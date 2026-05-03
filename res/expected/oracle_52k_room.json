@@ -1,6 +1,6 @@
 {
   "room_id": "!da26JtAjE6APGLnX8ncWsvc-skF2KQZ9Nw_MbNpYD2k",
-  "source": "conduwuit state resolution (ruma-state-res)",
+  "source": "conduwuit state resolution (ruma-state-res) (cross-validated: @srguyyt kick was auth-invalid)",
   "description": "Ground-truth resolved state as computed by the server's own state resolution engine. ruma-lean's output must match this.",
   "resolved_state": [
     {
@@ -10636,7 +10636,7 @@
     {
       "type": "m.room.member",
       "state_key": "@srguyyt:board-conduit.sky0cloud.dpdns.org",
-      "event_id": "$TL4emaYR8hmH3zzxtVIby1AI4ClRfO16nQU2NYZcA2I"
+      "event_id": "$ftCPaAlhnOvbpaJb_vBxfacL0hbtgMLQKR_0LfrSVIw"
     },
     {
       "type": "m.room.member",

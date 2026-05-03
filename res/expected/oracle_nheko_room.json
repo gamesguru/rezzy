@@ -1,6 +1,6 @@
 {
   "room_id": "!UbCmIlGTHNIgIRZcpt:nheko.im",
-  "source": "conduwuit state resolution (ruma-state-res)",
+  "source": "conduwuit/guwitty state resolution (cross-validated with nutra.tk)",
   "description": "Ground-truth resolved state as computed by the server's own state resolution engine. ruma-lean's output must match this.",
   "resolved_state": [
     {
@@ -2276,7 +2276,7 @@
     {
       "type": "m.room.member",
       "state_key": "@me:pedro36572.com",
-      "event_id": "$FMyWvGGsoqsi8t_vqFCTFjzkXQgUEgfaZXMDZh5fJwQ"
+      "event_id": "$R0ZlTjfNb9fUvDsYNk6KCiizqUW-VbArJXAZtmUTqUc"
     },
     {
       "type": "m.room.member",
@@ -2816,7 +2816,7 @@
     {
       "type": "m.room.member",
       "state_key": "@q234rty:magdeburg.jetzt",
-      "event_id": "$ycEeYZPMd68-sVDpsOYzCImTF4IfBW3vPGPdil3pkqg"
+      "event_id": "$0fzPGCpgOVe1sxWTdK3AGJFNA6LoNHHt9VqSU_u78RE"
     },
     {
       "type": "m.room.member",
