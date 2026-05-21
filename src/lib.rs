@@ -202,10 +202,12 @@ fn get_power_level_from_auth_chain(
                 if pl_event.is_none() {
                     pl_event = Some(aev.clone());
                 }
-            } else if aev.event_type == "m.room.create" && aev.state_key.is_empty()
-                && create_event.is_none() {
-                    create_event = Some(aev.clone());
-                }
+            } else if aev.event_type == "m.room.create"
+                && aev.state_key.is_empty()
+                && create_event.is_none()
+            {
+                create_event = Some(aev.clone());
+            }
 
             // Optimization: if we found both, we can stop walking.
             if pl_event.is_some() && create_event.is_some() {

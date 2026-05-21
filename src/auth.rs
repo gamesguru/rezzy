@@ -151,8 +151,41 @@ pub fn check_auth(event: &LeanEvent, state: &RoomState) -> Result<(), AuthError>
     Ok(())
 }
 
+const MAX_POWER_LEVEL: i64 = 9007199254740991; // 2^53 - 1
+
 /// Get the power level of a user from the current room state.
 fn get_sender_power_level(sender: &str, state: &RoomState) -> i64 {
+    // 1. Absolute Priority: Room Creator and additional creators (INFINITE power)
+    let create_key = ("m.room.create".into(), String::new());
+    if let Some(create_event) = state.get(&create_key) {
+        let is_primary_creator = create_event.sender == sender;
+        let mut is_additional_creator = false;
+
+        if let Some(creators) = create_event
+            .content
+            .get("room_creators")
+            .and_then(|c| c.as_array())
+        {
+            if creators.iter().any(|c| c.as_str() == Some(sender)) {
+                is_additional_creator = true;
+            }
+        }
+        if let Some(creators) = create_event
+            .content
+            .get("additional_creators")
+            .and_then(|c| c.as_array())
+        {
+            if creators.iter().any(|c| c.as_str() == Some(sender)) {
+                is_additional_creator = true;
+            }
+        }
+
+        if is_primary_creator || is_additional_creator {
+            return MAX_POWER_LEVEL;
+        }
+    }
+
+    // 2. State-based Power Levels
     let pl_key = ("m.room.power_levels".into(), String::new());
     if let Some(pl_event) = state.get(&pl_key) {
         if let Some(users) = pl_event.content.get("users").and_then(|u| u.as_object()) {
