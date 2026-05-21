@@ -51,7 +51,7 @@ fn resolve_and_get_state(fixture_path: &str, version: StateResVersion) -> HashMa
     let resolved = resolve_lean(BTreeMap::new(), map.clone(), &map, version);
     resolved
         .into_iter()
-        .map(|((t, sk), eid)| (format!("{t}|{sk}"), eid))
+        .map(|((t, sk), eid)| (format!("{}|{}", t, sk.unwrap_or_default()), eid))
         .collect()
 }
 

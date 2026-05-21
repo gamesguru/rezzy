@@ -859,7 +859,7 @@ mod tests {
     fn test_v2_1_strict_resolution() {
         let mut unconflicted = BTreeMap::new();
         unconflicted.insert(
-            ("m.room.member".into(), "@alice:example.com".into()),
+            ("m.room.member".into(), Some("@alice:example.com".into())),
             "A".into(),
         );
 
@@ -902,7 +902,7 @@ mod tests {
             StateResVersion::V2_1,
         );
         assert_eq!(
-            resolved.get(&("m.room.member".into(), "@alice:example.com".into())),
+            resolved.get(&("m.room.member".into(), Some("@alice:example.com".into()))),
             Some(&"B".into())
         );
     }
@@ -1258,7 +1258,7 @@ mod tests {
     #[test]
     fn test_resolve_lean_functionality() {
         let mut unconflicted = BTreeMap::new();
-        unconflicted.insert(("type".into(), "key".into()), "id".into());
+        unconflicted.insert(("type".into(), Some("key".into())), "id".into());
         let conflicted = HashMap::new();
         let resolved = resolve_lean(
             unconflicted.clone(),
@@ -1275,11 +1275,11 @@ mod tests {
 
         let mut unconflicted = BTreeMap::new();
         unconflicted.insert(
-            ("m.room.member".into(), "@alice:example.com".into()),
+            ("m.room.member".into(), Some("@alice:example.com".into())),
             "id1".into(),
         );
         unconflicted.insert(
-            ("m.room.member".into(), "@bob:example.com".into()),
+            ("m.room.member".into(), Some("@bob:example.com".into())),
             "id2".into(),
         );
 
@@ -1350,11 +1350,11 @@ mod tests {
         );
 
         assert_eq!(
-            resolved.get(&("m.room.member".into(), "@alice:example.com".into())),
+            resolved.get(&("m.room.member".into(), Some("@alice:example.com".into()))),
             Some(&"id1".into())
         );
         assert_eq!(
-            resolved.get(&("m.room.member".into(), "@bob:example.com".into())),
+            resolved.get(&("m.room.member".into(), Some("@bob:example.com".into()))),
             Some(&"id2_new".into())
         );
     }

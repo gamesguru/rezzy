@@ -465,7 +465,7 @@ mod tests {
         );
         let mut state = RoomState::new();
         state.insert(
-            ("m.room.member".into(), "@alice:example.com".into()),
+            ("m.room.member".into(), Some("@alice:example.com".into())),
             make_event(
                 "$join",
                 "m.room.member",
@@ -488,7 +488,7 @@ mod tests {
         );
         let mut state = RoomState::new();
         state.insert(
-            ("m.room.member".into(), "@alice:example.com".into()),
+            ("m.room.member".into(), Some("@alice:example.com".into())),
             make_event(
                 "$ban",
                 "m.room.member",
@@ -514,7 +514,7 @@ mod tests {
         );
         let mut state = RoomState::new();
         state.insert(
-            ("m.room.member".into(), "@alice:example.com".into()),
+            ("m.room.member".into(), Some("@alice:example.com".into())),
             make_event(
                 "$join",
                 "m.room.member",
@@ -524,7 +524,7 @@ mod tests {
             ),
         );
         state.insert(
-            ("m.room.power_levels".into(), String::new()),
+            ("m.room.power_levels".into(), Some(String::new())),
             make_event(
                 "$pl",
                 "m.room.power_levels",

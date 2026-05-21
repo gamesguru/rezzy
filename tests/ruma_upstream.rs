@@ -67,7 +67,7 @@ fn sort_and_verify(events: &[LeanEvent], version: StateResVersion) -> Vec<String
 fn resolve_fixture_batch(
     fixture_paths: &[&str],
     version: StateResVersion,
-) -> BTreeMap<(String, String), String> {
+) -> BTreeMap<(String, Option<String>), String> {
     let events = load_fixtures(fixture_paths);
     let event_map = to_event_map(&events);
 
@@ -114,7 +114,7 @@ fn test_ruma_bootstrap_public_chat_resolution() {
     );
     // After resolution, the power_levels should be the latest version
     let pl_winner = resolved
-        .get(&("m.room.power_levels".into(), String::new()))
+        .get(&("m.room.power_levels".into(), Some(String::new())))
         .expect("No power_levels in resolved state");
     assert_eq!(pl_winner, "$01-m-room-power_levels");
 }
@@ -133,7 +133,7 @@ fn test_ruma_ban_vs_power_levels() {
     );
     // Bob should be banned (alice's ban wins over bob's PL change)
     let bob_member = resolved
-        .get(&("m.room.member".into(), "@bob:example.com".into()))
+        .get(&("m.room.member".into(), Some("@bob:example.com".into())))
         .expect("Bob's membership not in resolved state");
     assert_eq!(
         bob_member, "$00-m-room-member-ban-bob",
@@ -154,7 +154,7 @@ fn test_ruma_topic_vs_power_levels() {
     );
     // Power levels should reflect Alice's demotion of Bob
     let pl = resolved
-        .get(&("m.room.power_levels".into(), String::new()))
+        .get(&("m.room.power_levels".into(), Some(String::new())))
         .expect("No power_levels in resolved state");
     // Alice's PL change should win (she has higher power)
     assert!(
@@ -176,11 +176,11 @@ fn test_ruma_concurrent_joins() {
     );
     // Both should have membership entries
     assert!(
-        resolved.contains_key(&("m.room.member".into(), "@charlie:example.com".into())),
+        resolved.contains_key(&("m.room.member".into(), Some("@charlie:example.com".into()))),
         "Charlie should be in resolved state"
     );
     assert!(
-        resolved.contains_key(&("m.room.member".into(), "@ella:example.com".into())),
+        resolved.contains_key(&("m.room.member".into(), Some("@ella:example.com".into()))),
         "Ella should be in resolved state"
     );
 }
@@ -199,7 +199,7 @@ fn test_ruma_join_rules_vs_join() {
     );
     // Join rules should be updated by Alice
     assert!(
-        resolved.contains_key(&("m.room.join_rules".into(), String::new())),
+        resolved.contains_key(&("m.room.join_rules".into(), Some(String::new()))),
         "Join rules should be in resolved state"
     );
 }
@@ -229,7 +229,7 @@ fn test_ruma_power_levels_admin_vs_mod() {
         StateResVersion::V2,
     );
     let pl = resolved
-        .get(&("m.room.power_levels".into(), String::new()))
+        .get(&("m.room.power_levels".into(), Some(String::new())))
         .expect("No power_levels in resolved state");
     // Admin's change should supersede mod's change
     assert!(pl.starts_with("$"), "Winner should be a valid event ID");
@@ -248,7 +248,7 @@ fn test_ruma_topic_vs_ban() {
         StateResVersion::V2,
     );
     // Bob should be banned
-    let bob_member = resolved.get(&("m.room.member".into(), "@bob:example.com".into()));
+    let bob_member = resolved.get(&("m.room.member".into(), Some("@bob:example.com".into())));
     assert!(bob_member.is_some(), "Bob's membership should be in state");
 }
 
@@ -386,8 +386,8 @@ fn test_large_room_10k_v2_vs_v2_1_divergence() {
     assert!(!v2_1.is_empty(), "V2.1 must produce resolved state");
     // Both must agree on m.room.create
     assert_eq!(
-        v2.get(&("m.room.create".into(), String::new())),
-        v2_1.get(&("m.room.create".into(), String::new())),
+        v2.get(&("m.room.create".into(), Some(String::new()))),
+        v2_1.get(&("m.room.create".into(), Some(String::new()))),
         "V2 and V2.1 must agree on the create event"
     );
 }
