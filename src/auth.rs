@@ -75,7 +75,7 @@ impl fmt::Display for AuthError {
 }
 
 /// The room state at a specific point in the DAG (keyed by (type, state_key) -> event).
-pub type RoomState = BTreeMap<(String, String), LeanEvent>;
+pub type RoomState = BTreeMap<(String, Option<String>), LeanEvent>;
 
 /// Check whether `event` is authorized given the room state at its `prev_events`.
 ///
@@ -96,7 +96,7 @@ pub fn check_auth(event: &LeanEvent, state: &RoomState) -> Result<(), AuthError>
     }
 
     // Rule 2: Check sender is not banned
-    let member_key = ("m.room.member".into(), event.sender.clone());
+    let member_key = ("m.room.member".into(), Some(event.sender.clone()));
     if let Some(member_event) = state.get(&member_key) {
         if let Some(membership) = member_event
             .content
@@ -128,7 +128,7 @@ pub fn check_auth(event: &LeanEvent, state: &RoomState) -> Result<(), AuthError>
 
     // Rule 4: Check power level requirements
     let sender_pl = get_sender_power_level(&event.sender, state);
-    let required_pl = get_required_power_level(&event.event_type, state);
+    let required_pl = get_required_power_level(event, state);
 
     if sender_pl < required_pl {
         return Err(AuthError::InsufficientPowerLevel {
@@ -151,7 +151,7 @@ const MAX_POWER_LEVEL: i64 = 9007199254740991; // 2^53 - 1
 /// Get the power level of a user from the current room state.
 fn get_sender_power_level(sender: &str, state: &RoomState) -> i64 {
     // 1. Absolute Priority: Room Creator and additional creators (INFINITE power)
-    let create_key = ("m.room.create".into(), String::new());
+    let create_key = ("m.room.create".into(), Some(String::new()));
     if let Some(create_event) = state.get(&create_key) {
         let is_primary_creator = create_event.sender == sender;
         let mut is_additional_creator = false;
@@ -181,7 +181,7 @@ fn get_sender_power_level(sender: &str, state: &RoomState) -> i64 {
     }
 
     // 2. State-based Power Levels
-    let pl_key = ("m.room.power_levels".into(), String::new());
+    let pl_key = ("m.room.power_levels".into(), Some(String::new()));
     if let Some(pl_event) = state.get(&pl_key) {
         if let Some(users) = pl_event.content.get("users").and_then(|u| u.as_object()) {
             if let Some(pl) = users.get(sender).and_then(|v| v.as_i64()) {
@@ -200,18 +200,18 @@ fn get_sender_power_level(sender: &str, state: &RoomState) -> i64 {
     0 // Default power level if no power_levels event exists
 }
 
-/// Get the required power level to send a given event type.
-fn get_required_power_level(event_type: &str, state: &RoomState) -> i64 {
-    let pl_key = ("m.room.power_levels".into(), String::new());
+/// Get the required power level to send an event based on room state.
+fn get_required_power_level(event: &LeanEvent, state: &RoomState) -> i64 {
+    let pl_key = ("m.room.power_levels".into(), Some(String::new()));
     if let Some(pl_event) = state.get(&pl_key) {
         // Check specific event type overrides
         if let Some(events) = pl_event.content.get("events").and_then(|e| e.as_object()) {
-            if let Some(pl) = events.get(event_type).and_then(|v| v.as_i64()) {
+            if let Some(pl) = events.get(&event.event_type).and_then(|v| v.as_i64()) {
                 return pl;
             }
         }
         // Fall back to state_default for state events, events_default for others
-        if event_type.starts_with("m.room.") {
+        if event.state_key.is_some() {
             if let Some(default) = pl_event
                 .content
                 .get("state_default")
@@ -233,9 +233,7 @@ fn get_required_power_level(event_type: &str, state: &RoomState) -> i64 {
 
 /// Validate membership transition rules for `m.room.member` events.
 fn check_membership_rules(event: &LeanEvent, state: &RoomState) -> Result<(), AuthError> {
-    let target_user = &event.state_key;
-    let _sender = &event.sender;
-
+    let target_user = event.state_key.as_deref().unwrap_or("");
     let new_membership = event
         .content
         .get("membership")
@@ -243,25 +241,27 @@ fn check_membership_rules(event: &LeanEvent, state: &RoomState) -> Result<(), Au
         .unwrap_or("");
 
     match new_membership {
-        // A user can only join as themselves (state_key == sender)
-        "join" if event.state_key != event.sender => {
-            return Err(AuthError::InvalidStateKey {
-                expected: event.sender.clone(),
-                actual: event.state_key.clone(),
-            });
-        }
-        // If state_key != sender, this is a kick — requires power level
-        "leave" if event.state_key != event.sender => {
-            let sender_pl = get_sender_power_level(&event.sender, state);
-            let kick_pl = get_kick_power_level(state);
-            if sender_pl < kick_pl {
-                return Err(AuthError::InsufficientPowerLevel {
-                    required: kick_pl,
-                    actual: sender_pl,
-                    event_type: "kick".into(),
+        "join"
+            // A user can only join as themselves
+            if target_user != event.sender => {
+                return Err(AuthError::InvalidStateKey {
+                    expected: event.sender.clone(),
+                    actual: target_user.into(),
                 });
             }
-        }
+        "leave"
+            // If target_user != sender, this is a kick — requires power level
+            if target_user != event.sender => {
+                let sender_pl = get_sender_power_level(&event.sender, state);
+                let kick_pl = get_kick_power_level(state);
+                if sender_pl < kick_pl {
+                    return Err(AuthError::InsufficientPowerLevel {
+                        required: kick_pl,
+                        actual: sender_pl,
+                        event_type: "kick".into(),
+                    });
+                }
+            }
         "ban" => {
             // Banning requires the ban power level
             let sender_pl = get_sender_power_level(&event.sender, state);
@@ -276,14 +276,25 @@ fn check_membership_rules(event: &LeanEvent, state: &RoomState) -> Result<(), Au
         }
         "invite" => {
             // Inviting requires invite power level, and sender != target
-            if event.state_key == event.sender {
+            if target_user == event.sender {
                 return Err(AuthError::InvalidStateKey {
                     expected: alloc::format!("!= {}", event.sender),
-                    actual: event.state_key.clone(),
+                    actual: target_user.into(),
                 });
             }
+
+            let sender_pl = get_sender_power_level(&event.sender, state);
+            let invite_pl = get_invite_power_level(state);
+            if sender_pl < invite_pl {
+                return Err(AuthError::InsufficientPowerLevel {
+                    required: invite_pl,
+                    actual: sender_pl,
+                    event_type: "invite".into(),
+                });
+            }
+
             // Check target isn't already banned
-            let target_key = ("m.room.member".into(), target_user.clone());
+            let target_key = ("m.room.member".into(), Some(target_user.into()));
             if let Some(target_member) = state.get(&target_key) {
                 if target_member
                     .content
@@ -292,7 +303,7 @@ fn check_membership_rules(event: &LeanEvent, state: &RoomState) -> Result<(), Au
                     == Some("ban")
                 {
                     return Err(AuthError::BannedUser {
-                        sender: target_user.clone(),
+                        sender: target_user.into(),
                         event_id: event.event_id.clone(),
                     });
                 }
@@ -306,7 +317,7 @@ fn check_membership_rules(event: &LeanEvent, state: &RoomState) -> Result<(), Au
 
 /// Get the kick power level from room state.
 fn get_kick_power_level(state: &RoomState) -> i64 {
-    let pl_key = ("m.room.power_levels".into(), String::new());
+    let pl_key = ("m.room.power_levels".into(), Some(String::new()));
     if let Some(pl_event) = state.get(&pl_key) {
         if let Some(kick) = pl_event.content.get("kick").and_then(|v| v.as_i64()) {
             return kick;
@@ -316,8 +327,18 @@ fn get_kick_power_level(state: &RoomState) -> i64 {
 }
 
 /// Get the ban power level from room state.
+fn get_invite_power_level(state: &RoomState) -> i64 {
+    let pl_key = ("m.room.power_levels".into(), Some(String::new()));
+    if let Some(pl_event) = state.get(&pl_key) {
+        if let Some(invite) = pl_event.content.get("invite").and_then(|v| v.as_i64()) {
+            return invite;
+        }
+    }
+    0 // Default invite power level per Matrix spec (v12)
+}
+
 fn get_ban_power_level(state: &RoomState) -> i64 {
-    let pl_key = ("m.room.power_levels".into(), String::new());
+    let pl_key = ("m.room.power_levels".into(), Some(String::new()));
     if let Some(pl_event) = state.get(&pl_key) {
         if let Some(ban) = pl_event.content.get("ban").and_then(|v| v.as_i64()) {
             return ban;
@@ -340,10 +361,16 @@ pub fn check_auth_chain(
     for event in sorted_events {
         match check_auth(event, &state) {
             Ok(()) => {
-                // Apply event to state
-                if !event.state_key.is_empty() || event.event_type == "m.room.create" {
+                // Apply event to state if it's a state event
+                if let Some(state_key) = &event.state_key {
                     state.insert(
-                        (event.event_type.clone(), event.state_key.clone()),
+                        (event.event_type.clone(), Some(state_key.clone())),
+                        event.clone(),
+                    );
+                } else if event.event_type == "m.room.create" {
+                    // Fallback for m.room.create if it somehow lacks a state_key
+                    state.insert(
+                        (event.event_type.clone(), Some(String::new())),
                         event.clone(),
                     );
                 }
@@ -367,14 +394,14 @@ mod tests {
     fn make_event(
         id: &str,
         event_type: &str,
-        state_key: &str,
+        state_key: Option<&str>,
         sender: &str,
         content: serde_json::Value,
     ) -> LeanEvent {
         LeanEvent {
             event_id: id.into(),
             event_type: event_type.into(),
-            state_key: state_key.into(),
+            state_key: state_key.map(|s| s.into()),
             sender: sender.into(),
             content,
             ..Default::default()
@@ -386,7 +413,7 @@ mod tests {
         let create = make_event(
             "$create",
             "m.room.create",
-            "",
+            Some(""),
             "@alice:example.com",
             json!({}),
         );
@@ -399,7 +426,7 @@ mod tests {
         let mut create = make_event(
             "$create",
             "m.room.create",
-            "",
+            Some(""),
             "@alice:example.com",
             json!({}),
         );
@@ -413,7 +440,13 @@ mod tests {
 
     #[test]
     fn test_non_member_rejection() {
-        let msg = make_event("$msg", "m.room.message", "", "@bob:example.com", json!({}));
+        let msg = make_event(
+            "$msg",
+            "m.room.message",
+            None,
+            "@bob:example.com",
+            json!({}),
+        );
         let state = RoomState::new();
         assert!(matches!(
             check_auth(&msg, &state),
@@ -426,7 +459,7 @@ mod tests {
         let msg = make_event(
             "$msg",
             "m.room.message",
-            "",
+            None,
             "@alice:example.com",
             json!({}),
         );
@@ -436,7 +469,7 @@ mod tests {
             make_event(
                 "$join",
                 "m.room.member",
-                "@alice:example.com",
+                Some("@alice:example.com"),
                 "@alice:example.com",
                 json!({"membership": "join"}),
             ),
@@ -449,7 +482,7 @@ mod tests {
         let msg = make_event(
             "$msg",
             "m.room.message",
-            "",
+            None,
             "@alice:example.com",
             json!({}),
         );
@@ -459,7 +492,7 @@ mod tests {
             make_event(
                 "$ban",
                 "m.room.member",
-                "@alice:example.com",
+                Some("@alice:example.com"),
                 "@admin:example.com",
                 json!({"membership": "ban"}),
             ),
@@ -475,7 +508,7 @@ mod tests {
         let msg = make_event(
             "$msg",
             "m.room.power_levels",
-            "",
+            Some(""),
             "@alice:example.com",
             json!({}),
         );
@@ -485,7 +518,7 @@ mod tests {
             make_event(
                 "$join",
                 "m.room.member",
-                "@alice:example.com",
+                Some("@alice:example.com"),
                 "@alice:example.com",
                 json!({"membership": "join"}),
             ),
@@ -495,7 +528,7 @@ mod tests {
             make_event(
                 "$pl",
                 "m.room.power_levels",
-                "",
+                Some(""),
                 "@admin:example.com",
                 json!({"state_default": 50, "users": {"@admin:example.com": 100}}),
             ),
@@ -511,7 +544,7 @@ mod tests {
         let join = make_event(
             "$join",
             "m.room.member",
-            "@bob:example.com",
+            Some("@bob:example.com"),
             "@alice:example.com",
             json!({"membership": "join"}),
         );
@@ -527,21 +560,21 @@ mod tests {
         let create = make_event(
             "$create",
             "m.room.create",
-            "",
+            Some(""),
             "@alice:example.com",
             json!({}),
         );
         let join = make_event(
             "$join",
             "m.room.member",
-            "@alice:example.com",
+            Some("@alice:example.com"),
             "@alice:example.com",
             json!({"membership": "join"}),
         );
         let msg = make_event(
             "$msg",
             "m.room.message",
-            "",
+            None,
             "@alice:example.com",
             json!({"body": "hello"}),
         );

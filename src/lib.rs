@@ -122,7 +122,7 @@ pub struct LeanEvent {
     #[serde(rename = "type")]
     pub event_type: String,
     #[serde(default)]
-    pub state_key: String,
+    pub state_key: Option<String>,
     #[serde(default, deserialize_with = "deserialize_power_level")]
     pub power_level: i64,
     pub origin_server_ts: u64,
@@ -198,12 +198,12 @@ fn get_power_level_from_auth_chain(
         }
 
         if let Some(aev) = auth_context.get(&aid) {
-            if aev.event_type == "m.room.power_levels" && aev.state_key.is_empty() {
+            if aev.event_type == "m.room.power_levels" && aev.state_key.as_deref() == Some("") {
                 if pl_event.is_none() {
                     pl_event = Some(aev.clone());
                 }
             } else if aev.event_type == "m.room.create"
-                && aev.state_key.is_empty()
+                && aev.state_key.as_deref() == Some("")
                 && create_event.is_none()
             {
                 create_event = Some(aev.clone());
@@ -407,11 +407,11 @@ pub fn lean_kahn_sort(
 }
 
 pub fn resolve_lean(
-    unconflicted_state: BTreeMap<(String, String), String>,
+    unconflicted_state: BTreeMap<(String, Option<String>), String>,
     conflicted_events: HashMap<String, LeanEvent>,
     auth_context: &HashMap<String, LeanEvent>,
     version: StateResVersion,
-) -> BTreeMap<(String, String), String> {
+) -> BTreeMap<(String, Option<String>), String> {
     // MSC4297 (v2.1): The algorithm starts from an empty set of state.
     let mut resolved = match version {
         StateResVersion::V2_1 => BTreeMap::new(),
@@ -473,15 +473,36 @@ pub fn resolve_lean(
 /// consists of the events in the conflict set (E) and the currently resolved state (S).
 fn iterative_auth_ok(
     event: &LeanEvent,
-    resolved: &BTreeMap<(String, String), String>,
+    resolved: &BTreeMap<(String, Option<String>), String>,
     auth_context: &HashMap<String, LeanEvent>,
 ) -> bool {
+    // Optimization: The sender of the room creation event is infinitely auth'd.
+    // This provides a massive speedup for the initial room bootstrap events.
+    if let Some(create_id) = resolved.get(&("m.room.create".into(), Some(String::new()))) {
+        if let Some(create_ev) = auth_context.get(create_id) {
+            if create_ev.sender == event.sender {
+                return true;
+            }
+        }
+    }
+
     let mut state = crate::auth::RoomState::new();
 
     // 1. Populate state from consensus resolved map (S)
-    for (k, v) in resolved {
-        if let Some(ev) = auth_context.get(v) {
-            state.insert(k.clone(), ev.clone());
+    // Optimization: check_auth only needs specific keys:
+    // m.room.create, m.room.power_levels, m.room.join_rules, and the sender's membership.
+    let keys_needed = [
+        ("m.room.create".into(), Some(String::new())),
+        ("m.room.power_levels".into(), Some(String::new())),
+        ("m.room.join_rules".into(), Some(String::new())),
+        ("m.room.member".into(), Some(event.sender.clone())),
+    ];
+
+    for key in &keys_needed {
+        if let Some(eid) = resolved.get(key) {
+            if let Some(ev) = auth_context.get(eid) {
+                state.insert(key.clone(), ev.clone());
+            }
         }
     }
 
@@ -507,9 +528,10 @@ fn iterative_auth_ok(
         Ok(_) => true,
         Err(e) => {
             std::eprintln!(
-                "REJECTED: {} type={} sender={} error={}",
+                "REJECTED: {} type={} sk={} sender={} error={}",
                 event.event_id,
                 event.event_type,
+                event.state_key.clone().unwrap_or_default(),
                 event.sender,
                 e
             );
@@ -521,13 +543,13 @@ fn iterative_auth_ok(
 /// Build the power-level mainline: the chain of m.room.power_levels events
 /// from the resolved PL event backwards through auth_events.
 fn build_mainline(
-    resolved: &BTreeMap<(String, String), String>,
+    resolved: &BTreeMap<(String, Option<String>), String>,
     auth_context: &HashMap<String, LeanEvent>,
 ) -> Vec<String> {
     let mut mainline = Vec::new();
     let pl_key = (
         alloc::string::String::from("m.room.power_levels"),
-        alloc::string::String::new(),
+        Some(alloc::string::String::new()),
     );
     let mut current = resolved.get(&pl_key).cloned();
 
@@ -733,7 +755,7 @@ mod tests {
         assert_eq!(ev.event_id, "$test");
         assert_eq!(ev.event_type, "m.room.message");
         assert_eq!(ev.origin_server_ts, 12345);
-        assert_eq!(ev.state_key, "");
+        assert_eq!(ev.state_key, None);
         assert_eq!(ev.power_level, 0);
         assert_eq!(ev.sender, "");
         assert_eq!(ev.prev_events.len(), 0);
@@ -806,7 +828,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 0,
                 origin_server_ts: 100,
                 prev_events: vec![],
@@ -820,7 +842,7 @@ mod tests {
             LeanEvent {
                 event_id: "B".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 0,
                 origin_server_ts: 50,
                 prev_events: vec![],
@@ -847,7 +869,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 50,
                 origin_server_ts: 100,
                 prev_events: vec![],
@@ -861,7 +883,7 @@ mod tests {
             LeanEvent {
                 event_id: "B".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 50,
                 prev_events: vec![],
@@ -893,7 +915,7 @@ mod tests {
             LeanEvent {
                 event_id: "B".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 0,
                 origin_server_ts: 100,
                 prev_events: vec![],
@@ -907,7 +929,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 0,
                 origin_server_ts: 100,
                 prev_events: vec![],
@@ -928,7 +950,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 100,
                 prev_events: vec![],
@@ -942,7 +964,7 @@ mod tests {
             LeanEvent {
                 event_id: "B".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 50,
                 origin_server_ts: 10,
                 prev_events: vec![],
@@ -964,7 +986,7 @@ mod tests {
             LeanEvent {
                 event_id: "B".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 10,
                 prev_events: vec![],
@@ -978,7 +1000,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 10,
                 prev_events: vec![],
@@ -1000,7 +1022,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 10,
                 origin_server_ts: 10,
                 prev_events: vec![],
@@ -1014,7 +1036,7 @@ mod tests {
             LeanEvent {
                 event_id: "B".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 100,
                 prev_events: vec![],
@@ -1040,7 +1062,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 100,
                 prev_events: vec!["B".into()],
@@ -1054,7 +1076,7 @@ mod tests {
             LeanEvent {
                 event_id: "B".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 100,
                 prev_events: vec!["A".into()],
@@ -1072,7 +1094,7 @@ mod tests {
         let event = LeanEvent {
             event_id: "$abc".into(),
             event_type: "m.room.member".into(),
-            state_key: "@alice:example.com".into(),
+            state_key: Some("@alice:example.com".into()),
             power_level: 100,
             origin_server_ts: 12345,
             prev_events: vec![],
@@ -1090,7 +1112,7 @@ mod tests {
         let e1 = LeanEvent {
             event_id: "a".into(),
             event_type: "m.room.member".into(),
-            state_key: "@alice:example.com".into(),
+            state_key: Some("@alice:example.com".into()),
             power_level: 100,
             origin_server_ts: 10,
             prev_events: vec![],
@@ -1101,7 +1123,7 @@ mod tests {
         let e2 = LeanEvent {
             event_id: "b".into(),
             event_type: "m.room.member".into(),
-            state_key: "@alice:example.com".into(),
+            state_key: Some("@alice:example.com".into()),
             power_level: 100,
             origin_server_ts: 10,
             prev_events: vec![],
@@ -1133,7 +1155,7 @@ mod tests {
         let e = LeanEvent {
             event_id: "a".into(),
             event_type: "m.room.member".into(),
-            state_key: "@alice:example.com".into(),
+            state_key: Some("@alice:example.com".into()),
             power_level: 100,
             origin_server_ts: 10,
             prev_events: vec![],
@@ -1153,7 +1175,7 @@ mod tests {
             LeanEvent {
                 event_id: "1".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 10,
                 prev_events: vec![],
@@ -1167,7 +1189,7 @@ mod tests {
             LeanEvent {
                 event_id: "2".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 50,
                 origin_server_ts: 20,
                 prev_events: vec!["1".into()],
@@ -1181,7 +1203,7 @@ mod tests {
             LeanEvent {
                 event_id: "3".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 50,
                 origin_server_ts: 15,
                 prev_events: vec!["1".into()],
@@ -1195,7 +1217,7 @@ mod tests {
             LeanEvent {
                 event_id: "4".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 10,
                 origin_server_ts: 30,
                 prev_events: vec!["2".into(), "3".into()],
@@ -1220,7 +1242,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 10,
                 prev_events: vec!["MISSING".into()],
@@ -1268,7 +1290,7 @@ mod tests {
             LeanEvent {
                 event_id: "create".into(),
                 event_type: "m.room.create".into(),
-                state_key: String::new(),
+                state_key: Some(String::new()),
                 sender: "@alice:example.com".into(),
                 power_level: 100,
                 origin_server_ts: 1,
@@ -1282,7 +1304,7 @@ mod tests {
             LeanEvent {
                 event_id: "id1".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 sender: "@alice:example.com".into(),
                 power_level: 50,
                 origin_server_ts: 500,
@@ -1296,7 +1318,7 @@ mod tests {
             LeanEvent {
                 event_id: "id2".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@bob:example.com".into(),
+                state_key: Some("@bob:example.com".into()),
                 sender: "@bob:example.com".into(),
                 power_level: 50,
                 origin_server_ts: 500,
@@ -1310,7 +1332,7 @@ mod tests {
             LeanEvent {
                 event_id: "id2_new".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@bob:example.com".into(),
+                state_key: Some("@bob:example.com".into()),
                 sender: "@bob:example.com".into(),
                 power_level: 100,
                 origin_server_ts: 1000,
@@ -1349,7 +1371,7 @@ mod tests {
                 LeanEvent {
                     event_id: r.0.to_string(),
                     event_type: "m.room.member".into(),
-                    state_key: "@alice:example.com".into(),
+                    state_key: Some("@alice:example.com".into()),
                     power_level: r.1,
                     origin_server_ts: r.2,
                     depth: r.3,
@@ -1388,7 +1410,7 @@ mod tests {
             LeanEvent {
                 event_id: "1".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@user:example.com".into(),
+                state_key: Some("@user:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 10,
                 prev_events: vec![],
@@ -1402,7 +1424,7 @@ mod tests {
             LeanEvent {
                 event_id: "2".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@user:example.com".into(),
+                state_key: Some("@user:example.com".into()),
                 power_level: 0,
                 origin_server_ts: 20,
                 prev_events: vec!["1".into()],
@@ -1419,7 +1441,10 @@ mod tests {
             resolved_state.insert(key, ev.event_id.clone());
         }
         assert_eq!(
-            resolved_state.get(&("m.room.member".to_string(), "@user:example.com".to_string())),
+            resolved_state.get(&(
+                "m.room.member".to_string(),
+                Some("@user:example.com".to_string())
+            )),
             Some(&"2".to_string())
         );
     }
@@ -1438,7 +1463,7 @@ mod tests {
         let e = LeanEvent {
             event_id: "a".into(),
             event_type: "m.room.member".into(),
-            state_key: "@alice:example.com".into(),
+            state_key: Some("@alice:example.com".into()),
             power_level: 100,
             origin_server_ts: 10,
             prev_events: vec![],
@@ -1457,7 +1482,7 @@ mod tests {
         let e = LeanEvent {
             event_id: "a".into(),
             event_type: "m.room.member".into(),
-            state_key: "@alice:example.com".into(),
+            state_key: Some("@alice:example.com".into()),
             power_level: 100,
             origin_server_ts: 10,
             prev_events: vec![],
@@ -1484,7 +1509,7 @@ mod tests {
             LeanEvent {
                 event_id: "B".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 0,
                 origin_server_ts: 10,
                 prev_events: vec![],
@@ -1498,7 +1523,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 0,
                 origin_server_ts: 10,
                 prev_events: vec![],
@@ -1519,7 +1544,7 @@ mod tests {
             LeanEvent {
                 event_id: "1".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 10,
                 prev_events: vec![],
@@ -1540,7 +1565,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 10,
                 prev_events: vec![],
@@ -1564,7 +1589,7 @@ mod tests {
             LeanEvent {
                 event_id: "$early".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@user:example.com".into(),
+                state_key: Some("@user:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 1000,
                 auth_events: vec![],
@@ -1576,7 +1601,7 @@ mod tests {
             LeanEvent {
                 event_id: "$late".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@user:example.com".into(),
+                state_key: Some("@user:example.com".into()),
                 power_level: 100,
                 origin_server_ts: 2000,
                 auth_events: vec![],
@@ -1602,7 +1627,7 @@ mod tests {
             LeanEvent {
                 event_id: "$ban_a".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@spammer:evil.com".into(),
+                state_key: Some("@spammer:evil.com".into()),
                 power_level: 50,
                 origin_server_ts: 1772724243891,
                 auth_events: vec![],
@@ -1614,7 +1639,7 @@ mod tests {
             LeanEvent {
                 event_id: "$ban_b".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@spammer:evil.com".into(),
+                state_key: Some("@spammer:evil.com".into()),
                 power_level: 50,
                 origin_server_ts: 1772724243893, // 2ms later
                 auth_events: vec![],
@@ -1634,7 +1659,7 @@ mod tests {
         let e1 = LeanEvent {
             event_id: "a".into(),
             event_type: "m.room.member".into(),
-            state_key: "@alice:example.com".into(),
+            state_key: Some("@alice:example.com".into()),
             power_level: 100,
             origin_server_ts: 10,
             prev_events: vec![],
@@ -1645,7 +1670,7 @@ mod tests {
         let e2 = LeanEvent {
             event_id: "b".into(),
             event_type: "m.room.member".into(),
-            state_key: "@alice:example.com".into(),
+            state_key: Some("@alice:example.com".into()),
             power_level: 100,
             origin_server_ts: 10,
             prev_events: vec![],
@@ -1656,7 +1681,7 @@ mod tests {
         let e3 = LeanEvent {
             event_id: "c".into(),
             event_type: "m.room.member".into(),
-            state_key: "@alice:example.com".into(),
+            state_key: Some("@alice:example.com".into()),
             power_level: 50,
             origin_server_ts: 10,
             prev_events: vec![],
@@ -1681,7 +1706,7 @@ mod tests {
         let e_base = LeanEvent {
             event_id: "m".into(),
             event_type: "m.room.member".into(),
-            state_key: "@alice:example.com".into(),
+            state_key: Some("@alice:example.com".into()),
             power_level: 50,
             origin_server_ts: 50,
             prev_events: vec![],
@@ -1765,7 +1790,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 auth_events: vec!["B".into()],
                 ..Default::default()
             },
@@ -1775,7 +1800,7 @@ mod tests {
             LeanEvent {
                 event_id: "B".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 auth_events: vec!["A".into()],
                 ..Default::default()
             },
@@ -1802,7 +1827,7 @@ mod tests {
             LeanEvent {
                 event_id: "C".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 auth_events: vec![],
                 ..Default::default()
             },
@@ -1812,7 +1837,7 @@ mod tests {
             LeanEvent {
                 event_id: "A".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 auth_events: vec!["B".into(), "C".into()],
                 ..Default::default()
             },
@@ -1822,7 +1847,7 @@ mod tests {
             LeanEvent {
                 event_id: "B".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 auth_events: vec!["A".into()],
                 ..Default::default()
             },
@@ -1895,7 +1920,7 @@ mod tests {
                 LeanEvent {
                     event_id: id,
                     event_type: "m.room.member".into(),
-                    state_key: "@alice:example.com".into(),
+                    state_key: Some("@alice:example.com".into()),
                     power_level: 100,
                     origin_server_ts: i as u64,
                     auth_events: auth,
@@ -1927,7 +1952,7 @@ mod tests {
                 LeanEvent {
                     event_id: id.into(),
                     event_type: "m.room.member".into(),
-                    state_key: "@alice:example.com".into(),
+                    state_key: Some("@alice:example.com".into()),
                     auth_events: auths.iter().map(|s| s.to_string()).collect(),
                     ..Default::default()
                 },
@@ -1965,7 +1990,7 @@ mod tests {
             LeanEvent {
                 event_id: "X".into(),
                 event_type: "m.room.member".into(),
-                state_key: "@alice:example.com".into(),
+                state_key: Some("@alice:example.com".into()),
                 auth_events: vec!["MISSING_1".into(), "MISSING_2".into()],
                 ..Default::default()
             },

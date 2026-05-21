@@ -527,7 +527,8 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
 
     let mut user_power_levels = HashMap::new();
     let mut default_power_level = 0;
-    if let Some(id) = resolved_power_state.get(&("m.room.power_levels".to_string(), "".to_string()))
+    if let Some(id) =
+        resolved_power_state.get(&("m.room.power_levels".to_string(), Some("".to_string())))
     {
         if let Some(ev) = events_map.get(id) {
             if let Some(users) = ev.content.get("users").and_then(|u| u.as_object()) {
@@ -550,7 +551,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
     }
 
     let start = Instant::now();
-    let mut occurrences: HashMap<(String, String), HashMap<String, usize>> = HashMap::new();
+    let mut occurrences: HashMap<(String, Option<String>), HashMap<String, usize>> = HashMap::new();
     let num_sets = state_maps.len();
     for map in &state_maps {
         for (key, id) in map {
@@ -762,7 +763,8 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 if ev.event_type == "m.room.member" {
                     if let Some(dn) = ev.content.get("displayname").and_then(|v| v.as_str()) {
                         if !dn.is_empty() {
-                            displaynames.insert(ev.state_key.clone(), dn.to_string());
+                            displaynames
+                                .insert(ev.state_key.clone().unwrap_or_default(), dn.to_string());
                         }
                     }
                 }
@@ -818,7 +820,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                             .get("membership")
                             .and_then(|v| v.as_str())
                             .unwrap_or("?");
-                        let target = get_name(&ev.state_key);
+                        let target = get_name(ev.state_key.as_deref().unwrap_or_default());
                         let reason = ev
                             .content
                             .get("reason")
@@ -826,7 +828,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                             .unwrap_or("");
                         match membership {
                             "join" => format!("{} joined the room", target),
-                            "leave" if ev.sender == ev.state_key => {
+                            "leave" if ev.state_key.as_ref() == Some(&ev.sender) => {
                                 format!("{} left the room", target)
                             }
                             "leave" => format!(
