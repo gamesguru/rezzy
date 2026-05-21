@@ -518,7 +518,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
         }
     }
 
-    let sorted_power_ids = lean_kahn_sort(&power_events, version);
+    let sorted_power_ids = lean_kahn_sort(&power_events, &events_map, version);
     let mut resolved_power_state = std::collections::BTreeMap::new();
     for id in sorted_power_ids {
         let ev = power_events.get(&id).unwrap();
@@ -584,8 +584,12 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
         }
     }
 
-    let final_state_map =
-        ruma_lean::resolve_lean(unconflicted_state, conflicted_events.clone(), version);
+    let final_state_map = ruma_lean::resolve_lean(
+        unconflicted_state,
+        conflicted_events.clone(),
+        &events_map,
+        version,
+    );
 
     let duration = start.elapsed();
 

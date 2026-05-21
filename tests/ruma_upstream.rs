@@ -45,7 +45,7 @@ fn to_event_map(events: &[LeanEvent]) -> HashMap<String, LeanEvent> {
 /// Run Kahn's sort on the events and verify it doesn't detect any cycles.
 fn sort_and_verify(events: &[LeanEvent], version: StateResVersion) -> Vec<String> {
     let map = to_event_map(events);
-    let result = ruma_lean::lean_kahn_sort_detailed(&map, version);
+    let result = ruma_lean::lean_kahn_sort_detailed(&map, &map, version);
     match &result {
         ruma_lean::KahnSortResult::CycleDetected { stuck, .. } => {
             panic!("Cycle detected in fixture DAG! Stuck events: {:?}", stuck);
@@ -76,7 +76,7 @@ fn resolve_fixture_batch(
 
     // For batch tests, pass all events as the conflicted set
     let unconflicted = BTreeMap::new();
-    resolve_lean(unconflicted, event_map, version)
+    resolve_lean(unconflicted, event_map.clone(), &event_map, version)
 }
 
 const FIXTURE_DIR: &str = "res/ruma_upstream";
@@ -284,8 +284,18 @@ fn test_benchmark_1k_resolution_determinism() {
     let events: Vec<LeanEvent> = serde_json::from_value(data["events"].clone()).unwrap();
 
     // Run resolution twice and verify determinism
-    let resolved1 = resolve_lean(BTreeMap::new(), to_event_map(&events), StateResVersion::V2);
-    let resolved2 = resolve_lean(BTreeMap::new(), to_event_map(&events), StateResVersion::V2);
+    let resolved1 = resolve_lean(
+        BTreeMap::new(),
+        to_event_map(&events),
+        &to_event_map(&events),
+        StateResVersion::V2,
+    );
+    let resolved2 = resolve_lean(
+        BTreeMap::new(),
+        to_event_map(&events),
+        &to_event_map(&events),
+        StateResVersion::V2,
+    );
     assert_eq!(resolved1, resolved2, "Resolution must be deterministic");
 }
 
@@ -349,8 +359,18 @@ fn test_large_room_10k_v2_1_sort() {
 #[test]
 fn test_large_room_10k_resolution_determinism() {
     let events = load_large_room();
-    let r1 = resolve_lean(BTreeMap::new(), to_event_map(&events), StateResVersion::V2);
-    let r2 = resolve_lean(BTreeMap::new(), to_event_map(&events), StateResVersion::V2);
+    let r1 = resolve_lean(
+        BTreeMap::new(),
+        to_event_map(&events),
+        &to_event_map(&events),
+        StateResVersion::V2,
+    );
+    let r2 = resolve_lean(
+        BTreeMap::new(),
+        to_event_map(&events),
+        &to_event_map(&events),
+        StateResVersion::V2,
+    );
     assert_eq!(r1, r2, "10K room resolution must be deterministic");
 }
 
@@ -358,8 +378,8 @@ fn test_large_room_10k_resolution_determinism() {
 fn test_large_room_10k_v2_vs_v2_1_divergence() {
     let events = load_large_room();
     let map = to_event_map(&events);
-    let v2 = resolve_lean(BTreeMap::new(), map.clone(), StateResVersion::V2);
-    let v2_1 = resolve_lean(BTreeMap::new(), map, StateResVersion::V2_1);
+    let v2 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2);
+    let v2_1 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1);
     // V2 and V2.1 may diverge on conflicted state — that's the whole point of MSC4297.
     // But both must produce valid resolved state.
     assert!(!v2.is_empty(), "V2 must produce resolved state");
@@ -525,12 +545,12 @@ fn test_real_dag_52k_room_v2_1_sort() {
 fn test_real_dag_52k_room_resolution() {
     let events = load_real_dag("res/real_dag_52k_room.json");
     let map = to_event_map(&events);
-    let resolved = resolve_lean(BTreeMap::new(), map, StateResVersion::V2);
+    let resolved = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2);
     assert!(!resolved.is_empty(), "Resolution should produce state");
     // Determinism check
     let events2 = load_real_dag("res/real_dag_52k_room.json");
     let map2 = to_event_map(&events2);
-    let resolved2 = resolve_lean(BTreeMap::new(), map2, StateResVersion::V2);
+    let resolved2 = resolve_lean(BTreeMap::new(), map2.clone(), &map2, StateResVersion::V2);
     assert_eq!(resolved, resolved2, "Resolution must be deterministic");
 }
 
@@ -570,6 +590,11 @@ fn test_real_dag_nheko_room_106_heads() {
     );
 
     // Resolution must still complete on this messy DAG
-    let resolved = resolve_lean(BTreeMap::new(), event_map, StateResVersion::V2);
+    let resolved = resolve_lean(
+        BTreeMap::new(),
+        event_map.clone(),
+        &event_map,
+        StateResVersion::V2,
+    );
     assert!(!resolved.is_empty(), "Resolution should produce state");
 }

@@ -169,7 +169,7 @@ impl LeanEvent {
     }
 }
 
-/// A wrapper to ensure BinaryHeap pops the "smallest" (best) event first.
+/// A wrapper to ensure BinaryHeap pops the "Best" event FIRST.
 #[derive(Debug, Clone, Copy)]
 struct SortPriority<'a> {
     event: &'a LeanEvent,
@@ -177,18 +177,71 @@ struct SortPriority<'a> {
     version: StateResVersion,
 }
 
-/// Dynamically fetches the sender's power level by inspecting the event's auth chain.
-fn get_power_level_from_auth_chain(event: &LeanEvent, events: &HashMap<String, LeanEvent>) -> i64 {
+const MAX_POWER_LEVEL: i64 = 9007199254740991; // 2^53 - 1
+
+/// Dynamically fetches the sender's power level by recursively walking the event's auth chain.
+fn get_power_level_from_auth_chain(
+    event: &LeanEvent,
+    auth_context: &HashMap<String, LeanEvent>,
+) -> i64 {
     let mut pl_event = None;
     let mut create_event = None;
 
-    for aid in &event.auth_events {
-        if let Some(aev) = events.get(aid) {
+    // Use a work queue to walk the auth chain recursively.
+    let mut queue = Vec::new();
+    queue.extend(event.auth_events.iter().cloned());
+    let mut visited = BTreeSet::new();
+
+    while let Some(aid) = queue.pop() {
+        if !visited.insert(aid.clone()) {
+            continue;
+        }
+
+        if let Some(aev) = auth_context.get(&aid) {
             if aev.event_type == "m.room.power_levels" && aev.state_key.is_empty() {
-                pl_event = Some(aev);
-            } else if aev.event_type == "m.room.create" && aev.state_key.is_empty() {
-                create_event = Some(aev);
+                if pl_event.is_none() {
+                    pl_event = Some(aev.clone());
+                }
+            } else if aev.event_type == "m.room.create" && aev.state_key.is_empty()
+                && create_event.is_none() {
+                    create_event = Some(aev.clone());
+                }
+
+            // Optimization: if we found both, we can stop walking.
+            if pl_event.is_some() && create_event.is_some() {
+                break;
             }
+
+            // Continue walking up the auth chain.
+            queue.extend(aev.auth_events.iter().cloned());
+        }
+    }
+
+    if let Some(create_ev) = create_event {
+        let is_primary_creator = create_ev.sender == event.sender;
+        let mut is_additional_creator = false;
+
+        if let Some(creators) = create_ev
+            .content
+            .get("room_creators")
+            .and_then(|c| c.as_array())
+        {
+            if creators.iter().any(|c| c.as_str() == Some(&event.sender)) {
+                is_additional_creator = true;
+            }
+        }
+        if let Some(creators) = create_ev
+            .content
+            .get("additional_creators")
+            .and_then(|c| c.as_array())
+        {
+            if creators.iter().any(|c| c.as_str() == Some(&event.sender)) {
+                is_additional_creator = true;
+            }
+        }
+
+        if is_primary_creator || is_additional_creator {
+            return MAX_POWER_LEVEL;
         }
     }
 
@@ -203,18 +256,14 @@ fn get_power_level_from_auth_chain(event: &LeanEvent, events: &HashMap<String, L
         }
     }
 
-    if let Some(create_ev) = create_event {
-        if create_ev.sender == event.sender {
-            return 100;
-        }
-    }
-
     event.power_level
 }
 
 impl<'a> PartialEq for SortPriority<'a> {
     fn eq(&self, other: &Self) -> bool {
-        self.cmp(other) == Ordering::Equal
+        self.power_level == other.power_level
+            && self.event.origin_server_ts == other.event.origin_server_ts
+            && self.event.event_id == other.event.event_id
     }
 }
 
@@ -226,10 +275,7 @@ impl<'a> Ord for SortPriority<'a> {
             StateResVersion::V1 => {
                 // V1 tie-breaking: depth (asc) -> event_id (asc)
                 // In Rust's Max-Heap BinaryHeap, "greater" elements are popped first.
-                // In a Last-Wins resolution loop, we want the BEST events (Shallower, smaller ID) to pop LAST.
-                // So "Best" must be "Smaller" than "Worst".
-
-                // Shallower depth (smaller value) is BETTER (pops last = is "smaller").
+                // We want deeper events to pop FIRST, so they must be "greater".
                 match self.event.depth.cmp(&other.event.depth) {
                     Ordering::Equal => self.event.event_id.cmp(&other.event.event_id),
                     ord => ord,
@@ -238,20 +284,19 @@ impl<'a> Ord for SortPriority<'a> {
             StateResVersion::V2 | StateResVersion::V2_1 => {
                 // V2 tie-breaking: power_level (desc) -> origin_server_ts (asc) -> event_id (asc)
                 // In Rust's Max-Heap BinaryHeap, "greater" elements are popped first.
-                // In a Last-Wins resolution loop, we want the BEST events (Highest PL, earliest timestamp) to pop LAST.
-                // So "Best" must be "Smaller" than "Worst".
+                // We want the WORST events (lower PL, later TS) to pop FIRST.
 
-                // Higher power level is BETTER (pops last = is "smaller").
+                // Lower power level is "Greater" (pops first).
                 match other.power_level.cmp(&self.power_level) {
                     Ordering::Equal => {
-                        // Earlier timestamp is BETTER (pops last = is "smaller").
+                        // Later timestamp is "Greater" (pops first).
                         match self
                             .event
                             .origin_server_ts
                             .cmp(&other.event.origin_server_ts)
                         {
                             Ordering::Equal => {
-                                // Lexicographically smaller ID is BETTER (pops last = is "smaller").
+                                // Lexicographically larger ID is "Greater" (pops first).
                                 self.event.event_id.cmp(&other.event.event_id)
                             }
                             ord => ord,
@@ -275,6 +320,7 @@ impl<'a> PartialOrd for SortPriority<'a> {
 /// and cycle detection, providing the stuck set for debugging.
 pub fn lean_kahn_sort_detailed(
     events: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent>,
     version: StateResVersion,
 ) -> KahnSortResult {
     let mut in_degree: HashMap<String, usize> = HashMap::new();
@@ -284,6 +330,9 @@ pub fn lean_kahn_sort_detailed(
         in_degree.entry(id.clone()).or_insert(0);
         for auth in &event.auth_events {
             if events.contains_key(auth) {
+                // Topological sort: ancestors come BEFORE descendants.
+                // But we want a REVERSE topological sort: descendants BEFORE ancestors.
+                // So we add edges from ancestors to descendants.
                 adjacency.entry(auth.clone()).or_default().push(id.clone());
                 *in_degree.entry(id.clone()).or_insert(0) += 1;
             }
@@ -296,7 +345,7 @@ pub fn lean_kahn_sort_detailed(
             if let Some(event) = events.get(id) {
                 queue.push(SortPriority {
                     event,
-                    power_level: get_power_level_from_auth_chain(event, events),
+                    power_level: get_power_level_from_auth_chain(event, auth_context),
                     version,
                 });
             }
@@ -320,7 +369,7 @@ pub fn lean_kahn_sort_detailed(
                     let next_ev = events.get(next_id).unwrap();
                     queue.push(SortPriority {
                         event: next_ev,
-                        power_level: get_power_level_from_auth_chain(next_ev, events),
+                        power_level: get_power_level_from_auth_chain(next_ev, auth_context),
                         version,
                     });
                 }
@@ -349,32 +398,31 @@ pub fn lean_kahn_sort_detailed(
 /// Backward-compatible wrapper that returns an empty Vec on cycles.
 pub fn lean_kahn_sort(
     events: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent>,
     version: StateResVersion,
 ) -> Vec<String> {
-    lean_kahn_sort_detailed(events, version).into_sorted()
+    lean_kahn_sort_detailed(events, auth_context, version).into_sorted()
 }
 
 pub fn resolve_lean(
     unconflicted_state: BTreeMap<(String, String), String>,
     conflicted_events: HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent>,
     version: StateResVersion,
 ) -> BTreeMap<(String, String), String> {
     // MSC4297 (v2.1): The algorithm starts from an empty set of state.
-    let (mut resolved, sort_set) = match version {
-        StateResVersion::V2_1 => (BTreeMap::new(), conflicted_events.clone()),
-        _ => (unconflicted_state, conflicted_events),
+    let mut resolved = match version {
+        StateResVersion::V2_1 => BTreeMap::new(),
+        _ => unconflicted_state,
     };
 
+    let sort_set = &conflicted_events;
+
     // Route all events through Kahn sort (reverse topological power ordering).
-    // The spec classifies only certain m.room.member events as "power events,"
-    // but empirical testing against production homeservers shows that ALL member
-    // events go through Kahn sort, not mainline sort. Mainline sort is only used
-    // for non-member state events (topic, name, etc.) where PL chain proximity
-    // determines winner.
     let mut power_events = HashMap::new();
     let mut non_power_events = HashMap::new();
 
-    for (id, ev) in &sort_set {
+    for (id, ev) in sort_set {
         if ev.event_type == "m.room.member"
             || ev.event_type == "m.room.create"
             || ev.event_type == "m.room.power_levels"
@@ -388,10 +436,10 @@ pub fn resolve_lean(
 
     // Step 1: Sort power events by reverse topological power ordering (Kahn sort)
     // Step 2: Apply iterative auth checks (per spec & Ruma implementation)
-    let sorted_power_ids = lean_kahn_sort(&power_events, version);
+    let sorted_power_ids = lean_kahn_sort(&power_events, auth_context, version);
     for id in &sorted_power_ids {
         if let Some(event) = sort_set.get(id) {
-            if iterative_auth_ok(event, &resolved, &sort_set) {
+            if iterative_auth_ok(event, &resolved, auth_context) {
                 resolved.insert(
                     (event.event_type.clone(), event.state_key.clone()),
                     event.event_id.clone(),
@@ -401,14 +449,14 @@ pub fn resolve_lean(
     }
 
     // Step 3: Build the power-level mainline for mainline sort
-    let mainline = build_mainline(&resolved, &sort_set);
+    let mainline = build_mainline(&resolved, auth_context);
 
     // Step 4: Sort non-power events by mainline ordering + iterative auth check
     let mut non_power_list: Vec<&LeanEvent> = non_power_events.values().collect();
-    mainline_sort(&mut non_power_list, &mainline, &sort_set);
+    mainline_sort(&mut non_power_list, &mainline, auth_context);
 
     for ev in non_power_list {
-        if iterative_auth_ok(ev, &resolved, &sort_set) {
+        if iterative_auth_ok(ev, &resolved, auth_context) {
             resolved.insert(
                 (ev.event_type.clone(), ev.state_key.clone()),
                 ev.event_id.clone(),
@@ -419,29 +467,53 @@ pub fn resolve_lean(
     resolved
 }
 
-/// Targeted iterative auth check: reject m.room.member events when the
-/// resolved state already has a ban/kick for that user from a different sender
-/// (i.e., a moderator action). This prevents stale join forks from overwriting
-/// moderation actions resolved in earlier iterations.
+/// Targeted iterative auth check. Per Matrix spec, the auth context for event 'e'
+/// consists of the events in the conflict set (E) and the currently resolved state (S).
 fn iterative_auth_ok(
     event: &LeanEvent,
     resolved: &BTreeMap<(String, String), String>,
-    all_events: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent>,
 ) -> bool {
     let mut state = crate::auth::RoomState::new();
+
+    // 1. Populate state from consensus resolved map (S)
     for (k, v) in resolved {
-        if let Some(ev) = all_events.get(v) {
+        if let Some(ev) = auth_context.get(v) {
             state.insert(k.clone(), ev.clone());
         }
     }
-    crate::auth::check_auth(event, &state).is_ok()
+
+    // 2. Supplement with events from the event's own auth chain (from E union S)
+    // This is crucial for supporting Worst-First sort orders where descendants
+    // are processed before ancestors have been added to 'resolved'.
+    for aid in &event.auth_events {
+        if let Some(aev) = auth_context.get(aid) {
+            let key = (aev.event_type.clone(), aev.state_key.clone());
+            // Consensus state (resolved) always wins over the event's raw auth chain.
+            state.entry(key).or_insert_with(|| aev.clone());
+        }
+    }
+
+    match crate::auth::check_auth(event, &state) {
+        Ok(_) => true,
+        Err(e) => {
+            std::eprintln!(
+                "REJECTED: {} type={} sender={} error={:?}",
+                event.event_id,
+                event.event_type,
+                event.sender,
+                e
+            );
+            false
+        }
+    }
 }
 
 /// Build the power-level mainline: the chain of m.room.power_levels events
 /// from the resolved PL event backwards through auth_events.
 fn build_mainline(
     resolved: &BTreeMap<(String, String), String>,
-    all_events: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent>,
 ) -> Vec<String> {
     let mut mainline = Vec::new();
     let pl_key = (
@@ -453,9 +525,9 @@ fn build_mainline(
     while let Some(eid) = current {
         mainline.push(eid.clone());
         current = None;
-        if let Some(ev) = all_events.get(&eid) {
+        if let Some(ev) = auth_context.get(&eid) {
             for auth_id in &ev.auth_events {
-                if let Some(auth_ev) = all_events.get(auth_id) {
+                if let Some(auth_ev) = auth_context.get(auth_id) {
                     if auth_ev.event_type == "m.room.power_levels" {
                         current = Some(auth_id.clone());
                         break;
@@ -473,7 +545,7 @@ fn build_mainline(
 fn closest_mainline_position(
     event: &LeanEvent,
     mainline: &[String],
-    all_events: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent>,
 ) -> usize {
     // Check if this event itself is on the mainline
     if let Some(pos) = mainline.iter().position(|id| id == &event.event_id) {
@@ -491,7 +563,7 @@ fn closest_mainline_position(
         if let Some(pos) = mainline.iter().position(|id| id == &auth_id) {
             return pos;
         }
-        if let Some(auth_ev) = all_events.get(&auth_id) {
+        if let Some(auth_ev) = auth_context.get(&auth_id) {
             for parent_auth in &auth_ev.auth_events {
                 stack.push(parent_auth.clone());
             }
@@ -509,7 +581,7 @@ fn closest_mainline_position(
 fn mainline_sort(
     events: &mut Vec<&LeanEvent>,
     mainline: &[String],
-    all_events: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent>,
 ) {
     // Pre-compute mainline positions
     let positions: HashMap<String, usize> = events
@@ -517,7 +589,7 @@ fn mainline_sort(
         .map(|ev| {
             (
                 ev.event_id.clone(),
-                closest_mainline_position(ev, mainline, all_events),
+                closest_mainline_position(ev, mainline, auth_context),
             )
         })
         .collect();
@@ -748,7 +820,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V1);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V1);
         assert_eq!(sorted, vec!["A", "B"]);
     }
 
@@ -792,7 +864,12 @@ mod tests {
 
         // In V2, A would win because it's unconflicted.
         // In V2.1, B should win because it has a higher power level (100 > 50) and it's sorted together with A.
-        let resolved = resolve_lean(unconflicted, conflicted, StateResVersion::V2_1);
+        let resolved = resolve_lean(
+            unconflicted,
+            conflicted.clone(),
+            &conflicted,
+            StateResVersion::V2_1,
+        );
         assert_eq!(
             resolved.get(&("m.room.member".into(), "@alice:example.com".into())),
             Some(&"B".into())
@@ -830,7 +907,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V1);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V1);
         assert_eq!(sorted, vec!["B", "A"]);
     }
 
@@ -865,7 +942,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
         // Best (A) comes LAST.
         assert_eq!(sorted, vec!["B", "A"]);
     }
@@ -901,7 +978,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
         // Best (A, smaller ID) comes LAST.
         assert_eq!(sorted, vec!["B", "A"]);
     }
@@ -937,9 +1014,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted_v1 = lean_kahn_sort(&events, StateResVersion::V1);
-        let sorted_v2 = lean_kahn_sort(&events, StateResVersion::V2);
-        let sorted_v2_1 = lean_kahn_sort(&events, StateResVersion::V2_1);
+        let sorted_v1 = lean_kahn_sort(&events, &events, StateResVersion::V1);
+        let sorted_v2 = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted_v2_1 = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
         assert_eq!(sorted_v1, vec!["B", "A"]);
         // B is better (higher power level), so it comes LAST in V2 and V2.1
         assert_eq!(sorted_v2, vec!["A", "B"]);
@@ -977,7 +1054,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
         assert!(sorted.is_empty());
     }
 
@@ -1118,7 +1195,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
         // 1 pops first (only one with in-degree 0).
         // Then 2 and 3 are in queue. 3 has earlier TS (15, better) so it pops LAST.
         // Then 2 (TS 20, worse) pops FIRST.
@@ -1143,7 +1220,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
         assert_eq!(sorted, vec!["A"]);
     }
 
@@ -1152,7 +1229,12 @@ mod tests {
         let mut unconflicted = BTreeMap::new();
         unconflicted.insert(("type".into(), "key".into()), "id".into());
         let conflicted = HashMap::new();
-        let resolved = resolve_lean(unconflicted.clone(), conflicted, StateResVersion::V2);
+        let resolved = resolve_lean(
+            unconflicted.clone(),
+            conflicted.clone(),
+            &conflicted,
+            StateResVersion::V2,
+        );
         assert_eq!(resolved, unconflicted);
     }
 
@@ -1229,7 +1311,12 @@ mod tests {
             },
         );
 
-        let resolved = resolve_lean(unconflicted.clone(), conflicted, StateResVersion::V2_1);
+        let resolved = resolve_lean(
+            unconflicted.clone(),
+            conflicted.clone(),
+            &conflicted,
+            StateResVersion::V2_1,
+        );
 
         assert_eq!(
             resolved.get(&("m.room.member".into(), "@alice:example.com".into())),
@@ -1263,7 +1350,7 @@ mod tests {
                 },
             );
         }
-        let result = lean_kahn_sort(&events, version);
+        let result = lean_kahn_sort(&events, &events, version);
         assert_eq!(
             result,
             expected.iter().map(|s| s.to_string()).collect::<Vec<_>>()
@@ -1315,7 +1402,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
         let mut resolved_state = BTreeMap::new();
         for id in sorted {
             let ev = events.get(&id).unwrap();
@@ -1411,7 +1498,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V1);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V1);
         assert_eq!(sorted, vec!["B", "A"]);
     }
 
@@ -1432,7 +1519,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
         assert_eq!(sorted, vec!["1"]);
     }
 
@@ -1453,7 +1540,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, StateResVersion::V2_1);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
         assert_eq!(sorted, vec!["A"]);
     }
 
@@ -1488,11 +1575,11 @@ mod tests {
             },
         );
         // Later ts pops first (worse), earlier ts comes last (wins).
-        let sorted = lean_kahn_sort(&events, StateResVersion::V2_1);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
         assert_eq!(sorted, vec!["$late", "$early"]);
 
         // V2 must match V2_1
-        let sorted_v2 = lean_kahn_sort(&events, StateResVersion::V2);
+        let sorted_v2 = lean_kahn_sort(&events, &events, StateResVersion::V2);
         assert_eq!(sorted_v2, vec!["$late", "$early"]);
     }
 
@@ -1526,10 +1613,10 @@ mod tests {
             },
         );
         // $ban_b (later ts) pops first, $ban_a (earlier ts) comes last = wins.
-        let sorted_v2 = lean_kahn_sort(&events, StateResVersion::V2);
+        let sorted_v2 = lean_kahn_sort(&events, &events, StateResVersion::V2);
         assert_eq!(sorted_v2, vec!["$ban_b", "$ban_a"]);
 
-        let sorted_v2_1 = lean_kahn_sort(&events, StateResVersion::V2_1);
+        let sorted_v2_1 = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
         assert_eq!(sorted_v2_1, vec!["$ban_b", "$ban_a"]);
     }
 
@@ -1684,7 +1771,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let result = lean_kahn_sort_detailed(&events, StateResVersion::V2);
+        let result = lean_kahn_sort_detailed(&events, &events, StateResVersion::V2);
         match result {
             KahnSortResult::CycleDetected { sorted, stuck } => {
                 assert!(sorted.is_empty());
@@ -1731,7 +1818,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let result = lean_kahn_sort_detailed(&events, StateResVersion::V2);
+        let result = lean_kahn_sort_detailed(&events, &events, StateResVersion::V2);
         match result {
             KahnSortResult::CycleDetected { sorted, stuck } => {
                 assert_eq!(sorted, vec!["C"]);
@@ -1808,7 +1895,7 @@ mod tests {
                 },
             );
         }
-        let sorted = lean_kahn_sort(&events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
         assert_eq!(sorted.len(), 1000);
         // First element must be ev_0 (in-degree 0)
         assert_eq!(sorted[0], "ev_0");

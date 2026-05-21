@@ -48,7 +48,7 @@ fn load_oracle(path: &str) -> HashMap<String, String> {
 fn resolve_and_get_state(fixture_path: &str, version: StateResVersion) -> HashMap<String, String> {
     let events = load_fixture(fixture_path);
     let map = to_event_map(&events);
-    let resolved = resolve_lean(BTreeMap::new(), map, version);
+    let resolved = resolve_lean(BTreeMap::new(), map.clone(), &map, version);
     resolved
         .into_iter()
         .map(|((t, sk), eid)| (format!("{t}|{sk}"), eid))
