@@ -173,7 +173,43 @@ impl LeanEvent {
 #[derive(Debug, Clone, Copy)]
 struct SortPriority<'a> {
     event: &'a LeanEvent,
+    power_level: i64,
     version: StateResVersion,
+}
+
+/// Dynamically fetches the sender's power level by inspecting the event's auth chain.
+fn get_power_level_from_auth_chain(event: &LeanEvent, events: &HashMap<String, LeanEvent>) -> i64 {
+    let mut pl_event = None;
+    let mut create_event = None;
+
+    for aid in &event.auth_events {
+        if let Some(aev) = events.get(aid) {
+            if aev.event_type == "m.room.power_levels" && aev.state_key.is_empty() {
+                pl_event = Some(aev);
+            } else if aev.event_type == "m.room.create" && aev.state_key.is_empty() {
+                create_event = Some(aev);
+            }
+        }
+    }
+
+    if let Some(pl_ev) = pl_event {
+        if let Some(users) = pl_ev.content.get("users").and_then(|u| u.as_object()) {
+            if let Some(pl) = users.get(&event.sender).and_then(|p| p.as_i64()) {
+                return pl;
+            }
+        }
+        if let Some(default_pl) = pl_ev.content.get("users_default").and_then(|p| p.as_i64()) {
+            return default_pl;
+        }
+    }
+
+    if let Some(create_ev) = create_event {
+        if create_ev.sender == event.sender {
+            return 100;
+        }
+    }
+
+    event.power_level
 }
 
 impl<'a> PartialEq for SortPriority<'a> {
@@ -189,32 +225,33 @@ impl<'a> Ord for SortPriority<'a> {
         match self.version {
             StateResVersion::V1 => {
                 // V1 tie-breaking: depth (asc) -> event_id (asc)
-                // Inverted for Max-Heap
-                match other.event.depth.cmp(&self.event.depth) {
-                    Ordering::Equal => other.event.event_id.cmp(&self.event.event_id),
+                // In Rust's Max-Heap BinaryHeap, "greater" elements are popped first.
+                // In a Last-Wins resolution loop, we want the BEST events (Shallower, smaller ID) to pop LAST.
+                // So "Best" must be "Smaller" than "Worst".
+
+                // Shallower depth (smaller value) is BETTER (pops last = is "smaller").
+                match self.event.depth.cmp(&other.event.depth) {
+                    Ordering::Equal => self.event.event_id.cmp(&other.event.event_id),
                     ord => ord,
                 }
             }
             StateResVersion::V2 | StateResVersion::V2_1 => {
                 // V2 tie-breaking: power_level (desc) -> origin_server_ts (asc) -> event_id (asc)
-                // To have "best" events come LAST in the sorted list, we must pop "worst" events FIRST.
                 // In Rust's Max-Heap BinaryHeap, "greater" elements are popped first.
-                // So "worst" must be "greater" than "best".
+                // In a Last-Wins resolution loop, we want the BEST events (Highest PL, earliest timestamp) to pop LAST.
+                // So "Best" must be "Smaller" than "Worst".
 
-                // Higher power level is BETTER (should win = come last = be smallest = pop last).
-                // So lower power_level pops first (is "greater" in max-heap).
-                match other.event.power_level.cmp(&self.event.power_level) {
+                // Higher power level is BETTER (pops last = is "smaller").
+                match other.power_level.cmp(&self.power_level) {
                     Ordering::Equal => {
-                        // Later timestamp is BETTER (should win = come last = be smallest).
-                        // So earlier timestamp pops first (is "greater" in max-heap).
-                        match other
+                        // Earlier timestamp is BETTER (pops last = is "smaller").
+                        match self
                             .event
                             .origin_server_ts
-                            .cmp(&self.event.origin_server_ts)
+                            .cmp(&other.event.origin_server_ts)
                         {
                             Ordering::Equal => {
-                                // Lexicographically SMALLER ID is BETTER (pops last).
-                                // Larger ID pops first (is "greater" in max-heap).
+                                // Lexicographically smaller ID is BETTER (pops last = is "smaller").
                                 self.event.event_id.cmp(&other.event.event_id)
                             }
                             ord => ord,
@@ -257,7 +294,11 @@ pub fn lean_kahn_sort_detailed(
     for (id, &degree) in &in_degree {
         if degree == 0 {
             if let Some(event) = events.get(id) {
-                queue.push(SortPriority { event, version });
+                queue.push(SortPriority {
+                    event,
+                    power_level: get_power_level_from_auth_chain(event, events),
+                    version,
+                });
             }
         }
     }
@@ -265,14 +306,21 @@ pub fn lean_kahn_sort_detailed(
     let mut result = Vec::new();
     while let Some(priority) = queue.pop() {
         let event = priority.event;
+        std::eprintln!(
+            "KAHN POPS: {} (pl: {})",
+            event.event_id,
+            priority.power_level
+        );
         result.push(event.event_id.clone());
         if let Some(neighbors) = adjacency.get(&event.event_id) {
             for next_id in neighbors {
                 let degree = in_degree.get_mut(next_id).unwrap();
                 *degree -= 1;
                 if *degree == 0 {
+                    let next_ev = events.get(next_id).unwrap();
                     queue.push(SortPriority {
-                        event: events.get(next_id).unwrap(),
+                        event: next_ev,
+                        power_level: get_power_level_from_auth_chain(next_ev, events),
                         version,
                     });
                 }
@@ -380,36 +428,13 @@ fn iterative_auth_ok(
     resolved: &BTreeMap<(String, String), String>,
     all_events: &HashMap<String, LeanEvent>,
 ) -> bool {
-    // Only check m.room.member events where membership is join or invite
-    if event.event_type == "m.room.member" {
-        let new_membership = event
-            .content
-            .get("membership")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        if new_membership == "join" || new_membership == "invite" {
-            let target_key = (
-                alloc::string::String::from("m.room.member"),
-                event.state_key.clone(),
-            );
-            if let Some(resolved_eid) = resolved.get(&target_key) {
-                if let Some(resolved_ev) = all_events.get(resolved_eid) {
-                    let resolved_membership = resolved_ev
-                        .content
-                        .get("membership")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    // Only bans permanently prevent joins. Kicks (leave) allow rejoin.
-                    if resolved_membership == "ban" && resolved_ev.sender != resolved_ev.state_key {
-                        return false;
-                    }
-                }
-            }
+    let mut state = crate::auth::RoomState::new();
+    for (k, v) in resolved {
+        if let Some(ev) = all_events.get(v) {
+            state.insert(k.clone(), ev.clone());
         }
     }
-
-    true
+    crate::auth::check_auth(event, &state).is_ok()
 }
 
 /// Build the power-level mainline: the chain of m.room.power_levels events
@@ -650,16 +675,18 @@ mod tests {
             ..Default::default()
         };
         let p_base = SortPriority {
+            power_level: e_base.power_level,
             event: &e_base,
             version: StateResVersion::V2,
         };
         let p_worst_pl = SortPriority {
+            power_level: e_worst_pl.power_level,
             event: &e_worst_pl,
             version: StateResVersion::V2,
         };
 
-        // Worse events (lower PL) should be GREATER so they pop FIRST from Max-Heap.
-        assert_eq!(p_base.cmp(&p_worst_pl), Ordering::Less); // p_worst_pl has power 50, p_base 100. Lower pl pops first = Greater.
+        // Best events (higher PL) should be SMALLER so they pop LAST from Max-Heap.
+        assert_eq!(p_base.cmp(&p_worst_pl), Ordering::Less); // p_base 100, p_worst_pl 50. Alice is better = Smaller.
 
         let e_later_ts = LeanEvent {
             event_id: "$3".into(),
@@ -668,11 +695,12 @@ mod tests {
             ..Default::default()
         };
         let p_later_ts = SortPriority {
+            power_level: e_later_ts.power_level,
             event: &e_later_ts,
             version: StateResVersion::V2,
         };
-        // p_later_ts has ts 20 (better — wins), p_base has ts 10 (worse — pops first = Greater).
-        assert_eq!(p_base.cmp(&p_later_ts), Ordering::Greater);
+        // p_base has ts 10 (better — wins), p_later_ts has ts 20 (worse). Better pops last = Smaller.
+        assert_eq!(p_base.cmp(&p_later_ts), Ordering::Less);
 
         let e_larger_id = LeanEvent {
             event_id: "$2".into(),
@@ -681,10 +709,11 @@ mod tests {
             ..Default::default()
         };
         let p_larger_id = SortPriority {
+            power_level: e_larger_id.power_level,
             event: &e_larger_id,
             version: StateResVersion::V2,
         };
-        // p_larger_id has id "$2", p_base has id "$1". Larger ID pops first = Greater.
+        // p_base has id "$1" (better), p_larger_id has id "$2" (worse). Better pops last = Smaller.
         assert_eq!(p_base.cmp(&p_larger_id), Ordering::Less);
     }
 
@@ -802,7 +831,7 @@ mod tests {
             },
         );
         let sorted = lean_kahn_sort(&events, StateResVersion::V1);
-        assert_eq!(sorted, vec!["A", "B"]);
+        assert_eq!(sorted, vec!["B", "A"]);
     }
 
     #[test]
@@ -911,7 +940,7 @@ mod tests {
         let sorted_v1 = lean_kahn_sort(&events, StateResVersion::V1);
         let sorted_v2 = lean_kahn_sort(&events, StateResVersion::V2);
         let sorted_v2_1 = lean_kahn_sort(&events, StateResVersion::V2_1);
-        assert_eq!(sorted_v1, vec!["A", "B"]);
+        assert_eq!(sorted_v1, vec!["B", "A"]);
         // B is better (higher power level), so it comes LAST in V2 and V2.1
         assert_eq!(sorted_v2, vec!["A", "B"]);
         assert_eq!(sorted_v2_1, vec!["A", "B"]);
@@ -997,10 +1026,12 @@ mod tests {
         assert!(e1.partial_cmp(&e2).is_some());
 
         let p1 = SortPriority {
+            power_level: e1.power_level,
             event: &e1,
             version: StateResVersion::V2,
         };
         let p2 = SortPriority {
+            power_level: e2.power_level,
             event: &e2,
             version: StateResVersion::V2,
         };
@@ -1089,10 +1120,10 @@ mod tests {
         );
         let sorted = lean_kahn_sort(&events, StateResVersion::V2);
         // 1 pops first (only one with in-degree 0).
-        // Then 2 and 3 are in queue. 3 has earlier TS (15, worse) so it pops first.
-        // Then 2 (TS 20, better) pops.
+        // Then 2 and 3 are in queue. 3 has earlier TS (15, better) so it pops LAST.
+        // Then 2 (TS 20, worse) pops FIRST.
         // Then 4 pops.
-        assert_eq!(sorted, vec!["1", "3", "2", "4"]);
+        assert_eq!(sorted, vec!["1", "2", "3", "4"]);
     }
 
     #[test]
@@ -1249,7 +1280,7 @@ mod tests {
         run_batch_test(
             StateResVersion::V1,
             &[("Deep", 100, 100, 10, &[]), ("Shallow", 10, 100, 1, &[])],
-            &["Shallow", "Deep"],
+            &["Deep", "Shallow"],
         );
     }
 
@@ -1339,6 +1370,7 @@ mod tests {
             ..Default::default()
         };
         let p = SortPriority {
+            power_level: e.power_level,
             event: &e,
             version: StateResVersion::V2,
         };
@@ -1380,7 +1412,7 @@ mod tests {
             },
         );
         let sorted = lean_kahn_sort(&events, StateResVersion::V1);
-        assert_eq!(sorted, vec!["A", "B"]);
+        assert_eq!(sorted, vec!["B", "A"]);
     }
 
     #[test]
@@ -1455,13 +1487,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        // Earlier ts pops first (worse), later ts comes last (wins).
+        // Later ts pops first (worse), earlier ts comes last (wins).
         let sorted = lean_kahn_sort(&events, StateResVersion::V2_1);
-        assert_eq!(sorted, vec!["$early", "$late"]);
+        assert_eq!(sorted, vec!["$late", "$early"]);
 
         // V2 must match V2_1
         let sorted_v2 = lean_kahn_sort(&events, StateResVersion::V2);
-        assert_eq!(sorted_v2, vec!["$early", "$late"]);
+        assert_eq!(sorted_v2, vec!["$late", "$early"]);
     }
 
     /// Regression test: millisecond-close Draupnir ban races resolve identically
@@ -1493,12 +1525,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        // $ban_a (earlier ts) pops first, $ban_b (later ts) comes last = wins.
+        // $ban_b (later ts) pops first, $ban_a (earlier ts) comes last = wins.
         let sorted_v2 = lean_kahn_sort(&events, StateResVersion::V2);
-        assert_eq!(sorted_v2, vec!["$ban_a", "$ban_b"]);
+        assert_eq!(sorted_v2, vec!["$ban_b", "$ban_a"]);
 
         let sorted_v2_1 = lean_kahn_sort(&events, StateResVersion::V2_1);
-        assert_eq!(sorted_v2_1, vec!["$ban_a", "$ban_b"]);
+        assert_eq!(sorted_v2_1, vec!["$ban_b", "$ban_a"]);
     }
 
     #[test]
@@ -1562,6 +1594,7 @@ mod tests {
             ..Default::default()
         };
         let p_base = SortPriority {
+            power_level: e_base.power_level,
             event: &e_base,
             version: StateResVersion::V2,
         };
@@ -1570,32 +1603,36 @@ mod tests {
             ..e_base.clone()
         };
         let p_high_power = SortPriority {
+            power_level: e_high_power.power_level,
             event: &e_high_power,
             version: StateResVersion::V2,
         };
-        // p_base is WORSE (PL 50 < 100), so it should be GREATER.
+        // p_base is WORSE (PL 50 < 100). Better (100) must be Smaller (pops last). So p_base > p_high_power.
         assert_eq!(p_base.cmp(&p_high_power), Ordering::Greater);
         let e_early_ts = LeanEvent {
             origin_server_ts: 10,
             ..e_base.clone()
         };
         let p_early_ts = SortPriority {
+            power_level: e_early_ts.power_level,
             event: &e_early_ts,
             version: StateResVersion::V2,
         };
-        // p_early_ts has TS 10 (worse, pops first = Greater), p_base has TS 50 (better, pops last = Less).
-        assert_eq!(p_base.cmp(&p_early_ts), Ordering::Less);
+        // p_early_ts has TS 10 (better). Better must be Smaller (pops last). So p_base > p_early_ts.
+        assert_eq!(p_base.cmp(&p_early_ts), Ordering::Greater);
         let e_early_id = LeanEvent {
             event_id: "a".into(),
             ..e_base.clone()
         };
         let p_early_id = SortPriority {
+            power_level: e_early_id.power_level,
             event: &e_early_id,
             version: StateResVersion::V2,
         };
-        // p_early_id has ID "a", p_base has ID "m". Larger ID pops first, so p_base is GREATER.
+        // p_early_id has ID "a" (better). Better must be Smaller (pops last). So p_base > p_early_id.
         assert_eq!(p_base.cmp(&p_early_id), Ordering::Greater);
         let p_v1_base = SortPriority {
+            power_level: e_base.power_level,
             event: &e_base,
             version: StateResVersion::V1,
         };
@@ -1604,15 +1641,19 @@ mod tests {
             ..e_base.clone()
         };
         let p_shallow = SortPriority {
+            power_level: e_shallow.power_level,
             event: &e_shallow,
             version: StateResVersion::V1,
         };
-        assert_eq!(p_v1_base.cmp(&p_shallow), Ordering::Less);
+        // V1: shallow depth (1) is better. Better must be Smaller (pops last). So p_v1_base > p_shallow.
+        assert_eq!(p_v1_base.cmp(&p_shallow), Ordering::Greater);
         let p_v1_early_id = SortPriority {
+            power_level: e_early_id.power_level,
             event: &e_early_id,
             version: StateResVersion::V1,
         };
-        assert_eq!(p_v1_base.cmp(&p_v1_early_id), Ordering::Less);
+        // V1: early ID "a" is better. Better must be Smaller (pops last). So p_v1_base > p_v1_early_id.
+        assert_eq!(p_v1_base.cmp(&p_v1_early_id), Ordering::Greater);
         assert_eq!(p_v1_base.cmp(&p_v1_base), Ordering::Equal);
     }
 

@@ -7,26 +7,6 @@ description = "Formally verified, dependency-free Matrix State Resolution v2 log
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gamesguru/ruma-lean"
 autotests = false
-exclude = [
-    "res/",
-    "scripts/",
-    "docs/",
-    "RumaLean/",
-    "RumaLean.lean",
-    "lake*",
-    "lean-toolchain",
-    ".envrc",
-    ".env.example",
-    ".github",
-    ".gitignore",
-    ".editorconfig",
-    ".pre-commit-config.yaml",
-    ".prettierignore",
-    ".prettierrc",
-    ".rgignore",
-    "tests/",
-    "Makefile",
-]
 
 [[bin]]
 name = "ruma-lean"
@@ -50,3 +30,33 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 ureq = { version = "2.9", optional = true, features = ["json"] }
 
 [dev-dependencies]
+[[test]]
+name = "ruma_upstream"
+path = "tests/ruma_upstream.rs"
+[[test]]
+name = "snapshots"
+path = "tests/snapshots.rs"
+[[test]]
+name = "sanity"
+path = "tests/sanity.rs"
+
+exclude = [
+    "res/",
+    "scripts/",
+    "docs/",
+    "RumaLean/",
+    "RumaLean.lean",
+    "lake*",
+    "lean-toolchain",
+    ".envrc",
+    ".env.example",
+    ".github",
+    ".gitignore",
+    ".editorconfig",
+    ".pre-commit-config.yaml",
+    ".prettierignore",
+    ".prettierrc",
+    ".rgignore",
+    "tests/",
+    "Makefile",
+]
