@@ -485,14 +485,21 @@ fn iterative_auth_ok(
         }
     }
 
-    // 2. Supplement with events from the event's own auth chain (from E union S)
+    // 2. Supplement with events from the event's own RECURSIVE auth chain (from E union S)
     // This is crucial for supporting Worst-First sort orders where descendants
     // are processed before ancestors have been added to 'resolved'.
-    for aid in &event.auth_events {
-        if let Some(aev) = auth_context.get(aid) {
+    let mut stack = event.auth_events.clone();
+    let mut visited = BTreeSet::new();
+    while let Some(aid) = stack.pop() {
+        if !visited.insert(aid.clone()) {
+            continue;
+        }
+        if let Some(aev) = auth_context.get(&aid) {
             let key = (aev.event_type.clone(), aev.state_key.clone());
             // Consensus state (resolved) always wins over the event's raw auth chain.
             state.entry(key).or_insert_with(|| aev.clone());
+            // Walk up to find the membership/PL/create events if not already found.
+            stack.extend(aev.auth_events.iter().cloned());
         }
     }
 
@@ -500,7 +507,7 @@ fn iterative_auth_ok(
         Ok(_) => true,
         Err(e) => {
             std::eprintln!(
-                "REJECTED: {} type={} sender={} error={:?}",
+                "REJECTED: {} type={} sender={} error={}",
                 event.event_id,
                 event.event_type,
                 event.sender,

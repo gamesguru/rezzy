@@ -29,7 +29,7 @@ use crate::LeanEvent;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthError {
     /// The sender is not a member of the room (or membership is not "join").
-    NotMember { sender: String },
+    NotMember { sender: String, event_id: String },
     /// The sender's power level is below the required level for this event type.
     InsufficientPowerLevel {
         required: i64,
@@ -37,7 +37,7 @@ pub enum AuthError {
         event_type: String,
     },
     /// The sender is banned from the room.
-    BannedUser { sender: String },
+    BannedUser { sender: String, event_id: String },
     /// For `m.room.member` events, the `state_key` doesn't match the expected
     /// user ID for the given membership transition.
     InvalidStateKey { expected: String, actual: String },
@@ -50,30 +50,22 @@ pub enum AuthError {
 impl fmt::Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AuthError::NotMember { sender } => {
-                write!(f, "sender {} is not a joined member", sender)
+            AuthError::NotMember { sender, .. } => {
+                write!(f, "sender {} is not joined", sender)
             }
             AuthError::InsufficientPowerLevel {
                 required,
                 actual,
                 event_type,
-            } => write!(
-                f,
-                "power level {} < {} required for {}",
-                actual, required, event_type
-            ),
-            AuthError::BannedUser { sender } => {
+            } => write!(f, "PL {} < {} for {}", actual, required, event_type),
+            AuthError::BannedUser { sender, .. } => {
                 write!(f, "sender {} is banned", sender)
             }
             AuthError::InvalidStateKey { expected, actual } => {
-                write!(
-                    f,
-                    "invalid state_key: expected {}, got {}",
-                    expected, actual
-                )
+                write!(f, "invalid state_key: {} (expected {})", actual, expected)
             }
             AuthError::CreateWithPrevEvents => {
-                write!(f, "m.room.create must not have prev_events")
+                write!(f, "m.room.create has prev_events")
             }
             AuthError::MissingAuthEvent(id) => {
                 write!(f, "missing auth event: {}", id)
@@ -114,6 +106,7 @@ pub fn check_auth(event: &LeanEvent, state: &RoomState) -> Result<(), AuthError>
             if membership == "ban" {
                 return Err(AuthError::BannedUser {
                     sender: event.sender.clone(),
+                    event_id: event.event_id.clone(),
                 });
             }
 
@@ -121,6 +114,7 @@ pub fn check_auth(event: &LeanEvent, state: &RoomState) -> Result<(), AuthError>
             if event.event_type != "m.room.member" && membership != "join" {
                 return Err(AuthError::NotMember {
                     sender: event.sender.clone(),
+                    event_id: event.event_id.clone(),
                 });
             }
         }
@@ -128,6 +122,7 @@ pub fn check_auth(event: &LeanEvent, state: &RoomState) -> Result<(), AuthError>
         // No membership record and not a membership event — reject
         return Err(AuthError::NotMember {
             sender: event.sender.clone(),
+            event_id: event.event_id.clone(),
         });
     }
 
@@ -298,6 +293,7 @@ fn check_membership_rules(event: &LeanEvent, state: &RoomState) -> Result<(), Au
                 {
                     return Err(AuthError::BannedUser {
                         sender: target_user.clone(),
+                        event_id: event.event_id.clone(),
                     });
                 }
             }
@@ -558,6 +554,7 @@ mod tests {
     fn test_auth_error_display() {
         let err = AuthError::NotMember {
             sender: "@bob:example.com".into(),
+            event_id: "$unused".into(),
         };
         let msg = alloc::format!("{}", err);
         assert!(msg.contains("bob"));
