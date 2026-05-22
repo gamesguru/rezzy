@@ -2000,4 +2000,93 @@ mod tests {
         missing.sort();
         assert_eq!(missing, vec!["MISSING_1", "MISSING_2"]);
     }
+
+    fn default_test_event(id: &str, pl: i64, ts: u64, auth: Vec<&str>) -> LeanEvent {
+        LeanEvent {
+            event_id: id.into(),
+            event_type: "m.room.message".into(), // not power
+            state_key: None,
+            power_level: pl,
+            origin_server_ts: ts,
+            prev_events: vec![],
+            auth_events: auth.into_iter().map(ToString::to_string).collect(),
+            depth: 1,
+            sender: "@user:example.com".into(),
+            content: serde_json::Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    #[test]
+    fn test_mainline_sort_no_pl_ancestor_sorts_first() {
+        // PL mainline: pl-3 -> pl-2 -> pl-1
+        let mainline = vec![
+            "$pl-3".to_string(),
+            "$pl-2".to_string(),
+            "$pl-1".to_string(),
+        ];
+
+        let mut auth_context = HashMap::new();
+        // Mock auth context to build the paths
+        auth_context.insert(
+            "$msg-old".into(),
+            default_test_event("$msg-old", 0, 20, vec!["$pl-1"]),
+        );
+        auth_context.insert(
+            "$msg-new".into(),
+            default_test_event("$msg-new", 0, 30, vec!["$pl-3"]),
+        );
+        auth_context.insert(
+            "$msg-no-pl".into(),
+            default_test_event("$msg-no-pl", 0, 10, vec![]),
+        );
+
+        // Add PL events themselves to auth context
+        auth_context.insert(
+            "$pl-3".into(),
+            default_test_event("$pl-3", 100, 3, vec!["$pl-2"]),
+        );
+        auth_context.insert(
+            "$pl-2".into(),
+            default_test_event("$pl-2", 100, 2, vec!["$pl-1"]),
+        );
+        auth_context.insert("$pl-1".into(), default_test_event("$pl-1", 100, 1, vec![]));
+
+        let ev_old = auth_context.get("$msg-old").unwrap();
+        let ev_new = auth_context.get("$msg-new").unwrap();
+        let ev_no_pl = auth_context.get("$msg-no-pl").unwrap();
+
+        let mut events_to_sort = vec![ev_old, ev_new, ev_no_pl];
+
+        mainline_sort(&mut events_to_sort, &mainline, &auth_context);
+
+        let sorted_ids: Vec<String> = events_to_sort.iter().map(|e| e.event_id.clone()).collect();
+        // Per spec, an event with i = ∞ (no mainline ancestor) sorts before all
+        // chain-rooted events under "x < y if x.position is greater than y's".
+        assert_eq!(sorted_ids, vec!["$msg-no-pl", "$msg-old", "$msg-new"]);
+    }
+
+    #[test]
+    fn test_reverse_topological_power_sort() {
+        let mut events = HashMap::new();
+        // Graph structure from Ruma test:
+        // l -> o
+        // m -> n, o
+        // n -> o
+        // p -> o
+        // We use V2 which uses PL, TS, and ID. To match Ruma exactly, we just use defaults.
+        // Wait, the Ruma test passes `int!(0)` for all power levels and TS.
+        events.insert("$l".into(), default_test_event("$l", 0, 0, vec!["$o"]));
+        events.insert(
+            "$m".into(),
+            default_test_event("$m", 0, 0, vec!["$n", "$o"]),
+        );
+        events.insert("$n".into(), default_test_event("$n", 0, 0, vec!["$o"]));
+        events.insert("$o".into(), default_test_event("$o", 0, 0, vec![]));
+        events.insert("$p".into(), default_test_event("$p", 0, 0, vec!["$o"]));
+
+        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        // ruma-lean pops WORST events first so they get applied first and overwritten by BETTER events.
+        // Therefore, the topological output is the reverse of Ruma's for tied events!
+        assert_eq!(sorted, vec!["$o", "$p", "$n", "$m", "$l"]);
+    }
 }

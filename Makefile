@@ -116,8 +116,22 @@ clean:   rust/clean lean/clean ##H Remove all build artifacts
 # Data generation
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+.PHONY: fetch-stateres-vectors
+fetch-stateres-vectors: ##H Fetch Ruma state resolution test vectors
+	@mkdir -p res/ruma_upstream/MSC4297-problem-A res/ruma_upstream/MSC4297-problem-B
+	@echo "Fetching MSC4297-problem-A vectors..."
+	@test -f res/ruma_upstream/MSC4297-problem-A/pdus-v11.json || curl -sL https://raw.githubusercontent.com/ruma/ruma/main/crates/ruma-state-res/tests/it/resolve/fixtures/MSC4297-problem-A/pdus-v11.json -o res/ruma_upstream/MSC4297-problem-A/pdus-v11.json
+	@test -f res/ruma_upstream/MSC4297-problem-A/pdus-v12.json || curl -sL https://raw.githubusercontent.com/ruma/ruma/main/crates/ruma-state-res/tests/it/resolve/fixtures/MSC4297-problem-A/pdus-v12.json -o res/ruma_upstream/MSC4297-problem-A/pdus-v12.json
+	@test -f res/ruma_upstream/MSC4297-problem-A/state-bob.json || curl -sL https://raw.githubusercontent.com/ruma/ruma/main/crates/ruma-state-res/tests/it/resolve/fixtures/MSC4297-problem-A/state-bob.json -o res/ruma_upstream/MSC4297-problem-A/state-bob.json
+	@test -f res/ruma_upstream/MSC4297-problem-A/state-charlie.json || curl -sL https://raw.githubusercontent.com/ruma/ruma/main/crates/ruma-state-res/tests/it/resolve/fixtures/MSC4297-problem-A/state-charlie.json -o res/ruma_upstream/MSC4297-problem-A/state-charlie.json
+	@echo "Fetching MSC4297-problem-B vectors..."
+	@test -f res/ruma_upstream/MSC4297-problem-B/pdus-v11.json || curl -sL https://raw.githubusercontent.com/ruma/ruma/main/crates/ruma-state-res/tests/it/resolve/fixtures/MSC4297-problem-B/pdus-v11.json -o res/ruma_upstream/MSC4297-problem-B/pdus-v11.json
+	@test -f res/ruma_upstream/MSC4297-problem-B/pdus-v12.json || curl -sL https://raw.githubusercontent.com/ruma/ruma/main/crates/ruma-state-res/tests/it/resolve/fixtures/MSC4297-problem-B/pdus-v12.json -o res/ruma_upstream/MSC4297-problem-B/pdus-v12.json
+	@test -f res/ruma_upstream/MSC4297-problem-B/state-eve.json || curl -sL https://raw.githubusercontent.com/ruma/ruma/main/crates/ruma-state-res/tests/it/resolve/fixtures/MSC4297-problem-B/state-eve.json -o res/ruma_upstream/MSC4297-problem-B/state-eve.json
+	@test -f res/ruma_upstream/MSC4297-problem-B/state-zara.json || curl -sL https://raw.githubusercontent.com/ruma/ruma/main/crates/ruma-state-res/tests/it/resolve/fixtures/MSC4297-problem-B/state-zara.json -o res/ruma_upstream/MSC4297-problem-B/state-zara.json
+
 .PHONY: fixtures
-fixtures: ##H Generate synthetic data and fetch real DAGs if MATRIX_TOKEN is set
+fixtures: fetch-stateres-vectors ##H Generate synthetic data and fetch real DAGs if MATRIX_TOKEN is set
 	@mkdir -p res res/expected
 	@test -f res/benchmark_1k.json || python3 scripts/generate_benchmark_1k.py
 	@test -f res/realistic_large_room.json || python3 scripts/gen_large_room.py
