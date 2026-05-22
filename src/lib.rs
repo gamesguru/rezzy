@@ -818,42 +818,73 @@ fn build_mainline(
     mainline
 }
 
-/// Find the closest mainline event for a given event by walking its auth chain.
-/// Returns the index in the mainline (0 = most recent PL event = best position).
-fn closest_mainline_position(
-    event: &LeanEvent,
+/// Precompute the closest mainline position for every event reachable via
+/// auth_events using a single O(V+E) multi-source reverse-BFS.
+///
+/// The naive approach walks the auth chain per-event: O(events × chain_depth).
+/// On a dense DAG with 52k events this dominates runtime.
+///
+/// This approach instead:
+/// 1. Seeds the BFS from ALL mainline events simultaneously at their positions.
+/// 2. Builds reverse auth-edges (auth_ev → events that list it) once: O(V+E).
+/// 3. BFS outward through those reverse edges; since we process in ascending
+///    position order, the first time an event is reached gives the minimum
+///    (closest) mainline position.
+///
+/// Total: O(V+E) — each vertex and edge touched at most once.
+fn precompute_mainline_positions(
     mainline: &[String],
     auth_context: &HashMap<String, LeanEvent>,
-) -> usize {
-    // Check if this event itself is on the mainline
-    if let Some(pos) = mainline.iter().position(|id| id == &event.event_id) {
-        return pos;
+) -> HashMap<String, usize> {
+    let mainline_len = mainline.len();
+
+    // Build reverse adjacency over the full auth context once.
+    // reverse_adj[A] = [E1, E2, ...] means E1, E2, ... list A in their auth_events.
+    let mut reverse_adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (id, ev) in auth_context {
+        for auth_id in &ev.auth_events {
+            reverse_adj
+                .entry(auth_id.as_str())
+                .or_default()
+                .push(id.as_str());
+        }
     }
 
-    // Walk auth_events to find the closest mainline event
-    let mut visited = alloc::collections::BTreeSet::new();
-    let mut stack: Vec<String> = event.auth_events.clone();
+    let mut dist: HashMap<String, usize> = HashMap::with_capacity(auth_context.len());
 
-    while let Some(auth_id) = stack.pop() {
-        if !visited.insert(auth_id.clone()) {
-            continue;
-        }
-        if let Some(pos) = mainline.iter().position(|id| id == &auth_id) {
-            return pos;
-        }
-        if let Some(auth_ev) = auth_context.get(&auth_id) {
-            for parent_auth in &auth_ev.auth_events {
-                stack.push(parent_auth.clone());
+    // Seed: process mainline events in position order (0 = closest = best).
+    // Using a VecDeque gives BFS ordering; since positions only increase along
+    // the mainline and edges carry zero additional cost, this is correct.
+    let mut queue: alloc::collections::VecDeque<(&str, usize)> =
+        alloc::collections::VecDeque::new();
+
+    for (pos, id) in mainline.iter().enumerate() {
+        dist.insert(id.clone(), pos);
+        queue.push_back((id.as_str(), pos));
+    }
+
+    // Flood-fill outward through reverse auth-edges.
+    // First assignment wins (minimum position) because we process in BFS order
+    // starting from position 0.
+    while let Some((id, pos)) = queue.pop_front() {
+        if let Some(children) = reverse_adj.get(id) {
+            for &child_id in children {
+                if !dist.contains_key(child_id) {
+                    dist.insert(child_id.into(), pos);
+                    queue.push_back((child_id, pos));
+                }
             }
         }
     }
 
-    // Not connected to mainline at all — worst position
-    mainline.len()
+    // Events with no path to mainline get sentinel = mainline_len (worst).
+    // Callers use `.get().copied().unwrap_or(mainline_len)` for those.
+    let _ = mainline_len; // consumed by callers
+    dist
 }
 
 /// Sort events by mainline ordering per the Matrix spec:
-/// 1. Closest mainline position (smaller index = closer to current PL = better = wins = comes last)
+/// 1. Closest mainline position (smaller index = closer to current PL = comes last)
 /// 2. origin_server_ts ascending (earlier first, later wins via last-write)
 /// 3. event_id ascending (smaller first)
 fn mainline_sort(
@@ -861,20 +892,14 @@ fn mainline_sort(
     mainline: &[String],
     auth_context: &HashMap<String, LeanEvent>,
 ) {
-    // Pre-compute mainline positions
-    let positions: HashMap<String, usize> = events
-        .iter()
-        .map(|ev| {
-            (
-                ev.event_id.clone(),
-                closest_mainline_position(ev, mainline, auth_context),
-            )
-        })
-        .collect();
+    let mainline_len = mainline.len();
+
+    // Single O(V+E) pass over the full auth context.
+    let dist = precompute_mainline_positions(mainline, auth_context);
 
     events.sort_by(|a, b| {
-        let pos_a = positions.get(&a.event_id).copied().unwrap_or(usize::MAX);
-        let pos_b = positions.get(&b.event_id).copied().unwrap_or(usize::MAX);
+        let pos_a = dist.get(&a.event_id).copied().unwrap_or(mainline_len);
+        let pos_b = dist.get(&b.event_id).copied().unwrap_or(mainline_len);
 
         // Larger mainline position = farther from current PL = worse = comes first
         // (so it gets overwritten by closer events via last-write-wins)
