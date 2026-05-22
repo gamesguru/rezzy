@@ -34,9 +34,12 @@ pub use ruma_state_res::{events, test_utils, utils, Error as RumaError, Event, S
 #[cfg(feature = "mock-ruma")]
 fn ruma_to_lean_event<E: Event>(ev: &E) -> crate::LeanEvent {
     use alloc::string::ToString;
-    let content_val: serde_json::Value = serde_json::from_str(ev.content().get()).unwrap_or(serde_json::Value::Null);
+    let content_val: serde_json::Value =
+        serde_json::from_str(ev.content().get()).unwrap_or(serde_json::Value::Null);
     let power_level = if let Some(pl) = content_val.get("power_level") {
-        pl.as_i64().or_else(|| pl.as_str().and_then(|s| s.parse().ok())).unwrap_or(0)
+        pl.as_i64()
+            .or_else(|| pl.as_str().and_then(|s| s.parse().ok()))
+            .unwrap_or(0)
     } else {
         0
     };
@@ -61,20 +64,24 @@ pub fn resolve<'a, E, MapsIter>(
     _state_maps: impl IntoIterator<IntoIter = MapsIter>,
     _auth_chains: Vec<ruma_state_res::utils::event_id_set::EventIdSet<E::Id>>,
     _fetch_event: impl Fn(&ruma_common::EventId) -> Option<E>,
-    _fetch_conflicted_state_subgraph: impl Fn(&StateMap<Vec<E::Id>>) -> Option<ruma_state_res::utils::event_id_set::EventIdSet<E::Id>>,
+    _fetch_conflicted_state_subgraph: impl Fn(
+        &StateMap<Vec<E::Id>>,
+    ) -> Option<
+        ruma_state_res::utils::event_id_set::EventIdSet<E::Id>,
+    >,
 ) -> core::result::Result<StateMap<E::Id>, RumaError>
 where
     E: Event + Clone,
     E::Id: 'a,
     MapsIter: Iterator<Item = &'a StateMap<E::Id>> + Clone,
 {
-    use std::collections::{BTreeMap, HashMap, HashSet};
     use alloc::string::ToString;
     use core::borrow::Borrow;
-    
+    use std::collections::{BTreeMap, HashMap, HashSet};
+
     let mut state_sets = Vec::new();
     let mut id_map: HashMap<String, E::Id> = HashMap::new();
-    
+
     for map in _state_maps {
         state_sets.push(map.clone());
         for id in map.values() {
@@ -85,7 +92,8 @@ where
         return Ok(StateMap::new());
     }
 
-    let mut counts: HashMap<(&(ruma_events::StateEventType, String), &E::Id), usize> = HashMap::new();
+    let mut counts: HashMap<(&(ruma_events::StateEventType, String), &E::Id), usize> =
+        HashMap::new();
     for map in &state_sets {
         for (key, id) in map.iter() {
             *counts.entry((key, id)).or_insert(0) += 1;
@@ -99,11 +107,12 @@ where
     for map in &state_sets {
         for (key, id) in map.iter() {
             if counts.get(&(key, id)).copied().unwrap_or(0) == num_maps {
-                let state_key_opt = if key.1.is_empty() { None } else { Some(key.1.clone()) };
-                unconflicted_state.insert(
-                    (key.0.to_string(), state_key_opt),
-                    id.to_string()
-                );
+                let state_key_opt = if key.1.is_empty() {
+                    None
+                } else {
+                    Some(key.1.clone())
+                };
+                unconflicted_state.insert((key.0.to_string(), state_key_opt), id.to_string());
             } else {
                 conflicted_keys.insert(key.clone());
             }
@@ -126,11 +135,71 @@ where
         }
     }
 
+    let mut conflicted_state_set: StateMap<Vec<E::Id>> = StateMap::new();
+    for map in &state_sets {
+        for (key, id) in map.iter() {
+            if conflicted_keys.contains(key) {
+                let list = conflicted_state_set
+                    .entry(key.clone())
+                    .or_insert_with(Vec::new);
+                if !list.contains(id) {
+                    list.push(id.clone());
+                }
+            }
+        }
+    }
+
+    if _state_res_rules.begin_iterative_auth_checks_with_empty_state_map {
+        if let Some(subgraph) = _fetch_conflicted_state_subgraph(&conflicted_state_set) {
+            for id in subgraph {
+                let id_str = id.to_string();
+                if !conflicted_events.contains_key(&id_str) {
+                    if let Some(ev) = _fetch_event(id.borrow()) {
+                        conflicted_events.insert(id_str.clone(), ruma_to_lean_event(&ev));
+                    }
+                }
+            }
+        }
+    }
+
     let mut to_fetch = Vec::new();
     for map in &state_sets {
         for (_key, id) in map.iter() {
             to_fetch.push(id.clone());
             id_map.insert(id.to_string(), id.clone());
+        }
+    }
+
+    // Compute auth difference
+    // Also handle odd number of auth chains if applicable (ruma does not do this for symmetric_diff, but wait, ruma chunks by 2. Let's just do exactly what ruma does, or just compute union minus intersection)
+    // Actually, an easier way is just union all chains, and intersect all chains, then diff = union - intersection.
+    let mut union_auth = std::collections::HashSet::new();
+    let mut intersect_auth = if _auth_chains.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        _auth_chains[0]
+            .iter()
+            .map(|id| id.to_string())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    for chain in &_auth_chains {
+        let set: std::collections::HashSet<_> = chain.iter().map(|id| id.to_string()).collect();
+        union_auth.extend(set.clone());
+        intersect_auth.retain(|id| set.contains(id));
+    }
+    let auth_diff: std::collections::HashSet<_> =
+        union_auth.difference(&intersect_auth).cloned().collect();
+    std::eprintln!("AUTH CHAINS COUNT: {}", _auth_chains.len());
+    std::eprintln!("AUTH DIFF SIZE: {}", auth_diff.len());
+
+    for id_str in auth_diff {
+        if !conflicted_events.contains_key(&id_str) {
+            if let Some(id) = id_map.get(&id_str) {
+                if let Some(ev) = _fetch_event(id.borrow()) {
+                    std::eprintln!("AUTH DIFF ADDED: {}", id_str);
+                    conflicted_events.insert(id_str.clone(), ruma_to_lean_event(&ev));
+                }
+            }
         }
     }
     for chain in _auth_chains {
@@ -169,20 +238,17 @@ where
             crate::StateResVersion::V2_1
         } else {
             crate::StateResVersion::V2
-        }
+        },
     );
 
     let mut result = StateMap::new();
     for ((ev_type, state_key), id_str) in resolved {
-        let key = (
-            ev_type.as_str().into(),
-            state_key.unwrap_or_default()
-        );
+        let key = (ev_type.as_str().into(), state_key.unwrap_or_default());
         if let Some(id) = id_map.get(&id_str) {
             result.insert(key, id.clone());
         }
     }
-    
+
     Ok(result)
 }
 
@@ -377,6 +443,14 @@ fn get_power_level_from_auth_chain(
         }
     }
 
+    // Explicitly find m.room.create if it wasn't in the auth chain (V12+ behavior)
+    if create_event.is_none() {
+        create_event = auth_context
+            .values()
+            .find(|ev| ev.event_type == "m.room.create")
+            .cloned();
+    }
+
     if let Some(pl_ev) = pl_event {
         if let Some(users) = pl_ev.content.get("users").and_then(|u| u.as_object()) {
             if let Some(pl) = users.get(&event.sender).and_then(|p| p.as_i64()) {
@@ -445,27 +519,16 @@ impl<'a> Ord for SortPriority<'a> {
             StateResVersion::V2 | StateResVersion::V2_1 => {
                 // V2 tie-breaking: power_level (desc) -> origin_server_ts (asc) -> event_id (asc)
                 // In Rust's Max-Heap BinaryHeap, "greater" elements are popped first.
-                // We want the WORST events (lower PL, later TS) to pop FIRST.
-
-                match other.power_level.cmp(&self.power_level) {
-                    Ordering::Equal => {
-                        // We want the WORST events (lower PL, earlier TS, smaller ID) to pop FIRST.
-                        // So they must be "Greater".
-                        // Earlier TS is "Greater" (pops first).
-                        match other
+                // We want the HIGHEST power level, EARLIEST timestamp, and SMALLEST event ID to pop first.
+                self.power_level
+                    .cmp(&other.power_level)
+                    .then_with(|| {
+                        other
                             .event
                             .origin_server_ts
                             .cmp(&self.event.origin_server_ts)
-                        {
-                            Ordering::Equal => {
-                                // Lexicographically smaller ID is "Greater" (pops first).
-                                other.event.event_id.cmp(&self.event.event_id)
-                            }
-                            ord => ord,
-                        }
-                    }
-                    ord => ord,
-                }
+                    })
+                    .then_with(|| other.event.event_id.cmp(&self.event.event_id))
             }
         }
     }
@@ -563,7 +626,13 @@ pub fn lean_kahn_sort(
     auth_context: &HashMap<String, LeanEvent>,
     version: StateResVersion,
 ) -> Vec<String> {
-    lean_kahn_sort_detailed(events, auth_context, version).into_sorted()
+    match lean_kahn_sort_detailed(events, auth_context, version) {
+        KahnSortResult::Ok(sorted) => sorted,
+        KahnSortResult::CycleDetected { sorted, stuck } => {
+            std::eprintln!("KAHN CYCLE DETECTED! Stuck: {:?}", stuck);
+            sorted
+        }
+    }
 }
 
 pub fn resolve_lean(
@@ -652,15 +721,15 @@ fn iterative_auth_ok(
 
     // Explicitly add m.room.create to the auth state if we can find it in the context.
     // In V12+, m.room.create is implicitly in the auth state because it's not allowed in auth_events.
-    if !state.contains_key(&("m.room.create".into(), Some(String::new()))) {
-        let create_ev = auth_context.values()
+    if let std::collections::btree_map::Entry::Vacant(e) =
+        state.entry(("m.room.create".into(), Some(String::new())))
+    {
+        let create_ev = auth_context
+            .values()
             .chain(conflicted_events.values())
             .find(|ev| ev.event_type == "m.room.create");
         if let Some(create_ev) = create_ev {
-            state.insert(
-                ("m.room.create".into(), Some(String::new())),
-                create_ev.clone()
-            );
+            e.insert(create_ev.clone());
         }
     }
 
@@ -673,7 +742,10 @@ fn iterative_auth_ok(
         if !visited.insert(aid.clone()) {
             continue;
         }
-        if let Some(aev) = auth_context.get(&aid).or_else(|| conflicted_events.get(&aid)) {
+        if let Some(aev) = auth_context
+            .get(&aid)
+            .or_else(|| conflicted_events.get(&aid))
+        {
             let key = (aev.event_type.clone(), aev.state_key.clone());
             // Consensus state (resolved) always wins over the event's raw auth chain.
             state.entry(key).or_insert_with(|| aev.clone());
@@ -687,7 +759,7 @@ fn iterative_auth_ok(
         Ok(_) => {
             std::eprintln!("AUTH OK: {} type={}", event.event_id, event.event_type);
             true
-        },
+        }
         Err(e) => {
             std::eprintln!(
                 "REJECTED: {} type={} sk={} sender={} error={}",

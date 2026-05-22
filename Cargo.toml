@@ -40,9 +40,6 @@ similar = "3.1.0"
 test-log = "0.2.20"
 tracing-subscriber = "0.3.23"
 [[test]]
-name = "ruma_upstream"
-path = "tests/ruma_upstream.rs"
-[[test]]
 name = "snapshots"
 path = "tests/snapshots.rs"
 [[test]]

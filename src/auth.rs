@@ -122,8 +122,10 @@ pub fn check_auth(event: &LeanEvent, state: &RoomState) -> Result<(), AuthError>
         // Room version 11: The creator of the room has an implied membership of "join"
         // if no explicit membership event exists for them.
         let create_key = ("m.room.create".into(), Some(String::new()));
-        let is_creator = state.get(&create_key).map_or(false, |create_ev| create_ev.sender == event.sender);
-        
+        let is_creator = state
+            .get(&create_key)
+            .is_some_and(|create_ev| create_ev.sender == event.sender);
+
         if !is_creator {
             return Err(AuthError::NotMember {
                 sender: event.sender.clone(),
@@ -138,7 +140,10 @@ pub fn check_auth(event: &LeanEvent, state: &RoomState) -> Result<(), AuthError>
         let required_pl = get_required_power_level(event, state);
 
         let pl_key = ("m.room.power_levels".into(), Some(String::new()));
-        let pl_ev_id = state.get(&pl_key).map(|ev| ev.event_id.clone()).unwrap_or_else(|| "NONE".into());
+        let _pl_ev_id = state
+            .get(&pl_key)
+            .map(|ev| ev.event_id.clone())
+            .unwrap_or_else(|| "NONE".into());
 
         if sender_pl < required_pl {
             return Err(AuthError::InsufficientPowerLevel {
@@ -254,14 +259,56 @@ fn check_membership_rules(event: &LeanEvent, state: &RoomState) -> Result<(), Au
         .unwrap_or("");
 
     match new_membership {
-        "join"
+        "join" => {
             // A user can only join as themselves
-            if target_user != event.sender => {
+            if target_user != event.sender {
                 return Err(AuthError::InvalidStateKey {
                     expected: event.sender.clone(),
                     actual: target_user.into(),
                 });
             }
+
+            let current_membership = state
+                .get(&("m.room.member".into(), Some(target_user.into())))
+                .and_then(|ev| ev.content.get("membership"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
+
+            if current_membership == "ban" {
+                return Err(AuthError::BannedUser {
+                    sender: event.sender.clone(),
+                    event_id: event.event_id.clone(),
+                });
+            }
+
+            let join_rule = state
+                .get(&("m.room.join_rules".into(), Some(String::new())))
+                .and_then(|ev| ev.content.get("join_rule"))
+                .and_then(|r| r.as_str())
+                .unwrap_or("invite"); // Default to invite
+
+            let is_creator = state
+                .get(&("m.room.create".into(), Some("".into())))
+                .is_some_and(|ev| ev.sender == event.sender);
+
+            if is_creator {
+                // Room creator can always join
+            } else if join_rule == "invite" || join_rule == "knock" {
+                if current_membership == "invite" || current_membership == "join" {
+                    // Allowed
+                } else {
+                    return Err(AuthError::NotMember {
+                        sender: event.sender.clone(),
+                        event_id: event.event_id.clone(),
+                    });
+                }
+            } else if join_rule != "public" {
+                return Err(AuthError::NotMember {
+                    sender: event.sender.clone(),
+                    event_id: event.event_id.clone(),
+                });
+            }
+        }
         "leave"
             // If target_user != sender, this is a kick — requires power level
             if target_user != event.sender => {

@@ -26,6 +26,13 @@ fn load_fixture(path: &str) -> Vec<LeanEvent> {
 }
 
 /// Load multiple fixture files and concatenate them into one event list.
+#[test]
+fn test_room_id() {
+    let s = "!00-m-room-create";
+    let id = ruma::RoomId::parse(s);
+    println!("id: {:?}", id);
+}
+
 fn load_fixtures(paths: &[&str]) -> Vec<LeanEvent> {
     let mut events = Vec::new();
     for path in paths {
@@ -40,6 +47,15 @@ fn to_event_map(events: &[LeanEvent]) -> HashMap<String, LeanEvent> {
         .iter()
         .map(|e| (e.event_id.clone(), e.clone()))
         .collect()
+}
+
+const FIXTURE_DIR: &str = "ruma/crates/ruma-state-res/tests/it/resolve/fixtures";
+
+fn sort_and_verify(events: &[LeanEvent], version: StateResVersion) -> Vec<String> {
+    let map = to_event_map(events);
+    let result = ruma_lean::lean_kahn_sort_detailed(&map, &map, version);
+    assert!(result.is_ok(), "Cycle detected during sort");
+    result.into_sorted()
 }
 
 /// Run Kahn's sort on the events and verify it doesn't detect any cycles.
