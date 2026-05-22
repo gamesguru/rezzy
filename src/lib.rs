@@ -568,13 +568,20 @@ pub fn lean_kahn_sort_detailed(
         }
     }
 
+    // Pre-compute power levels once per event to avoid redundant auth chain walks
+    // inside the hot BinaryHeap push path.
+    let pl_cache: HashMap<String, i64> = events
+        .iter()
+        .map(|(id, ev)| (id.clone(), get_power_level_from_auth_chain(ev, auth_context)))
+        .collect();
+
     let mut queue: BinaryHeap<SortPriority> = BinaryHeap::new();
     for (id, &degree) in &in_degree {
         if degree == 0 {
             if let Some(event) = events.get(id) {
                 queue.push(SortPriority {
                     event,
-                    power_level: get_power_level_from_auth_chain(event, auth_context),
+                    power_level: pl_cache.get(id).copied().unwrap_or(0),
                     version,
                 });
             }
@@ -584,6 +591,7 @@ pub fn lean_kahn_sort_detailed(
     let mut result = Vec::new();
     while let Some(priority) = queue.pop() {
         let event = priority.event;
+        #[cfg(test)]
         std::eprintln!(
             "KAHN POPS: {} (pl: {})",
             event.event_id,
@@ -598,7 +606,7 @@ pub fn lean_kahn_sort_detailed(
                     let next_ev = events.get(next_id).unwrap();
                     queue.push(SortPriority {
                         event: next_ev,
-                        power_level: get_power_level_from_auth_chain(next_ev, auth_context),
+                        power_level: pl_cache.get(next_id).copied().unwrap_or(0),
                         version,
                     });
                 }

@@ -33,14 +33,6 @@ fn test_room_id() {
     println!("id: {:?}", id);
 }
 
-fn load_fixtures(paths: &[&str]) -> Vec<LeanEvent> {
-    let mut events = Vec::new();
-    for path in paths {
-        events.extend(load_fixture(path));
-    }
-    events
-}
-
 /// Build a HashMap<String, LeanEvent> from a list of events (keyed by event_id).
 fn to_event_map(events: &[LeanEvent]) -> HashMap<String, LeanEvent> {
     events
@@ -59,6 +51,7 @@ fn sort_and_verify(events: &[LeanEvent], version: StateResVersion) -> Vec<String
 }
 
 /// Run Kahn's sort on the events and verify it doesn't detect any cycles.
+#[test]
 fn test_benchmark_1k_sort_no_cycles() {
     let content = std::fs::read_to_string("res/benchmark_1k.json").expect("benchmark_1k.json");
     let data: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -399,28 +392,4 @@ fn test_real_dag_nheko_room_106_heads() {
         StateResVersion::V2,
     );
     assert!(!resolved.is_empty(), "Resolution should produce state");
-}
-
-fn resolve_msc4297(
-    pdus_file: &str,
-    state_files: &[&str],
-    version: StateResVersion,
-) -> BTreeMap<(String, Option<String>), String> {
-    let events = load_fixtures(&[pdus_file]);
-    let event_map = to_event_map(&events);
-
-    let mut conflicted_events = HashMap::new();
-
-    for file in state_files {
-        let content = std::fs::read_to_string(file).unwrap();
-        let event_ids: Vec<String> = serde_json::from_str(&content).unwrap();
-        for id in event_ids {
-            if let Some(ev) = event_map.get(&id) {
-                conflicted_events.insert(id.clone(), ev.clone());
-            }
-        }
-    }
-
-    let unconflicted = BTreeMap::new();
-    resolve_lean(unconflicted, conflicted_events, &event_map, version)
 }
