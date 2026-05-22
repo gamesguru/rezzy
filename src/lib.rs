@@ -517,18 +517,22 @@ impl<'a> Ord for SortPriority<'a> {
                 }
             }
             StateResVersion::V2 | StateResVersion::V2_1 => {
-                // V2 tie-breaking: power_level (desc) -> origin_server_ts (asc) -> event_id (asc)
+                // V2 reverse topological power ordering: worst events pop FIRST.
                 // In Rust's Max-Heap BinaryHeap, "greater" elements are popped first.
-                // We want the HIGHEST power level, EARLIEST timestamp, and SMALLEST event ID to pop first.
-                self.power_level
-                    .cmp(&other.power_level)
-                    .then_with(|| {
-                        other
-                            .event
-                            .origin_server_ts
-                            .cmp(&self.event.origin_server_ts)
-                    })
-                    .then_with(|| other.event.event_id.cmp(&self.event.event_id))
+                // Lower power level is "Greater" (pops first).
+                // Later timestamp is "Greater" (pops first).
+                // Lexicographically larger event_id is "Greater" (pops first).
+                match other.power_level.cmp(&self.power_level) {
+                    Ordering::Equal => match self
+                        .event
+                        .origin_server_ts
+                        .cmp(&other.event.origin_server_ts)
+                    {
+                        Ordering::Equal => self.event.event_id.cmp(&other.event.event_id),
+                        ord => ord,
+                    },
+                    ord => ord,
+                }
             }
         }
     }
