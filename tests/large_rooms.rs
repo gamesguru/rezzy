@@ -29,7 +29,7 @@ fn load_fixture(path: &str) -> Vec<LeanEvent> {
 #[test]
 fn test_room_id() {
     let s = "!00-m-room-create";
-    let id = ruma::RoomId::parse(s);
+    let id = ruma_common::RoomId::parse(s);
     println!("id: {:?}", id);
 }
 
