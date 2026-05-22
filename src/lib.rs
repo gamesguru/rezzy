@@ -518,17 +518,27 @@ impl<'a> Ord for SortPriority<'a> {
             }
             StateResVersion::V2 | StateResVersion::V2_1 => {
                 // V2 reverse topological power ordering: worst events pop FIRST.
-                // In Rust's Max-Heap BinaryHeap, "greater" elements are popped first.
-                // Lower power level is "Greater" (pops first).
-                // Later timestamp is "Greater" (pops first).
-                // Lexicographically larger event_id is "Greater" (pops first).
+                //
+                // Ruma uses Reverse(TieBreaker) on a BinaryHeap, giving a min-heap where
+                // the SMALLEST TieBreaker value pops first (and therefore LOSES).
+                // We use a direct max-heap (no Reverse), so we need the mirror image:
+                // the GREATEST SortPriority pops first and LOSES.
+                //
+                // Ruma TieBreaker order:  higher PL < lower PL  (lower PL wins)
+                //                        earlier ts < later ts  (later ts wins)
+                //                        smaller id < larger id (larger id wins)
+                //
+                // Our max-heap must match by inverting each comparison relative to Ruma:
+                //   lower PL  -> Greater  (pops first, loses) -> use other.pl.cmp(&self.pl)  ✓ unchanged
+                //   earlier ts -> Greater (pops first, loses) -> use other.ts.cmp(&self.ts)
+                //   smaller id -> Greater (pops first, loses) -> use other.id.cmp(&self.id)
                 match other.power_level.cmp(&self.power_level) {
-                    Ordering::Equal => match self
+                    Ordering::Equal => match other
                         .event
                         .origin_server_ts
-                        .cmp(&other.event.origin_server_ts)
+                        .cmp(&self.event.origin_server_ts)
                     {
-                        Ordering::Equal => self.event.event_id.cmp(&other.event.event_id),
+                        Ordering::Equal => other.event.event_id.cmp(&self.event.event_id),
                         ord => ord,
                     },
                     ord => ord,
@@ -1074,8 +1084,9 @@ mod tests {
             event: &e_later_ts,
             version: StateResVersion::V2,
         };
-        // p_base has ts 10 (better — wins), p_later_ts has ts 20 (worse). Better pops last = Smaller.
-        assert_eq!(p_base.cmp(&p_later_ts), Ordering::Less);
+        // p_later_ts has ts 20 (better — wins); later ts pops LAST = is Smaller.
+        // p_base has ts 10 (worse) = Greater (pops first, loses).
+        assert_eq!(p_base.cmp(&p_later_ts), Ordering::Greater);
 
         let e_larger_id = LeanEvent {
             event_id: "$2".into(),
@@ -1088,8 +1099,9 @@ mod tests {
             event: &e_larger_id,
             version: StateResVersion::V2,
         };
-        // p_base has id "$1" (better), p_larger_id has id "$2" (worse). Better pops last = Smaller.
-        assert_eq!(p_base.cmp(&p_larger_id), Ordering::Less);
+        // p_larger_id has id "$2" (better — wins); larger id pops LAST = is Smaller.
+        // p_base has id "$1" (worse) = Greater (pops first, loses).
+        assert_eq!(p_base.cmp(&p_larger_id), Ordering::Greater);
     }
 
     #[test]
@@ -1282,8 +1294,8 @@ mod tests {
             },
         );
         let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
-        // Best (A, smaller ID) comes LAST.
-        assert_eq!(sorted, vec!["B", "A"]);
+        // Best (B, larger ID) comes LAST.
+        assert_eq!(sorted, vec!["A", "B"]);
     }
 
     #[test]
@@ -1500,10 +1512,10 @@ mod tests {
         );
         let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
         // 1 pops first (only one with in-degree 0).
-        // Then 2 and 3 are in queue. 3 has earlier TS (15, better) so it pops LAST.
-        // Then 2 (TS 20, worse) pops FIRST.
+        // Then 2 and 3 are in queue. 3 has earlier TS (15, worse) so it pops FIRST.
+        // Then 2 (TS 20, better — later wins) pops LAST.
         // Then 4 pops.
-        assert_eq!(sorted, vec!["1", "2", "3", "4"]);
+        assert_eq!(sorted, vec!["1", "3", "2", "4"]);
     }
 
     #[test]
@@ -1897,13 +1909,13 @@ mod tests {
                 ..Default::default()
             },
         );
-        // Later ts pops first (worse), earlier ts comes last (wins).
+        // Earlier ts pops first (worse), later ts comes last (wins).
         let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
-        assert_eq!(sorted, vec!["$late", "$early"]);
+        assert_eq!(sorted, vec!["$early", "$late"]);
 
         // V2 must match V2_1
         let sorted_v2 = lean_kahn_sort(&events, &events, StateResVersion::V2);
-        assert_eq!(sorted_v2, vec!["$late", "$early"]);
+        assert_eq!(sorted_v2, vec!["$early", "$late"]);
     }
 
     /// Regression test: millisecond-close Draupnir ban races resolve identically
@@ -1935,12 +1947,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        // $ban_b (later ts) pops first, $ban_a (earlier ts) comes last = wins.
+        // $ban_a (earlier ts) pops first (loses), $ban_b (later ts) comes last = wins.
         let sorted_v2 = lean_kahn_sort(&events, &events, StateResVersion::V2);
-        assert_eq!(sorted_v2, vec!["$ban_b", "$ban_a"]);
+        assert_eq!(sorted_v2, vec!["$ban_a", "$ban_b"]);
 
         let sorted_v2_1 = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
-        assert_eq!(sorted_v2_1, vec!["$ban_b", "$ban_a"]);
+        assert_eq!(sorted_v2_1, vec!["$ban_a", "$ban_b"]);
     }
 
     #[test]
@@ -2028,8 +2040,8 @@ mod tests {
             event: &e_early_ts,
             version: StateResVersion::V2,
         };
-        // p_early_ts has TS 10 (better). Better must be Smaller (pops last). So p_base > p_early_ts.
-        assert_eq!(p_base.cmp(&p_early_ts), Ordering::Greater);
+        // p_base has TS 50 (better — later wins). Better must be Smaller (pops last). So p_base < p_early_ts.
+        assert_eq!(p_base.cmp(&p_early_ts), Ordering::Less);
         let e_early_id = LeanEvent {
             event_id: "a".into(),
             ..e_base.clone()
@@ -2039,8 +2051,8 @@ mod tests {
             event: &e_early_id,
             version: StateResVersion::V2,
         };
-        // p_early_id has ID "a" (better). Better must be Smaller (pops last). So p_base > p_early_id.
-        assert_eq!(p_base.cmp(&p_early_id), Ordering::Greater);
+        // p_base has ID "m" (better — larger id wins). Better must be Smaller (pops last). So p_base < p_early_id.
+        assert_eq!(p_base.cmp(&p_early_id), Ordering::Less);
         let p_v1_base = SortPriority {
             power_level: e_base.power_level,
             event: &e_base,
@@ -2374,8 +2386,10 @@ mod tests {
         events.insert("$p".into(), default_test_event("$p", 0, 0, vec!["$o"]));
 
         let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
-        // ruma-lean pops WORST events first so they get applied first and overwritten by BETTER events.
-        // Therefore, the topological output is the reverse of Ruma's for tied events!
-        assert_eq!(sorted, vec!["$o", "$p", "$n", "$m", "$l"]);
+        // All events have same PL=0 and ts=0, so tie-break is by event_id.
+        // Smaller id pops first (loses). Sorted: $o (root), then $l < $n < $p in id order,
+        // $m waits for $n. After $n pops, $m becomes eligible and beats $p ("m" > "p"? no:
+        // "$m" < "$p" → $m pops first). So order: [$o, $l, $n, $m, $p].
+        assert_eq!(sorted, vec!["$o", "$l", "$n", "$m", "$p"]);
     }
 }
