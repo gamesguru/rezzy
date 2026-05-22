@@ -572,7 +572,12 @@ pub fn lean_kahn_sort_detailed(
     // inside the hot BinaryHeap push path.
     let pl_cache: HashMap<String, i64> = events
         .iter()
-        .map(|(id, ev)| (id.clone(), get_power_level_from_auth_chain(ev, auth_context)))
+        .map(|(id, ev)| {
+            (
+                id.clone(),
+                get_power_level_from_auth_chain(ev, auth_context),
+            )
+        })
         .collect();
 
     let mut queue: BinaryHeap<SortPriority> = BinaryHeap::new();
@@ -767,23 +772,19 @@ fn iterative_auth_ok(
     }
 
     let auth_result = crate::auth::check_auth(event, &state);
-    match auth_result {
-        Ok(_) => {
-            std::eprintln!("AUTH OK: {} type={}", event.event_id, event.event_type);
-            true
-        }
-        Err(e) => {
-            std::eprintln!(
-                "REJECTED: {} type={} sk={} sender={} error={}",
-                event.event_id,
-                event.event_type,
-                event.state_key.clone().unwrap_or_default(),
-                event.sender,
-                e
-            );
-            false
-        }
+    #[cfg(test)]
+    match &auth_result {
+        Ok(_) => std::eprintln!("AUTH OK: {} type={}", event.event_id, event.event_type),
+        Err(e) => std::eprintln!(
+            "REJECTED: {} type={} sk={} sender={} error={}",
+            event.event_id,
+            event.event_type,
+            event.state_key.clone().unwrap_or_default(),
+            event.sender,
+            e
+        ),
     }
+    auth_result.is_ok()
 }
 
 /// Build the power-level mainline: the chain of m.room.power_levels events
