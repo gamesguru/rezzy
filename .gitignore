@@ -5,6 +5,7 @@ target/
 .tmp/
 *.zip
 *.tar.*
+/*.txt
 # force add something if you want it
 res/
 # python

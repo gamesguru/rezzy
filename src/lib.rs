@@ -668,6 +668,18 @@ pub fn resolve_lean(
     auth_context: &HashMap<String, LeanEvent>,
     version: StateResVersion,
 ) -> BTreeMap<(String, Option<String>), String> {
+    // Build a merged lookup map for sort/mainline operations.
+    // auth_context intentionally excludes events that are in conflicted_events;
+    // however, a conflicted event (e.g. $01-power_levels) may appear in the
+    // auth_events chain of another conflicted event ($02), so PL lookups during
+    // sorting must be able to find it.  iterative_auth_ok already checks both
+    // maps independently — we only need to merge here for the sort phases.
+    let sort_context: HashMap<String, LeanEvent> = auth_context
+        .iter()
+        .chain(conflicted_events.iter())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     // MSC4297 (v2.1): The algorithm starts from an empty set of state.
     let mut resolved = match version {
         StateResVersion::V2_1 => BTreeMap::new(),
@@ -694,7 +706,7 @@ pub fn resolve_lean(
 
     // Step 1: Sort power events by reverse topological power ordering (Kahn sort)
     // Step 2: Apply iterative auth checks (per spec & Ruma implementation)
-    let sorted_power_ids = lean_kahn_sort(&power_events, auth_context, version);
+    let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, version);
     for id in &sorted_power_ids {
         if let Some(event) = sort_set.get(id) {
             if iterative_auth_ok(event, &resolved, auth_context, sort_set) {
@@ -707,11 +719,11 @@ pub fn resolve_lean(
     }
 
     // Step 3: Build the power-level mainline for mainline sort
-    let mainline = build_mainline(&resolved, auth_context);
+    let mainline = build_mainline(&resolved, &sort_context);
 
     // Step 4: Sort non-power events by mainline ordering + iterative auth check
     let mut non_power_list: Vec<&LeanEvent> = non_power_events.values().collect();
-    mainline_sort(&mut non_power_list, &mainline, auth_context);
+    mainline_sort(&mut non_power_list, &mainline, &sort_context);
 
     for ev in non_power_list {
         if iterative_auth_ok(ev, &resolved, auth_context, sort_set) {
