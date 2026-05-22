@@ -119,23 +119,34 @@ pub fn check_auth(event: &LeanEvent, state: &RoomState) -> Result<(), AuthError>
             }
         }
     } else if event.event_type != "m.room.member" {
-        // No membership record and not a membership event — reject
-        return Err(AuthError::NotMember {
-            sender: event.sender.clone(),
-            event_id: event.event_id.clone(),
-        });
+        // Room version 11: The creator of the room has an implied membership of "join"
+        // if no explicit membership event exists for them.
+        let create_key = ("m.room.create".into(), Some(String::new()));
+        let is_creator = state.get(&create_key).map_or(false, |create_ev| create_ev.sender == event.sender);
+        
+        if !is_creator {
+            return Err(AuthError::NotMember {
+                sender: event.sender.clone(),
+                event_id: event.event_id.clone(),
+            });
+        }
     }
 
     // Rule 4: Check power level requirements
-    let sender_pl = get_sender_power_level(&event.sender, state);
-    let required_pl = get_required_power_level(event, state);
+    if event.event_type != "m.room.member" && event.event_type != "m.room.third_party_invite" {
+        let sender_pl = get_sender_power_level(&event.sender, state);
+        let required_pl = get_required_power_level(event, state);
 
-    if sender_pl < required_pl {
-        return Err(AuthError::InsufficientPowerLevel {
-            required: required_pl,
-            actual: sender_pl,
-            event_type: event.event_type.clone(),
-        });
+        let pl_key = ("m.room.power_levels".into(), Some(String::new()));
+        let pl_ev_id = state.get(&pl_key).map(|ev| ev.event_id.clone()).unwrap_or_else(|| "NONE".into());
+
+        if sender_pl < required_pl {
+            return Err(AuthError::InsufficientPowerLevel {
+                required: required_pl,
+                actual: sender_pl,
+                event_type: event.event_type.clone(),
+            });
+        }
     }
 
     // Rule 5: m.room.member state_key validation
@@ -212,23 +223,25 @@ fn get_required_power_level(event: &LeanEvent, state: &RoomState) -> i64 {
         }
         // Fall back to state_default for state events, events_default for others
         if event.state_key.is_some() {
-            if let Some(default) = pl_event
+            return pl_event
                 .content
                 .get("state_default")
                 .and_then(|v| v.as_i64())
-            {
-                return default;
-            }
+                .unwrap_or(50);
         }
-        if let Some(default) = pl_event
+        return pl_event
             .content
             .get("events_default")
             .and_then(|v| v.as_i64())
-        {
-            return default;
-        }
+            .unwrap_or(0);
     }
-    0 // No restrictions if no power_levels event exists
+    // No restrictions if no power_levels event exists
+    // However, Matrix spec says if NO PL event exists, state events require 50.
+    if event.state_key.is_some() {
+        50
+    } else {
+        0
+    }
 }
 
 /// Validate membership transition rules for `m.room.member` events.
