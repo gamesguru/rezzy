@@ -1561,7 +1561,7 @@ mod tests {
                 power_level: 50,
                 origin_server_ts: 500,
                 content: json!({"membership": "join"}),
-                auth_events: vec!["create".into()],
+                auth_events: vec!["create".into(), "id1".into()],
                 ..Default::default()
             },
         );
@@ -1575,7 +1575,7 @@ mod tests {
                 power_level: 100,
                 origin_server_ts: 1000,
                 content: json!({"membership": "join"}),
-                auth_events: vec!["create".into()],
+                auth_events: vec!["create".into(), "id1".into()],
                 ..Default::default()
             },
         );
