@@ -1511,6 +1511,7 @@ mod tests {
     fn test_resolve_lean_v2_1_overlay() {
         use serde_json::json;
 
+        // Uncontested state: Alice is already joined, Bob's old event is the prior state.
         let mut unconflicted = BTreeMap::new();
         unconflicted.insert(
             ("m.room.member".into(), Some("@alice:example.com".into())),
@@ -1521,9 +1522,9 @@ mod tests {
             "id2".into(),
         );
 
-        let mut conflicted = HashMap::new();
-        // m.room.create to seed auth state
-        conflicted.insert(
+        // Auth context: uncontested background events needed to validate the conflicted ones.
+        let mut auth_context = HashMap::new();
+        auth_context.insert(
             "create".into(),
             LeanEvent {
                 event_id: "create".into(),
@@ -1536,8 +1537,21 @@ mod tests {
                 ..Default::default()
             },
         );
-        // Provide objects for all events to be sorted in V2.1
-        conflicted.insert(
+        auth_context.insert(
+            "join_rules".into(),
+            LeanEvent {
+                event_id: "join_rules".into(),
+                event_type: "m.room.join_rules".into(),
+                state_key: Some(String::new()),
+                sender: "@alice:example.com".into(),
+                power_level: 100,
+                origin_server_ts: 2,
+                content: json!({"join_rule": "public"}),
+                auth_events: vec!["create".into()],
+                ..Default::default()
+            },
+        );
+        auth_context.insert(
             "id1".into(),
             LeanEvent {
                 event_id: "id1".into(),
@@ -1551,6 +1565,9 @@ mod tests {
                 ..Default::default()
             },
         );
+
+        // The conflict: two competing versions of Bob's membership.
+        let mut conflicted = HashMap::new();
         conflicted.insert(
             "id2".into(),
             LeanEvent {
@@ -1561,7 +1578,7 @@ mod tests {
                 power_level: 50,
                 origin_server_ts: 500,
                 content: json!({"membership": "join"}),
-                auth_events: vec!["create".into(), "id1".into()],
+                auth_events: vec!["create".into(), "join_rules".into(), "id1".into()],
                 ..Default::default()
             },
         );
@@ -1575,15 +1592,15 @@ mod tests {
                 power_level: 100,
                 origin_server_ts: 1000,
                 content: json!({"membership": "join"}),
-                auth_events: vec!["create".into(), "id1".into()],
+                auth_events: vec!["create".into(), "join_rules".into(), "id1".into()],
                 ..Default::default()
             },
         );
 
         let resolved = resolve_lean(
             unconflicted.clone(),
-            conflicted.clone(),
-            &conflicted,
+            conflicted,
+            &auth_context,
             StateResVersion::V2_1,
         );
 
