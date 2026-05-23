@@ -1531,12 +1531,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted_ids = lean_kahn_sort(&events, &events, StateResVersion::V2);
         // 1 pops first (only one with in-degree 0).
         // Then 2 and 3 are in queue. 3 has earlier TS (15, worse) so it pops FIRST.
         // Then 2 (TS 20, better — later wins) pops LAST.
         // Then 4 pops.
-        assert_eq!(sorted, vec!["1", "3", "2", "4"]);
+        assert_eq!(sorted_ids, vec!["1", "3", "2", "4"]);
     }
 
     #[test]
@@ -2052,17 +2052,18 @@ mod tests {
         };
         // p_base is WORSE (PL 50 < 100). Higher PL is Greater (pops first). So p_base < p_high_power.
         assert_eq!(p_base.cmp(&p_high_power), Ordering::Less);
-        let e_early_ts = LeanEvent {
-            origin_server_ts: 10,
+        let e_best = LeanEvent {
+            origin_server_ts: 100,
             ..e_base.clone()
         };
-        let p_early_ts = SortPriority {
-            power_level: e_early_ts.power_level,
-            event: &e_early_ts,
+        let p_best = SortPriority {
+            power_level: e_best.power_level,
+            event: &e_best,
             version: StateResVersion::V2,
         };
-        // p_base has TS 50 (better — later wins). Better must be Smaller (pops last). So p_base < p_early_ts.
-        assert_eq!(p_base.cmp(&p_early_ts), Ordering::Less);
+        // p_best has TS 100 (better: later wins). Better must be Smaller (pops last).
+        // So p_base > p_best.
+        assert_eq!(p_base.cmp(&p_best), Ordering::Greater);
         let e_early_id = LeanEvent {
             event_id: "a".into(),
             ..e_base.clone()
@@ -2406,11 +2407,11 @@ mod tests {
         events.insert("$o".into(), default_test_event("$o", 0, 0, vec![]));
         events.insert("$p".into(), default_test_event("$p", 0, 0, vec!["$o"]));
 
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted_ids = lean_kahn_sort(&events, &events, StateResVersion::V2);
         // All events have same PL=0 and ts=0, so tie-break is by event_id.
         // Smaller id pops first (loses). Sorted: $o (root), then $l < $n < $p in id order,
         // $m waits for $n. After $n pops, $m becomes eligible and beats $p ("m" > "p"? no:
         // "$m" < "$p" → $m pops first). So order: [$o, $l, $n, $m, $p].
-        assert_eq!(sorted, vec!["$o", "$l", "$n", "$m", "$p"]);
+        assert_eq!(sorted_ids, vec!["$o", "$l", "$n", "$m", "$p"]);
     }
 }
