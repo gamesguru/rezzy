@@ -82,13 +82,21 @@ pub trait StateKeyDyn {
 }
 
 impl StateKeyDyn for (String, Option<String>) {
-    fn ev_type(&self) -> &str { &self.0 }
-    fn state_key(&self) -> Option<&str> { self.1.as_deref() }
+    fn ev_type(&self) -> &str {
+        &self.0
+    }
+    fn state_key(&self) -> Option<&str> {
+        self.1.as_deref()
+    }
 }
 
 impl<'a> StateKeyDyn for (&'a str, Option<&'a str>) {
-    fn ev_type(&self) -> &str { self.0 }
-    fn state_key(&self) -> Option<&str> { self.1 }
+    fn ev_type(&self) -> &str {
+        self.0
+    }
+    fn state_key(&self) -> Option<&str> {
+        self.1
+    }
 }
 
 impl<'a> Borrow<dyn StateKeyDyn + 'a> for (String, Option<String>) {
@@ -113,7 +121,8 @@ impl PartialOrd for dyn StateKeyDyn + '_ {
 
 impl Ord for dyn StateKeyDyn + '_ {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.ev_type().cmp(other.ev_type())
+        self.ev_type()
+            .cmp(other.ev_type())
             .then_with(|| self.state_key().cmp(&other.state_key()))
     }
 }
