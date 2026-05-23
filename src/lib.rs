@@ -189,14 +189,11 @@ where
     }
     let auth_diff: std::collections::HashSet<_> =
         union_auth.difference(&intersect_auth).cloned().collect();
-    std::eprintln!("AUTH CHAINS COUNT: {}", _auth_chains.len());
-    std::eprintln!("AUTH DIFF SIZE: {}", auth_diff.len());
 
     for id_str in auth_diff {
         if !conflicted_events.contains_key(&id_str) {
             if let Some(id) = id_map.get(&id_str) {
                 if let Some(ev) = _fetch_event(id.borrow()) {
-                    std::eprintln!("AUTH DIFF ADDED: {}", id_str);
                     conflicted_events.insert(id_str.clone(), ruma_to_lean_event(&ev));
                 }
             }
@@ -243,14 +240,14 @@ where
 
     let mut result = StateMap::new();
     for ((ev_type, state_key), id_str) in resolved {
-        let key = (ev_type.as_str().into(), state_key.clone().unwrap_or_default());
+        let key = (
+            ev_type.as_str().into(),
+            state_key.clone().unwrap_or_default(),
+        );
         if let Some(id) = id_map.get(&id_str) {
             result.insert(key, id.clone());
-        } else {
-            std::eprintln!("RESOLVE MISSING ID: {} (key={}/{})", id_str, ev_type, state_key.as_deref().unwrap_or(""));
         }
     }
-    std::eprintln!("RESOLVE RESULT: {:?}", result.keys().map(|(t,sk)| alloc::format!("{}/{}", t, sk)).collect::<alloc::vec::Vec<_>>());
 
     Ok(result)
 }
@@ -609,12 +606,7 @@ pub fn lean_kahn_sort_detailed(
     let mut result = Vec::new();
     while let Some(priority) = queue.pop() {
         let event = priority.event;
-        #[cfg(test)]
-        std::eprintln!(
-            "KAHN POPS: {} (pl: {})",
-            event.event_id,
-            priority.power_level
-        );
+
         result.push(event.event_id.clone());
         if let Some(neighbors) = adjacency.get(&event.event_id) {
             for next_id in neighbors {
@@ -712,12 +704,7 @@ pub fn resolve_lean(
     let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, version);
     for id in &sorted_power_ids {
         if let Some(event) = sort_set.get(id) {
-            let ok = iterative_auth_ok(event, &resolved, auth_context, sort_set);
-            std::eprintln!(
-                "PWR_AUTH id={} type={} ok={}",
-                id, event.event_type, ok
-            );
-            if ok {
+            if iterative_auth_ok(event, &resolved, auth_context, sort_set) {
                 resolved.insert(
                     (event.event_type.clone(), event.state_key.clone()),
                     event.event_id.clone(),
@@ -743,11 +730,9 @@ pub fn resolve_lean(
     }
 
     let mut final_resolved = unconflicted_state;
-    std::eprintln!("LEAN_RESOLVED keys: {:?}", final_resolved.keys().map(|(t,sk)| alloc::format!("{}/{}", t, sk.as_deref().unwrap_or(""))).collect::<alloc::vec::Vec<_>>());
     for (k, v) in resolved {
         final_resolved.insert(k, v);
     }
-    std::eprintln!("LEAN_FINAL keys: {:?}", final_resolved.keys().map(|(t,sk)| alloc::format!("{}/{}", t, sk.as_deref().unwrap_or(""))).collect::<alloc::vec::Vec<_>>());
     final_resolved
 }
 
@@ -807,27 +792,6 @@ fn iterative_auth_ok(
     }
 
     let auth_result = crate::auth::check_auth(event, &state);
-    if event.event_id.contains("02-m-room-power") {
-        let pl_key = ("m.room.power_levels".into(), Some(String::new()));
-        let resolved_pl_id = resolved.get(&pl_key).cloned().unwrap_or_else(|| "NONE".into());
-        let pl_in_state = state.get(&("m.room.power_levels".into(), Some(String::new())))
-            .map(|e| alloc::format!("{} bob={:?}", e.event_id, e.content.get("users").and_then(|u| u.get("@bob:example.com"))));
-        std::eprintln!(
-            "STATE_DUMP for {}: resolved_pl_id={}, pl_in_state={:?}",
-            event.event_id, resolved_pl_id, pl_in_state,
-        );
-    }
-    match &auth_result {
-        Ok(_) => {} // std::eprintln!("AUTH OK: {} type={}", event.event_id, event.event_type),
-        Err(e) => std::eprintln!(
-            "REJECTED: {} type={} sk={} sender={} error={}",
-            event.event_id,
-            event.event_type,
-            event.state_key.clone().unwrap_or_default(),
-            event.sender,
-            e
-        ),
-    }
     auth_result.is_ok()
 }
 
