@@ -835,11 +835,22 @@ fn build_mainline(
         mainline.push(eid.clone());
         current = None;
         if let Some(ev) = auth_context.get(&eid) {
+            let mut queue = alloc::collections::VecDeque::new();
             for auth_id in &ev.auth_events {
-                if let Some(auth_ev) = auth_context.get(auth_id) {
+                queue.push_back(auth_id.clone());
+            }
+            let mut visited = hashbrown::HashSet::new();
+            while let Some(q_id) = queue.pop_front() {
+                if !visited.insert(q_id.clone()) {
+                    continue;
+                }
+                if let Some(auth_ev) = auth_context.get(&q_id) {
                     if auth_ev.event_type == "m.room.power_levels" {
-                        current = Some(auth_id.clone());
+                        current = Some(q_id);
                         break;
+                    }
+                    for aid in &auth_ev.auth_events {
+                        queue.push_back(aid.clone());
                     }
                 }
             }
