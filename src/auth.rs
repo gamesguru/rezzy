@@ -144,7 +144,7 @@ pub fn check_auth(event: &LeanEvent, state: &impl StateProvider) -> Result<(), A
     }
 
     // Rule 4: Check power level requirements
-    if event.event_type != "m.room.member" && event.event_type != "m.room.third_party_invite" {
+    if event.event_type != "m.room.member" {
         let sender_pl = get_sender_power_level(&event.sender, state);
         let required_pl = get_required_power_level(event, state);
 
