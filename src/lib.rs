@@ -699,12 +699,17 @@ pub fn resolve_lean(
         }
     }
 
+    let create_ev = auth_context
+        .values()
+        .chain(sort_set.values())
+        .find(|ev| ev.event_type == "m.room.create");
+
     // Step 1: Sort power events by reverse topological power ordering (Kahn sort)
     // Step 2: Apply iterative auth checks (per spec & Ruma implementation)
     let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, version);
     for id in &sorted_power_ids {
         if let Some(event) = sort_set.get(id) {
-            if iterative_auth_ok(event, &resolved, auth_context, sort_set) {
+            if iterative_auth_ok(event, &resolved, auth_context, sort_set, create_ev) {
                 resolved.insert(
                     (event.event_type.clone(), event.state_key.clone()),
                     event.event_id.clone(),
@@ -721,7 +726,7 @@ pub fn resolve_lean(
     mainline_sort(&mut non_power_list, &mainline, &sort_context);
 
     for ev in non_power_list {
-        if iterative_auth_ok(ev, &resolved, auth_context, sort_set) {
+        if iterative_auth_ok(ev, &resolved, auth_context, sort_set, create_ev) {
             resolved.insert(
                 (ev.event_type.clone(), ev.state_key.clone()),
                 ev.event_id.clone(),
@@ -736,6 +741,35 @@ pub fn resolve_lean(
     final_resolved
 }
 
+struct OverlayState<'a> {
+    resolved: &'a BTreeMap<(String, Option<String>), String>,
+    auth_context: &'a HashMap<String, LeanEvent>,
+    conflicted: &'a HashMap<String, LeanEvent>,
+    local_auth: HashMap<(String, Option<String>), LeanEvent>,
+    create_ev: Option<&'a LeanEvent>,
+}
+
+impl<'a> crate::auth::StateProvider for OverlayState<'a> {
+    fn get_event(&self, key: &(String, Option<String>)) -> Option<&LeanEvent> {
+        // Check consensus resolved state
+        if let Some(eid) = self.resolved.get(key) {
+            return self
+                .auth_context
+                .get(eid)
+                .or_else(|| self.conflicted.get(eid));
+        }
+        // Check local auth chain (BFS result)
+        if let Some(ev) = self.local_auth.get(key) {
+            return Some(ev);
+        }
+        // Fallback for create
+        if key.0 == "m.room.create" && key.1.as_deref() == Some("") {
+            return self.create_ev;
+        }
+        None
+    }
+}
+
 /// Targeted iterative auth check. Per Matrix spec, the auth context for event 'e'
 /// consists of the events in the conflict set (E) and the currently resolved state (S).
 fn iterative_auth_ok(
@@ -743,29 +777,15 @@ fn iterative_auth_ok(
     resolved: &BTreeMap<(String, Option<String>), String>,
     auth_context: &HashMap<String, LeanEvent>,
     conflicted_events: &HashMap<String, LeanEvent>,
+    cached_create: Option<&LeanEvent>,
 ) -> bool {
-    let mut state = crate::auth::RoomState::new();
-
-    // 1. Populate state from consensus resolved map (S)
-    for (key, eid) in resolved {
-        if let Some(ev) = auth_context.get(eid).or_else(|| conflicted_events.get(eid)) {
-            state.insert(key.clone(), ev.clone());
-        }
-    }
-
-    // Explicitly add m.room.create to the auth state if we can find it in the context.
-    // In V12+, m.room.create is implicitly in the auth state because it's not allowed in auth_events.
-    if let std::collections::btree_map::Entry::Vacant(e) =
-        state.entry(("m.room.create".into(), Some(String::new())))
-    {
-        let create_ev = auth_context
-            .values()
-            .chain(conflicted_events.values())
-            .find(|ev| ev.event_type == "m.room.create");
-        if let Some(create_ev) = create_ev {
-            e.insert(create_ev.clone());
-        }
-    }
+    let mut overlay = OverlayState {
+        resolved,
+        auth_context,
+        conflicted: conflicted_events,
+        local_auth: HashMap::new(),
+        create_ev: cached_create,
+    };
 
     // 2. Supplement with events from the event's own RECURSIVE auth chain (from E union S).
     // Use BFS (queue) so that direct auth deps (1 hop from E) are inserted before transitive
@@ -775,6 +795,7 @@ fn iterative_auth_ok(
     let mut queue = alloc::collections::VecDeque::new();
     queue.extend(event.auth_events.iter().cloned());
     let mut visited = BTreeSet::new();
+
     while let Some(aid) = queue.pop_front() {
         if !visited.insert(aid.clone()) {
             continue;
@@ -784,15 +805,16 @@ fn iterative_auth_ok(
             .or_else(|| conflicted_events.get(&aid))
         {
             let key = (aev.event_type.clone(), aev.state_key.clone());
-            // Consensus state (resolved) always wins over the event's raw auth chain.
-            state.entry(key).or_insert_with(|| aev.clone());
+            // Speed up iterations by only inserting to local_auth if consensus lacks it
+            if !resolved.contains_key(&key) {
+                overlay.local_auth.entry(key).or_insert_with(|| aev.clone());
+            }
             // Walk up to find the membership/PL/create events if not already found.
             queue.extend(aev.auth_events.iter().cloned());
         }
     }
 
-    let auth_result = crate::auth::check_auth(event, &state);
-    auth_result.is_ok()
+    crate::auth::check_auth(event, &overlay).is_ok()
 }
 
 /// Build the power-level mainline: the chain of m.room.power_levels events
