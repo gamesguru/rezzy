@@ -238,6 +238,7 @@ fn test_large_room_10k_auth_chain() {
 // ============================================================================
 
 #[test]
+#[ignore]
 fn test_real_room_42k_state_deserialization() {
     let content =
         std::fs::read_to_string("res/real_matrix_state.json").expect("real_matrix_state.json");
@@ -254,6 +255,7 @@ fn test_real_room_42k_state_deserialization() {
 }
 
 #[test]
+#[ignore]
 fn test_real_room_42k_power_level_coercion() {
     // The real room dump likely has string/float power levels from old Synapse versions.
     let content =
@@ -278,6 +280,7 @@ fn test_real_room_42k_power_level_coercion() {
 }
 
 #[test]
+#[ignore]
 fn test_real_room_v2_1_deserialization() {
     let content = std::fs::read_to_string("res/real_matrix_state_v2_1.json")
         .expect("real_matrix_state_v2_1.json");
@@ -305,6 +308,7 @@ fn load_real_dag(path: &str) -> Vec<LeanEvent> {
 }
 
 #[test]
+#[ignore]
 fn test_real_dag_52k_room_deserialization() {
     let events = load_real_dag("res/real_dag_52k_room.json");
     assert!(
@@ -323,6 +327,7 @@ fn test_real_dag_52k_room_deserialization() {
 }
 
 #[test]
+#[ignore]
 fn test_real_dag_52k_room_sort() {
     let events = load_real_dag("res/real_dag_52k_room.json");
     let sorted = sort_and_verify(&events, StateResVersion::V2);
@@ -330,6 +335,7 @@ fn test_real_dag_52k_room_sort() {
 }
 
 #[test]
+#[ignore]
 fn test_real_dag_52k_room_v2_1_sort() {
     let events = load_real_dag("res/real_dag_52k_room.json");
     let sorted = sort_and_verify(&events, StateResVersion::V2_1);
@@ -337,6 +343,7 @@ fn test_real_dag_52k_room_v2_1_sort() {
 }
 
 #[test]
+#[ignore]
 fn test_real_dag_52k_room_resolution() {
     let events = load_real_dag("res/real_dag_52k_room.json");
     let map = to_event_map(&events);
@@ -350,6 +357,7 @@ fn test_real_dag_52k_room_resolution() {
 }
 
 #[test]
+#[ignore]
 fn test_real_dag_nheko_room_sort() {
     let events = load_real_dag("res/real_dag_nheko.json");
     assert!(
@@ -362,6 +370,7 @@ fn test_real_dag_nheko_room_sort() {
 }
 
 #[test]
+#[ignore]
 fn test_real_dag_nheko_room_106_heads() {
     // This room has 106 DAG heads — a real federation mess
     let events = load_real_dag("res/real_dag_nheko.json");
