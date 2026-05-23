@@ -322,7 +322,7 @@ where
         }
 
         fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> {
-            Ok(v as i64)
+            Ok(v.try_into().unwrap_or(i64::MAX))
         }
 
         fn visit_f64<E: de::Error>(self, v: f64) -> Result<i64, E> {
@@ -331,6 +331,7 @@ where
 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<i64, E> {
             Ok(v.parse::<i64>()
+                .or_else(|_| v.parse::<u64>().map(|u| u.try_into().unwrap_or(i64::MAX)))
                 .or_else(|_| v.parse::<f64>().map(|f| f as i64))
                 .unwrap_or(0))
         }
@@ -519,26 +520,20 @@ impl<'a> Ord for SortPriority<'a> {
             StateResVersion::V2 | StateResVersion::V2_1 => {
                 // V2 reverse topological power ordering: worst events pop FIRST.
                 //
-                // Ruma uses Reverse(TieBreaker) on a BinaryHeap where TieBreaker.cmp is:
-                //   other.pl.cmp(&self.pl)  → higher PL = smaller TieBreaker → larger Reverse → pops first
-                //   self.ts.cmp(&other.ts)  → earlier ts = smaller TieBreaker → larger Reverse → pops first
-                //   self.id.cmp(&other.id)  → smaller id = smaller TieBreaker → larger Reverse → pops first
+                // In our direct max-heap (no Reverse) we pop Greater first, so we make worst events Greater.
+                //   lower PL → Greater  → use other.power_level.cmp(&self.power_level)
+                //   later ts → Greater → use self.event.origin_server_ts.cmp(&other.event.origin_server_ts)
+                //   larger id → Greater → use self.event.event_id.cmp(&other.event.event_id)
                 //
-                // In our direct max-heap (no Reverse) we invert each: Greater = pops first.
-                //   higher PL → Greater  → use self.pl.cmp(&other.pl)
-                //   earlier ts → Greater → use other.ts.cmp(&self.ts)
-                //   smaller id → Greater → use other.id.cmp(&self.id)
-                //
-                // Net result: high-PL events pop first (losing for same-key conflicts but
-                // setting auth context before lower-PL events are checked — this is what
-                // makes Alice's ban appear before Bob's concurrent PL change).
-                match self.power_level.cmp(&other.power_level) {
-                    Ordering::Equal => match other
+                // Net result: low-PL events pop first, so best events pop last.
+                // This ensures that when applied with last-write-wins, the best events win conflicts.
+                match other.power_level.cmp(&self.power_level) {
+                    Ordering::Equal => match self
                         .event
                         .origin_server_ts
-                        .cmp(&self.event.origin_server_ts)
+                        .cmp(&other.event.origin_server_ts)
                     {
-                        Ordering::Equal => other.event.event_id.cmp(&self.event.event_id),
+                        Ordering::Equal => self.event.event_id.cmp(&other.event.event_id),
                         ord => ord,
                     },
                     ord => ord,
@@ -770,7 +765,8 @@ impl<'a> crate::auth::StateProvider for OverlayState<'a> {
     }
 }
 
-/// Targeted iterative auth check. Per Matrix spec, the auth context for event 'e'
+/// Iterative auth check. Builds a `RoomState` from the resolved state and local auth chain,
+/// and delegates to `auth::check_auth`. Per Matrix spec, the auth context for event 'e'
 /// consists of the events in the conflict set (E) and the currently resolved state (S).
 fn iterative_auth_ok(
     event: &LeanEvent,
@@ -1090,8 +1086,8 @@ mod tests {
             version: StateResVersion::V2,
         };
 
-        // Higher PL is GREATER (pops first, loses for same key, but sets auth context first).
-        assert_eq!(p_base.cmp(&p_worst_pl), Ordering::Greater); // p_base 100 > p_worst_pl 50.
+        // Lower PL is GREATER (pops first, so best events end up last and win).
+        assert_eq!(p_base.cmp(&p_worst_pl), Ordering::Less); // p_base 100 < p_worst_pl 50.
 
         let e_later_ts = LeanEvent {
             event_id: "$3".into(),
@@ -1104,12 +1100,10 @@ mod tests {
             event: &e_later_ts,
             version: StateResVersion::V2,
         };
-        // p_later_ts has ts 20 (better — wins); later ts pops LAST = is Smaller.
-        // p_base has ts 10 (worse) = Greater (pops first, loses).
-        assert_eq!(p_base.cmp(&p_later_ts), Ordering::Greater);
+        assert_eq!(p_base.cmp(&p_later_ts), Ordering::Less); // TS 10 is Less than TS 20.
 
         let e_larger_id = LeanEvent {
-            event_id: "$2".into(),
+            event_id: "$4".into(),
             power_level: 100,
             origin_server_ts: 10,
             ..Default::default()
@@ -1119,9 +1113,7 @@ mod tests {
             event: &e_larger_id,
             version: StateResVersion::V2,
         };
-        // p_larger_id has id "$2" (better — wins); larger id pops LAST = is Smaller.
-        // p_base has id "$1" (worse) = Greater (pops first, loses).
-        assert_eq!(p_base.cmp(&p_larger_id), Ordering::Greater);
+        assert_eq!(p_base.cmp(&p_larger_id), Ordering::Less); // "$1" is Less than "$4".
     }
 
     #[test]
