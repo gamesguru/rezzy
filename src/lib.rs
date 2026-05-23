@@ -519,20 +519,20 @@ impl<'a> Ord for SortPriority<'a> {
             StateResVersion::V2 | StateResVersion::V2_1 => {
                 // V2 reverse topological power ordering: worst events pop FIRST.
                 //
-                // Ruma uses Reverse(TieBreaker) on a BinaryHeap, giving a min-heap where
-                // the SMALLEST TieBreaker value pops first (and therefore LOSES).
-                // We use a direct max-heap (no Reverse), so we need the mirror image:
-                // the GREATEST SortPriority pops first and LOSES.
+                // Ruma uses Reverse(TieBreaker) on a BinaryHeap where TieBreaker.cmp is:
+                //   other.pl.cmp(&self.pl)  → higher PL = smaller TieBreaker → larger Reverse → pops first
+                //   self.ts.cmp(&other.ts)  → earlier ts = smaller TieBreaker → larger Reverse → pops first
+                //   self.id.cmp(&other.id)  → smaller id = smaller TieBreaker → larger Reverse → pops first
                 //
-                // Ruma TieBreaker order:  higher PL < lower PL  (lower PL wins)
-                //                        earlier ts < later ts  (later ts wins)
-                //                        smaller id < larger id (larger id wins)
+                // In our direct max-heap (no Reverse) we invert each: Greater = pops first.
+                //   higher PL → Greater  → use self.pl.cmp(&other.pl)
+                //   earlier ts → Greater → use other.ts.cmp(&self.ts)
+                //   smaller id → Greater → use other.id.cmp(&self.id)
                 //
-                // Our max-heap must match by inverting each comparison relative to Ruma:
-                //   lower PL  -> Greater  (pops first, loses) -> use other.pl.cmp(&self.pl)  ✓ unchanged
-                //   earlier ts -> Greater (pops first, loses) -> use other.ts.cmp(&self.ts)
-                //   smaller id -> Greater (pops first, loses) -> use other.id.cmp(&self.id)
-                match other.power_level.cmp(&self.power_level) {
+                // Net result: high-PL events pop first (losing for same-key conflicts but
+                // setting auth context before lower-PL events are checked — this is what
+                // makes Alice's ban appear before Bob's concurrent PL change).
+                match self.power_level.cmp(&other.power_level) {
                     Ordering::Equal => match other
                         .event
                         .origin_server_ts
@@ -1082,8 +1082,8 @@ mod tests {
             version: StateResVersion::V2,
         };
 
-        // Best events (higher PL) should be SMALLER so they pop LAST from Max-Heap.
-        assert_eq!(p_base.cmp(&p_worst_pl), Ordering::Less); // p_base 100, p_worst_pl 50. Alice is better = Smaller.
+        // Higher PL is GREATER (pops first, loses for same key, but sets auth context first).
+        assert_eq!(p_base.cmp(&p_worst_pl), Ordering::Greater); // p_base 100 > p_worst_pl 50.
 
         let e_later_ts = LeanEvent {
             event_id: "$3".into(),
@@ -1189,8 +1189,8 @@ mod tests {
             },
         );
 
-        // In V2, A would win because it's unconflicted.
-        // In V2.1, B should win because it has a higher power level (100 > 50) and it's sorted together with A.
+        // In V2.1, A should win because B (higher PL=100) is applied first and then
+        // overwritten by A (lower PL=50) — lower PL pops last and wins for same-key conflicts.
         let resolved = resolve_lean(
             unconflicted,
             conflicted.clone(),
@@ -1199,7 +1199,7 @@ mod tests {
         );
         assert_eq!(
             resolved.get(&("m.room.member".into(), Some("@alice:example.com".into()))),
-            Some(&"B".into())
+            Some(&"A".into())
         );
     }
 
@@ -1270,8 +1270,8 @@ mod tests {
             },
         );
         let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
-        // Best (A) comes LAST.
-        assert_eq!(sorted, vec!["B", "A"]);
+        // A (higher PL=100) pops first (applied first, loses for same key). B pops last, wins.
+        assert_eq!(sorted, vec!["A", "B"]);
     }
 
     #[test]
@@ -1345,9 +1345,9 @@ mod tests {
         let sorted_v2 = lean_kahn_sort(&events, &events, StateResVersion::V2);
         let sorted_v2_1 = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
         assert_eq!(sorted_v1, vec!["B", "A"]);
-        // B is better (higher power level), so it comes LAST in V2 and V2.1
-        assert_eq!(sorted_v2, vec!["A", "B"]);
-        assert_eq!(sorted_v2_1, vec!["A", "B"]);
+        // B (higher power level) pops FIRST in V2 and V2.1 — applied first, loses for same key.
+        assert_eq!(sorted_v2, vec!["B", "A"]);
+        assert_eq!(sorted_v2_1, vec!["B", "A"]);
     }
 
     #[test]
@@ -1668,7 +1668,7 @@ mod tests {
         );
         assert_eq!(
             resolved.get(&("m.room.member".into(), Some("@bob:example.com".into()))),
-            Some(&"id2_new".into())
+            Some(&"id2".into()) // id2_new (PL=100) pops first, id2 (PL=50) pops last and wins.
         );
     }
 
@@ -1706,7 +1706,7 @@ mod tests {
         run_batch_test(
             StateResVersion::V2,
             &[("Alice", 100, 500, 1, &[]), ("Bob", 50, 100, 1, &[])],
-            &["Bob", "Alice"], // Bob is worse (PL 50), pops first.
+            &["Alice", "Bob"], // Alice is better (PL 100), pops first.
         );
         run_batch_test(
             StateResVersion::V1,
@@ -2041,8 +2041,8 @@ mod tests {
             event: &e_high_power,
             version: StateResVersion::V2,
         };
-        // p_base is WORSE (PL 50 < 100). Better (100) must be Smaller (pops last). So p_base > p_high_power.
-        assert_eq!(p_base.cmp(&p_high_power), Ordering::Greater);
+        // p_base is WORSE (PL 50 < 100). Higher PL is Greater (pops first). So p_base < p_high_power.
+        assert_eq!(p_base.cmp(&p_high_power), Ordering::Less);
         let e_early_ts = LeanEvent {
             origin_server_ts: 10,
             ..e_base.clone()
