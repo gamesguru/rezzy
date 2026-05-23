@@ -73,16 +73,62 @@ impl fmt::Display for AuthError {
     }
 }
 
+use core::borrow::Borrow;
+use core::cmp::Ordering;
+
+pub trait StateKeyDyn {
+    fn ev_type(&self) -> &str;
+    fn state_key(&self) -> Option<&str>;
+}
+
+impl StateKeyDyn for (String, Option<String>) {
+    fn ev_type(&self) -> &str { &self.0 }
+    fn state_key(&self) -> Option<&str> { self.1.as_deref() }
+}
+
+impl<'a> StateKeyDyn for (&'a str, Option<&'a str>) {
+    fn ev_type(&self) -> &str { self.0 }
+    fn state_key(&self) -> Option<&str> { self.1 }
+}
+
+impl<'a> Borrow<dyn StateKeyDyn + 'a> for (String, Option<String>) {
+    fn borrow(&self) -> &(dyn StateKeyDyn + 'a) {
+        self
+    }
+}
+
+impl PartialEq for dyn StateKeyDyn + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.ev_type() == other.ev_type() && self.state_key() == other.state_key()
+    }
+}
+
+impl Eq for dyn StateKeyDyn + '_ {}
+
+impl PartialOrd for dyn StateKeyDyn + '_ {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for dyn StateKeyDyn + '_ {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.ev_type().cmp(other.ev_type())
+            .then_with(|| self.state_key().cmp(&other.state_key()))
+    }
+}
+
 pub trait StateProvider {
-    fn get_event(&self, key: &(String, Option<String>)) -> Option<&LeanEvent>;
+    fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent>;
 }
 
 /// The room state at a specific point in the DAG (keyed by (type, state_key) -> event).
 pub type RoomState = alloc::collections::BTreeMap<(String, Option<String>), LeanEvent>;
 
 impl StateProvider for RoomState {
-    fn get_event(&self, key: &(String, Option<String>)) -> Option<&LeanEvent> {
-        self.get(key)
+    fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent> {
+        let query: &dyn StateKeyDyn = &(event_type, state_key);
+        self.get(query)
     }
 }
 
@@ -105,8 +151,7 @@ pub fn check_auth(event: &LeanEvent, state: &impl StateProvider) -> Result<(), A
     }
 
     // Rule 2: Check sender is not banned
-    let member_key = ("m.room.member".into(), Some(event.sender.clone()));
-    if let Some(member_event) = state.get_event(&member_key) {
+    if let Some(member_event) = state.get_event("m.room.member", Some(&event.sender)) {
         if let Some(membership) = member_event
             .content
             .get("membership")
@@ -130,9 +175,8 @@ pub fn check_auth(event: &LeanEvent, state: &impl StateProvider) -> Result<(), A
     } else if event.event_type != "m.room.member" {
         // Room version 11: The creator of the room has an implied membership of "join"
         // if no explicit membership event exists for them.
-        let create_key = ("m.room.create".into(), Some(String::new()));
         let is_creator = state
-            .get_event(&create_key)
+            .get_event("m.room.create", Some(""))
             .is_some_and(|create_ev| create_ev.sender == event.sender);
 
         if !is_creator {
@@ -148,9 +192,8 @@ pub fn check_auth(event: &LeanEvent, state: &impl StateProvider) -> Result<(), A
         let sender_pl = get_sender_power_level(&event.sender, state);
         let required_pl = get_required_power_level(event, state);
 
-        let pl_key = ("m.room.power_levels".into(), Some(String::new()));
         let _pl_ev_id = state
-            .get_event(&pl_key)
+            .get_event("m.room.power_levels", Some(""))
             .map(|ev| ev.event_id.clone())
             .unwrap_or_else(|| "NONE".into());
 
@@ -176,8 +219,7 @@ const MAX_POWER_LEVEL: i64 = 9007199254740991; // 2^53 - 1
 /// Get the power level of a user from the current room state.
 fn get_sender_power_level(sender: &str, state: &impl StateProvider) -> i64 {
     // 1. Absolute Priority: Room Creator and additional creators (INFINITE power)
-    let create_key = ("m.room.create".into(), Some(String::new()));
-    if let Some(create_event) = state.get_event(&create_key) {
+    if let Some(create_event) = state.get_event("m.room.create", Some("")) {
         let is_primary_creator = create_event.sender == sender;
         let mut is_additional_creator = false;
 
@@ -206,8 +248,7 @@ fn get_sender_power_level(sender: &str, state: &impl StateProvider) -> i64 {
     }
 
     // 2. State-based Power Levels
-    let pl_key = ("m.room.power_levels".into(), Some(String::new()));
-    if let Some(pl_event) = state.get_event(&pl_key) {
+    if let Some(pl_event) = state.get_event("m.room.power_levels", Some("")) {
         if let Some(users) = pl_event.content.get("users").and_then(|u| u.as_object()) {
             if let Some(pl) = users.get(sender).and_then(|v| v.as_i64()) {
                 return pl;
@@ -227,8 +268,7 @@ fn get_sender_power_level(sender: &str, state: &impl StateProvider) -> i64 {
 
 /// Get the required power level to send an event based on room state.
 fn get_required_power_level(event: &LeanEvent, state: &impl StateProvider) -> i64 {
-    let pl_key = ("m.room.power_levels".into(), Some(String::new()));
-    if let Some(pl_event) = state.get_event(&pl_key) {
+    if let Some(pl_event) = state.get_event("m.room.power_levels", Some("")) {
         // Check specific event type overrides
         if let Some(events) = pl_event.content.get("events").and_then(|e| e.as_object()) {
             if let Some(pl) = events.get(&event.event_type).and_then(|v| v.as_i64()) {
@@ -278,7 +318,7 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
             }
 
             let current_membership = state
-                .get_event(&("m.room.member".into(), Some(target_user.into())))
+                .get_event("m.room.member", Some(target_user))
                 .and_then(|ev| ev.content.get("membership"))
                 .and_then(|m| m.as_str())
                 .unwrap_or("");
@@ -291,13 +331,13 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
             }
 
             let join_rule = state
-                .get_event(&("m.room.join_rules".into(), Some(String::new())))
+                .get_event("m.room.join_rules", Some(""))
                 .and_then(|ev| ev.content.get("join_rule"))
                 .and_then(|r| r.as_str())
                 .unwrap_or("invite"); // Default to invite
 
             let is_creator = state
-                .get_event(&("m.room.create".into(), Some("".into())))
+                .get_event("m.room.create", Some(""))
                 .is_some_and(|ev| ev.sender == event.sender);
 
             if is_creator {
@@ -363,8 +403,7 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
             }
 
             // Check target isn't already banned
-            let target_key = ("m.room.member".into(), Some(target_user.into()));
-            if let Some(target_member) = state.get_event(&target_key) {
+            if let Some(target_member) = state.get_event("m.room.member", Some(target_user)) {
                 if target_member
                     .content
                     .get("membership")
@@ -386,8 +425,7 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
 
 /// Get the kick power level from room state.
 fn get_kick_power_level(state: &impl StateProvider) -> i64 {
-    let pl_key = ("m.room.power_levels".into(), Some(String::new()));
-    if let Some(pl_event) = state.get_event(&pl_key) {
+    if let Some(pl_event) = state.get_event("m.room.power_levels", Some("")) {
         if let Some(kick) = pl_event.content.get("kick").and_then(|v| v.as_i64()) {
             return kick;
         }
@@ -397,8 +435,7 @@ fn get_kick_power_level(state: &impl StateProvider) -> i64 {
 
 /// Get the ban power level from room state.
 fn get_invite_power_level(state: &impl StateProvider) -> i64 {
-    let pl_key = ("m.room.power_levels".into(), Some(String::new()));
-    if let Some(pl_event) = state.get_event(&pl_key) {
+    if let Some(pl_event) = state.get_event("m.room.power_levels", Some("")) {
         if let Some(invite) = pl_event.content.get("invite").and_then(|v| v.as_i64()) {
             return invite;
         }
@@ -407,8 +444,7 @@ fn get_invite_power_level(state: &impl StateProvider) -> i64 {
 }
 
 fn get_ban_power_level(state: &impl StateProvider) -> i64 {
-    let pl_key = ("m.room.power_levels".into(), Some(String::new()));
-    if let Some(pl_event) = state.get_event(&pl_key) {
+    if let Some(pl_event) = state.get_event("m.room.power_levels", Some("")) {
         if let Some(ban) = pl_event.content.get("ban").and_then(|v| v.as_i64()) {
             return ban;
         }

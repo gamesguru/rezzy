@@ -745,25 +745,26 @@ struct OverlayState<'a> {
     resolved: &'a BTreeMap<(String, Option<String>), String>,
     auth_context: &'a HashMap<String, LeanEvent>,
     conflicted: &'a HashMap<String, LeanEvent>,
-    local_auth: HashMap<(String, Option<String>), LeanEvent>,
+    local_auth: BTreeMap<(String, Option<String>), LeanEvent>,
     create_ev: Option<&'a LeanEvent>,
 }
 
 impl<'a> crate::auth::StateProvider for OverlayState<'a> {
-    fn get_event(&self, key: &(String, Option<String>)) -> Option<&LeanEvent> {
+    fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent> {
+        let query: &dyn crate::auth::StateKeyDyn = &(event_type, state_key);
         // Check consensus resolved state
-        if let Some(eid) = self.resolved.get(key) {
+        if let Some(eid) = self.resolved.get(query) {
             return self
                 .auth_context
                 .get(eid)
                 .or_else(|| self.conflicted.get(eid));
         }
         // Check local auth chain (BFS result)
-        if let Some(ev) = self.local_auth.get(key) {
+        if let Some(ev) = self.local_auth.get(query) {
             return Some(ev);
         }
         // Fallback for create
-        if key.0 == "m.room.create" && key.1.as_deref() == Some("") {
+        if event_type == "m.room.create" && state_key == Some("") {
             return self.create_ev;
         }
         None
@@ -783,7 +784,7 @@ fn iterative_auth_ok(
         resolved,
         auth_context,
         conflicted: conflicted_events,
-        local_auth: HashMap::new(),
+        local_auth: BTreeMap::new(),
         create_ev: cached_create,
     };
 
