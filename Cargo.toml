@@ -7,27 +7,6 @@ description = "Formally verified, dependency-free Matrix State Resolution v2 log
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gamesguru/ruma-lean"
 autotests = false
-default-run = "ruma-lean"
-exclude = [
-    "res/",
-    "scripts/",
-    "docs/",
-    "RumaLean/",
-    "RumaLean.lean",
-    "lake*",
-    "lean-toolchain",
-    ".envrc",
-    ".env.example",
-    ".github",
-    ".gitignore",
-    ".editorconfig",
-    ".pre-commit-config.yaml",
-    ".prettierignore",
-    ".prettierrc",
-    ".rgignore",
-    "tests/",
-    "Makefile",
-]
 
 [[bin]]
 name = "ruma-lean"
@@ -74,6 +53,26 @@ path = "tests/snapshots.rs"
 name = "sanity"
 path = "tests/sanity.rs"
 
+exclude = [
+    "res/",
+    "scripts/",
+    "docs/",
+    "RumaLean/",
+    "RumaLean.lean",
+    "lake*",
+    "lean-toolchain",
+    ".envrc",
+    ".env.example",
+    ".github",
+    ".gitignore",
+    ".editorconfig",
+    ".pre-commit-config.yaml",
+    ".prettierignore",
+    ".prettierrc",
+    ".rgignore",
+    "tests/",
+    "Makefile",
+]
 [[test]]
 name = "large_rooms"
 path = "tests/large_rooms.rs"
