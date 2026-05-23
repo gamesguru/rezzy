@@ -243,11 +243,14 @@ where
 
     let mut result = StateMap::new();
     for ((ev_type, state_key), id_str) in resolved {
-        let key = (ev_type.as_str().into(), state_key.unwrap_or_default());
+        let key = (ev_type.as_str().into(), state_key.clone().unwrap_or_default());
         if let Some(id) = id_map.get(&id_str) {
             result.insert(key, id.clone());
+        } else {
+            std::eprintln!("RESOLVE MISSING ID: {} (key={}/{})", id_str, ev_type, state_key.as_deref().unwrap_or(""));
         }
     }
+    std::eprintln!("RESOLVE RESULT: {:?}", result.keys().map(|(t,sk)| alloc::format!("{}/{}", t, sk)).collect::<alloc::vec::Vec<_>>());
 
     Ok(result)
 }
@@ -709,7 +712,12 @@ pub fn resolve_lean(
     let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, version);
     for id in &sorted_power_ids {
         if let Some(event) = sort_set.get(id) {
-            if iterative_auth_ok(event, &resolved, auth_context, sort_set) {
+            let ok = iterative_auth_ok(event, &resolved, auth_context, sort_set);
+            std::eprintln!(
+                "PWR_AUTH id={} type={} ok={}",
+                id, event.event_type, ok
+            );
+            if ok {
                 resolved.insert(
                     (event.event_type.clone(), event.state_key.clone()),
                     event.event_id.clone(),
@@ -735,9 +743,11 @@ pub fn resolve_lean(
     }
 
     let mut final_resolved = unconflicted_state;
+    std::eprintln!("LEAN_RESOLVED keys: {:?}", final_resolved.keys().map(|(t,sk)| alloc::format!("{}/{}", t, sk.as_deref().unwrap_or(""))).collect::<alloc::vec::Vec<_>>());
     for (k, v) in resolved {
         final_resolved.insert(k, v);
     }
+    std::eprintln!("LEAN_FINAL keys: {:?}", final_resolved.keys().map(|(t,sk)| alloc::format!("{}/{}", t, sk.as_deref().unwrap_or(""))).collect::<alloc::vec::Vec<_>>());
     final_resolved
 }
 
@@ -772,12 +782,15 @@ fn iterative_auth_ok(
         }
     }
 
-    // 2. Supplement with events from the event's own RECURSIVE auth chain (from E union S)
-    // This is crucial for supporting Worst-First sort orders where descendants
-    // are processed before ancestors have been added to 'resolved'.
-    let mut stack = event.auth_events.clone();
+    // 2. Supplement with events from the event's own RECURSIVE auth chain (from E union S).
+    // Use BFS (queue) so that direct auth deps (1 hop from E) are inserted before transitive
+    // deps (2+ hops). This ensures or_insert keeps the most-direct auth event for each key.
+    // DFS (stack) could insert a transitive dep like $00-pl (via $00-bob → $00-jl) before
+    // the direct dep $01-pl, causing the wrong PL event to be used for auth checks.
+    let mut queue = alloc::collections::VecDeque::new();
+    queue.extend(event.auth_events.iter().cloned());
     let mut visited = BTreeSet::new();
-    while let Some(aid) = stack.pop() {
+    while let Some(aid) = queue.pop_front() {
         if !visited.insert(aid.clone()) {
             continue;
         }
@@ -789,14 +802,23 @@ fn iterative_auth_ok(
             // Consensus state (resolved) always wins over the event's raw auth chain.
             state.entry(key).or_insert_with(|| aev.clone());
             // Walk up to find the membership/PL/create events if not already found.
-            stack.extend(aev.auth_events.iter().cloned());
+            queue.extend(aev.auth_events.iter().cloned());
         }
     }
 
     let auth_result = crate::auth::check_auth(event, &state);
-    #[cfg(test)]
+    if event.event_id.contains("02-m-room-power") {
+        let pl_key = ("m.room.power_levels".into(), Some(String::new()));
+        let resolved_pl_id = resolved.get(&pl_key).cloned().unwrap_or_else(|| "NONE".into());
+        let pl_in_state = state.get(&("m.room.power_levels".into(), Some(String::new())))
+            .map(|e| alloc::format!("{} bob={:?}", e.event_id, e.content.get("users").and_then(|u| u.get("@bob:example.com"))));
+        std::eprintln!(
+            "STATE_DUMP for {}: resolved_pl_id={}, pl_in_state={:?}",
+            event.event_id, resolved_pl_id, pl_in_state,
+        );
+    }
     match &auth_result {
-        Ok(_) => std::eprintln!("AUTH OK: {} type={}", event.event_id, event.event_type),
+        Ok(_) => {} // std::eprintln!("AUTH OK: {} type={}", event.event_id, event.event_type),
         Err(e) => std::eprintln!(
             "REJECTED: {} type={} sk={} sender={} error={}",
             event.event_id,
