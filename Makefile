@@ -63,7 +63,7 @@ lean: lean/build ##H Alias for lean/build
 
 .PHONY: rust/build
 rust/build: ##H Compile Rust binary (release)
-	$(CARGO) build --release --features cli
+	$(CARGO) build --release --features cli,hashing
 
 .PHONY: rust/test
 rust/test: fixtures ##H Run Rust tests
@@ -75,7 +75,7 @@ rust/clean: ##H Remove Rust build artifacts
 
 .PHONY: rust/install
 rust/install: ##H Install ruma-lean binary to cargo bin
-	$(CARGO) install --features cli --path .
+	$(CARGO) install --features cli,hashing --path .
 
 .PHONY: rust/coverage
 rust/coverage: ##H Run code coverage and generate HTML report
@@ -91,7 +91,7 @@ rust/coverage: ##H Run code coverage and generate HTML report
 .PHONY: rust/e2e
 rust/e2e: ##H Run e2e integration test on real JSON
 	for f in res/*.json; do \
-		$(CARGO) run --release --features cli -- -i "$$f"; \
+		$(CARGO) run --release --features cli,hashing -- -i "$$f"; \
 	done
 
 .PHONY: rust/publish

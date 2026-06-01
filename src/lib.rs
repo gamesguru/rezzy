@@ -343,7 +343,7 @@ where
 }
 
 /// A lightweight Matrix Event representation for Lean-equivalent resolution.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Default)]
 pub struct LeanEvent {
     pub event_id: String,
     #[serde(rename = "type")]
@@ -363,6 +363,82 @@ pub struct LeanEvent {
     pub auth_events: Vec<String>,
     #[serde(default)]
     pub depth: u64, // Required for V1
+}
+
+#[derive(Deserialize)]
+struct LeanEventInner {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    state_key: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_power_level")]
+    power_level: i64,
+    origin_server_ts: u64,
+    #[serde(default)]
+    sender: String,
+    #[serde(default)]
+    content: Value,
+    #[serde(default)]
+    prev_events: Vec<String>,
+    #[serde(default)]
+    auth_events: Vec<String>,
+    #[serde(default)]
+    depth: u64,
+}
+
+impl<'de> Deserialize<'de> for LeanEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+
+        let event_id = if let Some(id) = value.get("event_id").and_then(|v| v.as_str()) {
+            String::from(id)
+        } else {
+            #[cfg(feature = "hashing")]
+            {
+                use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+                use sha2::{Digest, Sha256};
+
+                let mut hash_value = value.clone();
+                if let Some(obj) = hash_value.as_object_mut() {
+                    obj.remove("unsigned");
+                    obj.remove("signatures");
+                }
+
+                let canonical_json =
+                    serde_json::to_string(&hash_value).map_err(serde::de::Error::custom)?;
+                let mut hasher = Sha256::new();
+                hasher.update(canonical_json.as_bytes());
+                let hash = hasher.finalize();
+
+                alloc::format!("${}", URL_SAFE_NO_PAD.encode(hash))
+            }
+            #[cfg(not(feature = "hashing"))]
+            {
+                return Err(serde::de::Error::custom(
+                    "event_id is missing and 'hashing' feature is disabled",
+                ));
+            }
+        };
+
+        let inner: LeanEventInner =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+
+        Ok(LeanEvent {
+            event_id,
+            event_type: inner.event_type,
+            state_key: inner.state_key,
+            power_level: inner.power_level,
+            origin_server_ts: inner.origin_server_ts,
+            sender: inner.sender,
+            content: inner.content,
+            prev_events: inner.prev_events,
+            auth_events: inner.auth_events,
+            depth: inner.depth,
+        })
+    }
 }
 
 impl PartialEq for LeanEvent {
