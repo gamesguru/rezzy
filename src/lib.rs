@@ -271,6 +271,8 @@ pub enum StateResVersion {
     V2_2,
 }
 
+type LocalAuthCache = HashMap<String, BTreeMap<(String, Option<String>), (LeanEvent, usize)>>;
+
 /// Result of Kahn's topological sort with diagnostic information.
 #[derive(Debug, Clone)]
 pub enum KahnSortResult {
@@ -684,10 +686,22 @@ pub fn resolve_lean(
 
     // Step 1: Sort power events by reverse topological power ordering (Kahn sort)
     // Step 2: Apply iterative auth checks (per spec & Ruma implementation)
+    let mut local_auth_cache: LocalAuthCache = HashMap::new();
+
     let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, create_ev, version);
     for id in &sorted_power_ids {
         if let Some(event) = sort_set.get(id) {
-            if iterative_auth_ok(event, &resolved, auth_context, sort_set, create_ev, version) {
+            let local_auth =
+                compute_local_auth(event, auth_context, sort_set, &mut local_auth_cache);
+            if iterative_auth_ok(
+                event,
+                &resolved,
+                auth_context,
+                sort_set,
+                local_auth,
+                create_ev,
+                version,
+            ) {
                 resolved.insert(
                     (event.event_type.clone(), event.state_key.clone()),
                     event.event_id.clone(),
@@ -704,7 +718,16 @@ pub fn resolve_lean(
     mainline_sort(&mut non_power_list, &mainline, &sort_context);
 
     for ev in non_power_list {
-        if iterative_auth_ok(ev, &resolved, auth_context, sort_set, create_ev, version) {
+        let local_auth = compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache);
+        if iterative_auth_ok(
+            ev,
+            &resolved,
+            auth_context,
+            sort_set,
+            local_auth,
+            create_ev,
+            version,
+        ) {
             resolved.insert(
                 (ev.event_type.clone(), ev.state_key.clone()),
                 ev.event_id.clone(),
@@ -800,7 +823,7 @@ fn compute_local_auth(
     event: &LeanEvent,
     auth_context: &HashMap<String, LeanEvent>,
     conflicted_events: &HashMap<String, LeanEvent>,
-    cache: &mut HashMap<String, BTreeMap<(String, Option<String>), (LeanEvent, usize)>>,
+    cache: &mut LocalAuthCache,
 ) -> BTreeMap<(String, Option<String>), LeanEvent> {
     if let Some(cached) = cache.get(&event.event_id) {
         return cached
