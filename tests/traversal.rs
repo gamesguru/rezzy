@@ -4,12 +4,19 @@ use std::collections::{BTreeMap, HashMap};
 
 #[test]
 fn test_v2_1_vs_v2_2_recursive_auth_lookup() {
-    // SCENARIO: An event requires a Power Level event that is 2 hops away in the auth chain.
-    // Event E -> Auth: [Member M]
-    // Member M -> Auth: [PowerLevels PL]
+    // SCENARIO: A state event requires a Power Level that is 2 hops away.
+    // Event E (Room Name) -> Auth: [Member Alice: join]
+    // Member Alice -> Auth: [Power Levels PL] (Alice has PL 100)
     //
-    // V2.1 (1-hop) should fail to find PL (if PL isn't in resolved state).
-    // V2.2 (Recursive) should find PL.
+    // Critically, Event E OMITTED the Power Level event from its own auth_events.
+    //
+    // V2.1 (1-hop): Only sees the join. Misses the PL event.
+    // Alice's PL defaults to 0. State events require PL 50.
+    // Result: REJECTED.
+    //
+    // V2.2 (Recursive BFS): Walks back from the join, finds the PL event.
+    // Alice has PL 100. 100 >= 50.
+    // Result: ACCEPTED.
 
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
@@ -27,65 +34,73 @@ fn test_v2_1_vs_v2_2_recursive_auth_lookup() {
         sender: "@creator:example.com".to_string(),
         origin_server_ts: 200,
         content: json!({
-            "users": { "@alice:example.com": 100 }
+            "users": { "@alice:example.com": 100 },
+            "state_default": 50
         }),
         auth_events: vec!["$create".to_string()],
         ..Default::default()
     };
 
-    let alice_member = LeanEvent {
-        event_id: "$alice_member".to_string(),
+    let alice_join = LeanEvent {
+        event_id: "$join".to_string(),
         event_type: "m.room.member".to_string(),
         state_key: Some("@alice:example.com".to_string()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 300,
         content: json!({ "membership": "join" }),
+        // Join includes PL to be authorized
         auth_events: vec!["$create".to_string(), "$pl".to_string()],
         ..Default::default()
     };
 
-    // This message is only valid if Alice has PL 100 (from $pl).
-    // It auths via Alice's membership.
-    let alice_msg = LeanEvent {
-        event_id: "$msg".to_string(),
-        event_type: "m.room.message".to_string(),
+    // The name event. It requires PL 50.
+    // It lists the join in auth_events, but OMITS the PL event.
+    let alice_name = LeanEvent {
+        event_id: "$name".to_string(),
+        event_type: "m.room.name".to_string(),
+        state_key: Some("".to_string()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 400,
-        auth_events: vec!["$create".to_string(), "$alice_member".to_string()],
+        content: json!({ "name": "Alice's Room" }),
+        auth_events: vec!["$create".to_string(), "$join".to_string()],
         ..Default::default()
     };
 
     let mut auth_context = HashMap::new();
     auth_context.insert(create_ev.event_id.clone(), create_ev);
     auth_context.insert(pl_ev.event_id.clone(), pl_ev);
-    auth_context.insert(alice_member.event_id.clone(), alice_member);
+    auth_context.insert(alice_join.event_id.clone(), alice_join);
 
     let mut conflicted_events = HashMap::new();
-    conflicted_events.insert(alice_msg.event_id.clone(), alice_msg);
+    conflicted_events.insert(alice_name.event_id.clone(), alice_name);
 
-    // V2.1: Should FAIL to resolve the message because it can't find $pl.
-    // It looks at $alice_member (1 hop), sees it needs PL to check if Alice can send,
-    // but $pl is 2 hops away from $msg (it's an auth-event of $alice_member).
-    // Since resolved state is empty (MSC4297 start), it has no fallback.
+    // V2.1: Should FAIL to resolve the name change.
+    // It doesn't see the PL event, so it uses default PL 0 for Alice.
     let resolved_v21 = resolve_lean(
         BTreeMap::new(),
         conflicted_events.clone(),
         &auth_context,
         StateResVersion::V2_1,
     );
-    assert!(!resolved_v21.contains_key(&("m.room.message".to_string(), None)));
+    assert!(
+        !resolved_v21.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        "V2.1 should have rejected the name change due to missing PL event in local 1-hop auth"
+    );
 
-    // V2.2: Should SUCCEED because it performs a recursive BFS walk.
-    // It finds $alice_member, then finds $pl as an ancestor, and correctly auths the message.
+    // V2.2: Should SUCCEED.
+    // It heals the chain by finding $pl as an ancestor of $join.
     let resolved_v22 = resolve_lean(
         BTreeMap::new(),
         conflicted_events,
         &auth_context,
         StateResVersion::V2_2,
     );
-    assert!(resolved_v22.contains_key(&("m.room.message".to_string(), None)));
+    assert!(
+        resolved_v22.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        "V2.2 should have accepted the name change by finding the PL event via BFS"
+    );
     assert_eq!(
-        resolved_v22.get(&("m.room.message".to_string(), None)),
-        Some(&"$msg".to_string())
+        resolved_v22.get(&("m.room.name".to_string(), Some("".to_string()))),
+        Some(&"$name".to_string())
     );
 }
