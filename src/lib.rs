@@ -409,32 +409,20 @@ const MAX_POWER_LEVEL: i64 = 9007199254740991; // 2^53 - 1
 fn get_power_level_from_auth_chain(
     event: &LeanEvent,
     auth_context: &HashMap<String, LeanEvent>,
+    create_ev: Option<&LeanEvent>,
 ) -> i64 {
     let mut pl_event = None;
-    let mut create_event = None;
 
     // Spec compliance: only check immediate auth_events.
     for aid in &event.auth_events {
         if let Some(aev) = auth_context.get(aid) {
-            if aev.event_type == "m.room.power_levels" && aev.state_key.as_deref() == Some("") {
-                if pl_event.is_none() {
-                    pl_event = Some(aev.clone());
-                }
-            } else if aev.event_type == "m.room.create"
+            if aev.event_type == "m.room.power_levels"
                 && aev.state_key.as_deref() == Some("")
-                && create_event.is_none()
+                && pl_event.is_none()
             {
-                create_event = Some(aev.clone());
+                pl_event = Some(aev.clone());
             }
         }
-    }
-
-    // Explicitly find m.room.create if it wasn't in the immediate auth_events (V12+ behavior)
-    if create_event.is_none() {
-        create_event = auth_context
-            .values()
-            .find(|ev| ev.event_type == "m.room.create" && ev.state_key.as_deref() == Some(""))
-            .cloned();
     }
 
     if let Some(pl_ev) = pl_event {
@@ -449,7 +437,7 @@ fn get_power_level_from_auth_chain(
         return 0; // Default if PL event exists but no users_default
     }
 
-    if let Some(create_ev) = create_event {
+    if let Some(create_ev) = create_ev {
         let is_primary_creator = create_ev.sender == event.sender;
         let mut is_additional_creator = false;
 
@@ -546,6 +534,7 @@ impl<'a> PartialOrd for SortPriority<'a> {
 pub fn lean_kahn_sort_detailed(
     events: &HashMap<String, LeanEvent>,
     auth_context: &HashMap<String, LeanEvent>,
+    create_ev: Option<&LeanEvent>,
     version: StateResVersion,
 ) -> KahnSortResult {
     let mut in_degree: HashMap<String, usize> = HashMap::new();
@@ -571,7 +560,7 @@ pub fn lean_kahn_sort_detailed(
         .map(|(id, ev)| {
             (
                 id.clone(),
-                get_power_level_from_auth_chain(ev, auth_context),
+                get_power_level_from_auth_chain(ev, auth_context, create_ev),
             )
         })
         .collect();
@@ -632,9 +621,10 @@ pub fn lean_kahn_sort_detailed(
 pub fn lean_kahn_sort(
     events: &HashMap<String, LeanEvent>,
     auth_context: &HashMap<String, LeanEvent>,
+    create_ev: Option<&LeanEvent>,
     version: StateResVersion,
 ) -> Vec<String> {
-    match lean_kahn_sort_detailed(events, auth_context, version) {
+    match lean_kahn_sort_detailed(events, auth_context, create_ev, version) {
         KahnSortResult::Ok(sorted) => sorted,
         KahnSortResult::CycleDetected { sorted, stuck } => {
             std::eprintln!("KAHN CYCLE DETECTED! Stuck: {:?}", stuck);
@@ -650,22 +640,11 @@ pub fn resolve_lean(
     version: StateResVersion,
 ) -> BTreeMap<(String, Option<String>), String> {
     // Build a merged lookup map for sort/mainline operations.
-    // auth_context intentionally excludes events that are in conflicted_events;
-    // however, a conflicted event (e.g. $01-power_levels) may appear in the
-    // auth_events chain of another conflicted event ($02), so PL lookups during
-    // sorting must be able to find it.  iterative_auth_ok already checks both
-    // maps independently — we only need to merge here for the sort phases.
     let sort_context: HashMap<String, LeanEvent> = auth_context
         .iter()
         .chain(conflicted_events.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-
-    // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
-    let mut resolved = match version {
-        StateResVersion::V2_1 | StateResVersion::V2_2 => BTreeMap::new(),
-        _ => unconflicted_state.clone(),
-    };
 
     let sort_set = &conflicted_events;
 
@@ -690,13 +669,21 @@ pub fn resolve_lean(
         .chain(sort_set.values())
         .find(|ev| ev.event_type == "m.room.create");
 
-    // Step 1: Sort power events by reverse topological power ordering (Kahn sort)
-    // Step 2: Apply iterative auth checks (per spec & Ruma implementation)
-    let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, version);
+    let mut context = ResolutionContext::new(
+        unconflicted_state.clone(),
+        auth_context,
+        &conflicted_events,
+        create_ev,
+        version,
+    );
+
+    // Step 1 & 2: Sort power events and apply iterative auth checks
+    let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, create_ev, version);
     for id in &sorted_power_ids {
         if let Some(event) = sort_set.get(id) {
-            if iterative_auth_ok(event, &resolved, auth_context, sort_set, create_ev, version) {
-                resolved.insert(
+            let local_auth = context.compute_local_auth(event);
+            if context.iterative_auth_ok(event, local_auth) {
+                context.resolved.insert(
                     (event.event_type.clone(), event.state_key.clone()),
                     event.event_id.clone(),
                 );
@@ -705,15 +692,16 @@ pub fn resolve_lean(
     }
 
     // Step 3: Build the power-level mainline for mainline sort
-    let mainline = build_mainline(&resolved, &sort_context);
+    let mainline = build_mainline(&context.resolved, &sort_context);
 
     // Step 4: Sort non-power events by mainline ordering + iterative auth check
     let mut non_power_list: Vec<&LeanEvent> = non_power_events.values().collect();
     mainline_sort(&mut non_power_list, &mainline, &sort_context);
 
     for ev in non_power_list {
-        if iterative_auth_ok(ev, &resolved, auth_context, sort_set, create_ev, version) {
-            resolved.insert(
+        let local_auth = context.compute_local_auth(ev);
+        if context.iterative_auth_ok(ev, local_auth) {
+            context.resolved.insert(
                 (ev.event_type.clone(), ev.state_key.clone()),
                 ev.event_id.clone(),
             );
@@ -721,7 +709,7 @@ pub fn resolve_lean(
     }
 
     let mut final_resolved = unconflicted_state;
-    for (k, v) in resolved {
+    for (k, v) in context.resolved {
         final_resolved.insert(k, v);
     }
     final_resolved
@@ -779,51 +767,97 @@ impl<'a> crate::auth::StateProvider for OverlayState<'a> {
 
 /// Targeted iterative auth check. Per Matrix spec, the auth context for event 'e'
 /// consists of the events in the conflict set (E) and the currently resolved state (S).
-fn iterative_auth_ok(
-    event: &LeanEvent,
-    resolved: &BTreeMap<(String, Option<String>), String>,
-    auth_context: &HashMap<String, LeanEvent>,
-    conflicted_events: &HashMap<String, LeanEvent>,
-    cached_create: Option<&LeanEvent>,
+struct ResolutionContext<'a> {
+    resolved: BTreeMap<(String, Option<String>), String>,
+    auth_context: &'a HashMap<String, LeanEvent>,
+    conflicted: &'a HashMap<String, LeanEvent>,
+    local_auth_cache: HashMap<String, BTreeMap<(String, Option<String>), LeanEvent>>,
+    create_ev: Option<&'a LeanEvent>,
     version: StateResVersion,
-) -> bool {
-    let mut overlay = OverlayState {
-        resolved,
-        auth_context,
-        conflicted: conflicted_events,
-        local_auth: BTreeMap::new(),
-        create_ev: cached_create,
-        version,
-    };
+}
 
-    // 2. Supplement with events from the event's own RECURSIVE auth chain (from E union S).
-    // Use BFS (queue) so that direct auth deps (1 hop from E) are inserted before transitive
-    // deps (2+ hops). This ensures or_insert keeps the most-direct auth event for each key.
-    // DFS (stack) could insert a transitive dep like $00-pl (via $00-bob → $00-jl) before
-    // the direct dep $01-pl, causing the wrong PL event to be used for auth checks.
-    let mut queue = alloc::collections::VecDeque::new();
-    queue.extend(event.auth_events.iter().cloned());
-    let mut visited = BTreeSet::new();
+impl<'a> ResolutionContext<'a> {
+    fn new(
+        unconflicted_state: BTreeMap<(String, Option<String>), String>,
+        auth_context: &'a HashMap<String, LeanEvent>,
+        conflicted: &'a HashMap<String, LeanEvent>,
+        create_ev: Option<&'a LeanEvent>,
+        version: StateResVersion,
+    ) -> Self {
+        // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
+        let resolved = match version {
+            StateResVersion::V2_1 | StateResVersion::V2_2 => BTreeMap::new(),
+            _ => unconflicted_state,
+        };
 
-    while let Some(aid) = queue.pop_front() {
-        if !visited.insert(aid.clone()) {
-            continue;
-        }
-        if let Some(aev) = auth_context
-            .get(&aid)
-            .or_else(|| conflicted_events.get(&aid))
-        {
-            let key = (aev.event_type.clone(), aev.state_key.clone());
-            // Insert to local_auth to ensure we have the auth chain events available
-            // if the supplemental merge skips them (V2.1).
-            overlay.local_auth.entry(key).or_insert_with(|| aev.clone());
-
-            // Walk up to find the membership/PL/create events if not already found.
-            queue.extend(aev.auth_events.iter().cloned());
+        Self {
+            resolved,
+            auth_context,
+            conflicted,
+            local_auth_cache: HashMap::new(),
+            create_ev,
+            version,
         }
     }
 
-    crate::auth::check_auth(event, &overlay).is_ok()
+    fn iterative_auth_ok(
+        &mut self,
+        event: &LeanEvent,
+        local_auth: BTreeMap<(String, Option<String>), LeanEvent>,
+    ) -> bool {
+        let overlay = OverlayState {
+            resolved: &self.resolved,
+            auth_context: self.auth_context,
+            conflicted: self.conflicted,
+            local_auth,
+            create_ev: self.create_ev,
+            version: self.version,
+        };
+
+        crate::auth::check_auth(event, &overlay).is_ok()
+    }
+
+    fn compute_local_auth(
+        &mut self,
+        event: &LeanEvent,
+    ) -> BTreeMap<(String, Option<String>), LeanEvent> {
+        if let Some(cached) = self.local_auth_cache.get(&event.event_id) {
+            return cached.clone();
+        }
+
+        let mut local_auth = BTreeMap::new();
+        let mut queue = alloc::collections::VecDeque::new();
+        queue.extend(event.auth_events.iter().cloned());
+        let mut visited = BTreeSet::new();
+
+        while let Some(aid) = queue.pop_front() {
+            if !visited.insert(aid.clone()) {
+                continue;
+            }
+
+            // If we have the context for this ancestor cached, we can merge it and stop walking this branch.
+            if let Some(cached_ancestor) = self.local_auth_cache.get(&aid) {
+                for (key, ev) in cached_ancestor {
+                    local_auth.entry(key.clone()).or_insert_with(|| ev.clone());
+                }
+                continue;
+            }
+
+            if let Some(aev) = self
+                .auth_context
+                .get(&aid)
+                .or_else(|| self.conflicted.get(&aid))
+            {
+                let key = (aev.event_type.clone(), aev.state_key.clone());
+                local_auth.entry(key).or_insert_with(|| aev.clone());
+                queue.extend(aev.auth_events.iter().cloned());
+            }
+        }
+
+        self.local_auth_cache
+            .insert(event.event_id.clone(), local_auth.clone());
+        local_auth
+    }
 }
 
 /// Build the power-level mainline: the chain of m.room.power_levels events
@@ -1175,7 +1209,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V1);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V1,
+        );
         assert_eq!(sorted, vec!["A", "B"]);
     }
 
@@ -1262,7 +1301,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V1);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V1,
+        );
         assert_eq!(sorted, vec!["B", "A"]);
     }
 
@@ -1297,7 +1341,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         // A (higher PL=100) pops first (applied first, loses for same key). B pops last, wins.
         assert_eq!(sorted, vec!["A", "B"]);
     }
@@ -1333,7 +1382,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         // Best (B, larger ID) comes LAST.
         assert_eq!(sorted, vec!["A", "B"]);
     }
@@ -1369,9 +1423,24 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted_v1 = lean_kahn_sort(&events, &events, StateResVersion::V1);
-        let sorted_v2 = lean_kahn_sort(&events, &events, StateResVersion::V2);
-        let sorted_v2_1 = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
+        let sorted_v1 = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V1,
+        );
+        let sorted_v2 = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
+        let sorted_v2_1 = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2_1,
+        );
         assert_eq!(sorted_v1, vec!["B", "A"]);
         // B (higher power level) pops FIRST in V2 and V2.1 — applied first, loses for same key.
         assert_eq!(sorted_v2, vec!["B", "A"]);
@@ -1409,7 +1478,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         assert!(sorted.is_empty());
     }
 
@@ -1550,7 +1624,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted_ids = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted_ids = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         // 1 pops first (only one with in-degree 0).
         // Then 2 and 3 are in queue. 3 has earlier TS (15, worse) so it pops FIRST.
         // Then 2 (TS 20, better — later wins) pops LAST.
@@ -1575,7 +1654,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         assert_eq!(sorted, vec!["A"]);
     }
 
@@ -1722,7 +1806,12 @@ mod tests {
                 },
             );
         }
-        let result = lean_kahn_sort(&events, &events, version);
+        let result = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            version,
+        );
         assert_eq!(
             result,
             expected.iter().map(|s| s.to_string()).collect::<Vec<_>>()
@@ -1774,7 +1863,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         let mut resolved_state = BTreeMap::new();
         for id in sorted {
             let ev = events.get(&id).unwrap();
@@ -1873,7 +1967,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V1);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V1,
+        );
         assert_eq!(sorted, vec!["B", "A"]);
     }
 
@@ -1894,7 +1993,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         assert_eq!(sorted, vec!["1"]);
     }
 
@@ -1915,7 +2019,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2_1,
+        );
         assert_eq!(sorted, vec!["A"]);
     }
 
@@ -1950,11 +2059,21 @@ mod tests {
             },
         );
         // Earlier ts pops first (worse), later ts comes last (wins).
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2_1,
+        );
         assert_eq!(sorted, vec!["$early", "$late"]);
 
         // V2 must match V2_1
-        let sorted_v2 = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted_v2 = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         assert_eq!(sorted_v2, vec!["$early", "$late"]);
     }
 
@@ -1988,10 +2107,20 @@ mod tests {
             },
         );
         // $ban_a (earlier ts) pops first (loses), $ban_b (later ts) comes last = wins.
-        let sorted_v2 = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted_v2 = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         assert_eq!(sorted_v2, vec!["$ban_a", "$ban_b"]);
 
-        let sorted_v2_1 = lean_kahn_sort(&events, &events, StateResVersion::V2_1);
+        let sorted_v2_1 = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2_1,
+        );
         assert_eq!(sorted_v2_1, vec!["$ban_a", "$ban_b"]);
     }
 
@@ -2147,7 +2276,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let result = lean_kahn_sort_detailed(&events, &events, StateResVersion::V2);
+        let result = lean_kahn_sort_detailed(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         match result {
             KahnSortResult::CycleDetected { sorted, stuck } => {
                 assert!(sorted.is_empty());
@@ -2194,7 +2328,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        let result = lean_kahn_sort_detailed(&events, &events, StateResVersion::V2);
+        let result = lean_kahn_sort_detailed(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         match result {
             KahnSortResult::CycleDetected { sorted, stuck } => {
                 assert_eq!(sorted, vec!["C"]);
@@ -2271,7 +2410,12 @@ mod tests {
                 },
             );
         }
-        let sorted = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         assert_eq!(sorted.len(), 1000);
         // First element must be ev_0 (in-degree 0)
         assert_eq!(sorted[0], "ev_0");
@@ -2426,7 +2570,12 @@ mod tests {
         events.insert("$o".into(), default_test_event("$o", 0, 0, vec![]));
         events.insert("$p".into(), default_test_event("$p", 0, 0, vec!["$o"]));
 
-        let sorted_ids = lean_kahn_sort(&events, &events, StateResVersion::V2);
+        let sorted_ids = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
         // All events have same PL=0 and ts=0, so tie-break is by event_id.
         // Smaller id pops first (loses). Sorted: $o (root), then $l < $n < $p in id order,
         // $m waits for $n. After $n pops, $m becomes eligible and beats $p ("m" > "p"? no:

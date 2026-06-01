@@ -45,7 +45,8 @@ const FIXTURE_DIR: &str = "ruma/crates/ruma-state-res/tests/it/resolve/fixtures"
 
 fn sort_and_verify(events: &[LeanEvent], version: StateResVersion) -> Vec<String> {
     let map = to_event_map(events);
-    let result = ruma_lean::lean_kahn_sort_detailed(&map, &map, version);
+    let create_ev = events.iter().find(|ev| ev.event_type == "m.room.create");
+    let result = ruma_lean::lean_kahn_sort_detailed(&map, &map, create_ev, version);
     assert!(result.is_ok(), "Cycle detected during sort");
     result.into_sorted()
 }

@@ -1013,7 +1013,10 @@ fn apply_global_power_levels(
         }
     }
 
-    let sorted_power_ids = ruma_lean::lean_kahn_sort(&power_events, events_map, version);
+    let create_ev = events_map
+        .values()
+        .find(|ev| ev.event_type == "m.room.create");
+    let sorted_power_ids = ruma_lean::lean_kahn_sort(&power_events, events_map, create_ev, version);
     let mut resolved_power_state = std::collections::BTreeMap::new();
     for id in sorted_power_ids {
         if let Some(ev) = power_events.get(&id) {
