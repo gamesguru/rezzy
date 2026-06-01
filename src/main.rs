@@ -555,21 +555,21 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
     }
 
     let mut conflicted_events = HashMap::new();
-    // 1. Add conflicted state set
+    // Add conflicted state set
     for id in &conflicted_state_set {
         if let Some(ev) = events_map.get(id) {
             conflicted_events.insert(id.clone(), ev.clone());
         }
     }
 
-    // 2. Add auth difference
+    // Add auth difference
     for id in &auth_difference {
         if let Some(ev) = events_map.get(id) {
             conflicted_events.insert(id.clone(), ev.clone());
         }
     }
 
-    // 3. Add conflicted state subgraph (MSC4297 / v2.1+)
+    // Add conflicted state subgraph (MSC4297 / v2.1+)
     if version == StateResVersion::V2_1 || version == StateResVersion::V2_2 {
         let subgraph =
             ruma_lean::compute_v2_1_conflicted_subgraph(&events_map, &conflicted_state_set);

@@ -15,7 +15,7 @@
 \maketitle
 
 \begin{abstract}
-Matrix State Resolution v2 is the bedrock of decentralized consensus in the Matrix protocol. However, as rooms scale to hundreds of thousands of events and deep federation forks, the algorithm's performance degrades and edge-case vulnerabilities emerge. We present State Resolution v2.2, which introduces the ``Transitive'' supplemental merge to eliminate the Power Level Replay vulnerability (CVE-2026-XXXXX) while maintaining Spec-compliant behavior. Furthermore, we describe a high-performance implementation utilizing Roaring Bitmaps and memoized auth contexts, and a Lean 4 formalization that enables Zero-Knowledge STARK proofs of room state.
+Matrix State Resolution v2 is the bedrock of decentralized consensus in the Matrix protocol. However, as rooms scale to hundreds of thousands of events and deep federation forks, the algorithm's performance degrades and edge-case vulnerabilities emerge. We present State Resolution v2.2, which introduces the ``Goldilographical'' supplemental merge to eliminate the Power Level Replay vulnerability (CVE-2026-XXXXX) while maintaining Spec-compliant behavior. Furthermore, we describe a high-performance implementation utilizing Roaring Bitmaps and memoized auth contexts, and a Lean 4 formalization that enables Zero-Knowledge STARK proofs of room state.
 \end{abstract}
 
 \section{Introduction}
@@ -24,7 +24,7 @@ State Resolution is the process by which multiple homeservers in a Matrix room r
 \section{The Power Level Replay Vulnerability}
 In State Resolution v2.1 (MSC4297), the introduction of a supplemental merge to stabilize room state inadvertently opened a window for ``Time-Travel'' attacks. A demoted administrator could craft a malicious event citing their historical (elevated) power levels.
 
-\section{State Resolution v2.2: The Transitive Fix}
+\section{State Resolution v2.2: The Goldilographical Fix}
 State Res v2.2 solves this by restricting the supplemental merge to \textit{ancestor} power levels only. An event $e$ can only authenticate against a resolved power level $PL_{resolved}$ if $PL_{resolved}$ is already present in the recursive auth chain of $e$.
 
 \section{Performance Optimizations}

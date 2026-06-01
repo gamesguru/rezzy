@@ -507,14 +507,16 @@ impl<'a> Ord for SortPriority<'a> {
                 // setting auth context before lower-PL events are checked — this is what
                 // makes Alice's ban appear before Bob's concurrent PL change).
                 match self.power_level.cmp(&other.power_level) {
-                    Ordering::Equal => match other
-                        .event
-                        .origin_server_ts
-                        .cmp(&self.event.origin_server_ts)
-                    {
-                        Ordering::Equal => other.event.event_id.cmp(&self.event.event_id),
-                        ord => ord,
-                    },
+                    Ordering::Equal => {
+                        match other
+                            .event
+                            .origin_server_ts
+                            .cmp(&self.event.origin_server_ts)
+                        {
+                            Ordering::Equal => other.event.event_id.cmp(&self.event.event_id),
+                            ord => ord,
+                        }
+                    }
                     ord => ord,
                 }
             }
@@ -640,11 +642,22 @@ pub fn resolve_lean(
     version: StateResVersion,
 ) -> BTreeMap<(String, Option<String>), String> {
     // Build a merged lookup map for sort/mainline operations.
+    // auth_context intentionally excludes events that are in conflicted_events;
+    // however, a conflicted event (e.g. $01-power_levels) may appear in the
+    // auth_events chain of another conflicted event ($02), so PL lookups during
+    // sorting must be able to find it.  iterative_auth_ok already checks both
+    // maps independently — we only need to merge here for the sort phases.
     let sort_context: HashMap<String, LeanEvent> = auth_context
         .iter()
         .chain(conflicted_events.iter())
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+
+    // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
+    let mut resolved = match version {
+        StateResVersion::V2_1 | StateResVersion::V2_2 => BTreeMap::new(),
+        _ => unconflicted_state.clone(),
+    };
 
     let sort_set = &conflicted_events;
 
@@ -669,21 +682,26 @@ pub fn resolve_lean(
         .chain(sort_set.values())
         .find(|ev| ev.event_type == "m.room.create");
 
-    let mut context = ResolutionContext::new(
-        unconflicted_state.clone(),
-        auth_context,
-        &conflicted_events,
-        create_ev,
-        version,
-    );
+    // Step 1: Sort power events by reverse topological power ordering (Kahn sort)
+    // Step 2: Apply iterative auth checks (per spec & Ruma implementation)
+    let mut local_auth_cache: HashMap<String, BTreeMap<(String, Option<String>), LeanEvent>> =
+        HashMap::new();
 
-    // Step 1 & 2: Sort power events and apply iterative auth checks
     let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, create_ev, version);
     for id in &sorted_power_ids {
         if let Some(event) = sort_set.get(id) {
-            let local_auth = context.compute_local_auth(event);
-            if context.iterative_auth_ok(event, local_auth) {
-                context.resolved.insert(
+            let local_auth =
+                compute_local_auth(event, auth_context, sort_set, &mut local_auth_cache);
+            if iterative_auth_ok(
+                event,
+                &resolved,
+                auth_context,
+                sort_set,
+                local_auth,
+                create_ev,
+                version,
+            ) {
+                resolved.insert(
                     (event.event_type.clone(), event.state_key.clone()),
                     event.event_id.clone(),
                 );
@@ -692,16 +710,24 @@ pub fn resolve_lean(
     }
 
     // Step 3: Build the power-level mainline for mainline sort
-    let mainline = build_mainline(&context.resolved, &sort_context);
+    let mainline = build_mainline(&resolved, &sort_context);
 
     // Step 4: Sort non-power events by mainline ordering + iterative auth check
     let mut non_power_list: Vec<&LeanEvent> = non_power_events.values().collect();
     mainline_sort(&mut non_power_list, &mainline, &sort_context);
 
     for ev in non_power_list {
-        let local_auth = context.compute_local_auth(ev);
-        if context.iterative_auth_ok(ev, local_auth) {
-            context.resolved.insert(
+        let local_auth = compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache);
+        if iterative_auth_ok(
+            ev,
+            &resolved,
+            auth_context,
+            sort_set,
+            local_auth,
+            create_ev,
+            version,
+        ) {
+            resolved.insert(
                 (ev.event_type.clone(), ev.state_key.clone()),
                 ev.event_id.clone(),
             );
@@ -709,7 +735,7 @@ pub fn resolve_lean(
     }
 
     let mut final_resolved = unconflicted_state;
-    for (k, v) in context.resolved {
+    for (k, v) in resolved {
         final_resolved.insert(k, v);
     }
     final_resolved
@@ -731,7 +757,7 @@ impl<'a> crate::auth::StateProvider for OverlayState<'a> {
         // Supplemental Merge:
         // In V2, we supplement with ALL auth types from the resolved state.
         // In V2.1 (Stock MSC4297), we supplement with ONLY m.room.power_levels.
-        // In V2.2 (Transitive), we supplement with ONLY m.room.power_levels
+        // In V2.2 (Goldilographical), we supplement with ONLY m.room.power_levels
         // if they are also ancestors (present in the local auth chain).
         let should_supplement = match self.version {
             StateResVersion::V2_2 => {
@@ -767,100 +793,72 @@ impl<'a> crate::auth::StateProvider for OverlayState<'a> {
 
 /// Targeted iterative auth check. Per Matrix spec, the auth context for event 'e'
 /// consists of the events in the conflict set (E) and the currently resolved state (S).
-struct ResolutionContext<'a> {
-    resolved: BTreeMap<(String, Option<String>), String>,
-    auth_context: &'a HashMap<String, LeanEvent>,
-    conflicted: &'a HashMap<String, LeanEvent>,
-    local_auth_cache: HashMap<String, BTreeMap<(String, Option<String>), LeanEvent>>,
-    create_ev: Option<&'a LeanEvent>,
+fn iterative_auth_ok(
+    event: &LeanEvent,
+    resolved: &BTreeMap<(String, Option<String>), String>,
+    auth_context: &HashMap<String, LeanEvent>,
+    conflicted_events: &HashMap<String, LeanEvent>,
+    local_auth: BTreeMap<(String, Option<String>), LeanEvent>,
+    cached_create: Option<&LeanEvent>,
     version: StateResVersion,
+) -> bool {
+    let overlay = OverlayState {
+        resolved,
+        auth_context,
+        conflicted: conflicted_events,
+        local_auth,
+        create_ev: cached_create,
+        version,
+    };
+
+    crate::auth::check_auth(event, &overlay).is_ok()
 }
 
-impl<'a> ResolutionContext<'a> {
-    fn new(
-        unconflicted_state: BTreeMap<(String, Option<String>), String>,
-        auth_context: &'a HashMap<String, LeanEvent>,
-        conflicted: &'a HashMap<String, LeanEvent>,
-        create_ev: Option<&'a LeanEvent>,
-        version: StateResVersion,
-    ) -> Self {
-        // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
-        let resolved = match version {
-            StateResVersion::V2_1 | StateResVersion::V2_2 => BTreeMap::new(),
-            _ => unconflicted_state,
-        };
+/// Recursively compute the local auth context for an event, using memoization
+/// to avoid redundant graph walks. The context is represented as a map of
+/// (type, state_key) -> LeanEvent, ensuring that for each key, the "closest"
+/// auth event in the chain is preserved.
+fn compute_local_auth(
+    event: &LeanEvent,
+    auth_context: &HashMap<String, LeanEvent>,
+    conflicted_events: &HashMap<String, LeanEvent>,
+    cache: &mut HashMap<String, BTreeMap<(String, Option<String>), LeanEvent>>,
+) -> BTreeMap<(String, Option<String>), LeanEvent> {
+    if let Some(cached) = cache.get(&event.event_id) {
+        return cached.clone();
+    }
 
-        Self {
-            resolved,
-            auth_context,
-            conflicted,
-            local_auth_cache: HashMap::new(),
-            create_ev,
-            version,
+    let mut local_auth = BTreeMap::new();
+    let mut queue = alloc::collections::VecDeque::new();
+    queue.extend(event.auth_events.iter().cloned());
+    let mut visited = BTreeSet::new();
+
+    while let Some(aid) = queue.pop_front() {
+        if !visited.insert(aid.clone()) {
+            continue;
+        }
+
+        // If we have the context for this ancestor cached, we can merge it and stop walking this branch.
+        if let Some(cached_ancestor) = cache.get(&aid) {
+            for (key, ev) in cached_ancestor {
+                local_auth.entry(key.clone()).or_insert_with(|| ev.clone());
+            }
+            continue;
+        }
+
+        if let Some(aev) = auth_context
+            .get(&aid)
+            .or_else(|| conflicted_events.get(&aid))
+        {
+            let key = (aev.event_type.clone(), aev.state_key.clone());
+            local_auth.entry(key).or_insert_with(|| aev.clone());
+            queue.extend(aev.auth_events.iter().cloned());
         }
     }
 
-    fn iterative_auth_ok(
-        &mut self,
-        event: &LeanEvent,
-        local_auth: BTreeMap<(String, Option<String>), LeanEvent>,
-    ) -> bool {
-        let overlay = OverlayState {
-            resolved: &self.resolved,
-            auth_context: self.auth_context,
-            conflicted: self.conflicted,
-            local_auth,
-            create_ev: self.create_ev,
-            version: self.version,
-        };
-
-        crate::auth::check_auth(event, &overlay).is_ok()
-    }
-
-    fn compute_local_auth(
-        &mut self,
-        event: &LeanEvent,
-    ) -> BTreeMap<(String, Option<String>), LeanEvent> {
-        if let Some(cached) = self.local_auth_cache.get(&event.event_id) {
-            return cached.clone();
-        }
-
-        let mut local_auth = BTreeMap::new();
-        let mut queue = alloc::collections::VecDeque::new();
-        queue.extend(event.auth_events.iter().cloned());
-        let mut visited = BTreeSet::new();
-
-        while let Some(aid) = queue.pop_front() {
-            if !visited.insert(aid.clone()) {
-                continue;
-            }
-
-            // If we have the context for this ancestor cached, we can merge it and stop walking this branch.
-            if let Some(cached_ancestor) = self.local_auth_cache.get(&aid) {
-                for (key, ev) in cached_ancestor {
-                    local_auth.entry(key.clone()).or_insert_with(|| ev.clone());
-                }
-                continue;
-            }
-
-            if let Some(aev) = self
-                .auth_context
-                .get(&aid)
-                .or_else(|| self.conflicted.get(&aid))
-            {
-                let key = (aev.event_type.clone(), aev.state_key.clone());
-                local_auth.entry(key).or_insert_with(|| aev.clone());
-                queue.extend(aev.auth_events.iter().cloned());
-            }
-        }
-
-        self.local_auth_cache
-            .insert(event.event_id.clone(), local_auth.clone());
-        local_auth
-    }
+    cache.insert(event.event_id.clone(), local_auth.clone());
+    local_auth
 }
-
-/// Build the power-level mainline: the chain of m.room.power_levels events
 /// from the resolved PL event backwards through auth_events.
 fn build_mainline(
     resolved: &BTreeMap<(String, Option<String>), String>,
