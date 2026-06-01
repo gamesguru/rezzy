@@ -922,6 +922,24 @@ fn compute_local_auth(
         }
 
         if let Some(cached_ancestor) = cache.get(&aid) {
+            // The cache only contains the parents of `aid`. We must also insert `aid` itself!
+            if let Some(aev) = auth_context
+                .get(&aid)
+                .or_else(|| conflicted_events.get(&aid))
+            {
+                let key = (aev.event_type.clone(), aev.state_key.clone());
+                match local_auth.entry(key) {
+                    alloc::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert((aev.clone(), current_depth));
+                    }
+                    alloc::collections::btree_map::Entry::Occupied(mut e) => {
+                        if current_depth < e.get().1 {
+                            e.insert((aev.clone(), current_depth));
+                        }
+                    }
+                }
+            }
+
             for (key, (ev, cached_depth)) in cached_ancestor {
                 let total_depth = current_depth + cached_depth;
                 match local_auth.entry(key.clone()) {

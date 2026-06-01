@@ -78,6 +78,10 @@ name = "sanity"
 path = "tests/sanity.rs"
 
 [[test]]
+name = "hashing"
+path = "tests/hashing.rs"
+
+[[test]]
 name = "large_rooms"
 path = "tests/large_rooms.rs"
 
