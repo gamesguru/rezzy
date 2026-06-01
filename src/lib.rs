@@ -403,7 +403,8 @@ struct SortPriority<'a> {
 
 const MAX_POWER_LEVEL: i64 = 9007199254740991; // 2^53 - 1
 
-/// Dynamically fetches the sender's power level by recursively walking the event's auth chain.
+/// Dynamically fetches the sender's power level by inspecting the event's immediate auth_events.
+/// Recursive traversal of the auth chain is avoided to prevent bypassing immediate restrictions.
 fn get_power_level_from_auth_chain(
     event: &LeanEvent,
     auth_context: &HashMap<String, LeanEvent>,
@@ -411,17 +412,9 @@ fn get_power_level_from_auth_chain(
     let mut pl_event = None;
     let mut create_event = None;
 
-    // Use a work queue to walk the auth chain recursively.
-    let mut queue = Vec::new();
-    queue.extend(event.auth_events.iter().cloned());
-    let mut visited = BTreeSet::new();
-
-    while let Some(aid) = queue.pop() {
-        if !visited.insert(aid.clone()) {
-            continue;
-        }
-
-        if let Some(aev) = auth_context.get(&aid) {
+    // Spec compliance: only check immediate auth_events.
+    for aid in &event.auth_events {
+        if let Some(aev) = auth_context.get(aid) {
             if aev.event_type == "m.room.power_levels" && aev.state_key.as_deref() == Some("") {
                 if pl_event.is_none() {
                     pl_event = Some(aev.clone());
@@ -432,22 +425,14 @@ fn get_power_level_from_auth_chain(
             {
                 create_event = Some(aev.clone());
             }
-
-            // Optimization: if we found both, we can stop walking.
-            if pl_event.is_some() && create_event.is_some() {
-                break;
-            }
-
-            // Continue walking up the auth chain.
-            queue.extend(aev.auth_events.iter().cloned());
         }
     }
 
-    // Explicitly find m.room.create if it wasn't in the auth chain (V12+ behavior)
+    // Explicitly find m.room.create if it wasn't in the immediate auth_events (V12+ behavior)
     if create_event.is_none() {
         create_event = auth_context
             .values()
-            .find(|ev| ev.event_type == "m.room.create")
+            .find(|ev| ev.event_type == "m.room.create" && ev.state_key.as_deref() == Some(""))
             .cloned();
     }
 

@@ -1,5 +1,5 @@
 use clap::{Parser, ValueEnum};
-use ruma_lean::{lean_kahn_sort, LeanEvent, StateResVersion};
+use ruma_lean::{LeanEvent, StateResVersion};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
@@ -497,57 +497,8 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
         maps
     };
 
-    let mut power_events = HashMap::new();
-    let power_event_types = [
-        "m.room.create",
-        "m.room.power_levels",
-        "m.room.join_rules",
-        "m.room.member",
-    ];
-    for ev in events_map.values() {
-        if power_event_types.contains(&ev.event_type.as_str()) {
-            let mut power_ev = ev.clone();
-            if (!creator_user_id.is_empty() && ev.sender == creator_user_id)
-                || ev.event_type == "m.room.create"
-            {
-                power_ev.power_level = 100;
-            } else {
-                power_ev.power_level = 0;
-            }
-            power_events.insert(ev.event_id.clone(), power_ev);
-        }
-    }
-
-    let sorted_power_ids = lean_kahn_sort(&power_events, &events_map, version);
-    let mut resolved_power_state = std::collections::BTreeMap::new();
-    for id in sorted_power_ids {
-        let ev = power_events.get(&id).unwrap();
-        resolved_power_state.insert((ev.event_type.clone(), ev.state_key.clone()), id);
-    }
-
-    let mut user_power_levels = HashMap::new();
-    let mut default_power_level = 0;
-    if let Some(id) =
-        resolved_power_state.get(&("m.room.power_levels".to_string(), Some("".to_string())))
-    {
-        if let Some(ev) = events_map.get(id) {
-            if let Some(users) = ev.content.get("users").and_then(|u| u.as_object()) {
-                for (user_id, pl) in users {
-                    if let Some(pl_val) = pl.as_i64() {
-                        user_power_levels.insert(user_id.clone(), pl_val);
-                    }
-                }
-            }
-            if let Some(pl_val) = ev.content.get("users_default").and_then(|v| v.as_i64()) {
-                default_power_level = pl_val;
-            }
-        }
-    }
-
-    for ev in events_map.values_mut() {
-        ev.power_level = *user_power_levels
-            .get(&ev.sender)
-            .unwrap_or(&default_power_level);
+    if version != ruma_lean::StateResVersion::V2_1 {
+        apply_global_power_levels(&mut events_map, &creator_user_id, version);
     }
 
     let start = Instant::now();
@@ -564,33 +515,70 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
     }
 
     let mut unconflicted_state = std::collections::BTreeMap::new();
-    let mut conflicted_events = HashMap::new();
+    let mut conflicted_state_set = Vec::new();
+
     for (key, ids) in occurrences {
         if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
             // All heads agree on this event ID for this key
             let id = ids.keys().next().unwrap();
             unconflicted_state.insert(key, id.clone());
-            if version == StateResVersion::V2_1 {
-                if let Some(ev) = events_map.get(id) {
-                    conflicted_events.insert(id.clone(), ev.clone());
-                }
-            }
         } else {
             // Heads disagree, add all events for this key to the conflicted set
             for id in ids.keys() {
-                if let Some(ev) = events_map.get(id) {
-                    conflicted_events.insert(id.clone(), ev.clone());
-                }
+                conflicted_state_set.push(id.clone());
             }
         }
     }
 
-    let final_state_map = ruma_lean::resolve_lean(
-        unconflicted_state,
-        conflicted_events.clone(),
-        &events_map,
-        version,
-    );
+    // Auth difference: events in the auth chain of at least one head, but not all heads.
+    let mut auth_chains = Vec::new();
+    for head_id in &heads {
+        let chain = compute_auth_chain(std::slice::from_ref(head_id), &events_map);
+        let chain_set: std::collections::HashSet<String> = chain.into_iter().collect();
+        auth_chains.push(chain_set);
+    }
+
+    let mut auth_difference = std::collections::HashSet::new();
+    if !auth_chains.is_empty() {
+        let mut union = std::collections::HashSet::new();
+        let mut intersection = auth_chains[0].clone();
+
+        for chain in &auth_chains {
+            union.extend(chain.clone());
+            intersection.retain(|id| chain.contains(id));
+        }
+
+        for id in union.difference(&intersection) {
+            auth_difference.insert(id.clone());
+        }
+    }
+
+    let mut conflicted_events = HashMap::new();
+    // 1. Add conflicted state set
+    for id in &conflicted_state_set {
+        if let Some(ev) = events_map.get(id) {
+            conflicted_events.insert(id.clone(), ev.clone());
+        }
+    }
+
+    // 2. Add auth difference
+    for id in &auth_difference {
+        if let Some(ev) = events_map.get(id) {
+            conflicted_events.insert(id.clone(), ev.clone());
+        }
+    }
+
+    // 3. Add conflicted state subgraph (MSC4297 / v2.1)
+    if version == StateResVersion::V2_1 {
+        let subgraph =
+            ruma_lean::compute_v2_1_conflicted_subgraph(&events_map, &conflicted_state_set);
+        for (id, ev) in subgraph {
+            conflicted_events.insert(id, ev);
+        }
+    }
+
+    let final_state_map =
+        ruma_lean::resolve_lean(unconflicted_state, conflicted_events, &events_map, version);
 
     let duration = start.elapsed();
 
@@ -995,6 +983,66 @@ fn main() {
             eprintln!();
             std::process::exit(1);
         }
+    }
+}
+
+fn apply_global_power_levels(
+    events_map: &mut HashMap<String, ruma_lean::LeanEvent>,
+    creator_user_id: &str,
+    version: ruma_lean::StateResVersion,
+) {
+    let mut power_events = HashMap::new();
+    let power_event_types = [
+        "m.room.create",
+        "m.room.power_levels",
+        "m.room.join_rules",
+        "m.room.member",
+    ];
+    for ev in events_map.values() {
+        if power_event_types.contains(&ev.event_type.as_str()) {
+            let mut power_ev = ev.clone();
+            if (!creator_user_id.is_empty() && ev.sender == creator_user_id)
+                || ev.event_type == "m.room.create"
+            {
+                power_ev.power_level = 100;
+            } else {
+                power_ev.power_level = 0;
+            }
+            power_events.insert(ev.event_id.clone(), power_ev);
+        }
+    }
+
+    let sorted_power_ids = ruma_lean::lean_kahn_sort(&power_events, events_map, version);
+    let mut resolved_power_state = std::collections::BTreeMap::new();
+    for id in sorted_power_ids {
+        if let Some(ev) = power_events.get(&id) {
+            resolved_power_state.insert((ev.event_type.clone(), ev.state_key.clone()), id);
+        }
+    }
+
+    let mut user_power_levels = HashMap::new();
+    let mut default_power_level = 0;
+    if let Some(id) =
+        resolved_power_state.get(&("m.room.power_levels".to_string(), Some("".to_string())))
+    {
+        if let Some(ev) = events_map.get(id) {
+            if let Some(users) = ev.content.get("users").and_then(|u| u.as_object()) {
+                for (user_id, pl) in users {
+                    if let Some(pl_val) = pl.as_i64() {
+                        user_power_levels.insert(user_id.clone(), pl_val);
+                    }
+                }
+            }
+            if let Some(pl_val) = ev.content.get("users_default").and_then(|v| v.as_i64()) {
+                default_power_level = pl_val;
+            }
+        }
+    }
+
+    for ev in events_map.values_mut() {
+        ev.power_level = *user_power_levels
+            .get(&ev.sender)
+            .unwrap_or(&default_power_level);
     }
 }
 
