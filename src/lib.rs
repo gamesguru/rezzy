@@ -694,7 +694,7 @@ pub fn resolve_lean(
     let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, version);
     for id in &sorted_power_ids {
         if let Some(event) = sort_set.get(id) {
-            if iterative_auth_ok(event, &resolved, auth_context, sort_set, create_ev) {
+            if iterative_auth_ok(event, &resolved, auth_context, sort_set, create_ev, version) {
                 resolved.insert(
                     (event.event_type.clone(), event.state_key.clone()),
                     event.event_id.clone(),
@@ -711,7 +711,7 @@ pub fn resolve_lean(
     mainline_sort(&mut non_power_list, &mainline, &sort_context);
 
     for ev in non_power_list {
-        if iterative_auth_ok(ev, &resolved, auth_context, sort_set, create_ev) {
+        if iterative_auth_ok(ev, &resolved, auth_context, sort_set, create_ev, version) {
             resolved.insert(
                 (ev.event_type.clone(), ev.state_key.clone()),
                 ev.event_id.clone(),
@@ -732,18 +732,40 @@ struct OverlayState<'a> {
     conflicted: &'a HashMap<String, LeanEvent>,
     local_auth: BTreeMap<(String, Option<String>), LeanEvent>,
     create_ev: Option<&'a LeanEvent>,
+    version: StateResVersion,
 }
 
 impl<'a> crate::auth::StateProvider for OverlayState<'a> {
     fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent> {
         let query: &dyn crate::auth::StateKeyDyn = &(event_type, state_key);
-        // Check consensus resolved state
-        if let Some(eid) = self.resolved.get(query) {
-            return self
-                .auth_context
-                .get(eid)
-                .or_else(|| self.conflicted.get(eid));
+
+        // Supplemental Merge (The "Goldilocks" fix for v2.1):
+        // In V2, we supplement with ALL auth types from the resolved state.
+        // In V2.1 (MSC4297), we supplement with ONLY m.room.power_levels.
+        //
+        // SECURITY FIX (CVE-2026-XXXXX): To prevent "Time-Travel Promotions",
+        // we must limit the supplemental merge to "past" power levels only.
+        // We only use the resolved version of a PL event if it is an ancestor
+        // (already present in the event's recursive local_auth chain).
+        let should_supplement = match self.version {
+            StateResVersion::V2_1 => {
+                event_type == "m.room.power_levels"
+                    && state_key == Some("")
+                    && self.local_auth.contains_key(query)
+            }
+            _ => true,
+        };
+
+        if should_supplement {
+            // Check consensus resolved state
+            if let Some(eid) = self.resolved.get(query) {
+                return self
+                    .auth_context
+                    .get(eid)
+                    .or_else(|| self.conflicted.get(eid));
+            }
         }
+
         // Check local auth chain (BFS result)
         if let Some(ev) = self.local_auth.get(query) {
             return Some(ev);
@@ -764,6 +786,7 @@ fn iterative_auth_ok(
     auth_context: &HashMap<String, LeanEvent>,
     conflicted_events: &HashMap<String, LeanEvent>,
     cached_create: Option<&LeanEvent>,
+    version: StateResVersion,
 ) -> bool {
     let mut overlay = OverlayState {
         resolved,
@@ -771,6 +794,7 @@ fn iterative_auth_ok(
         conflicted: conflicted_events,
         local_auth: BTreeMap::new(),
         create_ev: cached_create,
+        version,
     };
 
     // 2. Supplement with events from the event's own RECURSIVE auth chain (from E union S).
@@ -791,10 +815,10 @@ fn iterative_auth_ok(
             .or_else(|| conflicted_events.get(&aid))
         {
             let key = (aev.event_type.clone(), aev.state_key.clone());
-            // Speed up iterations by only inserting to local_auth if consensus lacks it
-            if !resolved.contains_key(&key) {
-                overlay.local_auth.entry(key).or_insert_with(|| aev.clone());
-            }
+            // Insert to local_auth to ensure we have the auth chain events available
+            // if the supplemental merge skips them (V2.1).
+            overlay.local_auth.entry(key).or_insert_with(|| aev.clone());
+
             // Walk up to find the membership/PL/create events if not already found.
             queue.extend(aev.auth_events.iter().cloned());
         }
