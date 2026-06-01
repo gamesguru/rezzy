@@ -767,8 +767,13 @@ pub fn resolve_lean(
     let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, create_ev, version);
     for id in &sorted_power_ids {
         if let Some(event) = sort_set.get(id) {
-            let local_auth =
-                compute_local_auth(event, auth_context, sort_set, &mut local_auth_cache);
+            let local_auth = compute_local_auth(
+                event,
+                auth_context,
+                sort_set,
+                &mut local_auth_cache,
+                version,
+            );
             if iterative_auth_ok(
                 event,
                 &resolved,
@@ -794,7 +799,8 @@ pub fn resolve_lean(
     mainline_sort(&mut non_power_list, &mainline, &sort_context);
 
     for ev in non_power_list {
-        let local_auth = compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache);
+        let local_auth =
+            compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache, version);
         if iterative_auth_ok(
             ev,
             &resolved,
@@ -900,6 +906,7 @@ fn compute_local_auth(
     auth_context: &HashMap<String, LeanEvent>,
     conflicted_events: &HashMap<String, LeanEvent>,
     cache: &mut LocalAuthCache,
+    version: StateResVersion,
 ) -> BTreeMap<(String, Option<String>), LeanEvent> {
     if let Some(cached) = cache.get(&event.event_id) {
         return cached
@@ -972,8 +979,12 @@ fn compute_local_auth(
                 }
             }
 
-            for parent_id in &aev.auth_events {
-                queue.push_back((parent_id.clone(), current_depth + 1));
+            // Recursive traversal is NEW in V2.2.
+            // For V2.1 and below, we only check the immediate auth_events.
+            if version == StateResVersion::V2_2 {
+                for parent_id in &aev.auth_events {
+                    queue.push_back((parent_id.clone(), current_depth + 1));
+                }
             }
         }
     }

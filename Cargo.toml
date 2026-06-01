@@ -82,6 +82,10 @@ name = "hashing"
 path = "tests/hashing.rs"
 
 [[test]]
+name = "traversal"
+path = "tests/traversal.rs"
+
+[[test]]
 name = "large_rooms"
 path = "tests/large_rooms.rs"
 
