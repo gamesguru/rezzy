@@ -268,6 +268,7 @@ pub enum StateResVersion {
     V1,
     V2,
     V2_1,
+    V2_2,
 }
 
 /// Result of Kahn's topological sort with diagnostic information.
@@ -501,7 +502,7 @@ impl<'a> Ord for SortPriority<'a> {
                     ord => ord,
                 }
             }
-            StateResVersion::V2 | StateResVersion::V2_1 => {
+            StateResVersion::V2 | StateResVersion::V2_1 | StateResVersion::V2_2 => {
                 // V2 reverse topological power ordering: worst events pop FIRST.
                 //
                 // Ruma uses Reverse(TieBreaker) on a BinaryHeap where TieBreaker.cmp is:
@@ -660,9 +661,9 @@ pub fn resolve_lean(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    // MSC4297 (v2.1): The algorithm starts from an empty set of state.
+    // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
     let mut resolved = match version {
-        StateResVersion::V2_1 => BTreeMap::new(),
+        StateResVersion::V2_1 | StateResVersion::V2_2 => BTreeMap::new(),
         _ => unconflicted_state.clone(),
     };
 
@@ -739,20 +740,18 @@ impl<'a> crate::auth::StateProvider for OverlayState<'a> {
     fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent> {
         let query: &dyn crate::auth::StateKeyDyn = &(event_type, state_key);
 
-        // Supplemental Merge (The "Goldilocks" fix for v2.1):
+        // Supplemental Merge:
         // In V2, we supplement with ALL auth types from the resolved state.
-        // In V2.1 (MSC4297), we supplement with ONLY m.room.power_levels.
-        //
-        // SECURITY FIX (CVE-2026-XXXXX): To prevent "Time-Travel Promotions",
-        // we must limit the supplemental merge to "past" power levels only.
-        // We only use the resolved version of a PL event if it is an ancestor
-        // (already present in the event's recursive local_auth chain).
+        // In V2.1 (Stock MSC4297), we supplement with ONLY m.room.power_levels.
+        // In V2.2 (Transitive), we supplement with ONLY m.room.power_levels
+        // if they are also ancestors (present in the local auth chain).
         let should_supplement = match self.version {
-            StateResVersion::V2_1 => {
+            StateResVersion::V2_2 => {
                 event_type == "m.room.power_levels"
                     && state_key == Some("")
                     && self.local_auth.contains_key(query)
             }
+            StateResVersion::V2_1 => event_type == "m.room.power_levels" && state_key == Some(""),
             _ => true,
         };
 

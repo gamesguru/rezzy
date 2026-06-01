@@ -55,6 +55,7 @@ fn parse_room_version(ver: &str) -> anyhow::Result<StateResVersion> {
         "1" => Ok(StateResVersion::V1),
         "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" => Ok(StateResVersion::V2),
         "12" => Ok(StateResVersion::V2_1),
+        "12.1" | "13" => Ok(StateResVersion::V2_2),
         _ => anyhow::bail!("Unsupported room version: {ver}"),
     }
 }
@@ -497,7 +498,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
         maps
     };
 
-    if version != ruma_lean::StateResVersion::V2_1 {
+    if version != ruma_lean::StateResVersion::V2_1 && version != ruma_lean::StateResVersion::V2_2 {
         apply_global_power_levels(&mut events_map, &creator_user_id, version);
     }
 
@@ -568,8 +569,8 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
         }
     }
 
-    // 3. Add conflicted state subgraph (MSC4297 / v2.1)
-    if version == StateResVersion::V2_1 {
+    // 3. Add conflicted state subgraph (MSC4297 / v2.1+)
+    if version == StateResVersion::V2_1 || version == StateResVersion::V2_2 {
         let subgraph =
             ruma_lean::compute_v2_1_conflicted_subgraph(&events_map, &conflicted_state_set);
         for (id, ev) in subgraph {

@@ -152,7 +152,6 @@ fn test_large_room_10k_v2_1_sort() {
 }
 
 #[test]
-#[ignore]
 fn test_large_room_10k_resolution_determinism() {
     let events = load_large_room();
     let r1 = resolve_lean(
@@ -171,7 +170,6 @@ fn test_large_room_10k_resolution_determinism() {
 }
 
 #[test]
-#[ignore]
 fn test_large_room_10k_v2_vs_v2_1_divergence() {
     let events = load_large_room();
     let map = to_event_map(&events);
