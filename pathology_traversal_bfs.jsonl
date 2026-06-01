@@ -1,0 +1,6 @@
+{"type": "m.room.create", "event_id": "$create", "sender": "@alice:example.com", "origin_server_ts": 100, "content": {"creator": "@alice:example.com"}, "prev_events": [], "auth_events": []}
+{"type": "m.room.join_rules", "event_id": "$rules", "sender": "@alice:example.com", "state_key": "", "origin_server_ts": 110, "content": {"join_rule": "invite"}, "prev_events": ["$create"], "auth_events": ["$create"]}
+{"type": "m.room.member", "event_id": "$invite", "sender": "@alice:example.com", "state_key": "@bob:example.com", "origin_server_ts": 120, "content": {"membership": "invite"}, "prev_events": ["$rules"], "auth_events": ["$create", "$rules"]}
+{"type": "m.room.member", "event_id": "$join", "sender": "@bob:example.com", "state_key": "@bob:example.com", "origin_server_ts": 130, "content": {"membership": "join"}, "prev_events": ["$invite"], "auth_events": ["$create", "$rules", "$invite"]}
+{"type": "m.room.message", "event_id": "$msg_a", "sender": "@bob:example.com", "origin_server_ts": 140, "content": {"body": "hello from bob"}, "prev_events": ["$join"], "auth_events": ["$create", "$join"]}
+{"type": "m.room.topic", "event_id": "$alice_topic", "sender": "@alice:example.com", "state_key": "", "origin_server_ts": 150, "content": {"topic": "Alice's Room"}, "prev_events": ["$rules"], "auth_events": ["$create"]}
