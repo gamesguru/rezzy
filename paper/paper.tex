@@ -92,17 +92,19 @@ If an Administrator bans a malicious user, but the malicious user concurrently s
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[
-    node distance=1.5cm and 2cm,
+    node distance=1.5cm and 1.5cm,
     event/.style={rectangle, draw, rounded corners, minimum width=2.5cm, minimum height=1cm, align=center},
     auth/.style={->, dashed, thick}
 ]
 
-\node[event] (pl) {\texttt{\$pl} \\ Bob: 50};
-\node[event, right=of pl] (join) {\texttt{\$bob\_join}};
+\node[event] (create) {\texttt{\$create}};
+\node[event, right=of create] (pl) {\texttt{\$pl} \\ Bob: 50};
+\node[event, right=of pl] (join) {\texttt{\$bob\_join} \\ \texttt{m.room.member}};
 
-\node[event, above right=of join, fill=red!10] (ban) {\texttt{\$alice\_bans} \\ \texttt{\_bob}};
-\node[event, below right=of join, fill=orange!10] (name) {\texttt{\$bob\_name} \\ \texttt{\_change}};
+\node[event, above right=of join, fill=red!10] (ban) {\texttt{\$alice\_bans\_bob} \\ \texttt{m.room.member}};
+\node[event, below right=of join, fill=orange!10] (name) {\texttt{\$bob\_name\_change} \\ \texttt{m.room.name}};
 
+\draw[auth] (pl) -- (create);
 \draw[auth] (join) -- (pl);
 \draw[auth] (ban) -- (join);
 \draw[auth] (name) -- (join);
@@ -116,10 +118,10 @@ If an Administrator bans a malicious user, but the malicious user concurrently s
 
 Executing this graph through \texttt{ruma-lean} mathematically proves the vulnerability in v2.1 and the patch in v2.1.1:
 \begin{lstlisting}[basicstyle=\ttfamily\footnotesize, frame=single, caption={ruma-lean Validation: Ban Evasion}]
-$ cargo run -- --input ban_evasion.jsonl --state-res v2-1
+$ ruma-lean -i docs/ban_evasion.jsonl --state-res v2-1
 { "event_id": "$bob_name_change", "type": "m.room.name" }  <-- VULNERABLE
 
-$ cargo run -- --input ban_evasion.jsonl --state-res v2-1-1
+$ ruma-lean -i docs/ban_evasion.jsonl --state-res v2-1-1
 { "event_id": "$alice_bans_bob", "membership": "ban" }  <-- SECURE
 \end{lstlisting}
 
@@ -160,10 +162,12 @@ A separate vector, Demotion Evasion, occurs when a demoted administrator attempt
     auth/.style={->, dashed, thick}
 ]
 
-\node[event] (ancient) {\texttt{\$ancient\_pl} \\ Eve: 100};
+\node[event] (create) {\texttt{\$create}};
+\node[event, right=of create] (ancient) {\texttt{\$ancient\_pl} \\ Eve: 100};
 \node[event, right=of ancient, fill=red!10] (demote) {\texttt{\$pl\_demote} \\ Eve: 0};
-\node[event, below right=of ancient, fill=orange!10] (attack) {\texttt{\$eve\_attack} \\ (Requires 50)};
+\node[event, below right=of ancient, fill=orange!10] (attack) {\texttt{\$eve\_attack} \\ \texttt{m.room.name}};
 
+\draw[auth] (ancient) -- (create);
 \draw[auth] (demote) -- (ancient);
 \draw[auth] (attack) -- (ancient) node[pos=0.55, below, sloped] {Bypasses demotion};
 
