@@ -398,8 +398,8 @@ fn test_real_dag_nheko_room_106_heads() {
 #[test]
 fn test_unredacted_spam_storm_v2_1_1() {
     use std::io::BufRead;
-    // The unredacted spam storm broken dag case from ../../dags
-    let path = "../../dags/merged-sM2LwqNHGQOgLf35gqxPMy9D7oYde2q9ADg8HPBM3kE-unredacted-lounge-v12-d1-84135.jsonl";
+    let path =
+        ".tmp/remote-dag-sM2LwqNHGQOgLf35gqxPMy9D7oYde2q9ADg8HPBM3kE-v12-unredacted.org.jsonl";
 
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -443,16 +443,38 @@ fn test_unredacted_spam_storm_v2_1_1() {
 
     let map = to_event_map(&events);
 
-    let start = std::time::Instant::now();
-    let resolved = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1_1);
+    let start_v2 = std::time::Instant::now();
+    let resolved_v2 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2);
+    println!(
+        "V2.0 State Resolution of {} events took: {:?}",
+        events.len(),
+        start_v2.elapsed()
+    );
+
+    let start_v211 = std::time::Instant::now();
+    let resolved_v211 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1_1);
     println!(
         "V2.1.1 State Resolution of {} events took: {:?}",
         events.len(),
-        start.elapsed()
+        start_v211.elapsed()
     );
 
     assert!(
-        !resolved.is_empty(),
+        !resolved_v2.is_empty(),
+        "V2.0 Resolution should produce state for the unredacted storm"
+    );
+    assert!(
+        !resolved_v211.is_empty(),
         "V2.1.1 Resolution should produce state for the unredacted storm"
     );
+
+    let v2_pl = resolved_v2.get(&("m.room.power_levels".into(), Some("".into())));
+    let v211_pl = resolved_v211.get(&("m.room.power_levels".into(), Some("".into())));
+    if v2_pl != v211_pl {
+        println!("V2 and V2.1.1 diverged on power levels!");
+        println!("V2 PL: {:?}", v2_pl);
+        println!("V2.1.1 PL: {:?}", v211_pl);
+    } else {
+        println!("V2 and V2.1.1 produced identical power levels.");
+    }
 }

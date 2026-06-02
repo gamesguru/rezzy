@@ -66,14 +66,14 @@ fn test_pathology_duplicate_auth_poisoning() {
 }
 
 #[test]
-fn test_pathology_join_regress_broken() {
-    let path = "../dag-toolkit/pathology_join_regress_broken.jsonl";
+fn test_pathology_invite_lock() {
+    let path = "../dag-toolkit/pathology_invite_lock_simple.jsonl";
     let events = parse_jsonl_dag(path);
 
     let mut auth_context = HashMap::new();
     let mut conflicted_events = HashMap::new();
     for ev in events {
-        if ev.sender == "@nexy:B" {
+        if ev.sender == "@user:B" {
             conflicted_events.insert(ev.event_id.clone(), ev);
         } else {
             auth_context.insert(ev.event_id.clone(), ev);
@@ -87,9 +87,9 @@ fn test_pathology_join_regress_broken() {
         &auth_context,
         StateResVersion::V2_1,
     );
-    let nexy_key = ("m.room.member".to_string(), Some("@nexy:B".to_string()));
+    let user_key = ("m.room.member".to_string(), Some("@user:B".to_string()));
     assert!(
-        !resolved_v21.contains_key(&nexy_key),
+        !resolved_v21.contains_key(&user_key),
         "V2.1 dropped the user due to regression"
     );
 
@@ -103,7 +103,7 @@ fn test_pathology_join_regress_broken() {
     // In this specific DAG, V2.1.1 also drops the user because there's NO valid alternate path.
     // The test proves V2.1.1 strictly respects auth and doesn't hallucinate missing joins.
     assert!(
-        !resolved_v211.contains_key(&nexy_key),
+        !resolved_v211.contains_key(&user_key),
         "V2.1.1 correctly rejects isolated broken topologies"
     );
 }
