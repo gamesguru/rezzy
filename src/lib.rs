@@ -505,18 +505,7 @@ fn get_power_level_from_auth_chain(
         }
     }
 
-    if let Some(pl_ev) = pl_event {
-        if let Some(users) = pl_ev.content.get("users").and_then(|u| u.as_object()) {
-            if let Some(pl) = users.get(&event.sender).and_then(|p| p.as_i64()) {
-                return pl;
-            }
-        }
-        if let Some(default_pl) = pl_ev.content.get("users_default").and_then(|p| p.as_i64()) {
-            return default_pl;
-        }
-        return 0; // Default if PL event exists but no users_default
-    }
-
+    let mut is_creator = false;
     if let Some(create_ev) = create_ev {
         let is_primary_creator = create_ev.sender == event.sender;
         let mut is_additional_creator = false;
@@ -541,11 +530,27 @@ fn get_power_level_from_auth_chain(
         }
 
         if is_primary_creator || is_additional_creator {
-            return MAX_POWER_LEVEL;
+            is_creator = true;
         }
     }
 
-    event.power_level
+    if is_creator {
+        return MAX_POWER_LEVEL;
+    }
+
+    if let Some(pl_ev) = pl_event {
+        if let Some(users) = pl_ev.content.get("users").and_then(|u| u.as_object()) {
+            if let Some(pl) = users.get(&event.sender).and_then(|p| p.as_i64()) {
+                return pl;
+            }
+        }
+        if let Some(default_pl) = pl_ev.content.get("users_default").and_then(|p| p.as_i64()) {
+            return default_pl;
+        }
+        return 0; // Default if PL event exists but no users_default
+    }
+
+    event.power_level // Fallback to explicitly specified PL (e.g. for dump_jsonl compatibility)
 }
 
 /// Computes the shortest distance from the event to the m.room.create event via auth_events.

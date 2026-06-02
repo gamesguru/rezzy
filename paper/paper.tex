@@ -136,13 +136,13 @@ By supplementing \texttt{m.room.power\_levels} and \texttt{m.room.member} (speci
 ]
 
 \node[event, fill=blue!10] (v211) {\textbf{v2.1.1 Auth Overlay}};
-\node[event, right=of v211, fill=green!10] (pl) {\texttt{\$pl} (Included)};
-\node[event, below=of pl, fill=green!10] (ban) {\texttt{\$ban} (Included)};
-\node[event, below=of v211, fill=red!10] (invite) {\texttt{\$admin\_lock} (Excluded)};
+\node[event, right=of v211, fill=green!10] (ban) {\texttt{\$ban} (Included)};
+\node[event, above=0.5cm of ban, fill=green!10] (pl) {\texttt{\$pl} (Included)};
+\node[event, below=0.5cm of ban, fill=red!10] (invite) {\texttt{\$admin\_lock} (Excluded)};
 
-\draw[->, thick] (v211) -- (pl);
-\draw[->, thick] (v211) |- (ban);
-\draw[->, thick, dotted] (v211) -- (invite) node[midway, sloped, above] {Isolated};
+\draw[->, thick] (v211.east) |- (pl.west);
+\draw[->, thick] (v211.east) -- (ban.west);
+\draw[->, thick, dotted] (v211.east) |- (invite.west) node[pos=0.6, below] {Isolated};
 
 \end{tikzpicture}
 \caption{State Resolution v2.1.1: The mathematical sweet spot. Power levels and Authoritative Memberships (Bans) are merged into the overlay to defeat evasion attacks, while \texttt{join\_rules} are cleanly isolated to preserve historical DAG integrity.}
@@ -155,7 +155,7 @@ A separate vector, Demotion Evasion, occurs when a demoted administrator attempt
 \begin{figure}[H]
 \centering
 \begin{tikzpicture}[
-    node distance=1.5cm and 2cm,
+    node distance=2cm and 3cm,
     event/.style={rectangle, draw, rounded corners, minimum width=2.5cm, minimum height=1cm, align=center},
     auth/.style={->, dashed, thick}
 ]
@@ -165,7 +165,7 @@ A separate vector, Demotion Evasion, occurs when a demoted administrator attempt
 \node[event, below right=of ancient, fill=orange!10] (attack) {\texttt{\$eve\_attack} \\ (Requires 50)};
 
 \draw[auth] (demote) -- (ancient);
-\draw[auth] (attack) -- (ancient) node[midway, below, sloped] {Bypasses demotion};
+\draw[auth] (attack) -- (ancient) node[pos=0.55, below, sloped] {Bypasses demotion};
 
 \end{tikzpicture}
 \caption{Demotion Evasion: Eve maliciously points her event's \texttt{auth\_events} directly to her ancient PL 100 event. Both v2.1 and v2.1.1 defeat this because \texttt{\$pl\_demote} is supplemented into the auth overlay, superseding the ancient PL.}
@@ -181,16 +181,23 @@ $ cargo run -- --input demotion_evasion.jsonl --state-res v2-1-1
 [ Name change rejected ]  <-- SECURE
 \end{lstlisting}
 
+\section{Limitations: Disconnected Subgraphs and Spam Waves}
+During severe malicious events, such as automated spam storms, attackers rapidly inject thousands of conflicting state events (e.g., rapid alias swaps, name changes, or fake kicks). To amplify the damage, attackers intentionally break the underlying Event DAG by omitting intermediate \texttt{auth\_events} or creating dense topological loops, generating massive disconnected subgraphs.
+
+While State Resolution v2.1.1 successfully surgically patches the concurrent ban evasion and invite lock pathologies, it inherits the structural weaknesses of the broader MSC4297 traversal logic. We must admit a negative result here: v2.1.1 does \textbf{not} fully mitigate the computational collapse caused by these broken subgraphs.
+
+When the \texttt{ruma-lean} framework evaluates v2.1.1 against real-world pathology vectors extracted from known unredacted spam storms (e.g., an 84,000+ event broken DAG), the algorithm still suffers from exponential pathfinding traversals and severe performance degradation. Although it eventually resolves without a total state wipeout, the lack of strict subgraph depth bounding remains an open vulnerability in the Matrix specification that v2.1.1 does not solve.
+
 \section{Implementation Defects in MSC4297}
 Beyond the theoretical algorithm flaws, naive implementations of the MSC4297 (v2.1) specification suffered from severe mechanical and security defects when deployed in production (e.g., Room Version 12). During our formally verified reconstruction, we identified and patched six critical implementation failures:
 
 \begin{enumerate}
-    \item \textbf{Failure to Preserve Unconflicted State:} The v2.1 algorithm requires evaluating the full conflicted subgraph, but naive implementations accidentally discarded the baseline unconflicted state entirely during the \texttt{iterative\_auth\_check}, causing state wipeouts.
-    \item \textbf{Tripling Auth Work on Older Rooms:} The complex v2.1 Power Level sub-resolution logic erroneously bled into older room versions (v2, v10, v11). This tripled the auth-check work and caused massive performance regressions until properly gated to explicitly v2.1+ rooms.
-    \item \textbf{Creator Power Level Rejections:} The \texttt{check\_power\_levels} logic accidentally evaluated creator entries during the MSC4297 iterative auth phase. This caused valid v12 joins to be maliciously rejected during federation syncs.
-    \item \textbf{Incorrect Auth State Population:} The \texttt{iterative\_auth\_check} loop failed to pull the progressively updated \texttt{auth\_state} from the partially \texttt{resolved\_state}, breaking the strict sequential auth logic required by MSC4297.
-    \item \textbf{State Reset Vulnerabilities:} Malicious federated servers could craft massive conflicted subgraphs that exploited the v2.1 graph traversal, causing the resolution to hallucinate or trigger a state reset.
-    \item \textbf{Supplemental Auth Diff Dropping:} Various edge cases resulted in the supplemental auth diff flattening being skipped during the iterative auth check, which caused the state to randomly roll back to older extremes.
+    \item \textbf{Failure to Preserve Unconflicted State (ruma-state-res, continuwuity):} The v2.1 algorithm requires evaluating the full conflicted subgraph, but naive implementations accidentally discarded the baseline unconflicted state entirely during the iterative auth check phase, causing state wipeouts.
+    \item \textbf{Tripling Auth Work on Older Rooms (continuwuity):} The complex v2.1 Power Level sub-resolution logic erroneously bled into older room versions (v2, v10, v11). This tripled the auth-check work and caused massive performance regressions until properly gated to explicitly v2.1+ rooms.
+    \item \textbf{Creator Power Level Rejections (Synapse, continuwuity):} The \texttt{check\_power\_levels} logic accidentally evaluated creator entries during the MSC4297 iterative auth phase. This caused valid v12 joins to be maliciously rejected during federation syncs.
+    \item \textbf{Incorrect Auth State Population (ruma-state-res):} The iterative auth check phase loop failed to pull the progressively updated \texttt{auth\_state} from the partially \texttt{resolved\_state}, breaking the strict sequential auth logic required by MSC4297.
+    \item \textbf{State Reset Vulnerabilities (continuwuity):} Malicious federated servers could craft massive conflicted subgraphs that exploited the v2.1 graph traversal, causing the resolution to hallucinate or trigger a state reset.
+    \item \textbf{Supplemental Auth Diff Dropping (ruma-state-res, continuwuity):} Various edge cases resulted in the supplemental auth diff flattening being skipped during the iterative auth check phase, which caused the state to randomly roll back to older extremes.
 \end{enumerate}
 
 These defects highlight the danger of deploying complex graph-resolution algorithms without rigorous mathematical and mechanical verification.
