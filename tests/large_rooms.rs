@@ -394,3 +394,65 @@ fn test_real_dag_nheko_room_106_heads() {
     );
     assert!(!resolved.is_empty(), "Resolution should produce state");
 }
+
+#[test]
+fn test_unredacted_spam_storm_v2_2() {
+    use std::io::BufRead;
+    // The unredacted spam storm broken dag case from ../../dags
+    let path = "../../dags/merged-sM2LwqNHGQOgLf35gqxPMy9D7oYde2q9ADg8HPBM3kE-unredacted-lounge-v12-d1-84135.jsonl";
+
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            println!("Skipping test: could not open {}: {}", path, e);
+            return;
+        }
+    };
+
+    let reader = std::io::BufReader::new(file);
+    let mut events = Vec::new();
+    for line in reader.lines() {
+        let line = line.unwrap();
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // It's a JSONL file, parse each line
+        if let Ok(ev) = serde_json::from_str::<LeanEvent>(&line) {
+            events.push(ev);
+        } else {
+            // Some jsonl files might wrap the event in {"_source": {...}} depending on how they were dumped from ElasticSearch or DB
+            let val: serde_json::Value = serde_json::from_str(&line).unwrap();
+            if let Some(source) = val.get("_source") {
+                if let Ok(ev) = serde_json::from_value::<LeanEvent>(source.clone()) {
+                    events.push(ev);
+                }
+            } else if let Some(event) = val.get("event") {
+                if let Ok(ev) = serde_json::from_value::<LeanEvent>(event.clone()) {
+                    events.push(ev);
+                }
+            }
+        }
+    }
+
+    assert!(
+        !events.is_empty(),
+        "Failed to parse any events from the unredacted spam storm JSONL"
+    );
+    println!("Loaded {} events from unredacted storm", events.len());
+
+    let map = to_event_map(&events);
+
+    let start = std::time::Instant::now();
+    let resolved = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_2);
+    println!(
+        "V2.2 State Resolution of {} events took: {:?}",
+        events.len(),
+        start.elapsed()
+    );
+
+    assert!(
+        !resolved.is_empty(),
+        "V2.2 Resolution should produce state for the unredacted storm"
+    );
+}
