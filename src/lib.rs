@@ -586,6 +586,16 @@ impl<'a> Ord for SortPriority<'a> {
                 // makes Alice's ban appear before Bob's concurrent PL change).
                 match self.power_level.cmp(&other.power_level) {
                     Ordering::Equal => {
+                        // V2.2 Invite-Lock Fix: prioritize topological depth over origin_server_ts.
+                        // Smaller Depth -> Greater TieBreaker -> Pops First -> Loses.
+                        // Larger Depth -> Smaller TieBreaker -> Pops Last -> Wins.
+                        if self.version == StateResVersion::V2_2 {
+                            match other.event.depth.cmp(&self.event.depth) {
+                                Ordering::Equal => {}
+                                ord => return ord,
+                            }
+                        }
+
                         match other
                             .event
                             .origin_server_ts
@@ -744,6 +754,29 @@ pub fn resolve_lean(
     let mut non_power_events = HashMap::new();
 
     for (id, ev) in sort_set {
+        // V2.2: Hard Rejection of Duplicate Auth Keys
+        if version == StateResVersion::V2_2 {
+            let mut seen_keys = alloc::collections::BTreeSet::new();
+            let mut duplicate = false;
+            for auth_id in &ev.auth_events {
+                if let Some(auth_ev) = auth_context
+                    .get(auth_id)
+                    .or_else(|| conflicted_events.get(auth_id))
+                {
+                    let key = (auth_ev.event_type.clone(), auth_ev.state_key.clone());
+                    if !seen_keys.insert(key) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+            }
+            if duplicate {
+                // Hard reject: skip inserting it into power_events or non_power_events.
+                // It will be completely ignored by the state resolution algorithm.
+                continue;
+            }
+        }
+
         if ev.event_type == "m.room.member"
             || ev.event_type == "m.room.create"
             || ev.event_type == "m.room.power_levels"
