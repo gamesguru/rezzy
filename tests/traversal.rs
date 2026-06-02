@@ -107,6 +107,106 @@ fn test_v2_1_vs_v2_2_recursive_auth_lookup() {
 fn test_v2_2_xfail_disconnected_auth() {
     // Join event DOES NOT include PL. PL is disconnected from auth graph.
     // V2.1 fails.
-    // User expects V2.2 to pass despite the missing auth link.
-    run_auth_lookup_scenario(false, false, true);
+    // V2.2 also fails, correctly expected.
+    run_auth_lookup_scenario(false, false, false);
+}
+
+#[test]
+fn test_v2_2_deep_auth_chain_101() {
+    // SCENARIO: The required Power Level event is 101 hops deep in the auth chain.
+    // We create a linear auth chain of 101 events: E_101 -> E_100 -> ... -> E_1 -> PL
+    // The final event E_final only lists E_101 in its auth_events.
+    // We want to verify if V2.2's BFS can traverse all 101 hops to find the PL event,
+    // or if a depth limit prevents it.
+
+    let create_ev = LeanEvent {
+        event_id: "$create".to_string(),
+        event_type: "m.room.create".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@creator:example.com".to_string(),
+        origin_server_ts: 100,
+        ..Default::default()
+    };
+
+    let pl_ev = LeanEvent {
+        event_id: "$pl".to_string(),
+        event_type: "m.room.power_levels".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@creator:example.com".to_string(),
+        origin_server_ts: 200,
+        content: serde_json::json!({
+            "users": { "@alice:example.com": 100 },
+            "state_default": 50
+        }),
+        auth_events: vec!["$create".to_string()],
+        ..Default::default()
+    };
+
+    let mut auth_context = HashMap::new();
+    auth_context.insert(create_ev.event_id.clone(), create_ev.clone());
+    auth_context.insert(pl_ev.event_id.clone(), pl_ev.clone());
+
+    let mut last_event_id = "$pl".to_string();
+    for i in 1..=101 {
+        let ev_id = format!("$dummy_{}", i);
+        let ev = LeanEvent {
+            event_id: ev_id.clone(),
+            event_type: "m.dummy".to_string(),
+            state_key: Some(format!("state_{}", i)),
+            sender: "@alice:example.com".to_string(),
+            origin_server_ts: 200 + i as u64,
+            auth_events: vec!["$create".to_string(), last_event_id.clone()],
+            ..Default::default()
+        };
+        auth_context.insert(ev_id.clone(), ev);
+        last_event_id = ev_id;
+    }
+
+    let alice_join = LeanEvent {
+        event_id: "$join".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@alice:example.com".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 900,
+        content: serde_json::json!({ "membership": "join" }),
+        auth_events: vec!["$create".to_string(), last_event_id.clone()],
+        ..Default::default()
+    };
+    auth_context.insert(alice_join.event_id.clone(), alice_join.clone());
+
+    let alice_name = LeanEvent {
+        event_id: "$name".to_string(),
+        event_type: "m.room.name".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 1000,
+        content: serde_json::json!({ "name": "Alice's Room" }),
+        auth_events: vec!["$create".to_string(), alice_join.event_id.clone()],
+        ..Default::default()
+    };
+
+    let mut conflicted_events = HashMap::new();
+    conflicted_events.insert(alice_name.event_id.clone(), alice_name);
+
+    let resolved_v21 = resolve_lean(
+        BTreeMap::new(),
+        conflicted_events.clone(),
+        &auth_context,
+        StateResVersion::V2_1,
+    );
+    assert!(
+        !resolved_v21.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        "V2.1 should have failed 101 hops deep"
+    );
+
+    let resolved_v22 = resolve_lean(
+        BTreeMap::new(),
+        conflicted_events,
+        &auth_context,
+        StateResVersion::V2_2,
+    );
+    assert!(
+        resolved_v22.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        "V2.2 should have found the PL event 101 hops deep!"
+    );
 }
