@@ -112,8 +112,6 @@ fn test_v2_1_1_xfail_disconnected_auth() {
     run_auth_lookup_scenario(false, false, false);
 }
 
-
-
 #[test]
 fn test_v2_1_1_ancient_prev_event_allowed() {
     // SCENARIO: Alice sends a state event (m.room.name) where her client
@@ -365,12 +363,16 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
 }
 
 #[test]
-fn test_invite_lock_spam_wave_with_bans() {
-    // A programmatic model of the pathology_spam_break_full scenario,
-    // explicitly augmented with "disabling invites" and a "wave of bans" on the mainline.
+fn test_v2_1_1_fixes_invite_lock() {
+    // THE INVITE LOCK (NEXY ANOMALY)
+    // In V2.0, the supplemental merge aggressively overlaid ALL state events.
+    // If an Admin locked a room to "invite", historical joins on slower forks would be
+    // evaluated against the new "invite" rules rather than their local "public" rules,
+    // causing legitimate joins to be incorrectly rejected during resolution.
+    // V2.1.1 fixes this by EXCLUDING `m.room.join_rules` from the supplemental merge.
 
     let create_ev = LeanEvent {
-        event_id: "$1_create".to_string(),
+        event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
         state_key: Some("".to_string()),
         sender: "@admin:example.com".to_string(),
@@ -379,101 +381,70 @@ fn test_invite_lock_spam_wave_with_bans() {
     };
 
     let pl_ev = LeanEvent {
-        event_id: "$2_pl".to_string(),
+        event_id: "$pl".to_string(),
         event_type: "m.room.power_levels".to_string(),
         state_key: Some("".to_string()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
             "users": { "@admin:example.com": 100 },
-            "events_default": 0,
-            "state_default": 50
         }),
-        auth_events: vec!["$1_create".to_string()],
+        auth_events: vec!["$create".to_string()],
         ..Default::default()
     };
 
-    // --- MAINLINE ---
-    // The admin explicitly disables invites.
-    let disable_invites = LeanEvent {
-        event_id: "$3_join_rules_invite".to_string(),
+    let public_rules = LeanEvent {
+        event_id: "$public".to_string(),
         event_type: "m.room.join_rules".to_string(),
         state_key: Some("".to_string()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 300,
-        content: serde_json::json!({ "join_rule": "invite" }),
-        auth_events: vec!["$1_create".to_string(), "$2_pl".to_string()],
+        content: serde_json::json!({ "join_rule": "public" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
         ..Default::default()
     };
 
-    // The admin executes a wave of bans.
-    let ban1 = LeanEvent {
-        event_id: "$4_ban1".to_string(),
-        event_type: "m.room.member".to_string(),
-        state_key: Some("@spam1:example.com".to_string()),
-        sender: "@admin:example.com".to_string(),
-        origin_server_ts: 301,
-        content: serde_json::json!({ "membership": "ban" }),
-        auth_events: vec!["$1_create".to_string(), "$2_pl".to_string()],
-        ..Default::default()
-    };
-
-    let ban2 = LeanEvent {
-        event_id: "$5_ban2".to_string(),
-        event_type: "m.room.member".to_string(),
-        state_key: Some("@spam2:example.com".to_string()),
-        sender: "@admin:example.com".to_string(),
-        origin_server_ts: 302,
-        content: serde_json::json!({ "membership": "ban" }),
-        auth_events: vec!["$1_create".to_string(), "$2_pl".to_string()],
-        ..Default::default()
-    };
-
-    // --- ATTACKER (STALE FORK) ---
-    // The attacker forks from $2_pl.
-    // They manipulate the origin_server_ts to be extremely high (e.g. 999999)
-    // to force Kahn's sort to favor their event in V2.1.
-    // They submit a malicious state event forcing the room back to "public".
-    let malicious_public = LeanEvent {
-        event_id: "$99_join_rules_public".to_string(),
+    // The Admin later locks the room to stop spam.
+    let admin_lock = LeanEvent {
+        event_id: "$admin_lock".to_string(),
         event_type: "m.room.join_rules".to_string(),
         state_key: Some("".to_string()),
-        sender: "@admin:example.com".to_string(), // Assume they hijacked the admin, or we just want to test tie-breaker
-        origin_server_ts: 999999,                 // FAKED TIMESTAMP FOR TIE-BREAKER MANIPULATION
-        content: serde_json::json!({ "join_rule": "public" }),
-        auth_events: vec!["$1_create".to_string(), "$2_pl".to_string()],
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 400,
+        content: serde_json::json!({ "join_rule": "invite" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    // A historical user joined *before* the lock, so their auth chain points to the public rules.
+    let historical_join = LeanEvent {
+        event_id: "$hist_join".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@user:example.com".to_string()),
+        sender: "@user:example.com".to_string(),
+        origin_server_ts: 350,
+        content: serde_json::json!({ "membership": "join" }),
+        auth_events: vec![
+            "$create".to_string(),
+            "$pl".to_string(),
+            "$public".to_string(),
+        ],
         ..Default::default()
     };
 
     let mut auth_context = std::collections::HashMap::new();
-    auth_context.insert(create_ev.event_id.clone(), create_ev);
-    auth_context.insert(pl_ev.event_id.clone(), pl_ev);
+    auth_context.insert("$create".to_string(), create_ev);
+    auth_context.insert("$pl".to_string(), pl_ev);
+    auth_context.insert("$public".to_string(), public_rules);
 
     let mut conflicted_events = std::collections::HashMap::new();
-    conflicted_events.insert(disable_invites.event_id.clone(), disable_invites);
-    conflicted_events.insert(ban1.event_id.clone(), ban1);
-    conflicted_events.insert(ban2.event_id.clone(), ban2);
-    conflicted_events.insert(malicious_public.event_id.clone(), malicious_public);
+    conflicted_events.insert("$admin_lock".to_string(), admin_lock);
+    conflicted_events.insert("$hist_join".to_string(), historical_join);
 
-    // Resolution under V2.1
-    let resolved_v21 = ruma_lean::resolve_lean(
-        std::collections::BTreeMap::new(),
-        conflicted_events.clone(),
-        &auth_context,
-        ruma_lean::StateResVersion::V2_1,
-    );
-
-    let join_rules_key = ("m.room.join_rules".to_string(), Some("".to_string()));
-
-    // Wait, since auth_events are identical for both join_rules, V2.1.1 falls back to TS.
-    // Since the attacker manipulated TS, the attacker might STILL win under V2.1.1!
-    // Let's assert what happens so we can analyze the structural vulnerabilities together.
-
-    // Check V2.1 outcome
-    let v21_winner = resolved_v21.get(&join_rules_key).unwrap();
-    println!("V2.1 Winner: {}", v21_winner);
-
-    // Resolution under V2.1.1 (The V3 Ban Evasion Fix)
+    // Resolution under V2.1.1 (The V3 Fix)
+    // V2.1.1 supplements PLs and Bans, but NEVER `join_rules`.
+    // Therefore, `$hist_join` is evaluated against its local auth chain (`$public`),
+    // and is rightfully ACCEPTED into the resolved state!
     let resolved_v211 = ruma_lean::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events,
@@ -481,14 +452,15 @@ fn test_invite_lock_spam_wave_with_bans() {
         ruma_lean::StateResVersion::V2_1_1,
     );
 
-    // Check V2.1.1 outcome
-    let v211_winner = resolved_v211.get(&join_rules_key).unwrap();
-    println!("V2.1.1 Winner: {}", v211_winner);
+    let member_key = (
+        "m.room.member".to_string(),
+        Some("@user:example.com".to_string()),
+    );
 
-    // Assert that V2.1.1 STILL allows the room to heal (Public join rules win!)
     assert_eq!(
-        v211_winner, "$99_join_rules_public",
-        "V2.1.1 completely preserves the Invite Lock fix! The public join rules healed the room!"
+        resolved_v211.get(&member_key).unwrap(),
+        "$hist_join",
+        "SUCCESS: V2.1.1 completely bypassed the Invite Lock! The historical user's join survived the resolution!"
     );
 }
 

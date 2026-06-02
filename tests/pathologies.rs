@@ -50,7 +50,7 @@ fn test_pathology_duplicate_auth_poisoning() {
 
     // In V2.1.1, the Hard Rejection filter completely ignores the poisoned event
     let start_v211 = std::time::Instant::now();
-    let resolved_v211 = resolve_lean(
+    let _ = resolve_lean(
         BTreeMap::new(),
         conflicted_events,
         &auth_context,
