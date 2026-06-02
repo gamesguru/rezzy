@@ -390,3 +390,190 @@ fn test_v2_2_ancient_prev_event_allowed() {
         "V2.2 should allow the event even with an ancient prev_event"
     );
 }
+
+#[test]
+fn test_kahn_tiebreak_power_level_overwrites_via_auth() {
+    // This test explicitly proves how the tie-breaker works for Power Events.
+    // High Power Levels pop FIRST in Kahn's sort. Wait, if they pop first, don't they lose to Last-Write-Wins? 
+    // No! Power Events are special. They set the authorization rules for the rest of the loop! 
+    // If Alice (PL 100) bans Bob, her event pops first and sets the ban in the state map.
+    // When Bob's conflicting PL 0 join pops later, the state already contains the ban. 
+    // `iterative_auth_ok` evaluates Bob's join, sees he is banned, and completely rejects his event. 
+    // So Alice's ban stays.
+
+    let create_ev = LeanEvent {
+        event_id: "$create".to_string(),
+        event_type: "m.room.create".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 100,
+        ..Default::default()
+    };
+
+    let pl_ev = LeanEvent {
+        event_id: "$pl".to_string(),
+        event_type: "m.room.power_levels".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 200,
+        content: json!({
+            "users": { "@alice:example.com": 100 },
+            "events_default": 0,
+            "state_default": 50
+        }),
+        auth_events: vec!["$create".to_string()],
+        ..Default::default()
+    };
+
+    // Alice (PL 100) bans Bob.
+    let alice_ban = LeanEvent {
+        event_id: "$alice_ban".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@bob:example.com".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 300,
+        content: json!({ "membership": "ban" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    // Bob (PL 0) attempts to join.
+    // Exact same origin_server_ts and auth_chain_distance as the ban to force a pure Power Level tie-break.
+    let bob_join = LeanEvent {
+        event_id: "$bob_join".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@bob:example.com".to_string()),
+        sender: "@bob:example.com".to_string(),
+        origin_server_ts: 300, 
+        content: json!({ "membership": "join" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    let mut auth_context = HashMap::new();
+    auth_context.insert(create_ev.event_id.clone(), create_ev);
+    auth_context.insert(pl_ev.event_id.clone(), pl_ev);
+
+    let mut conflicted_events = HashMap::new();
+    conflicted_events.insert(alice_ban.event_id.clone(), alice_ban);
+    conflicted_events.insert(bob_join.event_id.clone(), bob_join);
+
+    let resolved = resolve_lean(
+        BTreeMap::new(),
+        conflicted_events,
+        &auth_context,
+        StateResVersion::V2_2,
+    );
+
+    // The resolved state should contain the ban, not the join
+    let member_key = ("m.room.member".to_string(), Some("@bob:example.com".to_string()));
+    assert_eq!(
+        resolved.get(&member_key).unwrap(),
+        "$alice_ban",
+        "Alice's ban should win against Bob's concurrent join because her higher PL forces it to pop first, setting the auth rules."
+    );
+}
+
+#[test]
+fn test_kahn_tiebreak_mods_banning_each_other() {
+    // Two mods (both PL 50) ban each other concurrently.
+    // They tie for Power Level.
+    // They have different state keys (Alice bans Bob, Bob bans Alice), so they don't overwrite each other.
+    // Kahn's sort determines who pops FIRST based on event_id.
+    // Whoever pops FIRST sets their ban in the state.
+    // When the second person's ban is evaluated, `iterative_auth_ok` sees they are ALREADY banned.
+    // Therefore, the second person's ban is REJECTED.
+    // "Who shoots first wins."
+
+    let create_ev = LeanEvent {
+        event_id: "$create".to_string(),
+        event_type: "m.room.create".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 100,
+        ..Default::default()
+    };
+
+    let pl_ev = LeanEvent {
+        event_id: "$pl".to_string(),
+        event_type: "m.room.power_levels".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 200,
+        content: json!({
+            "users": { "@alice:example.com": 50, "@bob:example.com": 50 },
+            "events_default": 0,
+            "state_default": 50
+        }),
+        auth_events: vec!["$create".to_string()],
+        ..Default::default()
+    };
+
+    // Alice bans Bob.
+    // event_id = "$A_alice_ban"
+    let alice_ban = LeanEvent {
+        event_id: "$A_alice_ban".to_string(), 
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@bob:example.com".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 300,
+        content: json!({ "membership": "ban" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    // Bob bans Alice.
+    // event_id = "$Z_bob_ban"
+    let bob_ban = LeanEvent {
+        event_id: "$Z_bob_ban".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@alice:example.com".to_string()),
+        sender: "@bob:example.com".to_string(),
+        origin_server_ts: 300, 
+        content: json!({ "membership": "ban" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    let mut auth_context = HashMap::new();
+    auth_context.insert(create_ev.event_id.clone(), create_ev);
+    auth_context.insert(pl_ev.event_id.clone(), pl_ev);
+
+    let mut conflicted_events = HashMap::new();
+    conflicted_events.insert(alice_ban.event_id.clone(), alice_ban);
+    conflicted_events.insert(bob_ban.event_id.clone(), bob_ban);
+
+    let resolved = resolve_lean(
+        BTreeMap::new(),
+        conflicted_events,
+        &auth_context,
+        StateResVersion::V2_2,
+    );
+
+    // Let's figure out who pops first!
+    // Priority: other.event.event_id.cmp(&self.event.event_id)
+    // Alice = "$A", Bob = "$Z"
+    // Alice's cmp: "$Z".cmp("$A") -> Greater. Alice is Greater, pops FIRST.
+    // Bob's cmp: "$A".cmp("$Z") -> Less. Bob is Less, pops LAST.
+    // Wait! Under State Resolution V2.1 and V2.2, auth checks for non-power-level events
+    // are strictly isolated to their own `auth_events` chain! (This is the core fix of MSC4297).
+    // Because neither ban is in the other's auth chain, NEITHER sees the other's ban during `iterative_auth_ok`!
+    // Therefore, BOTH bans pass authorization! 
+    // And since they have different state keys (@bob vs @alice), they both get inserted!
+    // Result: Mutual Destruction.
+
+    let bob_member_key = ("m.room.member".to_string(), Some("@bob:example.com".to_string()));
+    let alice_member_key = ("m.room.member".to_string(), Some("@alice:example.com".to_string()));
+
+    assert_eq!(
+        resolved.get(&bob_member_key).unwrap(),
+        "$A_alice_ban",
+        "Bob should be banned because Alice's ban was authorized by its local auth chain."
+    );
+
+    assert_eq!(
+        resolved.get(&alice_member_key).unwrap(),
+        "$Z_bob_ban",
+        "Alice should ALSO be banned because Bob's ban was authorized by its local auth chain! (V2.1 isolated auth)"
+    );
+}
