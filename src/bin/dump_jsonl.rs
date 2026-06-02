@@ -29,7 +29,7 @@ fn generate_invite_lock() {
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 200,
         content: json!({
-            "users": { "@admin:example.com": 100 },
+            "users": {},
         }),
         auth_events: vec!["$create".to_string()],
         ..Default::default()
@@ -95,7 +95,7 @@ fn generate_ban_evasion() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 200,
         content: json!({
-            "users": { "@alice:example.com": 100 },
+            "users": { "@eve:evil.com": 50 },
             "state_default": 50
         }),
         auth_events: vec!["$create".to_string()],
@@ -158,7 +158,7 @@ fn generate_demotion_evasion() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 200,
         content: json!({
-            "users": { "@alice:example.com": 100, "@eve:evil.com": 100 },
+            "users": { "@eve:evil.com": 100 },
             "state_default": 50
         }),
         auth_events: vec!["$create".to_string()],
@@ -183,7 +183,7 @@ fn generate_demotion_evasion() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 400,
         content: json!({
-            "users": { "@alice:example.com": 100, "@eve:evil.com": 0 },
+            "users": { "@eve:evil.com": 0 },
             "state_default": 50
         }),
         auth_events: vec!["$create".to_string(), "$pl_promo".to_string()],

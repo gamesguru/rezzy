@@ -388,7 +388,7 @@ fn test_v2_1_1_fixes_invite_lock() {
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
-            "users": { "@admin:example.com": 100 },
+            "users": {},
         }),
         auth_events: vec!["$create".to_string()],
         ..Default::default()
@@ -514,7 +514,7 @@ fn test_v2_1_1_cve_demotion_evasion() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
-            "users": { "@alice:example.com": 100, "@eve:evil.com": 100 },
+            "users": { "@eve:evil.com": 100 },
             "state_default": 50
         }),
         auth_events: vec!["$create".to_string()],
@@ -541,7 +541,7 @@ fn test_v2_1_1_cve_demotion_evasion() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 400,
         content: serde_json::json!({
-            "users": { "@alice:example.com": 100, "@eve:evil.com": 0 },
+            "users": { "@eve:evil.com": 0 },
             "state_default": 50
         }),
         auth_events: vec!["$create".to_string(), "$pl_promo".to_string()],
@@ -628,7 +628,7 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
-            "users": { "@alice:example.com": 100, "@bob:example.com": 50 },
+            "users": { "@bob:example.com": 50 },
             "state_default": 50
         }),
         auth_events: vec!["$create".to_string()],
