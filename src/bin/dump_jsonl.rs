@@ -95,28 +95,28 @@ fn generate_ban_evasion() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 200,
         content: json!({
-            "users": { "@eve:evil.com": 50 },
+            "users": { "@bob:example.com": 50 },
             "state_default": 50
         }),
         auth_events: vec!["$create".to_string()],
         ..Default::default()
     };
 
-    let eve_join = LeanEvent {
-        event_id: "$eve_join".to_string(),
+    let bob_join = LeanEvent {
+        event_id: "$bob_join".to_string(),
         event_type: "m.room.member".to_string(),
-        state_key: Some("@eve:evil.com".to_string()),
-        sender: "@eve:evil.com".to_string(),
+        state_key: Some("@bob:example.com".to_string()),
+        sender: "@bob:example.com".to_string(),
         origin_server_ts: 300,
         content: json!({ "membership": "join" }),
         auth_events: vec!["$create".to_string(), "$pl".to_string()],
         ..Default::default()
     };
 
-    let alice_bans_eve = LeanEvent {
-        event_id: "$alice_bans_eve".to_string(),
+    let alice_bans_bob = LeanEvent {
+        event_id: "$alice_bans_bob".to_string(),
         event_type: "m.room.member".to_string(),
-        state_key: Some("@eve:evil.com".to_string()),
+        state_key: Some("@bob:example.com".to_string()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 400,
         content: json!({ "membership": "ban" }),
@@ -124,20 +124,20 @@ fn generate_ban_evasion() {
         ..Default::default()
     };
 
-    let eve_attack = LeanEvent {
-        event_id: "$eve_attack".to_string(),
+    let bob_name_change = LeanEvent {
+        event_id: "$bob_name_change".to_string(),
         event_type: "m.room.name".to_string(),
         state_key: Some("".to_string()),
-        sender: "@eve:evil.com".to_string(),
+        sender: "@bob:example.com".to_string(),
         origin_server_ts: 500,
-        content: json!({ "name": "Hacked by Eve" }),
-        auth_events: vec!["$create".to_string(), "$eve_join".to_string()],
+        content: json!({ "name": "Hacked by Bob" }),
+        auth_events: vec!["$create".to_string(), "$bob_join".to_string()],
         ..Default::default()
     };
 
     write_jsonl(
         "docs/ban_evasion.jsonl",
-        vec![create_ev, pl_ev, eve_join, alice_bans_eve, eve_attack],
+        vec![create_ev, pl_ev, bob_join, alice_bans_bob, bob_name_change],
     );
 }
 

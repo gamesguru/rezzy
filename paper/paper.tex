@@ -29,7 +29,7 @@
   \small \textit{Department of Mathematics and Statistics,} \\
   \small \textit{School of Engineering and Computer Science} \\
   \small Cloud University \\
-  \small \href{mailto:sjjaroch@oakland.edu}{\texttt{sjjaroch@oakland.edu}}
+  \small \href{mailto:shane@nutra.tk}{\texttt{shane@nutra.tk}}
 }
 \date{\today}
 
@@ -117,10 +117,10 @@ If an Administrator bans a malicious user, but the malicious user concurrently s
 Executing this graph through \texttt{ruma-lean} mathematically proves the vulnerability in v2.1 and the patch in v2.1.1:
 \begin{lstlisting}[basicstyle=\ttfamily\footnotesize, frame=single, caption={ruma-lean Validation: Ban Evasion}]
 $ cargo run -- --input ban_evasion.jsonl --state-res v2-1
-{ "event_id": "$eve_attack", "type": "m.room.name" }  <-- VULNERABLE
+{ "event_id": "$bob_name_change", "type": "m.room.name" }  <-- VULNERABLE
 
 $ cargo run -- --input ban_evasion.jsonl --state-res v2-1-1
-{ "event_id": "$alice_bans_eve", "membership": "ban" }  <-- SECURE
+{ "event_id": "$alice_bans_bob", "membership": "ban" }  <-- SECURE
 \end{lstlisting}
 
 \section{State Resolution v2.1.1: The Surgical Merge}
