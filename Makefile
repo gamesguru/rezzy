@@ -61,7 +61,7 @@ lean: lean/build ##H Alias for lean/build
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .PHONY: paper
 paper: ##H Compile the LaTeX paper
-	pdflatex paper/paper.tex
+	cd paper && pdflatex paper.tex
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

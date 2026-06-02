@@ -9,7 +9,7 @@
 \usepackage{tikz}
 \usetikzlibrary{positioning, arrows.meta, shapes.geometric}
 
-\title{Matrix State Resolution V3: \\ A Surgical Fix for Invite Locks and Ban Evasion}
+\title{Matrix State Resolution v2.1.1: \\ A Surgical Fix for Invite Locks and Ban Evasion}
 \author{Shane Jaroch \\ \texttt{chown\_tee@proton.me}}
 \date{\today}
 
@@ -18,7 +18,7 @@
 \maketitle
 
 \begin{abstract}
-Matrix State Resolution is the core algorithm for achieving decentralized consensus across federated homeservers. Over its evolution, architectural decisions in the resolution algorithm have inadvertently exposed edge-case vulnerabilities. State Resolution v2 (V2.0) suffered from the "Invite Lock", where aggressive supplemental merges overrode administrative locks. State Resolution v2.1 (MSC4297) solved this by isolating the merge to Power Levels, but accidentally enabled Concurrent Ban Evasion. We present State Resolution V3, which surgically expands the supplemental merge to include Authoritative Memberships (Bans), achieving the mathematical sweet spot that protects against all known state anomalies.
+Matrix State Resolution is the core algorithm for achieving decentralized consensus across federated homeservers. Over its evolution, architectural decisions in the resolution algorithm have inadvertently exposed edge-case vulnerabilities. State Resolution v2 (V2.0) suffered from the "Invite Lock", where aggressive supplemental merges overrode administrative locks. State Resolution v2.1 (MSC4297) solved this by isolating the merge to Power Levels, but accidentally enabled Concurrent Ban Evasion. We present State Resolution v2.1.1, which surgically expands the supplemental merge to include Authoritative Memberships (Bans), achieving the mathematical sweet spot that protects against all known state anomalies.
 \end{abstract}
 
 \section{Introduction}
@@ -53,7 +53,7 @@ If an Administrator locked a room to "invite-only", historical \texttt{join} eve
 
 \end{tikzpicture}
 \caption{The Invite Lock: V2.0 supplements the \texttt{\$admin\_lock} event into the auth overlay, causing the independent \texttt{\$hist\_join} on the slower fork to be evaluated against the "invite" rules instead of its local "public" rules, locking the user out.}
-\label{fig:nexy_anomaly}
+\label{fig:invite_lock}
 \end{figure}
 
 \section{Concurrent Ban Evasion in V2.1}
@@ -85,8 +85,8 @@ If an Administrator bans a malicious user, but the malicious user concurrently s
 \label{fig:ban_evasion}
 \end{figure}
 
-\section{State Resolution V3: The Surgical Merge}
-State Resolution V3 addresses the vulnerabilities of both previous iterations by expanding the V2.1 supplemental merge to include \textbf{Authoritative Memberships}.
+\section{State Resolution v2.1.1: The Surgical Merge}
+State Resolution v2.1.1 addresses the vulnerabilities of both previous iterations by expanding the v2.1 supplemental merge to include \textbf{Authoritative Memberships}.
 By supplementing \texttt{m.room.power\_levels} and \texttt{m.room.member} (specifically when the membership is a "ban" or "leave" and the sender differs from the state key), the consensus Ban successfully overlays onto concurrent malicious events, forcing the iterative auth check to rightfully reject them. Meanwhile, \texttt{m.room.join\_rules} remains cleanly isolated, ensuring the DAG can heal from splits without suffering from Invite Locks.
 
 \begin{figure}[h]
@@ -97,22 +97,22 @@ By supplementing \texttt{m.room.power\_levels} and \texttt{m.room.member} (speci
     auth/.style={->, dashed, thick}
 ]
 
-\node[event, fill=blue!10] (v3) {\textbf{V3 Auth Overlay}};
-\node[event, right=of v3, fill=green!10] (pl) {\texttt{\$pl} (Included)};
+\node[event, fill=blue!10] (v211) {\textbf{v2.1.1 Auth Overlay}};
+\node[event, right=of v211, fill=green!10] (pl) {\texttt{\$pl} (Included)};
 \node[event, below=of pl, fill=green!10] (ban) {\texttt{\$ban} (Included)};
-\node[event, below=of v3, fill=red!10] (invite) {\texttt{\$admin\_lock} (Excluded)};
+\node[event, below=of v211, fill=red!10] (invite) {\texttt{\$admin\_lock} (Excluded)};
 
-\draw[->, thick] (v3) -- (pl);
-\draw[->, thick] (v3) |- (ban);
-\draw[->, thick, dotted] (v3) -- (invite) node[midway, sloped, above] {Isolated};
+\draw[->, thick] (v211) -- (pl);
+\draw[->, thick] (v211) |- (ban);
+\draw[->, thick, dotted] (v211) -- (invite) node[midway, sloped, above] {Isolated};
 
 \end{tikzpicture}
-\caption{State Resolution V3: The mathematical sweet spot. Power levels and Authoritative Memberships (Bans) are merged into the overlay to defeat evasion attacks, while \texttt{join\_rules} are cleanly isolated to preserve historical DAG integrity.}
-\label{fig:v3_merge}
+\caption{State Resolution v2.1.1: The mathematical sweet spot. Power levels and Authoritative Memberships (Bans) are merged into the overlay to defeat evasion attacks, while \texttt{join\_rules} are cleanly isolated to preserve historical DAG integrity.}
+\label{fig:v211_merge}
 \end{figure}
 
 \section{Defeating Demotion Evasion}
-A separate vector, Demotion Evasion, occurs when a demoted administrator attempts to bypass their demotion by referencing an ancient Power Level event in their 1-hop \texttt{auth\_events} chain. Both V2.1 and V3 inherently defeat this attack because the authoritative demotion is a Power Level event, which is supplemented into the auth overlay and immediately invalidates the malicious event's credentials.
+A separate vector, Demotion Evasion, occurs when a demoted administrator attempts to bypass their demotion by referencing an ancient Power Level event in their 1-hop \texttt{auth\_events} chain. Both v2.1 and v2.1.1 inherently defeat this attack because the authoritative demotion is a Power Level event, which is supplemented into the auth overlay and immediately invalidates the malicious event's credentials.
 
 \begin{figure}[h]
 \centering
@@ -130,11 +130,11 @@ A separate vector, Demotion Evasion, occurs when a demoted administrator attempt
 \draw[auth] (attack) -- (ancient) node[midway, below, sloped] {Bypasses demotion};
 
 \end{tikzpicture}
-\caption{Demotion Evasion: Eve maliciously points her event's \texttt{auth\_events} directly to her ancient PL 100 event. Both V2.1 and V3 defeat this because \texttt{\$pl\_demote} is supplemented into the auth overlay, superseding the ancient PL.}
+\caption{Demotion Evasion: Eve maliciously points her event's \texttt{auth\_events} directly to her ancient PL 100 event. Both v2.1 and v2.1.1 defeat this because \texttt{\$pl\_demote} is supplemented into the auth overlay, superseding the ancient PL.}
 \label{fig:demotion_evasion}
 \end{figure}
 
 \section{Conclusion}
-By carefully balancing the supplemental merge, State Resolution V3 provides a mathematically secure consensus algorithm that protects against both historical lockouts and concurrent evasion attacks.
+By carefully balancing the supplemental merge, State Resolution v2.1.1 provides a mathematically secure consensus algorithm that protects against both historical lockouts and concurrent evasion attacks.
 
 \end{document}
