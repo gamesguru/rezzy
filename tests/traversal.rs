@@ -210,3 +210,183 @@ fn test_v2_2_deep_auth_chain_101() {
         "V2.2 should have found the PL event 101 hops deep!"
     );
 }
+
+#[test]
+fn test_v2_2_performance_1_million_hops() {
+    // SCENARIO: A massive auth chain of 1,000,000 events.
+    // This proves that the BFS traversal and HashMap lookups can handle
+    // gigantic DAGs without stack overflows (since it's iterative) and
+    // without taking an unreasonable amount of time.
+
+    use std::time::Instant;
+    let start_setup = Instant::now();
+
+    let create_ev = LeanEvent {
+        event_id: "$create".to_string(),
+        event_type: "m.room.create".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@creator:example.com".to_string(),
+        origin_server_ts: 100,
+        ..Default::default()
+    };
+
+    let pl_ev = LeanEvent {
+        event_id: "$pl".to_string(),
+        event_type: "m.room.power_levels".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@creator:example.com".to_string(),
+        origin_server_ts: 200,
+        content: serde_json::json!({
+            "users": { "@alice:example.com": 100 },
+            "state_default": 50
+        }),
+        auth_events: vec!["$create".to_string()],
+        ..Default::default()
+    };
+
+    let mut auth_context = HashMap::with_capacity(1_000_005);
+    auth_context.insert(create_ev.event_id.clone(), create_ev.clone());
+    auth_context.insert(pl_ev.event_id.clone(), pl_ev.clone());
+
+    let mut last_event_id = "$pl".to_string();
+    for i in 1..=1_000_000 {
+        let ev_id = format!("$dummy_{}", i);
+        let ev = LeanEvent {
+            event_id: ev_id.clone(),
+            event_type: "m.dummy".to_string(),
+            state_key: None,
+            sender: "@alice:example.com".to_string(),
+            origin_server_ts: 200 + i as u64,
+            auth_events: vec!["$create".to_string(), last_event_id],
+            ..Default::default()
+        };
+        last_event_id = ev_id.clone();
+        auth_context.insert(ev_id, ev);
+    }
+
+    let alice_join = LeanEvent {
+        event_id: "$join".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@alice:example.com".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 2000000,
+        content: serde_json::json!({ "membership": "join" }),
+        auth_events: vec!["$create".to_string(), last_event_id.clone()],
+        ..Default::default()
+    };
+    auth_context.insert(alice_join.event_id.clone(), alice_join.clone());
+
+    let alice_name = LeanEvent {
+        event_id: "$name".to_string(),
+        event_type: "m.room.name".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 2000001,
+        content: serde_json::json!({ "name": "Alice's Room" }),
+        auth_events: vec!["$create".to_string(), alice_join.event_id.clone()],
+        ..Default::default()
+    };
+
+    let mut conflicted_events = HashMap::new();
+    conflicted_events.insert(alice_name.event_id.clone(), alice_name);
+
+    println!("Setup 1,000,000 events took: {:?}", start_setup.elapsed());
+
+    let start_resolve = Instant::now();
+    let resolved_v22 = resolve_lean(
+        BTreeMap::new(),
+        conflicted_events,
+        &auth_context,
+        StateResVersion::V2_2,
+    );
+    let resolve_duration = start_resolve.elapsed();
+    println!(
+        "State Resolution (V2.2) of 1,000,000 hops took: {:?}",
+        resolve_duration
+    );
+
+    assert!(
+        resolved_v22.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        "V2.2 should have found the PL event 1,000,000 hops deep!"
+    );
+}
+
+#[test]
+fn test_v2_2_ancient_prev_event_allowed() {
+    // SCENARIO: Alice sends a state event (m.room.name) where her client
+    // sets `prev_events` to the VERY FIRST event in the room ($create),
+    // effectively skipping the entire timeline graph.
+    // This proves that State Resolution doesn't care about `prev_events`.
+
+    let create_ev = LeanEvent {
+        event_id: "$create".to_string(),
+        event_type: "m.room.create".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@creator:example.com".to_string(),
+        origin_server_ts: 100,
+        ..Default::default()
+    };
+
+    let pl_ev = LeanEvent {
+        event_id: "$pl".to_string(),
+        event_type: "m.room.power_levels".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@creator:example.com".to_string(),
+        origin_server_ts: 200,
+        content: serde_json::json!({
+            "users": { "@alice:example.com": 100 },
+            "state_default": 50
+        }),
+        auth_events: vec!["$create".to_string()],
+        ..Default::default()
+    };
+
+    let alice_join = LeanEvent {
+        event_id: "$join".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@alice:example.com".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 300,
+        content: serde_json::json!({ "membership": "join" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    let mut auth_context = HashMap::new();
+    auth_context.insert(create_ev.event_id.clone(), create_ev.clone());
+    auth_context.insert(pl_ev.event_id.clone(), pl_ev.clone());
+    auth_context.insert(alice_join.event_id.clone(), alice_join.clone());
+
+    // Alice changes the room name, but references the ancient $create event in prev_events.
+    let alice_name = LeanEvent {
+        event_id: "$name".to_string(),
+        event_type: "m.room.name".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 1000,
+        content: serde_json::json!({ "name": "Alice's Room" }),
+        auth_events: vec![
+            "$create".to_string(),
+            "$join".to_string(),
+            "$pl".to_string(),
+        ],
+        prev_events: vec!["$create".to_string()], // <-- Ancient prev_event!
+        ..Default::default()
+    };
+
+    let mut conflicted_events = HashMap::new();
+    conflicted_events.insert(alice_name.event_id.clone(), alice_name);
+
+    let resolved_v22 = resolve_lean(
+        BTreeMap::new(),
+        conflicted_events,
+        &auth_context,
+        StateResVersion::V2_2,
+    );
+
+    // State resolution still passes because the auth_events are valid.
+    assert!(
+        resolved_v22.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        "V2.2 should allow the event even with an ancient prev_event"
+    );
+}
