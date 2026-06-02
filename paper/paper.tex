@@ -1,16 +1,36 @@
-\documentclass[11pt,a4paper]{article}
+\documentclass[12pt]{article}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage{amsmath,amssymb,amsfonts}
-\usepackage{hyperref}
+\usepackage[margin=1in]{geometry}
+\usepackage[hidelinks,hypertexnames=false]{hyperref}
 \usepackage{cite}
 \usepackage{listings}
 \usepackage{xcolor}
+\usepackage{float}
 \usepackage{tikz}
 \usetikzlibrary{positioning, arrows.meta, shapes.geometric}
 
+% ── Preprint watermark ───────────────────────────────────────────────────
+\usepackage{eso-pic}
+\AddToShipoutPictureBG{%
+  \put(\LenToUnit{0.5\paperwidth},\LenToUnit{0.955\paperheight}){%
+    \makebox(0,0){\textcolor{gray!25}{\large\textit{Preprint --- not peer reviewed}}}%
+  }%
+  \put(\LenToUnit{0.5\paperwidth},\LenToUnit{0.04\paperheight}){%
+    \makebox(0,0){\textcolor{gray!25}{\large\textit{Preprint --- not peer reviewed}}}%
+  }%
+}
+
 \title{Matrix State Resolution v2.1.1: \\ A Surgical Fix for Invite Locks and Ban Evasion}
-\author{Shane Jaroch \\ \texttt{chown\_tee@proton.me}}
+
+\author{%
+  Shane Jaroch \\
+  \small \textit{Department of Mathematics and Statistics,} \\
+  \small \textit{School of Engineering and Computer Science} \\
+  \small Cloud University \\
+  \small \href{mailto:sjjaroch@oakland.edu}{\texttt{sjjaroch@oakland.edu}}
+}
 \date{\today}
 
 \begin{document}
@@ -28,7 +48,7 @@ State Resolution is the process by which multiple homeservers in a Matrix room r
 In V2.0, the "Supplemental Merge" aggressively overlaid all state events, including \texttt{m.room.join\_rules}, into the auth context during resolution.
 If an Administrator locked a room to "invite-only", historical \texttt{join} events on slower forks would be erroneously evaluated against the newly merged "invite" rules rather than their local "public" rules. This caused legitimate, historical joins to be rejected during resolution, permanently locking out users.
 
-\begin{figure}[h]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
     node distance=1.5cm and 2cm,
@@ -60,7 +80,7 @@ If an Administrator locked a room to "invite-only", historical \texttt{join} eve
 To fix the Invite Lock, Matrix State Resolution v2.1 (MSC4297) strictly isolated the supplemental merge to only include \texttt{m.room.power\_levels}. While this successfully protected \texttt{join\_rules}, it excluded Membership events (Bans).
 If an Administrator bans a malicious user, but the malicious user concurrently submits a state event (e.g., a room name change) on a separate fork, V2.1 evaluates the malicious event against the user's local auth chain (which lacks the ban). Because the ban is not supplemented, the malicious event is accepted into the final resolved state.
 
-\begin{figure}[h]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
     node distance=1.5cm and 2cm,
@@ -89,7 +109,7 @@ If an Administrator bans a malicious user, but the malicious user concurrently s
 State Resolution v2.1.1 addresses the vulnerabilities of both previous iterations by expanding the v2.1 supplemental merge to include \textbf{Authoritative Memberships}.
 By supplementing \texttt{m.room.power\_levels} and \texttt{m.room.member} (specifically when the membership is a "ban" or "leave" and the sender differs from the state key), the consensus Ban successfully overlays onto concurrent malicious events, forcing the iterative auth check to rightfully reject them. Meanwhile, \texttt{m.room.join\_rules} remains cleanly isolated, ensuring the DAG can heal from splits without suffering from Invite Locks.
 
-\begin{figure}[h]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
     node distance=1.5cm and 2cm,
@@ -114,7 +134,7 @@ By supplementing \texttt{m.room.power\_levels} and \texttt{m.room.member} (speci
 \section{Defeating Demotion Evasion}
 A separate vector, Demotion Evasion, occurs when a demoted administrator attempts to bypass their demotion by referencing an ancient Power Level event in their 1-hop \texttt{auth\_events} chain. Both v2.1 and v2.1.1 inherently defeat this attack because the authoritative demotion is a Power Level event, which is supplemented into the auth overlay and immediately invalidates the malicious event's credentials.
 
-\begin{figure}[h]
+\begin{figure}[H]
 \centering
 \begin{tikzpicture}[
     node distance=1.5cm and 2cm,
@@ -133,6 +153,20 @@ A separate vector, Demotion Evasion, occurs when a demoted administrator attempt
 \caption{Demotion Evasion: Eve maliciously points her event's \texttt{auth\_events} directly to her ancient PL 100 event. Both v2.1 and v2.1.1 defeat this because \texttt{\$pl\_demote} is supplemented into the auth overlay, superseding the ancient PL.}
 \label{fig:demotion_evasion}
 \end{figure}
+
+\section{Implementation Defects in MSC4297}
+Beyond the theoretical algorithm flaws, naive implementations of the MSC4297 (v2.1) specification suffered from severe mechanical and security defects when deployed in production (e.g., Room Version 12). During our formally verified reconstruction, we identified and patched six critical implementation failures:
+
+\begin{enumerate}
+    \item \textbf{Failure to Preserve Unconflicted State:} The v2.1 algorithm requires evaluating the full conflicted subgraph, but naive implementations accidentally discarded the baseline unconflicted state entirely during the \texttt{iterative\_auth\_check}, causing state wipeouts.
+    \item \textbf{Tripling Auth Work on Older Rooms:} The complex v2.1 Power Level sub-resolution logic erroneously bled into older room versions (v2, v10, v11). This tripled the auth-check work and caused massive performance regressions until properly gated to explicitly v2.1+ rooms.
+    \item \textbf{Creator Power Level Rejections:} The \texttt{check\_power\_levels} logic accidentally evaluated creator entries during the MSC4297 iterative auth phase. This caused valid v12 joins to be maliciously rejected during federation syncs.
+    \item \textbf{Incorrect Auth State Population:} The \texttt{iterative\_auth\_check} loop failed to pull the progressively updated \texttt{auth\_state} from the partially \texttt{resolved\_state}, breaking the strict sequential auth logic required by MSC4297.
+    \item \textbf{State Reset Vulnerabilities:} Malicious federated servers could craft massive conflicted subgraphs that exploited the v2.1 graph traversal, causing the resolution to hallucinate or trigger a state reset.
+    \item \textbf{Supplemental Auth Diff Dropping:} Various edge cases resulted in the supplemental auth diff flattening being skipped during the iterative auth check, which caused the state to randomly roll back to older extremes.
+\end{enumerate}
+
+These defects highlight the danger of deploying complex graph-resolution algorithms without rigorous mathematical and mechanical verification.
 
 \section{Conclusion}
 By carefully balancing the supplemental merge, State Resolution v2.1.1 provides a mathematically secure consensus algorithm that protects against both historical lockouts and concurrent evasion attacks.
