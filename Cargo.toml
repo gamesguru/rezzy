@@ -93,3 +93,7 @@ path = "tests/large_rooms.rs"
 name = "upstream_runner"
 path = "tests/upstream_runner.rs"
 required-features = ["mock-ruma"]
+
+[[test]]
+name = "pathologies"
+path = "tests/pathologies.rs"
