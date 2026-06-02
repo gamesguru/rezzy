@@ -6,6 +6,11 @@ target/
 *.zip
 *.tar.*
 /*.txt
+# paper
+paper.aux
+paper.log
+paper.out
+paper.pdf
 # force add something if you want it
 res/
 # python

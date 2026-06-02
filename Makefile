@@ -56,6 +56,13 @@ lean/nuke: ##H Full Lean reset (removes packages too — will re-clone)
 .PHONY: lean
 lean: lean/build ##H Alias for lean/build
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Paper
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.PHONY: paper
+paper: ##H Compile the LaTeX paper
+	pdflatex paper/paper.tex
+
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Rust targets

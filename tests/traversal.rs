@@ -364,12 +364,13 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
 
 #[test]
 fn test_v2_1_1_fixes_invite_lock() {
-    // THE INVITE LOCK (NEXY ANOMALY)
     // In V2.0, the supplemental merge aggressively overlaid ALL state events.
     // If an Admin locked a room to "invite", historical joins on slower forks would be
     // evaluated against the new "invite" rules rather than their local "public" rules,
     // causing legitimate joins to be incorrectly rejected during resolution.
-    // V2.1.1 fixes this by EXCLUDING `m.room.join_rules` from the supplemental merge.
+    // V2.1 fixed this by strictly isolating the supplemental merge to PLs.
+    // V2.1.1 preserves this fix by ensuring `join_rules` remain EXCLUDED from the merge,
+    // even while it expands the merge to cover Authoritative Memberships (Bans).
 
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
@@ -441,7 +442,42 @@ fn test_v2_1_1_fixes_invite_lock() {
     conflicted_events.insert("$admin_lock".to_string(), admin_lock);
     conflicted_events.insert("$hist_join".to_string(), historical_join);
 
-    // Resolution under V2.1.1 (The V3 Fix)
+    // Resolution under V2.0 (The Shotgun)
+    // V2.0 supplemented ALL state events, meaning the `admin_lock` (invite-only) event
+    // is pulled into the auth overlay. The historical user's join is then evaluated against
+    // the "invite" rules and rightfully REJECTED, permanently locking them out!
+    let resolved_v2 = ruma_lean::resolve_lean(
+        std::collections::BTreeMap::new(),
+        conflicted_events.clone(),
+        &auth_context,
+        ruma_lean::StateResVersion::V2,
+    );
+    let member_key = (
+        "m.room.member".to_string(),
+        Some("@user:example.com".to_string()),
+    );
+
+    assert!(
+        !resolved_v2.contains_key(&member_key),
+        "V2.0 FAILS: The historical join is incorrectly rejected because the Invite Lock overrode it!"
+    );
+
+    // Resolution under V2.1 (The Scalpel)
+    // V2.1 only supplemented PLs. It successfully ignored `join_rules`, so the historical
+    // user's join survived!
+    let resolved_v21 = ruma_lean::resolve_lean(
+        std::collections::BTreeMap::new(),
+        conflicted_events.clone(),
+        &auth_context,
+        ruma_lean::StateResVersion::V2_1,
+    );
+    assert_eq!(
+        resolved_v21.get(&member_key).unwrap(),
+        "$hist_join",
+        "V2.1 PASSES: The Invite Lock was fixed in V2.1."
+    );
+
+    // Resolution under V2.1.1
     // V2.1.1 supplements PLs and Bans, but NEVER `join_rules`.
     // Therefore, `$hist_join` is evaluated against its local auth chain (`$public`),
     // and is rightfully ACCEPTED into the resolved state!
@@ -450,11 +486,6 @@ fn test_v2_1_1_fixes_invite_lock() {
         conflicted_events,
         &auth_context,
         ruma_lean::StateResVersion::V2_1_1,
-    );
-
-    let member_key = (
-        "m.room.member".to_string(),
-        Some("@user:example.com".to_string()),
     );
 
     assert_eq!(
