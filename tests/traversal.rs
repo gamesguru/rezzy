@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 fn run_auth_lookup_scenario(
     join_auth_includes_pl: bool,
     expected_v21_success: bool,
-    expected_v22_success: bool,
+    expected_v211_success: bool,
 ) {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
@@ -82,237 +82,40 @@ fn run_auth_lookup_scenario(
         "V2.1 success expectation mismatched: got {v21_success}, expected {expected_v21_success}"
     );
 
-    let resolved_v22 = resolve_lean(
+    let resolved_v211 = resolve_lean(
         BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        StateResVersion::V2_2,
+        StateResVersion::V2_1_1,
     );
-    let v22_success = resolved_v22.contains_key(&("m.room.name".to_string(), Some("".to_string())));
+    let v211_success =
+        resolved_v211.contains_key(&("m.room.name".to_string(), Some("".to_string())));
     assert_eq!(
-        v22_success, expected_v22_success,
-        "V2.2 success expectation mismatched: got {v22_success}, expected {expected_v22_success}"
+        v211_success, expected_v211_success,
+        "V2.1.1 success expectation mismatched: got {v211_success}, expected {expected_v211_success}"
     );
 }
 
 #[test]
-fn test_v2_1_vs_v2_2_recursive_auth_lookup() {
+fn test_v2_1_vs_v2_1_1_recursive_auth_lookup() {
     // Join event includes PL. PL is in the auth ancestry (depth 2).
     // V2.1 fails because it only checks 1-hop (depth 1).
-    // V2.2 succeeds because BFS finds the PL in ancestry.
-    run_auth_lookup_scenario(true, false, true);
+    // V2.1.1 ALSO fails because it rejects BFS in favor of strict 1-hop security.
+    run_auth_lookup_scenario(true, false, false);
 }
 
 #[test]
-fn test_v2_2_xfail_disconnected_auth() {
+fn test_v2_1_1_xfail_disconnected_auth() {
     // Join event DOES NOT include PL. PL is disconnected from auth graph.
     // V2.1 fails.
-    // V2.2 also fails, correctly expected.
+    // V2.1.1 also fails, correctly expected.
     run_auth_lookup_scenario(false, false, false);
 }
 
-#[test]
-fn test_v2_2_deep_auth_chain_101() {
-    // SCENARIO: The required Power Level event is 101 hops deep in the auth chain.
-    // We create a linear auth chain of 101 events: E_101 -> E_100 -> ... -> E_1 -> PL
-    // The final event E_final only lists E_101 in its auth_events.
-    // We want to verify if V2.2's BFS can traverse all 101 hops to find the PL event,
-    // or if a depth limit prevents it.
 
-    let create_ev = LeanEvent {
-        event_id: "$create".to_string(),
-        event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
-        sender: "@creator:example.com".to_string(),
-        origin_server_ts: 100,
-        ..Default::default()
-    };
-
-    let pl_ev = LeanEvent {
-        event_id: "$pl".to_string(),
-        event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
-        sender: "@creator:example.com".to_string(),
-        origin_server_ts: 200,
-        content: serde_json::json!({
-            "users": { "@alice:example.com": 100 },
-            "state_default": 50
-        }),
-        auth_events: vec!["$create".to_string()],
-        ..Default::default()
-    };
-
-    let mut auth_context = HashMap::new();
-    auth_context.insert(create_ev.event_id.clone(), create_ev.clone());
-    auth_context.insert(pl_ev.event_id.clone(), pl_ev.clone());
-
-    let mut last_event_id = "$pl".to_string();
-    for i in 1..=101 {
-        let ev_id = format!("$dummy_{}", i);
-        let ev = LeanEvent {
-            event_id: ev_id.clone(),
-            event_type: "m.dummy".to_string(),
-            state_key: Some(format!("state_{}", i)),
-            sender: "@alice:example.com".to_string(),
-            origin_server_ts: 200 + i as u64,
-            auth_events: vec!["$create".to_string(), last_event_id.clone()],
-            ..Default::default()
-        };
-        auth_context.insert(ev_id.clone(), ev);
-        last_event_id = ev_id;
-    }
-
-    let alice_join = LeanEvent {
-        event_id: "$join".to_string(),
-        event_type: "m.room.member".to_string(),
-        state_key: Some("@alice:example.com".to_string()),
-        sender: "@alice:example.com".to_string(),
-        origin_server_ts: 900,
-        content: serde_json::json!({ "membership": "join" }),
-        auth_events: vec!["$create".to_string(), last_event_id.clone()],
-        ..Default::default()
-    };
-    auth_context.insert(alice_join.event_id.clone(), alice_join.clone());
-
-    let alice_name = LeanEvent {
-        event_id: "$name".to_string(),
-        event_type: "m.room.name".to_string(),
-        state_key: Some("".to_string()),
-        sender: "@alice:example.com".to_string(),
-        origin_server_ts: 1000,
-        content: serde_json::json!({ "name": "Alice's Room" }),
-        auth_events: vec!["$create".to_string(), alice_join.event_id.clone()],
-        ..Default::default()
-    };
-
-    let mut conflicted_events = HashMap::new();
-    conflicted_events.insert(alice_name.event_id.clone(), alice_name);
-
-    let resolved_v21 = resolve_lean(
-        BTreeMap::new(),
-        conflicted_events.clone(),
-        &auth_context,
-        StateResVersion::V2_1,
-    );
-    assert!(
-        !resolved_v21.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
-        "V2.1 should have failed 101 hops deep"
-    );
-
-    let resolved_v22 = resolve_lean(
-        BTreeMap::new(),
-        conflicted_events,
-        &auth_context,
-        StateResVersion::V2_2,
-    );
-    assert!(
-        resolved_v22.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
-        "V2.2 should have found the PL event 101 hops deep!"
-    );
-}
 
 #[test]
-fn test_v2_2_performance_1_million_hops() {
-    // SCENARIO: A massive auth chain of 1,000,000 events.
-    // This proves that the BFS traversal and HashMap lookups can handle
-    // gigantic DAGs without stack overflows (since it's iterative) and
-    // without taking an unreasonable amount of time.
-
-    use std::time::Instant;
-    let start_setup = Instant::now();
-
-    let create_ev = LeanEvent {
-        event_id: "$create".to_string(),
-        event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
-        sender: "@creator:example.com".to_string(),
-        origin_server_ts: 100,
-        ..Default::default()
-    };
-
-    let pl_ev = LeanEvent {
-        event_id: "$pl".to_string(),
-        event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
-        sender: "@creator:example.com".to_string(),
-        origin_server_ts: 200,
-        content: serde_json::json!({
-            "users": { "@alice:example.com": 100 },
-            "state_default": 50
-        }),
-        auth_events: vec!["$create".to_string()],
-        ..Default::default()
-    };
-
-    let mut auth_context = HashMap::with_capacity(1_000_005);
-    auth_context.insert(create_ev.event_id.clone(), create_ev.clone());
-    auth_context.insert(pl_ev.event_id.clone(), pl_ev.clone());
-
-    let mut last_event_id = "$pl".to_string();
-    for i in 1..=1_000_000 {
-        let ev_id = format!("$dummy_{}", i);
-        let ev = LeanEvent {
-            event_id: ev_id.clone(),
-            event_type: "m.dummy".to_string(),
-            state_key: None,
-            sender: "@alice:example.com".to_string(),
-            origin_server_ts: 200 + i as u64,
-            auth_events: vec!["$create".to_string(), last_event_id],
-            ..Default::default()
-        };
-        last_event_id = ev_id.clone();
-        auth_context.insert(ev_id, ev);
-    }
-
-    let alice_join = LeanEvent {
-        event_id: "$join".to_string(),
-        event_type: "m.room.member".to_string(),
-        state_key: Some("@alice:example.com".to_string()),
-        sender: "@alice:example.com".to_string(),
-        origin_server_ts: 2000000,
-        content: serde_json::json!({ "membership": "join" }),
-        auth_events: vec!["$create".to_string(), last_event_id.clone()],
-        ..Default::default()
-    };
-    auth_context.insert(alice_join.event_id.clone(), alice_join.clone());
-
-    let alice_name = LeanEvent {
-        event_id: "$name".to_string(),
-        event_type: "m.room.name".to_string(),
-        state_key: Some("".to_string()),
-        sender: "@alice:example.com".to_string(),
-        origin_server_ts: 2000001,
-        content: serde_json::json!({ "name": "Alice's Room" }),
-        auth_events: vec!["$create".to_string(), alice_join.event_id.clone()],
-        ..Default::default()
-    };
-
-    let mut conflicted_events = HashMap::new();
-    conflicted_events.insert(alice_name.event_id.clone(), alice_name);
-
-    println!("Setup 1,000,000 events took: {:?}", start_setup.elapsed());
-
-    let start_resolve = Instant::now();
-    let resolved_v22 = resolve_lean(
-        BTreeMap::new(),
-        conflicted_events,
-        &auth_context,
-        StateResVersion::V2_2,
-    );
-    let resolve_duration = start_resolve.elapsed();
-    println!(
-        "State Resolution (V2.2) of 1,000,000 hops took: {:?}",
-        resolve_duration
-    );
-
-    assert!(
-        resolved_v22.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
-        "V2.2 should have found the PL event 1,000,000 hops deep!"
-    );
-}
-
-#[test]
-fn test_v2_2_ancient_prev_event_allowed() {
+fn test_v2_1_1_ancient_prev_event_allowed() {
     // SCENARIO: Alice sends a state event (m.room.name) where her client
     // sets `prev_events` to the VERY FIRST event in the room ($create),
     // effectively skipping the entire timeline graph.
@@ -377,17 +180,17 @@ fn test_v2_2_ancient_prev_event_allowed() {
     let mut conflicted_events = HashMap::new();
     conflicted_events.insert(alice_name.event_id.clone(), alice_name);
 
-    let resolved_v22 = resolve_lean(
+    let resolved_v211 = resolve_lean(
         BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        StateResVersion::V2_2,
+        StateResVersion::V2_1_1,
     );
 
     // State resolution still passes because the auth_events are valid.
     assert!(
-        resolved_v22.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
-        "V2.2 should allow the event even with an ancient prev_event"
+        resolved_v211.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        "V2.1.1 should allow the event even with an ancient prev_event"
     );
 }
 
@@ -462,7 +265,7 @@ fn test_kahn_tiebreak_power_level_overwrites_via_auth() {
         BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        StateResVersion::V2_2,
+        StateResVersion::V2_1_1,
     );
 
     // The resolved state should contain the ban, not the join
@@ -478,118 +281,8 @@ fn test_kahn_tiebreak_power_level_overwrites_via_auth() {
 }
 
 #[test]
-fn test_kahn_tiebreak_mods_banning_each_other() {
-    // Two mods (both PL 50) ban each other concurrently.
-    // They tie for Power Level.
-    // They have different state keys (Alice bans Bob, Bob bans Alice), so they don't overwrite each other.
-    // Kahn's sort determines who pops FIRST based on event_id.
-    // Whoever pops FIRST sets their ban in the state.
-    // When the second person's ban is evaluated, `iterative_auth_ok` sees they are ALREADY banned.
-    // Therefore, the second person's ban is REJECTED.
-    // "Who shoots first wins."
-
-    let create_ev = LeanEvent {
-        event_id: "$create".to_string(),
-        event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
-        sender: "@admin:example.com".to_string(),
-        origin_server_ts: 100,
-        ..Default::default()
-    };
-
-    let pl_ev = LeanEvent {
-        event_id: "$pl".to_string(),
-        event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
-        sender: "@admin:example.com".to_string(),
-        origin_server_ts: 200,
-        content: json!({
-            "users": { "@alice:example.com": 50, "@bob:example.com": 50 },
-            "events_default": 0,
-            "state_default": 50
-        }),
-        auth_events: vec!["$create".to_string()],
-        ..Default::default()
-    };
-
-    // Alice bans Bob.
-    // event_id = "$A_alice_ban"
-    let alice_ban = LeanEvent {
-        event_id: "$A_alice_ban".to_string(),
-        event_type: "m.room.member".to_string(),
-        state_key: Some("@bob:example.com".to_string()),
-        sender: "@alice:example.com".to_string(),
-        origin_server_ts: 300,
-        content: json!({ "membership": "ban" }),
-        auth_events: vec!["$create".to_string(), "$pl".to_string()],
-        ..Default::default()
-    };
-
-    // Bob bans Alice.
-    // event_id = "$Z_bob_ban"
-    let bob_ban = LeanEvent {
-        event_id: "$Z_bob_ban".to_string(),
-        event_type: "m.room.member".to_string(),
-        state_key: Some("@alice:example.com".to_string()),
-        sender: "@bob:example.com".to_string(),
-        origin_server_ts: 300,
-        content: json!({ "membership": "ban" }),
-        auth_events: vec!["$create".to_string(), "$pl".to_string()],
-        ..Default::default()
-    };
-
-    let mut auth_context = HashMap::new();
-    auth_context.insert(create_ev.event_id.clone(), create_ev);
-    auth_context.insert(pl_ev.event_id.clone(), pl_ev);
-
-    let mut conflicted_events = HashMap::new();
-    conflicted_events.insert(alice_ban.event_id.clone(), alice_ban);
-    conflicted_events.insert(bob_ban.event_id.clone(), bob_ban);
-
-    let resolved = resolve_lean(
-        BTreeMap::new(),
-        conflicted_events,
-        &auth_context,
-        StateResVersion::V2_2,
-    );
-
-    // Let's figure out who pops first!
-    // Priority: other.event.event_id.cmp(&self.event.event_id)
-    // Alice = "$A", Bob = "$Z"
-    // Alice's cmp: "$Z".cmp("$A") -> Greater. Alice is Greater, pops FIRST.
-    // Bob's cmp: "$A".cmp("$Z") -> Less. Bob is Less, pops LAST.
-    // Wait! Under State Resolution V2.1 and V2.2, auth checks for non-power-level events
-    // are strictly isolated to their own `auth_events` chain! (This is the core fix of MSC4297).
-    // Because neither ban is in the other's auth chain, NEITHER sees the other's ban during `iterative_auth_ok`!
-    // Therefore, BOTH bans pass authorization!
-    // And since they have different state keys (@bob vs @alice), they both get inserted!
-    // Result: Mutual Destruction.
-
-    let bob_member_key = (
-        "m.room.member".to_string(),
-        Some("@bob:example.com".to_string()),
-    );
-    let alice_member_key = (
-        "m.room.member".to_string(),
-        Some("@alice:example.com".to_string()),
-    );
-
-    assert_eq!(
-        resolved.get(&bob_member_key).unwrap(),
-        "$A_alice_ban",
-        "Bob should be banned because Alice's ban was authorized by its local auth chain."
-    );
-
-    assert_eq!(
-        resolved.get(&alice_member_key).unwrap(),
-        "$Z_bob_ban",
-        "Alice should ALSO be banned because Bob's ban was authorized by its local auth chain! (V2.1 isolated auth)"
-    );
-}
-
-#[test]
-fn test_kahn_tiebreak_mods_banning_each_other_v2_1() {
-    // Exact same test, but running under V2.1 to prove auth_chain_distance doesn't change the outcome.
+fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
+    // Exact same test, but running under V2.1.1 to prove auth_chain_distance doesn't change the outcome.
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
@@ -648,7 +341,7 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1() {
         std::collections::BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        ruma_lean::StateResVersion::V2_1,
+        ruma_lean::StateResVersion::V2_1_1,
     );
 
     let bob_member_key = (
@@ -660,18 +353,15 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1() {
         Some("@alice:example.com".to_string()),
     );
 
+    // Under STOCK V2.1, this resulted in Mutual Destruction.
+    // BUT under V2.1 Fixed (V3), Alice's ban pops first and is supplemented!
+    // So Bob's ban of Alice is evaluated while Bob is ALREADY banned, and is thus REJECTED.
+    // "Who shoots first wins" mathematically holds.
     assert_eq!(resolved.get(&bob_member_key).unwrap(), "$A_alice_ban");
-    let bob_member_key = (
-        "m.room.member".to_string(),
-        Some("@bob:example.com".to_string()),
+    assert!(
+        !resolved.contains_key(&alice_member_key),
+        "Bob's ban of Alice should be rightfully rejected because Alice shot first!"
     );
-    let alice_member_key = (
-        "m.room.member".to_string(),
-        Some("@alice:example.com".to_string()),
-    );
-
-    assert_eq!(resolved.get(&bob_member_key).unwrap(), "$A_alice_ban");
-    assert_eq!(resolved.get(&alice_member_key).unwrap(), "$Z_bob_ban");
 }
 
 #[test]
@@ -773,31 +463,37 @@ fn test_invite_lock_spam_wave_with_bans() {
         ruma_lean::StateResVersion::V2_1,
     );
 
-    // Resolution under V2.2
-    let resolved_v22 = ruma_lean::resolve_lean(
-        std::collections::BTreeMap::new(),
-        conflicted_events,
-        &auth_context,
-        ruma_lean::StateResVersion::V2_2,
-    );
-
     let join_rules_key = ("m.room.join_rules".to_string(), Some("".to_string()));
 
-    // Wait, since auth_events are identical for both join_rules, V2.2 falls back to TS.
-    // Since the attacker manipulated TS, the attacker might STILL win under V2.2!
+    // Wait, since auth_events are identical for both join_rules, V2.1.1 falls back to TS.
+    // Since the attacker manipulated TS, the attacker might STILL win under V2.1.1!
     // Let's assert what happens so we can analyze the structural vulnerabilities together.
 
     // Check V2.1 outcome
     let v21_winner = resolved_v21.get(&join_rules_key).unwrap();
     println!("V2.1 Winner: {}", v21_winner);
 
-    // Check V2.2 outcome
-    let v22_winner = resolved_v22.get(&join_rules_key).unwrap();
-    println!("V2.2 Winner: {}", v22_winner);
+    // Resolution under V2.1.1 (The V3 Ban Evasion Fix)
+    let resolved_v211 = ruma_lean::resolve_lean(
+        std::collections::BTreeMap::new(),
+        conflicted_events,
+        &auth_context,
+        ruma_lean::StateResVersion::V2_1_1,
+    );
+
+    // Check V2.1.1 outcome
+    let v211_winner = resolved_v211.get(&join_rules_key).unwrap();
+    println!("V2.1.1 Winner: {}", v211_winner);
+
+    // Assert that V2.1.1 STILL allows the room to heal (Public join rules win!)
+    assert_eq!(
+        v211_winner, "$99_join_rules_public",
+        "V2.1.1 completely preserves the Invite Lock fix! The public join rules healed the room!"
+    );
 }
 
 #[test]
-fn test_v2_2_cve_demotion_evasion() {
+fn test_v2_1_1_cve_demotion_evasion() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
@@ -850,7 +546,7 @@ fn test_v2_2_cve_demotion_evasion() {
     };
 
     // THE ATTACK: Eve maliciously changes the room name.
-    // She intentionally OMITS the demotion from her 1-hop auth_events, 
+    // She intentionally OMITS the demotion from her 1-hop auth_events,
     // trying to hide it.
     let eve_attack = LeanEvent {
         event_id: "$eve_attack".to_string(),
@@ -890,19 +586,18 @@ fn test_v2_2_cve_demotion_evasion() {
         "V2.1 Rightly Rejected the attack because Eve was demoted."
     );
 
-    // --- V2.2 FALLS FOR THE ATTACK ---
-    // V2.2 uses BFS. It walks back from $eve_attack -> $eve_join -> $pl_promo.
-    // It finds the ancient PL where Eve had 100. It skips the supplemental merge because
-    // $pl_demote is not in Eve's local auth ancestry. It authorizes the attack!
-    let resolved_v22 = ruma_lean::resolve_lean(
+    // --- V2.1.1 DEFEATS THE ATTACK ---
+    // V2.1.1 strictly enforces 1-hop security and supplements the demotion.
+    // Therefore, Eve is caught and her attack is rightfully rejected!
+    let resolved_v211 = ruma_lean::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        ruma_lean::StateResVersion::V2_2,
+        ruma_lean::StateResVersion::V2_1_1,
     );
     assert!(
-        resolved_v22.contains_key(&name_key),
-        "FATAL: V2.2 mistakenly allowed the attack by bypassing the demotion!"
+        !resolved_v211.contains_key(&name_key),
+        "SUCCESS: V2.1.1 successfully protected against Demotion Evasion!"
     );
 }
 
@@ -910,10 +605,10 @@ fn test_v2_2_cve_demotion_evasion() {
 fn test_v2_1_flaw_concurrent_ban_evasion() {
     // SCENARIO: The "Phantom State" Flaw in V2.1
     // If Alice bans Bob on Fork A, and Bob concurrently changes the room name on Fork B,
-    // Bob's name change will NOT see the ban during resolution, because V2.1 isolated 
-    // memberships to the local auth chain. Bob's state event will be accepted 
+    // Bob's name change will NOT see the ban during resolution, because V2.1 isolated
+    // memberships to the local auth chain. Bob's state event will be accepted
     // into the final resolved state despite him being banned!
-    
+
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
@@ -956,7 +651,11 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 400,
         content: serde_json::json!({ "membership": "ban" }),
-        auth_events: vec!["$create".to_string(), "$pl".to_string(), "$bob_join".to_string()],
+        auth_events: vec![
+            "$create".to_string(),
+            "$pl".to_string(),
+            "$bob_join".to_string(),
+        ],
         ..Default::default()
     };
 
@@ -969,7 +668,11 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
         origin_server_ts: 405,
         content: serde_json::json!({ "name": "Bob Rules" }),
         // Bob's local auth chain knows nothing of the ban on Fork A
-        auth_events: vec!["$create".to_string(), "$bob_join".to_string(), "$pl".to_string()],
+        auth_events: vec![
+            "$create".to_string(),
+            "$bob_join".to_string(),
+            "$pl".to_string(),
+        ],
         ..Default::default()
     };
 
@@ -982,28 +685,45 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
     conflicted_events.insert("$alice_bans_bob".to_string(), alice_bans_bob);
     conflicted_events.insert("$bob_name_change".to_string(), bob_name_change);
 
-    // Run V2.1 Resolution
+    // Run V2.1 Resolution (Stock)
     let resolved_v21 = ruma_lean::resolve_lean(
         std::collections::BTreeMap::new(),
-        conflicted_events,
+        conflicted_events.clone(),
         &auth_context,
-        ruma_lean::StateResVersion::V2_1
+        ruma_lean::StateResVersion::V2_1,
     );
 
     // Alice's ban has PL 100, so Kahn sort evaluates it FIRST. It is added to the resolved state.
     assert_eq!(
-        resolved_v21.get(&("m.room.member".to_string(), Some("@bob:example.com".to_string()))).unwrap(),
+        resolved_v21
+            .get(&(
+                "m.room.member".to_string(),
+                Some("@bob:example.com".to_string())
+            ))
+            .unwrap(),
         "$alice_bans_bob",
         "Bob should be banned in the final state"
     );
 
-    // But V2.1 accepts Bob's concurrent name change!
+    // V2.1 accepts Bob's concurrent name change!
     assert!(
         resolved_v21.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
         "V2.1 flaw: Mistakenly accepted Bob's name change because it ignored his concurrent ban!"
     );
-    
-    // A FUTURE ALGORITHM must ensure Bob's name change is rejected during merge.
+
+    // Run V2.1.1 Resolution (The V3 Fix)
+    let resolved_v211 = ruma_lean::resolve_lean(
+        std::collections::BTreeMap::new(),
+        conflicted_events,
+        &auth_context,
+        ruma_lean::StateResVersion::V2_1_1,
+    );
+
+    // V2.1.1 REJECTS Bob's concurrent name change!
+    assert!(
+        !resolved_v211.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        "V2.1.1 Fixed: Rightfully rejected Bob's name change because it supplemented the concurrent ban!"
+    );
 }
 
 #[test]
@@ -1039,7 +759,7 @@ fn test_v2_1_strictness_future_v3_should_pass() {
         origin_server_ts: 300,
         content: serde_json::json!({ "membership": "join" }),
         // BUG: Missing "$jr"
-        auth_events: vec!["$create".to_string()], 
+        auth_events: vec!["$create".to_string()],
         ..Default::default()
     };
 
@@ -1056,14 +776,17 @@ fn test_v2_1_strictness_future_v3_should_pass() {
         &auth_context,
         ruma_lean::StateResVersion::V2_1,
     );
-    
-    // V2.1 Rightfully Fails: It enforces the 1-hop strictness. Without "$jr" in the auth chain, 
+
+    // V2.1 Rightfully Fails: It enforces the 1-hop strictness. Without "$jr" in the auth chain,
     // it defaults to Invite-Only and rejects the join.
     assert!(
-        !resolved_v21.contains_key(&("m.room.member".to_string(), Some("@bob:example.com".to_string()))),
+        !resolved_v21.contains_key(&(
+            "m.room.member".to_string(),
+            Some("@bob:example.com".to_string())
+        )),
         "V2.1 rightfully rejected the event because the 1-hop auth list was incomplete."
     );
 
-    // A future State DAG (MSC4242) algorithm could theoretically pass this by validating 
+    // A future State DAG (MSC4242) algorithm could theoretically pass this by validating
     // the room state via `prev_state_events` instead of relying on the fragile string array.
 }

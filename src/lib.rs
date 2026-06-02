@@ -268,7 +268,8 @@ pub enum StateResVersion {
     V1,
     V2,
     V2_1,
-    V2_2,
+    V2_1_1, // The V3 / Ban Evasion Fix
+    V2_2,   // Reserved for State DAGs (MSC4242)
 }
 
 type LocalAuthCache = HashMap<String, BTreeMap<(String, Option<String>), (LeanEvent, usize)>>;
@@ -604,7 +605,10 @@ impl<'a> Ord for SortPriority<'a> {
                     ord => ord,
                 }
             }
-            StateResVersion::V2 | StateResVersion::V2_1 | StateResVersion::V2_2 => {
+            StateResVersion::V2
+            | StateResVersion::V2_1
+            | StateResVersion::V2_1_1
+            | StateResVersion::V2_2 => {
                 // V2 reverse topological power ordering: worst events pop FIRST.
                 //
                 // Ruma uses Reverse(TieBreaker) on a BinaryHeap where TieBreaker.cmp is:
@@ -795,7 +799,7 @@ pub fn resolve_lean(
 
     // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
     let mut resolved = match version {
-        StateResVersion::V2_1 | StateResVersion::V2_2 => BTreeMap::new(),
+        StateResVersion::V2_1 | StateResVersion::V2_1_1 | StateResVersion::V2_2 => BTreeMap::new(),
         _ => unconflicted_state.clone(),
     };
 
@@ -922,28 +926,44 @@ impl<'a> crate::auth::StateProvider for OverlayState<'a> {
     fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent> {
         let query: &dyn crate::auth::StateKeyDyn = &(event_type, state_key);
 
-        // Supplemental Merge:
-        // In V2, we supplement with ALL auth types from the resolved state.
         // In V2.1 (Stock MSC4297), we supplement with ONLY m.room.power_levels.
-        // In V2.2 (Goldilographical), we supplement with ONLY m.room.power_levels
-        // if they are also ancestors (present in the local auth chain).
+        // In V2.1.1 (The V3 / Ban Evasion Fix), we ALSO supplement m.room.member (bans/kicks).
+        // In V2.2 (Goldilographical), we completely disable the supplemental merge, relying on BFS.
         let should_supplement = match self.version {
-            StateResVersion::V2_2 => {
-                event_type == "m.room.power_levels"
-                    && state_key == Some("")
-                    && self.local_auth.contains_key(query)
-            }
+            StateResVersion::V2_2 => false,
             StateResVersion::V2_1 => event_type == "m.room.power_levels" && state_key == Some(""),
+            StateResVersion::V2_1_1 => {
+                (event_type == "m.room.power_levels" && state_key == Some(""))
+                    || (event_type == "m.room.member")
+            }
             _ => true,
         };
 
         if should_supplement {
             // Check consensus resolved state
             if let Some(eid) = self.resolved.get(query) {
-                return self
+                if let Some(ev) = self
                     .auth_context
                     .get(eid)
-                    .or_else(|| self.conflicted.get(eid));
+                    .or_else(|| self.conflicted.get(eid))
+                {
+                    if self.version == StateResVersion::V2_1_1 && event_type == "m.room.member" {
+                        // V2.1.1 Fix: Only supplement bans and kicks
+                        if let Some(membership) =
+                            ev.content.get("membership").and_then(|m| m.as_str())
+                        {
+                            let is_ban = membership == "ban";
+                            let is_kick =
+                                membership == "leave" && Some(ev.sender.as_str()) != state_key;
+                            if is_ban || is_kick {
+                                return Some(ev);
+                            }
+                        }
+                        // If it's a normal join/invite, fall through to local auth
+                    } else {
+                        return Some(ev);
+                    }
+                }
             }
         }
 

@@ -396,7 +396,7 @@ fn test_real_dag_nheko_room_106_heads() {
 }
 
 #[test]
-fn test_unredacted_spam_storm_v2_2() {
+fn test_unredacted_spam_storm_v2_1_1() {
     use std::io::BufRead;
     // The unredacted spam storm broken dag case from ../../dags
     let path = "../../dags/merged-sM2LwqNHGQOgLf35gqxPMy9D7oYde2q9ADg8HPBM3kE-unredacted-lounge-v12-d1-84135.jsonl";
@@ -444,15 +444,15 @@ fn test_unredacted_spam_storm_v2_2() {
     let map = to_event_map(&events);
 
     let start = std::time::Instant::now();
-    let resolved = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_2);
+    let resolved = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1_1);
     println!(
-        "V2.2 State Resolution of {} events took: {:?}",
+        "V2.1.1 State Resolution of {} events took: {:?}",
         events.len(),
         start.elapsed()
     );
 
     assert!(
         !resolved.is_empty(),
-        "V2.2 Resolution should produce state for the unredacted storm"
+        "V2.1.1 Resolution should produce state for the unredacted storm"
     );
 }

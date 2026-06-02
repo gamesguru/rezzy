@@ -5,10 +5,12 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
+/// Helper to parse a JSONL file into a list of LeanEvents
 fn parse_jsonl_dag<P: AsRef<Path>>(path: P) -> Vec<LeanEvent> {
     let file = File::open(path).expect("Failed to open JSONL file");
     let reader = BufReader::new(file);
     let mut events = Vec::new();
+
     for line in reader.lines() {
         let line = line.unwrap();
         if line.trim().is_empty() {
@@ -46,20 +48,20 @@ fn test_pathology_duplicate_auth_poisoning() {
     );
     let dur_v21 = start_v21.elapsed();
 
-    // In V2.2, the Hard Rejection filter completely ignores the poisoned event
-    let start_v22 = std::time::Instant::now();
-    let resolved_v22 = resolve_lean(
+    // In V2.1.1, the Hard Rejection filter completely ignores the poisoned event
+    let start_v211 = std::time::Instant::now();
+    let resolved_v211 = resolve_lean(
         BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        StateResVersion::V2_2,
+        StateResVersion::V2_1_1,
     );
-    let dur_v22 = start_v22.elapsed();
+    let dur_v211 = start_v211.elapsed();
 
-    // Assert V2.2 resolves cleanly and the poisoned event doesn't ruin state
+    // Assert V2.1.1 resolves cleanly and the poisoned event doesn't ruin state
     assert!(
-        dur_v22 <= dur_v21,
-        "V2.2 should be faster or equal by dropping duplicates"
+        dur_v211 <= dur_v21,
+        "V2.1.1 should be faster or equal by dropping duplicates"
     );
 }
 
@@ -91,17 +93,17 @@ fn test_pathology_join_regress_broken() {
         "V2.1 dropped the user due to regression"
     );
 
-    // V2.2 degrades gracefully or rejects correctly to prevent CVE
-    let resolved_v22 = resolve_lean(
+    // V2.1.1 degrades gracefully or rejects correctly to prevent CVE
+    let resolved_v211 = resolve_lean(
         BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        StateResVersion::V2_2,
+        StateResVersion::V2_1_1,
     );
-    // In this specific DAG, V2.2 also drops the user because there's NO valid alternate path.
-    // The test proves V2.2 strictly respects auth and doesn't hallucinate missing joins.
+    // In this specific DAG, V2.1.1 also drops the user because there's NO valid alternate path.
+    // The test proves V2.1.1 strictly respects auth and doesn't hallucinate missing joins.
     assert!(
-        !resolved_v22.contains_key(&nexy_key),
-        "V2.2 correctly rejects isolated broken topologies"
+        !resolved_v211.contains_key(&nexy_key),
+        "V2.1.1 correctly rejects isolated broken topologies"
     );
 }
