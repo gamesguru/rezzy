@@ -477,6 +477,7 @@ impl LeanEvent {
 struct SortPriority<'a> {
     event: &'a LeanEvent,
     power_level: i64,
+    auth_chain_distance: u64,
     version: StateResVersion,
 }
 
@@ -546,6 +547,41 @@ fn get_power_level_from_auth_chain(
     event.power_level
 }
 
+/// Computes the shortest distance from the event to the m.room.create event via auth_events.
+fn compute_auth_chain_distance(
+    event: &LeanEvent,
+    auth_context: &HashMap<String, LeanEvent>,
+    create_ev: Option<&LeanEvent>,
+) -> u64 {
+    let mut queue = alloc::collections::VecDeque::new();
+    let mut visited = alloc::collections::BTreeSet::new();
+
+    queue.push_back((event.event_id.clone(), 0));
+
+    while let Some((curr_id, dist)) = queue.pop_front() {
+        if let Some(create) = create_ev {
+            if curr_id == create.event_id {
+                return dist;
+            }
+        }
+
+        if !visited.insert(curr_id.clone()) {
+            continue;
+        }
+
+        if let Some(ev) = auth_context.get(&curr_id) {
+            if ev.auth_events.is_empty() {
+                return dist;
+            }
+            for parent in &ev.auth_events {
+                queue.push_back((parent.clone(), dist + 1));
+            }
+        }
+    }
+
+    0
+}
+
 impl<'a> PartialEq for SortPriority<'a> {
     fn eq(&self, other: &Self) -> bool {
         self.power_level == other.power_level
@@ -590,7 +626,7 @@ impl<'a> Ord for SortPriority<'a> {
                         // Smaller Depth -> Greater TieBreaker -> Pops First -> Loses.
                         // Larger Depth -> Smaller TieBreaker -> Pops Last -> Wins.
                         if self.version == StateResVersion::V2_2 {
-                            match other.event.depth.cmp(&self.event.depth) {
+                            match other.auth_chain_distance.cmp(&self.auth_chain_distance) {
                                 Ordering::Equal => {}
                                 ord => return ord,
                             }
@@ -655,6 +691,20 @@ pub fn lean_kahn_sort_detailed(
         })
         .collect();
 
+    let depth_cache: HashMap<String, u64> = if version == StateResVersion::V2_2 {
+        events
+            .iter()
+            .map(|(id, ev)| {
+                (
+                    id.clone(),
+                    compute_auth_chain_distance(ev, auth_context, create_ev),
+                )
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
     let mut queue: BinaryHeap<SortPriority> = BinaryHeap::new();
     for (id, &degree) in &in_degree {
         if degree == 0 {
@@ -662,6 +712,7 @@ pub fn lean_kahn_sort_detailed(
                 queue.push(SortPriority {
                     event,
                     power_level: pl_cache.get(id).copied().unwrap_or(0),
+                    auth_chain_distance: depth_cache.get(id).copied().unwrap_or(0),
                     version,
                 });
             }
@@ -682,6 +733,7 @@ pub fn lean_kahn_sort_detailed(
                     queue.push(SortPriority {
                         event: next_ev,
                         power_level: pl_cache.get(next_id).copied().unwrap_or(0),
+                        auth_chain_distance: depth_cache.get(next_id).copied().unwrap_or(0),
                         version,
                     });
                 }
