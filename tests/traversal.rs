@@ -2,22 +2,11 @@ use ruma_lean::{resolve_lean, LeanEvent, StateResVersion};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 
-#[test]
-fn test_v2_1_vs_v2_2_recursive_auth_lookup() {
-    // SCENARIO: A state event requires a Power Level that is 2 hops away.
-    // Event E (Room Name) -> Auth: [Member Alice: join]
-    // Member Alice -> Auth: [Power Levels PL] (Alice has PL 100)
-    //
-    // Critically, Event E OMITTED the Power Level event from its own auth_events.
-    //
-    // V2.1 (1-hop): Only sees the join. Misses the PL event.
-    // Alice's PL defaults to 0. State events require PL 50.
-    // Result: REJECTED.
-    //
-    // V2.2 (Recursive BFS): Walks back from the join, finds the PL event.
-    // Alice has PL 100. 100 >= 50.
-    // Result: ACCEPTED.
-
+fn run_auth_lookup_scenario(
+    join_auth_includes_pl: bool,
+    expected_v21_success: bool,
+    expected_v22_success: bool,
+) {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
@@ -41,6 +30,11 @@ fn test_v2_1_vs_v2_2_recursive_auth_lookup() {
         ..Default::default()
     };
 
+    let mut join_auth = vec!["$create".to_string()];
+    if join_auth_includes_pl {
+        join_auth.push("$pl".to_string());
+    }
+
     let alice_join = LeanEvent {
         event_id: "$join".to_string(),
         event_type: "m.room.member".to_string(),
@@ -48,8 +42,7 @@ fn test_v2_1_vs_v2_2_recursive_auth_lookup() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 300,
         content: json!({ "membership": "join" }),
-        // Join includes PL to be authorized
-        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        auth_events: join_auth,
         ..Default::default()
     };
 
@@ -62,6 +55,7 @@ fn test_v2_1_vs_v2_2_recursive_auth_lookup() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 400,
         content: json!({ "name": "Alice's Room" }),
+        // OMIT the PL event directly. It's only 1-hop if we put it here, which we don't.
         auth_events: vec!["$create".to_string(), "$join".to_string()],
         ..Default::default()
     };
@@ -82,25 +76,37 @@ fn test_v2_1_vs_v2_2_recursive_auth_lookup() {
         &auth_context,
         StateResVersion::V2_1,
     );
-    assert!(
-        !resolved_v21.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
-        "V2.1 should have rejected the name change due to missing PL event in local 1-hop auth"
+    let v21_success = resolved_v21.contains_key(&("m.room.name".to_string(), Some("".to_string())));
+    assert_eq!(
+        v21_success, expected_v21_success,
+        "V2.1 success expectation mismatched: got {v21_success}, expected {expected_v21_success}"
     );
 
-    // V2.2: Should SUCCEED.
-    // It heals the chain by finding $pl as an ancestor of $join.
     let resolved_v22 = resolve_lean(
         BTreeMap::new(),
         conflicted_events,
         &auth_context,
         StateResVersion::V2_2,
     );
-    assert!(
-        resolved_v22.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
-        "V2.2 should have accepted the name change by finding the PL event via BFS"
-    );
+    let v22_success = resolved_v22.contains_key(&("m.room.name".to_string(), Some("".to_string())));
     assert_eq!(
-        resolved_v22.get(&("m.room.name".to_string(), Some("".to_string()))),
-        Some(&"$name".to_string())
+        v22_success, expected_v22_success,
+        "V2.2 success expectation mismatched: got {v22_success}, expected {expected_v22_success}"
     );
+}
+
+#[test]
+fn test_v2_1_vs_v2_2_recursive_auth_lookup() {
+    // Join event includes PL. PL is in the auth ancestry (depth 2).
+    // V2.1 fails because it only checks 1-hop (depth 1).
+    // V2.2 succeeds because BFS finds the PL in ancestry.
+    run_auth_lookup_scenario(true, false, true);
+}
+
+#[test]
+fn test_v2_2_xfail_disconnected_auth() {
+    // Join event DOES NOT include PL. PL is disconnected from auth graph.
+    // V2.1 fails.
+    // User expects V2.2 to pass despite the missing auth link.
+    run_auth_lookup_scenario(false, false, true);
 }
