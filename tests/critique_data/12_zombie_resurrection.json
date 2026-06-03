@@ -21,10 +21,7 @@
     "type": "m.room.create"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "content": {
       "membership": "join"
     },
@@ -34,9 +31,7 @@
       "sha256": "CbOjL9iTyr67yCGYnA6ZK3tMVCt486KF4Bp0-29Ub8s"
     },
     "origin_server_ts": 2832000001800,
-    "prev_events": [
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "prev_events": ["$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "sender": "@charlie:ServerA",
     "signatures": {
       "ServerA": {
@@ -63,9 +58,7 @@
       "sha256": "AEs9eX7pJ3bt98O6dkQC2cn6hm9eLeJEL-rkm0xBV0w"
     },
     "origin_server_ts": 2832000002400,
-    "prev_events": [
-      "$CBj-F8sJfCXxKL_8GLJ4yUqshht1LgeyijCubWDnvHQ"
-    ],
+    "prev_events": ["$CBj-F8sJfCXxKL_8GLJ4yUqshht1LgeyijCubWDnvHQ"],
     "sender": "@alice:ServerA",
     "signatures": {
       "ServerA": {
@@ -90,9 +83,7 @@
       "sha256": "A7r7SmZkTdFc_4tIFWLL8E-A-1qPosbKZcB5NJ5Ks7g"
     },
     "origin_server_ts": 2832000003000,
-    "prev_events": [
-      "$AcTGxnPygrGU8zAmjyGwijxpXpxqtWI5jpmCcgFstVU"
-    ],
+    "prev_events": ["$AcTGxnPygrGU8zAmjyGwijxpXpxqtWI5jpmCcgFstVU"],
     "sender": "@alice:ServerA",
     "signatures": {
       "ServerA": {
@@ -118,9 +109,7 @@
       "sha256": "CvpWFzLQD2Iph-JJOzgQmwSPC-tPylJ9L7wQX6U1ldc"
     },
     "origin_server_ts": 2832000003600,
-    "prev_events": [
-      "$AcTGxnPygrGU8zAmjyGwijxpXpxqtWI5jpmCcgFstVU"
-    ],
+    "prev_events": ["$AcTGxnPygrGU8zAmjyGwijxpXpxqtWI5jpmCcgFstVU"],
     "sender": "@charlie:ServerA",
     "signatures": {
       "ServerA": {

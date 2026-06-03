@@ -21,9 +21,7 @@
     "type": "m.room.create"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"],
     "content": {
       "membership": "join"
     },
@@ -33,9 +31,7 @@
       "sha256": "A4zqplcr8p2esfZ5VW9DgbsLnd4LXFmz6oQuyASGVug"
     },
     "origin_server_ts": 1770000001000,
-    "prev_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"
-    ],
+    "prev_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"],
     "sender": "@alice:example.com",
     "signatures": {
       "example.com": {
@@ -46,10 +42,7 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "content": {
       "membership": "join"
     },
@@ -59,9 +52,7 @@
       "sha256": "BP-2nIZ9JyXlN8uQEjUJpF_3exNq7oGPw1gZcwMHIWs"
     },
     "origin_server_ts": 1770000003000,
-    "prev_events": [
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "prev_events": ["$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "sender": "@bob:example.com",
     "signatures": {
       "example.com": {
@@ -72,10 +63,7 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "content": {
       "membership": "join"
     },
@@ -85,9 +73,7 @@
       "sha256": "CbOjL9iTyr67yCGYnA6ZK3tMVCt486KF4Bp0-29Ub8s"
     },
     "origin_server_ts": 1770000004000,
-    "prev_events": [
-      "$BXmJtIHmB_gDBc_UbSYaOV5e1SWNpzDvj20D74TtyiY"
-    ],
+    "prev_events": ["$BXmJtIHmB_gDBc_UbSYaOV5e1SWNpzDvj20D74TtyiY"],
     "sender": "@charlie:example.com",
     "signatures": {
       "example.com": {
@@ -98,10 +84,7 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "content": {
       "membership": "join"
     },
@@ -111,9 +94,7 @@
       "sha256": "D0HWglcGPwlzAsPn34tV4lOaOhfzpkoo0Pw6Z762PUA"
     },
     "origin_server_ts": 1770000005000,
-    "prev_events": [
-      "$CBj-F8sJfCXxKL_8GLJ4yUqshht1LgeyijCubWDnvHQ"
-    ],
+    "prev_events": ["$CBj-F8sJfCXxKL_8GLJ4yUqshht1LgeyijCubWDnvHQ"],
     "sender": "@david:example.com",
     "signatures": {
       "example.com": {
@@ -124,10 +105,7 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "content": {
       "membership": "join"
     },
@@ -137,9 +115,7 @@
       "sha256": "FN9tykA-xKNABf5KcMHIqtiah33HrwFTw_H77KUokm0"
     },
     "origin_server_ts": 1770000006000,
-    "prev_events": [
-      "$DVs_7_XZMee41f3ab-r-9ExGVVj2fh1UwWwd_wfWV9E"
-    ],
+    "prev_events": ["$DVs_7_XZMee41f3ab-r-9ExGVVj2fh1UwWwd_wfWV9E"],
     "sender": "@frank:example.com",
     "signatures": {
       "example.com": {
@@ -150,10 +126,7 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "content": {
       "membership": "join"
     },
@@ -163,9 +136,7 @@
       "sha256": "IJzVlhfqJTKSR6BMSZ1eW-Um5Zm3K79A140y8Bb2rAY"
     },
     "origin_server_ts": 1770000010000,
-    "prev_events": [
-      "$HqiRW9-sOGCXmfNKAItccGdfao33s6S79FScf8PRkNI"
-    ],
+    "prev_events": ["$HqiRW9-sOGCXmfNKAItccGdfao33s6S79FScf8PRkNI"],
     "sender": "@ivy:example.com",
     "signatures": {
       "example.com": {
@@ -176,10 +147,7 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "content": {
       "membership": "join"
     },
@@ -189,9 +157,7 @@
       "sha256": "JC4EcrKp3QT4Ljjsb363zl6Op3JO15NOCiporktPVlY"
     },
     "origin_server_ts": 1770000011000,
-    "prev_events": [
-      "$Iv11kQEZ8qDetBHmS9sS-Ii93E2qgcesERtXpAK9W_Q"
-    ],
+    "prev_events": ["$Iv11kQEZ8qDetBHmS9sS-Ii93E2qgcesERtXpAK9W_Q"],
     "sender": "@jack:example.com",
     "signatures": {
       "example.com": {
@@ -219,9 +185,7 @@
       "sha256": "ChrNQbg1BZsPKiOM8szuSKJuQNpJH_VHqulLQLKMMik"
     },
     "origin_server_ts": 1770000014000,
-    "prev_events": [
-      "$B_8GUfGW39gso5deaQQt8I7KP89ki-FDvjFmAeQ8jPg"
-    ],
+    "prev_events": ["$B_8GUfGW39gso5deaQQt8I7KP89ki-FDvjFmAeQ8jPg"],
     "sender": "@charlie:example.com",
     "signatures": {
       "example.com": {
@@ -247,9 +211,7 @@
       "sha256": "BqJMc29zCad7pHbi7Yfezg4xs7Dbk_5nRaHzl_zqaRg"
     },
     "origin_server_ts": 1770000015000,
-    "prev_events": [
-      "$C4etVcuahFeeaXkKk1d5A2JT_Ee_ikIDO-23dlePoWU"
-    ],
+    "prev_events": ["$C4etVcuahFeeaXkKk1d5A2JT_Ee_ikIDO-23dlePoWU"],
     "sender": "@bob:example.com",
     "signatures": {
       "example.com": {
@@ -275,9 +237,7 @@
       "sha256": "CQY3Q-Qnz73ytYsNzk7oZWLD0FFQnQdUKzQkgCtIVK0"
     },
     "origin_server_ts": 1770000019000,
-    "prev_events": [
-      "$DqJKq01riiYNyDO8MEFMVSSmRyCtUV_1zqlZHi78Mh0"
-    ],
+    "prev_events": ["$DqJKq01riiYNyDO8MEFMVSSmRyCtUV_1zqlZHi78Mh0"],
     "sender": "@charlie:example.com",
     "signatures": {
       "example.com": {
@@ -303,9 +263,7 @@
       "sha256": "F_q6MVaR0SL8u4U4YAsPTVjso-gDyKQI7dO7RgH_Z0U"
     },
     "origin_server_ts": 1770000020000,
-    "prev_events": [
-      "$C4DBIJKtgZOtAqn2xk3uF5jHC6yYAUVRskdcTHCxxbM"
-    ],
+    "prev_events": ["$C4DBIJKtgZOtAqn2xk3uF5jHC6yYAUVRskdcTHCxxbM"],
     "sender": "@frank:example.com",
     "signatures": {
       "example.com": {

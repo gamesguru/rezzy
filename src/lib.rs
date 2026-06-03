@@ -995,7 +995,9 @@ impl<'a> crate::auth::StateProvider for OverlayState<'a> {
             | StateResVersion::V2_1_Synapse
             | StateResVersion::V2_1_Ruma
             | StateResVersion::V2_1_Tuwunel
-            | StateResVersion::V2_1_C10y => event_type == "m.room.power_levels" && state_key == Some(""),
+            | StateResVersion::V2_1_C10y => {
+                event_type == "m.room.power_levels" && state_key == Some("")
+            }
             StateResVersion::V2_1_1 => {
                 (event_type == "m.room.power_levels" && state_key == Some(""))
                     || (event_type == "m.room.member")

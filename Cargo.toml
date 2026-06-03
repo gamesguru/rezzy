@@ -101,4 +101,3 @@ path = "tests/pathologies.rs"
 [[test]]
 name = "critique"
 path = "tests/critique.rs"
-

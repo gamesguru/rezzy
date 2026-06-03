@@ -21,10 +21,7 @@
     "type": "m.room.create"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
-      "$AtL8-0oBDuUf_aeJR7PTe2zianAmwRvdXShVQ-9-Qm4"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$AtL8-0oBDuUf_aeJR7PTe2zianAmwRvdXShVQ-9-Qm4"],
     "content": {
       "users": {}
     },
@@ -34,9 +31,7 @@
       "sha256": "ALfwyOhgXUFDDZ5K5YsjUp-Kc2ziyixrjIH-GFinspg"
     },
     "origin_server_ts": 1770000002000,
-    "prev_events": [
-      "$AtL8-0oBDuUf_aeJR7PTe2zianAmwRvdXShVQ-9-Qm4"
-    ],
+    "prev_events": ["$AtL8-0oBDuUf_aeJR7PTe2zianAmwRvdXShVQ-9-Qm4"],
     "sender": "@alice:example.com",
     "signatures": {
       "example.com": {
@@ -61,9 +56,7 @@
       "sha256": "AWG1sRkh6xg9fjvDpUDLjxu7LLBIBpJsorohH712HyE"
     },
     "origin_server_ts": 1770000003000,
-    "prev_events": [
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "prev_events": ["$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "sender": "@alice:example.com",
     "signatures": {
       "example.com": {
@@ -88,9 +81,7 @@
       "sha256": "AWwRqTVOzfwd_tdxa5GnDsztjVL5bKTtaIdI_WtjIkg"
     },
     "origin_server_ts": 1770000003000,
-    "prev_events": [
-      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
-    ],
+    "prev_events": ["$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
     "sender": "@alice:example.com",
     "signatures": {
       "example.com": {

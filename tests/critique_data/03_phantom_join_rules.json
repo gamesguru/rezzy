@@ -21,9 +21,7 @@
     "type": "m.room.create"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"],
     "content": {
       "membership": "join"
     },
@@ -33,9 +31,7 @@
       "sha256": "A4zqplcr8p2esfZ5VW9DgbsLnd4LXFmz6oQuyASGVug"
     },
     "origin_server_ts": 1770000001000,
-    "prev_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"
-    ],
+    "prev_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"],
     "sender": "@alice:example.com",
     "signatures": {
       "example.com": {
@@ -46,10 +42,7 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": [
-      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
-      "$AtL8-0oBDuUf_aeJR7PTe2zianAmwRvdXShVQ-9-Qm4"
-    ],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$AtL8-0oBDuUf_aeJR7PTe2zianAmwRvdXShVQ-9-Qm4"],
     "content": {
       "users": {}
     },
@@ -59,9 +52,7 @@
       "sha256": "ALfwyOhgXUFDDZ5K5YsjUp-Kc2ziyixrjIH-GFinspg"
     },
     "origin_server_ts": 1770000002000,
-    "prev_events": [
-      "$AtL8-0oBDuUf_aeJR7PTe2zianAmwRvdXShVQ-9-Qm4"
-    ],
+    "prev_events": ["$AtL8-0oBDuUf_aeJR7PTe2zianAmwRvdXShVQ-9-Qm4"],
     "sender": "@alice:example.com",
     "signatures": {
       "example.com": {
@@ -86,9 +77,7 @@
       "sha256": "A8RYv34AAhpRjNvscdIHrnMbPd6M-utEaM5Cx0K0lmA"
     },
     "origin_server_ts": 2832000002400,
-    "prev_events": [
-      "$AVdCOUDHP9JduN9bq9WKvAXl0Oj9LCkY7TYgnO8v_EE"
-    ],
+    "prev_events": ["$AVdCOUDHP9JduN9bq9WKvAXl0Oj9LCkY7TYgnO8v_EE"],
     "sender": "@alice:example.com",
     "signatures": {
       "example.com": {
@@ -113,9 +102,7 @@
       "sha256": "CbOjL9iTyr67yCGYnA6ZK3tMVCt486KF4Bp0-29Ub8s"
     },
     "origin_server_ts": 1770000004000,
-    "prev_events": [
-      "$AVdCOUDHP9JduN9bq9WKvAXl0Oj9LCkY7TYgnO8v_EE"
-    ],
+    "prev_events": ["$AVdCOUDHP9JduN9bq9WKvAXl0Oj9LCkY7TYgnO8v_EE"],
     "sender": "@charlie:example.com",
     "signatures": {
       "example.com": {
