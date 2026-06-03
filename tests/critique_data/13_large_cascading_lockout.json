@@ -1,0 +1,318 @@
+[
+  {
+    "auth_events": [],
+    "content": {
+      "room_version": "12"
+    },
+    "depth": 1,
+    "event_id": "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+    "hashes": {
+      "sha256": "A7iJdVFylS8XNymnHIzk-EjqJGWBICnTNIarCi5IGqw"
+    },
+    "origin_server_ts": 1770000000000,
+    "prev_events": [],
+    "sender": "@alice:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "AWe0jLhYVsIq_30_GR8aQHlemDeytO2dc7UwPCSKNpcMWe0jLhYVsIq_30_GR8aQHlemDeytO2dc7UwPCSKNpc"
+      }
+    },
+    "state_key": "",
+    "type": "m.room.create"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"
+    ],
+    "content": {
+      "membership": "join"
+    },
+    "depth": 2,
+    "event_id": "$AtL8-0oBDuUf_aeJR7PTe2zianAmwRvdXShVQ-9-Qm4",
+    "hashes": {
+      "sha256": "A4zqplcr8p2esfZ5VW9DgbsLnd4LXFmz6oQuyASGVug"
+    },
+    "origin_server_ts": 1770000001000,
+    "prev_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"
+    ],
+    "sender": "@alice:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "AuoKZM-JLFzGOui_VwYq2xujFUKCraebAJNHItELHtdUuoKZM-JLFzGOui_VwYq2xujFUKCraebAJNHItELHtd"
+      }
+    },
+    "state_key": "@alice:example.com",
+    "type": "m.room.member"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
+    ],
+    "content": {
+      "membership": "join"
+    },
+    "depth": 4,
+    "event_id": "$BXmJtIHmB_gDBc_UbSYaOV5e1SWNpzDvj20D74TtyiY",
+    "hashes": {
+      "sha256": "BP-2nIZ9JyXlN8uQEjUJpF_3exNq7oGPw1gZcwMHIWs"
+    },
+    "origin_server_ts": 1770000003000,
+    "prev_events": [
+      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
+    ],
+    "sender": "@bob:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "BPbinSUasnNIQcMAP57ak7asGz2ut_3egMZrBCv4_UkAPbinSUasnNIQcMAP57ak7asGz2ut_3egMZrBCv4_Uk"
+      }
+    },
+    "state_key": "@bob:example.com",
+    "type": "m.room.member"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
+    ],
+    "content": {
+      "membership": "join"
+    },
+    "depth": 5,
+    "event_id": "$CBj-F8sJfCXxKL_8GLJ4yUqshht1LgeyijCubWDnvHQ",
+    "hashes": {
+      "sha256": "CbOjL9iTyr67yCGYnA6ZK3tMVCt486KF4Bp0-29Ub8s"
+    },
+    "origin_server_ts": 1770000004000,
+    "prev_events": [
+      "$BXmJtIHmB_gDBc_UbSYaOV5e1SWNpzDvj20D74TtyiY"
+    ],
+    "sender": "@charlie:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "CjOHforxwnrgsQheaAaa1YrNtWkv_V9guqkDW1WXRgU4jOHforxwnrgsQheaAaa1YrNtWkv_V9guqkDW1WXRgU"
+      }
+    },
+    "state_key": "@charlie:example.com",
+    "type": "m.room.member"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
+    ],
+    "content": {
+      "membership": "join"
+    },
+    "depth": 6,
+    "event_id": "$DVs_7_XZMee41f3ab-r-9ExGVVj2fh1UwWwd_wfWV9E",
+    "hashes": {
+      "sha256": "D0HWglcGPwlzAsPn34tV4lOaOhfzpkoo0Pw6Z762PUA"
+    },
+    "origin_server_ts": 1770000005000,
+    "prev_events": [
+      "$CBj-F8sJfCXxKL_8GLJ4yUqshht1LgeyijCubWDnvHQ"
+    ],
+    "sender": "@david:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "DFFwkqdZ8KW8laT-CafNNNtskVdRRZ6oGz8yuiJ7viU0FFwkqdZ8KW8laT-CafNNNtskVdRRZ6oGz8yuiJ7viU"
+      }
+    },
+    "state_key": "@david:example.com",
+    "type": "m.room.member"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
+    ],
+    "content": {
+      "membership": "join"
+    },
+    "depth": 7,
+    "event_id": "$FNGALUm17BJKChNIftEMfQHzDZBsyzCYS0Zz0YTMsWw",
+    "hashes": {
+      "sha256": "FN9tykA-xKNABf5KcMHIqtiah33HrwFTw_H77KUokm0"
+    },
+    "origin_server_ts": 1770000006000,
+    "prev_events": [
+      "$DVs_7_XZMee41f3ab-r-9ExGVVj2fh1UwWwd_wfWV9E"
+    ],
+    "sender": "@frank:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "F9_RlRWlKjuOkMHeh3YFHMJ91moHgz1HejccoTi8G8R09_RlRWlKjuOkMHeh3YFHMJ91moHgz1HejccoTi8G8R"
+      }
+    },
+    "state_key": "@frank:example.com",
+    "type": "m.room.member"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
+    ],
+    "content": {
+      "membership": "join"
+    },
+    "depth": 11,
+    "event_id": "$Iv11kQEZ8qDetBHmS9sS-Ii93E2qgcesERtXpAK9W_Q",
+    "hashes": {
+      "sha256": "IJzVlhfqJTKSR6BMSZ1eW-Um5Zm3K79A140y8Bb2rAY"
+    },
+    "origin_server_ts": 1770000010000,
+    "prev_events": [
+      "$HqiRW9-sOGCXmfNKAItccGdfao33s6S79FScf8PRkNI"
+    ],
+    "sender": "@ivy:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "IYLS18xMtiW89sv6phIFqU6oE-ZCSBMCVbCBJV19Z3zcYLS18xMtiW89sv6phIFqU6oE-ZCSBMCVbCBJV19Z3z"
+      }
+    },
+    "state_key": "@ivy:example.com",
+    "type": "m.room.member"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+      "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"
+    ],
+    "content": {
+      "membership": "join"
+    },
+    "depth": 12,
+    "event_id": "$JfHvl7q19ipvYq50LQ8cCifvaUx-tp5U_-Zs7qh5MOQ",
+    "hashes": {
+      "sha256": "JC4EcrKp3QT4Ljjsb363zl6Op3JO15NOCiporktPVlY"
+    },
+    "origin_server_ts": 1770000011000,
+    "prev_events": [
+      "$Iv11kQEZ8qDetBHmS9sS-Ii93E2qgcesERtXpAK9W_Q"
+    ],
+    "sender": "@jack:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "Jf4HzSM9N9O6VX3BDGW9PRJPsxVJoD6bbUo0GRbIRywsf4HzSM9N9O6VX3BDGW9PRJPsxVJoD6bbUo0GRbIRyw"
+      }
+    },
+    "state_key": "@jack:example.com",
+    "type": "m.room.member"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+      "$B_8GUfGW39gso5deaQQt8I7KP89ki-FDvjFmAeQ8jPg",
+      "$CBj-F8sJfCXxKL_8GLJ4yUqshht1LgeyijCubWDnvHQ"
+    ],
+    "content": {
+      "users": {
+        "@bob:example.com": 100,
+        "@charlie:example.com": 100
+      }
+    },
+    "depth": 15,
+    "event_id": "$C4etVcuahFeeaXkKk1d5A2JT_Ee_ikIDO-23dlePoWU",
+    "hashes": {
+      "sha256": "ChrNQbg1BZsPKiOM8szuSKJuQNpJH_VHqulLQLKMMik"
+    },
+    "origin_server_ts": 1770000014000,
+    "prev_events": [
+      "$B_8GUfGW39gso5deaQQt8I7KP89ki-FDvjFmAeQ8jPg"
+    ],
+    "sender": "@charlie:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "CcMydLq7-IMj_ixPy4_8cj2oNg4IJk0P8Vq55i4MOxHIcMydLq7-IMj_ixPy4_8cj2oNg4IJk0P8Vq55i4MOxH"
+      }
+    },
+    "state_key": "",
+    "type": "m.room.power_levels"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+      "$BXmJtIHmB_gDBc_UbSYaOV5e1SWNpzDvj20D74TtyiY",
+      "$C4etVcuahFeeaXkKk1d5A2JT_Ee_ikIDO-23dlePoWU",
+      "$GkfOEabUdd05D8rJIC9KajN2a_X1f1E-SRLHHJnbIv8"
+    ],
+    "content": {
+      "membership": "ban"
+    },
+    "depth": 16,
+    "event_id": "$BQOU9jttXJxVdooubVlkjd46s1ofEDAaXVEVFkul7PY",
+    "hashes": {
+      "sha256": "BqJMc29zCad7pHbi7Yfezg4xs7Dbk_5nRaHzl_zqaRg"
+    },
+    "origin_server_ts": 1770000015000,
+    "prev_events": [
+      "$C4etVcuahFeeaXkKk1d5A2JT_Ee_ikIDO-23dlePoWU"
+    ],
+    "sender": "@bob:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "BIRLD33reAXfAUepXZLDdkgxwwpaa7-vX6zePkkMfy-cIRLD33reAXfAUepXZLDdkgxwwpaa7-vX6zePkkMfy-"
+      }
+    },
+    "state_key": "@grace:example.com",
+    "type": "m.room.member"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+      "$AgAQgMnomKHyhaX6Wjr9b1AY7GFY4pe2k86ho55lI_I",
+      "$CBj-F8sJfCXxKL_8GLJ4yUqshht1LgeyijCubWDnvHQ",
+      "$HqiRW9-sOGCXmfNKAItccGdfao33s6S79FScf8PRkNI"
+    ],
+    "content": {
+      "membership": "ban"
+    },
+    "depth": 20,
+    "event_id": "$C4DBIJKtgZOtAqn2xk3uF5jHC6yYAUVRskdcTHCxxbM",
+    "hashes": {
+      "sha256": "CQY3Q-Qnz73ytYsNzk7oZWLD0FFQnQdUKzQkgCtIVK0"
+    },
+    "origin_server_ts": 1770000019000,
+    "prev_events": [
+      "$DqJKq01riiYNyDO8MEFMVSSmRyCtUV_1zqlZHi78Mh0"
+    ],
+    "sender": "@charlie:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "C_CTV3SuA2qk-kZqQ8QHHt6-CLew4HBAaiLZrUs3h7wE_CTV3SuA2qk-kZqQ8QHHt6-CLew4HBAaiLZrUs3h7w"
+      }
+    },
+    "state_key": "@henry:example.com",
+    "type": "m.room.member"
+  },
+  {
+    "auth_events": [
+      "$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I",
+      "$AgAQgMnomKHyhaX6Wjr9b1AY7GFY4pe2k86ho55lI_I",
+      "$EFkwGSVl313zKtZvq1Bjx8gD1eHGVxKKwYxgJMKzu2s",
+      "$FNGALUm17BJKChNIftEMfQHzDZBsyzCYS0Zz0YTMsWw"
+    ],
+    "content": {
+      "membership": "ban"
+    },
+    "depth": 21,
+    "event_id": "$FmCMgM0jjvd7dioldb147Rr0noCaoep2Z0iyxWyYuCs",
+    "hashes": {
+      "sha256": "F_q6MVaR0SL8u4U4YAsPTVjso-gDyKQI7dO7RgH_Z0U"
+    },
+    "origin_server_ts": 1770000020000,
+    "prev_events": [
+      "$C4DBIJKtgZOtAqn2xk3uF5jHC6yYAUVRskdcTHCxxbM"
+    ],
+    "sender": "@frank:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "FjMk_v9TNEVjfWbZsBoG49qnm5epXpmuTX8lfMerpRR0jMk_v9TNEVjfWbZsBoG49qnm5epXpmuTX8lfMerpRR"
+      }
+    },
+    "state_key": "@eve:example.com",
+    "type": "m.room.member"
+  }
+]

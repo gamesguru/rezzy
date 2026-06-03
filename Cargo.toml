@@ -97,3 +97,8 @@ required-features = ["mock-ruma"]
 [[test]]
 name = "pathologies"
 path = "tests/pathologies.rs"
+
+[[test]]
+name = "critique"
+path = "tests/critique.rs"
+
