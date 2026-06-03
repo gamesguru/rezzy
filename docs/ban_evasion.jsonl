@@ -1,5 +1,0 @@
-{"event_id":"$create","type":"m.room.create","state_key":"","power_level":0,"origin_server_ts":100,"sender":"@alice:example.com","content":null,"prev_events":[],"auth_events":[],"depth":0}
-{"event_id":"$pl","type":"m.room.power_levels","state_key":"","power_level":0,"origin_server_ts":200,"sender":"@alice:example.com","content":{"state_default":50,"users":{"@bob:example.com":50}},"prev_events":[],"auth_events":["$create"],"depth":0}
-{"event_id":"$bob_join","type":"m.room.member","state_key":"@bob:example.com","power_level":0,"origin_server_ts":300,"sender":"@bob:example.com","content":{"membership":"join"},"prev_events":[],"auth_events":["$create","$pl"],"depth":0}
-{"event_id":"$alice_bans_bob","type":"m.room.member","state_key":"@bob:example.com","power_level":0,"origin_server_ts":400,"sender":"@alice:example.com","content":{"membership":"ban"},"prev_events":[],"auth_events":["$create","$pl"],"depth":0}
-{"event_id":"$bob_name_change","type":"m.room.name","state_key":"","power_level":0,"origin_server_ts":500,"sender":"@bob:example.com","content":{"name":"Hacked by Bob"},"prev_events":[],"auth_events":["$create","$bob_join"],"depth":0}

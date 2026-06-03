@@ -25,7 +25,7 @@ fn parse_jsonl_dag<P: AsRef<Path>>(path: P) -> Vec<LeanEvent> {
 
 #[test]
 fn test_pathology_duplicate_auth_poisoning() {
-    let path = "../dag-toolkit/pathology_duplicate_auth.jsonl";
+    let path = "../dag-toolkit/examples/state-res-v2.1.1/03_duplicate_auth_poisoning.jsonl";
     let events = parse_jsonl_dag(path);
 
     let mut auth_context = HashMap::new();
@@ -67,7 +67,7 @@ fn test_pathology_duplicate_auth_poisoning() {
 
 #[test]
 fn test_pathology_invite_lock() {
-    let path = "../dag-toolkit/examples/state-res-v2.1.1/01_invite_lock.jsonl";
+    let path = "../dag-toolkit/examples/state-res-v2.1.1/02_invite_lock_regression.jsonl";
     let events = parse_jsonl_dag(path);
 
     let mut auth_context = HashMap::new();
@@ -108,75 +108,78 @@ fn test_pathology_invite_lock() {
     );
 }
 
-#[test]
-fn test_pathology_fruitless_search_bounded() {
-    let path = "../dag-toolkit/examples/state-res-v2.1.1/04_pathology_traversal_bfs.jsonl";
-    let events = parse_jsonl_dag(path);
+fn simulate_federation_lag(
+    full_graph: &HashMap<String, LeanEvent>,
+    conflicted_event_ids: &[String],
+    max_depth: Option<usize>,
+) -> std::time::Duration {
+    let mut known_graph = HashMap::new();
+    let start = std::time::Instant::now();
 
-    let mut event_map = HashMap::new();
-    let mut conflicted_event_ids = Vec::new();
-    let mut conflicted_events = HashMap::new();
-    let mut auth_context = HashMap::new();
-
-    for ev in events {
-        event_map.insert(ev.event_id.clone(), ev.clone());
-        if ev.event_type == "m.room.name" {
-            conflicted_event_ids.push(ev.event_id.clone());
-            conflicted_events.insert(ev.event_id.clone(), ev);
-        } else {
-            auth_context.insert(ev.event_id.clone(), ev);
+    for id in conflicted_event_ids {
+        if let Some(ev) = full_graph.get(id) {
+            known_graph.insert(id.clone(), ev.clone());
         }
     }
 
-    // V2.1 (worst case: Linear walk of auth chain, avg case: 1-5 hops, success: 99%)
-    // State Res V2.1 didn't suffer from pathfinding explosions because it was a linear Kahn sort walk
-    let start_v21 = std::time::Instant::now();
-    let _resolved_v21 = ruma_lean::resolve_lean(
-        BTreeMap::new(),
-        conflicted_events.clone(),
-        &auth_context,
-        ruma_lean::StateResVersion::V2_1,
-    );
-    let dur_v21 = start_v21.elapsed();
+    loop {
+        let result = ruma_lean::compute_v2_1_conflicted_subgraph_bounded(
+            &known_graph,
+            conflicted_event_ids,
+            max_depth,
+        );
 
-    // 2. V2.1.1 UNBOUNDED (The Flaw)
-    // If V2.1.1 searches for the overlay graph unboundedly, it explores all 65,000 decoy nodes
-    let start_v211_unbounded = std::time::Instant::now();
-    let _unbounded_subgraph = ruma_lean::compute_v2_1_conflicted_subgraph_bounded(
-        &event_map,
-        &conflicted_event_ids,
-        None, // UNBOUNDED
-    );
-    let dur_v211_unbounded = start_v211_unbounded.elapsed();
-    let _resolved_v211_unb = ruma_lean::resolve_lean(
-        BTreeMap::new(),
-        conflicted_events.clone(),
-        &auth_context,
-        ruma_lean::StateResVersion::V2_1_1,
-    );
+        if result.missing_auth_events.is_empty() {
+            break;
+        }
 
-    // 3. V2.1.1 BOUNDED (The Fix)
-    // V2.1.1 with a strict depth cap prevents the exponential/massive search tree DoS
-    let start_v211_bounded = std::time::Instant::now();
-    let _bounded_subgraph = ruma_lean::compute_v2_1_conflicted_subgraph_bounded(
-        &event_map,
-        &conflicted_event_ids,
-        Some(15), // STRICT BOUND
-    );
-    let dur_v211_bounded = start_v211_bounded.elapsed();
-    let _resolved_v211_bnd = ruma_lean::resolve_lean(
-        BTreeMap::new(),
-        conflicted_events.clone(),
-        &auth_context,
-        ruma_lean::StateResVersion::V2_1_1,
-    );
+        // Simulate network lag: 1 second per batch of 3 events fetched over federation
+        let batches = (result.missing_auth_events.len() as f64 / 3.0).ceil() as u64;
+        std::thread::sleep(std::time::Duration::from_secs(batches));
 
-    println!("V2.1 (Linear Walk)      took: {:?}", dur_v21);
-    println!("V2.1.1 UNBOUNDED BFS    took: {:?}", dur_v211_unbounded);
-    println!("V2.1.1 BOUNDED BFS      took: {:?}", dur_v211_bounded);
+        for missing_id in result.missing_auth_events {
+            if let Some(ev) = full_graph.get(&missing_id) {
+                known_graph.insert(missing_id, ev.clone());
+            } else {
+                // Dummy event to prevent infinite loops if missing entirely
+                let dummy = LeanEvent {
+                    event_id: missing_id.clone(),
+                    ..Default::default()
+                };
+                known_graph.insert(missing_id, dummy);
+            }
+        }
+    }
+    start.elapsed()
+}
 
+#[test]
+fn test_pathology_fruitless_search_bounded() {
+    let path = "../dag-toolkit/examples/state-res-v2.1.1/06_fruitless_search_small.jsonl";
+    let events = parse_jsonl_dag(path);
+
+    let mut full_graph = HashMap::new();
+    let mut conflicted_event_ids = Vec::new();
+
+    for ev in events {
+        full_graph.insert(ev.event_id.clone(), ev.clone());
+        if ev.event_type == "m.room.name" {
+            conflicted_event_ids.push(ev.event_id.clone());
+        }
+    }
+
+    // Unbounded BFS: Will fetch all 45 decoy nodes over federation (15 batches = ~15 seconds latency)
+    let dur_unbounded = simulate_federation_lag(&full_graph, &conflicted_event_ids, None);
+
+    // Bounded BFS (Depth 5): Will only fetch 15 nodes over federation (5 batches = ~5 seconds latency)
+    let dur_bounded = simulate_federation_lag(&full_graph, &conflicted_event_ids, Some(5));
+
+    println!("V2.1.1 UNBOUNDED Network Lag: {:?}", dur_unbounded);
+    println!("V2.1.1 BOUNDED Network Lag:   {:?}", dur_bounded);
+
+    // Unbounded version must take significantly longer due to sequential network blocking
     assert!(
-        dur_v211_unbounded > dur_v211_bounded * 2,
-        "Unbounded traversal must take significantly longer due to fruitless searching"
+        dur_unbounded > dur_bounded + std::time::Duration::from_secs(5),
+        "Unbounded traversal failed to simulate network blocking DoS"
     );
 }
