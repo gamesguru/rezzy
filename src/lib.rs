@@ -366,6 +366,45 @@ pub struct LeanEvent {
     pub depth: u64, // Required for V1
 }
 
+impl LeanEvent {
+    /// Validates basic syntactic limits and strict event whitelists as defined by the custom subset.
+    pub fn validate_syntactic(&self) -> Result<(), &'static str> {
+        if self.prev_events.len() > 20 {
+            return Err("prev_events exceeds maximum allowed length of 20");
+        }
+        if self.auth_events.len() > 10 {
+            return Err("auth_events exceeds maximum allowed length of 10");
+        }
+
+        const ALLOWED_EVENT_TYPES: &[&str] = &[
+            "m.room.create",
+            "m.room.join_rules",
+            "m.room.power_levels",
+            "m.room.member",
+            "m.room.name",
+            "m.room.topic",
+            "m.room.avatar",
+            "m.room.canonical_alias",
+            "m.room.history_visibility",
+            "m.room.guest_access",
+            "m.room.server_acl",
+            "m.room.tombstone",
+            "m.room.encryption",
+            "m.room.pinned_events",
+            "m.room.message",
+            "m.room.redaction",
+            "m.space.child",
+            "m.space.parent",
+        ];
+
+        if !ALLOWED_EVENT_TYPES.contains(&self.event_type.as_str()) {
+            return Err("event_type is not a recognized Matrix specification event");
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 struct LeanEventInner {
     #[serde(rename = "type")]
@@ -534,26 +573,21 @@ fn get_power_level_from_auth_chain(
         }
     }
 
+    if is_creator {
+        return MAX_POWER_LEVEL;
+    }
+
     if let Some(pl_ev) = pl_event {
         if let Some(users) = pl_ev.content.get("users").and_then(|u| u.as_object()) {
             if let Some(pl) = users.get(&event.sender).and_then(|p| p.as_i64()) {
-                // Spec compliance: if the creator's PL is explicitly set in the users map, use it!
                 return pl;
             }
-        }
-
-        if is_creator {
-            return MAX_POWER_LEVEL;
         }
 
         if let Some(default_pl) = pl_ev.content.get("users_default").and_then(|p| p.as_i64()) {
             return default_pl;
         }
         return 0; // Default if PL event exists but no users_default
-    }
-
-    if is_creator {
-        return MAX_POWER_LEVEL;
     }
 
     event.power_level // Fallback to explicitly specified PL (e.g. for dump_jsonl compatibility)

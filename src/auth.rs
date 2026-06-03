@@ -44,6 +44,8 @@ pub enum AuthError {
     CreateWithPrevEvents,
     /// An auth event referenced by this event is missing from the provided state.
     MissingAuthEvent(String),
+    /// The event failed basic syntactic validation (e.g. invalid event type, too many prev_events).
+    InvalidSyntax(String),
 }
 
 impl fmt::Display for AuthError {
@@ -68,6 +70,9 @@ impl fmt::Display for AuthError {
             }
             AuthError::MissingAuthEvent(id) => {
                 write!(f, "missing auth event: {}", id)
+            }
+            AuthError::InvalidSyntax(reason) => {
+                write!(f, "invalid syntax: {}", reason)
             }
         }
     }
@@ -150,6 +155,11 @@ impl StateProvider for RoomState {
 /// 4. Sender's power level must meet the event type requirement.
 /// 5. For `m.room.member` events, the state_key must match transition rules.
 pub fn check_auth(event: &LeanEvent, state: &impl StateProvider) -> Result<(), AuthError> {
+    // Rule 0: Custom syntactic validation
+    event
+        .validate_syntactic()
+        .map_err(|e| AuthError::InvalidSyntax(e.into()))?;
+
     // Rule 1: m.room.create must be the first event
     if event.event_type == "m.room.create" {
         if !event.prev_events.is_empty() {
