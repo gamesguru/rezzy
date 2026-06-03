@@ -534,20 +534,26 @@ fn get_power_level_from_auth_chain(
         }
     }
 
-    if is_creator {
-        return MAX_POWER_LEVEL;
-    }
-
     if let Some(pl_ev) = pl_event {
         if let Some(users) = pl_ev.content.get("users").and_then(|u| u.as_object()) {
             if let Some(pl) = users.get(&event.sender).and_then(|p| p.as_i64()) {
+                // Spec compliance: if the creator's PL is explicitly set in the users map, use it!
                 return pl;
             }
         }
+
+        if is_creator {
+            return MAX_POWER_LEVEL;
+        }
+
         if let Some(default_pl) = pl_ev.content.get("users_default").and_then(|p| p.as_i64()) {
             return default_pl;
         }
         return 0; // Default if PL event exists but no users_default
+    }
+
+    if is_creator {
+        return MAX_POWER_LEVEL;
     }
 
     event.power_level // Fallback to explicitly specified PL (e.g. for dump_jsonl compatibility)
