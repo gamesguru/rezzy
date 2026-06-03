@@ -264,10 +264,15 @@ pub use hashbrown::HashMap;
 /// The version of the Matrix State Resolution algorithm to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[allow(non_camel_case_types)]
 pub enum StateResVersion {
     V1,
     V2,
     V2_1,
+    V2_1_Synapse,
+    V2_1_Ruma,
+    V2_1_Tuwunel,
+    V2_1_C10y,
     V2_1_1, // The V3 / Ban Evasion Fix
     V2_2,   // Reserved for State DAGs (MSC4242)
 }
@@ -652,6 +657,10 @@ impl<'a> Ord for SortPriority<'a> {
             }
             StateResVersion::V2
             | StateResVersion::V2_1
+            | StateResVersion::V2_1_Synapse
+            | StateResVersion::V2_1_Ruma
+            | StateResVersion::V2_1_Tuwunel
+            | StateResVersion::V2_1_C10y
             | StateResVersion::V2_1_1
             | StateResVersion::V2_2 => {
                 // V2 reverse topological power ordering: worst events pop FIRST.
@@ -844,7 +853,13 @@ pub fn resolve_lean(
 
     // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
     let mut resolved = match version {
-        StateResVersion::V2_1 | StateResVersion::V2_1_1 | StateResVersion::V2_2 => BTreeMap::new(),
+        StateResVersion::V2_1
+        | StateResVersion::V2_1_Synapse
+        | StateResVersion::V2_1_Ruma
+        | StateResVersion::V2_1_Tuwunel
+        | StateResVersion::V2_1_C10y
+        | StateResVersion::V2_1_1
+        | StateResVersion::V2_2 => BTreeMap::new(),
         _ => unconflicted_state.clone(),
     };
 
@@ -976,7 +991,11 @@ impl<'a> crate::auth::StateProvider for OverlayState<'a> {
         // In V2.2 (Goldilographical), we completely disable the supplemental merge, relying on BFS.
         let should_supplement = match self.version {
             StateResVersion::V2_2 => false,
-            StateResVersion::V2_1 => event_type == "m.room.power_levels" && state_key == Some(""),
+            StateResVersion::V2_1
+            | StateResVersion::V2_1_Synapse
+            | StateResVersion::V2_1_Ruma
+            | StateResVersion::V2_1_Tuwunel
+            | StateResVersion::V2_1_C10y => event_type == "m.room.power_levels" && state_key == Some(""),
             StateResVersion::V2_1_1 => {
                 (event_type == "m.room.power_levels" && state_key == Some(""))
                     || (event_type == "m.room.member")
