@@ -533,25 +533,31 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
     }
 
     // Auth difference: events in the auth chain of at least one head, but not all heads.
-    let mut auth_chains = Vec::new();
-    for head_id in &heads {
-        let chain = compute_auth_chain(std::slice::from_ref(head_id), &events_map);
-        let chain_set: std::collections::HashSet<String> = chain.into_iter().collect();
-        auth_chains.push(chain_set);
-    }
+    let auth_graph = ruma_lean::roaring_auth::AuthGraph::build(&events_map);
 
     let mut auth_difference = std::collections::HashSet::new();
-    if !auth_chains.is_empty() {
-        let mut union = std::collections::HashSet::new();
-        let mut intersection = auth_chains[0].clone();
+    if !heads.is_empty() {
+        let mut union = roaring::RoaringBitmap::new();
+        let mut intersection = roaring::RoaringBitmap::new();
+        let mut first = true;
 
-        for chain in &auth_chains {
-            union.extend(chain.clone());
-            intersection.retain(|id| chain.contains(id));
+        for head_id in &heads {
+            if let Some(&idx) = auth_graph.id_to_index.get(head_id) {
+                let chain_bitmap = &auth_graph.auth_bitmaps[idx as usize];
+                if first {
+                    union = chain_bitmap.clone();
+                    intersection = chain_bitmap.clone();
+                    first = false;
+                } else {
+                    union |= chain_bitmap;
+                    intersection &= chain_bitmap;
+                }
+            }
         }
 
-        for id in union.difference(&intersection) {
-            auth_difference.insert(id.clone());
+        let diff = union - intersection;
+        for idx in diff {
+            auth_difference.insert(auth_graph.index_to_id[idx as usize].clone());
         }
     }
 
@@ -585,7 +591,16 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
     let duration = start.elapsed();
 
     let resolved_state_list: Vec<String> = final_state_map.values().cloned().collect();
-    let auth_chain_ids = compute_auth_chain(&resolved_state_list, &events_map);
+    let mut auth_chain_bitmap = roaring::RoaringBitmap::new();
+    for id in &resolved_state_list {
+        if let Some(&idx) = auth_graph.id_to_index.get(id) {
+            auth_chain_bitmap |= &auth_graph.auth_bitmaps[idx as usize];
+        }
+    }
+    let auth_chain_ids: Vec<String> = auth_chain_bitmap
+        .into_iter()
+        .map(|idx| auth_graph.index_to_id[idx as usize].clone())
+        .collect();
 
     match args.format {
         OutputFormat::Events => {
@@ -929,30 +944,6 @@ fn epoch_days_to_ymd(days: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
-}
-
-fn compute_auth_chain(
-    resolved_ids: &[String],
-    events_map: &HashMap<String, LeanEvent>,
-) -> Vec<String> {
-    let mut auth_chain = std::collections::BTreeSet::new();
-    let mut stack = Vec::new();
-
-    for id in resolved_ids {
-        stack.push(id.clone());
-    }
-
-    while let Some(event_id) = stack.pop() {
-        if let Some(event) = events_map.get(&event_id) {
-            for auth_id in &event.auth_events {
-                if !auth_chain.contains(auth_id) {
-                    auth_chain.insert(auth_id.clone());
-                    stack.push(auth_id.clone());
-                }
-            }
-        }
-    }
-    auth_chain.into_iter().collect()
 }
 
 fn main() {

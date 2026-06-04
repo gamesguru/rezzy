@@ -1,9 +1,9 @@
+use crate::HashMap;
 use crate::LeanEvent;
 use alloc::collections::VecDeque;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use hashbrown::HashMap;
 use roaring::RoaringBitmap;
 
 pub struct AuthGraph {
