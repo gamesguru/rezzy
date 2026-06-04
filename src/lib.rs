@@ -1390,3 +1390,4 @@ pub fn compute_v2_1_conflicted_subgraph_bounded(
         missing_auth_events: missing_auth_events.into_iter().collect(),
     }
 }
+pub mod roaring_auth;
