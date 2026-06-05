@@ -18,7 +18,8 @@ struct Args {
     #[arg(long, env = "MATRIX_HOMESERVER")]
     homeserver: Option<String>,
 
-    #[arg(long, env = "MATRIX_TOKEN")]
+    /// Matrix access token. Falls back to per-domain env var (e.g. MTOKEN_MATRIX_UNREDACTED_ORG)
+    #[arg(long, env = "MATRIX_TOKEN", hide_env_values = true)]
     token: Option<String>,
 
     #[arg(short, long)]
