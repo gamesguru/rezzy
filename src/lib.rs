@@ -993,17 +993,9 @@ impl<'a> crate::auth::StateProvider for OverlayState<'a> {
         let query: &dyn crate::auth::StateKeyDyn = &(event_type, state_key);
 
         // In V2.1 (Stock MSC4297), we supplement with ONLY m.room.power_levels.
-        // In V2.1.1 (The V3 / Ban Evasion Fix), we ALSO supplement m.room.member (bans/kicks).
-        // In V2.2 (Goldilographical), we completely disable the supplemental merge, relying on BFS.
+        // In V2.1.1 ...
         let should_supplement = match self.version {
-            StateResVersion::V2_2 => false,
-            StateResVersion::V2_1
-            | StateResVersion::V2_1_Synapse
-            | StateResVersion::V2_1_Ruma
-            | StateResVersion::V2_1_Tuwunel
-            | StateResVersion::V2_1_C10y => {
-                event_type == "m.room.power_levels" && state_key == Some("")
-            }
+            StateResVersion::V2_1 => event_type == "m.room.power_levels" && state_key == Some(""),
             StateResVersion::V2_1_1 => {
                 (event_type == "m.room.power_levels" && state_key == Some(""))
                     || (event_type == "m.room.member")
