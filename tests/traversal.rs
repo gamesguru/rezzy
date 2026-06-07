@@ -978,3 +978,116 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
         "CDO: Nexy\'s promotion must be dropped, resolving to the safe baseline"
     );
 }
+
+#[test]
+fn test_v2_1_1_anomaly_02_admin_lockout() {
+    // Anomaly 02: Admin Lockout / Lockdown Evasion
+    // Alice (Admin) locks the room to "invite-only".
+    // Concurrently, Bob (Spammer) joins the room under the old "public" join rules.
+    // Under stock v2.1, Bob's join is evaluated against Fork B's local public rules and accepted,
+    // evading the lock.
+    // Under CDO (v2.1.1), the concurrent lockdown dominates and drops Bob's join.
+
+    let create_ev = LeanEvent {
+        event_id: "$create".to_string(),
+        event_type: "m.room.create".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 100,
+        ..Default::default()
+    };
+
+    let pl_ev = LeanEvent {
+        event_id: "$pl".to_string(),
+        event_type: "m.room.power_levels".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 200,
+        content: serde_json::json!({
+            "users": { "@admin:example.com": 100 },
+        }),
+        auth_events: vec!["$create".to_string()],
+        ..Default::default()
+    };
+
+    let jr_pub = LeanEvent {
+        event_id: "$jr_pub".to_string(),
+        event_type: "m.room.join_rules".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 300,
+        content: serde_json::json!({ "join_rule": "public" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    // FORK A: Admin locks the room to "invite"
+    let admin_lock = LeanEvent {
+        event_id: "$admin_lock".to_string(),
+        event_type: "m.room.join_rules".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 400,
+        content: serde_json::json!({ "join_rule": "invite" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    // FORK B: Spammer concurrently joins under public rules
+    let spammer_join = LeanEvent {
+        event_id: "$spammer_join".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@spammer:example.com".to_string()),
+        sender: "@spammer:example.com".to_string(),
+        origin_server_ts: 450,
+        content: serde_json::json!({ "membership": "join" }),
+        auth_events: vec![
+            "$create".to_string(),
+            "$pl".to_string(),
+            "$jr_pub".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    let mut auth_context = std::collections::HashMap::new();
+    auth_context.insert("$create".to_string(), create_ev);
+    auth_context.insert("$pl".to_string(), pl_ev);
+    auth_context.insert("$jr_pub".to_string(), jr_pub);
+
+    let mut conflicted_events = std::collections::HashMap::new();
+    conflicted_events.insert("$admin_lock".to_string(), admin_lock);
+    conflicted_events.insert("$spammer_join".to_string(), spammer_join);
+
+    let mut unconflicted_state = std::collections::BTreeMap::new();
+    unconflicted_state.insert(
+        ("m.room.create".to_string(), Some("".to_string())),
+        "$create".to_string(),
+    );
+    unconflicted_state.insert(
+        ("m.room.power_levels".to_string(), Some("".to_string())),
+        "$pl".to_string(),
+    );
+    unconflicted_state.insert(
+        ("m.room.join_rules".to_string(), Some("".to_string())),
+        "$jr_pub".to_string(),
+    );
+
+    // Run V2.1.1 Resolution (CDO Enabled)
+    let resolved_v211 = ruma_lean::resolve_lean(
+        unconflicted_state,
+        conflicted_events,
+        &auth_context,
+        ruma_lean::StateResVersion::V2_1_1,
+    );
+
+    let spammer_key = (
+        "m.room.member".to_string(),
+        Some("@spammer:example.com".to_string()),
+    );
+
+    // CDO must drop the concurrent spammer join due to the concurrent lockdown
+    assert!(
+        !resolved_v211.contains_key(&spammer_key),
+        "CDO: Spammer join must be dropped because of the concurrent lockdown"
+    );
+}

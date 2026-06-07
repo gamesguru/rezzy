@@ -1,0 +1,109 @@
+[
+  {
+    "auth_events": [],
+    "content": {
+      "room_version": "11"
+    },
+    "depth": 1,
+    "event_id": "$root",
+    "hashes": {
+      "sha256": "fake"
+    },
+    "origin_server_ts": 1000,
+    "prev_events": [],
+    "sender": "@alice:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "fake"
+      }
+    },
+    "state_key": "",
+    "type": "m.room.create"
+  },
+  {
+    "auth_events": ["$root"],
+    "content": {
+      "membership": "join"
+    },
+    "depth": 2,
+    "event_id": "$alice_join",
+    "hashes": {
+      "sha256": "fake"
+    },
+    "origin_server_ts": 1100,
+    "prev_events": ["$root"],
+    "sender": "@alice:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "fake"
+      }
+    },
+    "state_key": "@alice:example.com",
+    "type": "m.room.member"
+  },
+  {
+    "auth_events": ["$root", "$alice_join"],
+    "content": {
+      "join_rule": "public"
+    },
+    "depth": 3,
+    "event_id": "$jr_pub",
+    "hashes": {
+      "sha256": "fake"
+    },
+    "origin_server_ts": 1150,
+    "prev_events": ["$alice_join"],
+    "sender": "@alice:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "fake"
+      }
+    },
+    "state_key": "",
+    "type": "m.room.join_rules"
+  },
+  {
+    "auth_events": ["$root", "$alice_join", "$jr_pub"],
+    "content": {
+      "users": {
+        "@alice:example.com": 100
+      }
+    },
+    "depth": 4,
+    "event_id": "$pl_init",
+    "hashes": {
+      "sha256": "fake"
+    },
+    "origin_server_ts": 1200,
+    "prev_events": ["$jr_pub"],
+    "sender": "@alice:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "fake"
+      }
+    },
+    "state_key": "",
+    "type": "m.room.power_levels"
+  },
+  {
+    "auth_events": ["$root", "$alice_join", "$jr_pub"],
+    "content": {
+      "membership": "join"
+    },
+    "depth": 5,
+    "event_id": "$bob_join",
+    "hashes": {
+      "sha256": "fake"
+    },
+    "origin_server_ts": 1250,
+    "prev_events": ["$pl_init"],
+    "sender": "@bob:example.com",
+    "signatures": {
+      "example.com": {
+        "ed25519:1": "fake"
+      }
+    },
+    "state_key": "@bob:example.com",
+    "type": "m.room.member"
+  }
+]

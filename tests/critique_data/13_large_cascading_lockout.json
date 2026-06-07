@@ -42,17 +42,17 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"],
     "content": {
       "membership": "join"
     },
-    "depth": 4,
+    "depth": 3,
     "event_id": "$BXmJtIHmB_gDBc_UbSYaOV5e1SWNpzDvj20D74TtyiY",
     "hashes": {
       "sha256": "BP-2nIZ9JyXlN8uQEjUJpF_3exNq7oGPw1gZcwMHIWs"
     },
-    "origin_server_ts": 1770000003000,
-    "prev_events": ["$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
+    "origin_server_ts": 1770000002000,
+    "prev_events": ["$AtL8-0oBDuUf_aeJR7PTe2zianAmwRvdXShVQ-9-Qm4"],
     "sender": "@bob:example.com",
     "signatures": {
       "example.com": {
@@ -63,16 +63,16 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"],
     "content": {
       "membership": "join"
     },
-    "depth": 5,
+    "depth": 4,
     "event_id": "$CBj-F8sJfCXxKL_8GLJ4yUqshht1LgeyijCubWDnvHQ",
     "hashes": {
       "sha256": "CbOjL9iTyr67yCGYnA6ZK3tMVCt486KF4Bp0-29Ub8s"
     },
-    "origin_server_ts": 1770000004000,
+    "origin_server_ts": 1770000003000,
     "prev_events": ["$BXmJtIHmB_gDBc_UbSYaOV5e1SWNpzDvj20D74TtyiY"],
     "sender": "@charlie:example.com",
     "signatures": {
@@ -84,16 +84,16 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"],
     "content": {
       "membership": "join"
     },
-    "depth": 6,
+    "depth": 5,
     "event_id": "$DVs_7_XZMee41f3ab-r-9ExGVVj2fh1UwWwd_wfWV9E",
     "hashes": {
       "sha256": "D0HWglcGPwlzAsPn34tV4lOaOhfzpkoo0Pw6Z762PUA"
     },
-    "origin_server_ts": 1770000005000,
+    "origin_server_ts": 1770000004000,
     "prev_events": ["$CBj-F8sJfCXxKL_8GLJ4yUqshht1LgeyijCubWDnvHQ"],
     "sender": "@david:example.com",
     "signatures": {
@@ -105,16 +105,16 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"],
     "content": {
       "membership": "join"
     },
-    "depth": 7,
+    "depth": 6,
     "event_id": "$FNGALUm17BJKChNIftEMfQHzDZBsyzCYS0Zz0YTMsWw",
     "hashes": {
       "sha256": "FN9tykA-xKNABf5KcMHIqtiah33HrwFTw_H77KUokm0"
     },
-    "origin_server_ts": 1770000006000,
+    "origin_server_ts": 1770000005000,
     "prev_events": ["$DVs_7_XZMee41f3ab-r-9ExGVVj2fh1UwWwd_wfWV9E"],
     "sender": "@frank:example.com",
     "signatures": {
@@ -126,16 +126,16 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"],
     "content": {
       "membership": "join"
     },
-    "depth": 11,
+    "depth": 10,
     "event_id": "$Iv11kQEZ8qDetBHmS9sS-Ii93E2qgcesERtXpAK9W_Q",
     "hashes": {
       "sha256": "IJzVlhfqJTKSR6BMSZ1eW-Um5Zm3K79A140y8Bb2rAY"
     },
-    "origin_server_ts": 1770000010000,
+    "origin_server_ts": 1770000009000,
     "prev_events": ["$HqiRW9-sOGCXmfNKAItccGdfao33s6S79FScf8PRkNI"],
     "sender": "@ivy:example.com",
     "signatures": {
@@ -147,16 +147,16 @@
     "type": "m.room.member"
   },
   {
-    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I", "$Asi8WFtgNg5d8ErHMCSzxKtm9z0c-nNwdZkJhLyfmU0"],
+    "auth_events": ["$ABNJTRN-FjG7owHVrKtue7eqdM4RhdRWVl71HXN2d7I"],
     "content": {
       "membership": "join"
     },
-    "depth": 12,
+    "depth": 11,
     "event_id": "$JfHvl7q19ipvYq50LQ8cCifvaUx-tp5U_-Zs7qh5MOQ",
     "hashes": {
       "sha256": "JC4EcrKp3QT4Ljjsb363zl6Op3JO15NOCiporktPVlY"
     },
-    "origin_server_ts": 1770000011000,
+    "origin_server_ts": 1770000010000,
     "prev_events": ["$Iv11kQEZ8qDetBHmS9sS-Ii93E2qgcesERtXpAK9W_Q"],
     "sender": "@jack:example.com",
     "signatures": {
