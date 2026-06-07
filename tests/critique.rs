@@ -322,7 +322,19 @@ fn test_anomaly_06_action_evaporation() {
 #[test]
 fn test_anomaly_06b_mod_membership_evaporation() {
     let (resolved, map) = resolve_pathology("06b_mod_membership_evaporation.jsonl");
-    assert_ne!(get_membership(&resolved, &map, "@nexy:example.com"), "join");
+    // Under CDO (v2.1.1), Nexy's unauthorized join is dropped (resolving to none).
+    assert_eq!(get_membership(&resolved, &map, "@nexy:example.com"), "none");
+    // And because her join is dropped, her concurrent ban of the spammer is transitively dropped.
+    // Thus, the spammer is still in the room ("join").
+    assert_eq!(
+        get_membership(&resolved, &map, "@spammer:example.com"),
+        "join"
+    );
+    // Honest members are unaffected.
+    assert_eq!(
+        get_membership(&resolved, &map, "@charlie:example.com"),
+        "join"
+    );
 }
 
 #[test]
