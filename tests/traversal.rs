@@ -793,3 +793,173 @@ fn test_v2_1_strictness_future_v3_should_pass() {
     // A future State DAG (MSC4242) algorithm could theoretically pass this by validating
     // the room state via `prev_state_events` instead of relying on the fragile string array.
 }
+
+#[test]
+fn test_v2_1_1_anomaly_06b_ghost_moderator() {
+    // Anomaly 06b: Moderator Membership Evaporation / Ghost Moderator
+    // A moderator (Nexy) joins and gets promoted on a public fork, then bans a spammer.
+    // Concurrently, an Admin locks the room to "invite".
+    // Phase 1 evaluates the lockdown and Nexy\'s promotion and ban first (because they are Power Events).
+    // Phase 2 evaluates Nexy\'s join. Nexy\'s join is rejected due to the lockdown.
+    // In unpatched v2.1, her promotion and ban survive, leaving a "Ghost Moderator".
+    // In CDO (v2.2), her join is concurrent and dominated by the invite lockdown,
+    // and her subsequent actions (promotion, ban) are transitively dropped due to dependency.
+
+    let create_ev = LeanEvent {
+        event_id: "$create".to_string(),
+        event_type: "m.room.create".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 100,
+        ..Default::default()
+    };
+
+    let pl_ev = LeanEvent {
+        event_id: "$pl".to_string(),
+        event_type: "m.room.power_levels".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 200,
+        content: serde_json::json!({
+            "users": { "@admin:example.com": 100 },
+        }),
+        auth_events: vec!["$create".to_string()],
+        ..Default::default()
+    };
+
+    let jr_pub = LeanEvent {
+        event_id: "$jr_pub".to_string(),
+        event_type: "m.room.join_rules".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 300,
+        content: serde_json::json!({ "join_rule": "public" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    let charlie_join = LeanEvent {
+        event_id: "$charlie_join".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@charlie:example.com".to_string()),
+        sender: "@charlie:example.com".to_string(),
+        origin_server_ts: 400,
+        content: serde_json::json!({ "membership": "join" }),
+        auth_events: vec![
+            "$create".to_string(),
+            "$pl".to_string(),
+            "$jr_pub".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    // FORK A: Admin locks the room
+    let admin_lock = LeanEvent {
+        event_id: "$admin_lock".to_string(),
+        event_type: "m.room.join_rules".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 500,
+        content: serde_json::json!({ "join_rule": "invite" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    // FORK B: Nexy joins on public rules, is promoted to Moderator, and bans spammer
+    let nexy_join = LeanEvent {
+        event_id: "$nexy_join".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@nexy:example.com".to_string()),
+        sender: "@nexy:example.com".to_string(),
+        origin_server_ts: 450,
+        content: serde_json::json!({ "membership": "join" }),
+        auth_events: vec![
+            "$create".to_string(),
+            "$pl".to_string(),
+            "$jr_pub".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    let nexy_promo = LeanEvent {
+        event_id: "$nexy_promo".to_string(),
+        event_type: "m.room.power_levels".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 460,
+        content: serde_json::json!({
+            "users": {
+                "@admin:example.com": 100,
+                "@nexy:example.com": 50,
+            }
+        }),
+        auth_events: vec![
+            "$create".to_string(),
+            "$pl".to_string(),
+            "$nexy_join".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    let nexy_bans_spammer = LeanEvent {
+        event_id: "$nexy_bans_spammer".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@spammer:example.com".to_string()),
+        sender: "@nexy:example.com".to_string(),
+        origin_server_ts: 470,
+        content: serde_json::json!({ "membership": "ban" }),
+        auth_events: vec![
+            "$create".to_string(),
+            "$nexy_promo".to_string(),
+            "$nexy_join".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    let mut auth_context = std::collections::HashMap::new();
+    auth_context.insert("$create".to_string(), create_ev);
+    auth_context.insert("$pl".to_string(), pl_ev);
+    auth_context.insert("$jr_pub".to_string(), jr_pub);
+    auth_context.insert("$charlie_join".to_string(), charlie_join);
+
+    let mut conflicted_events = std::collections::HashMap::new();
+    conflicted_events.insert("$admin_lock".to_string(), admin_lock);
+    conflicted_events.insert("$nexy_join".to_string(), nexy_join);
+    conflicted_events.insert("$nexy_promo".to_string(), nexy_promo);
+    conflicted_events.insert("$nexy_bans_spammer".to_string(), nexy_bans_spammer);
+
+    // Run V2.2 (CDO Enabled / State Res v2.2)
+    let resolved_v22 = ruma_lean::resolve_lean(
+        std::collections::BTreeMap::new(),
+        conflicted_events.clone(),
+        &auth_context,
+        ruma_lean::StateResVersion::V2_2,
+    );
+
+    let nexy_member_key = (
+        "m.room.member".to_string(),
+        Some("@nexy:example.com".to_string()),
+    );
+    let spammer_member_key = (
+        "m.room.member".to_string(),
+        Some("@spammer:example.com".to_string()),
+    );
+    let pl_key = ("m.room.power_levels".to_string(), Some("".to_string()));
+
+    // CDO\'s transitive closure drops nexy_join (dominated by lock) AND nexy_promo/nexy_bans_spammer (transitively dependent)
+    assert!(
+        !resolved_v22.contains_key(&nexy_member_key),
+        "CDO: Nexy join must be dropped because of the concurrent lockdown"
+    );
+    assert!(
+        !resolved_v22.contains_key(&spammer_member_key),
+        "CDO: Spammer ban must be transitively dropped since Nexy never legally joined"
+    );
+
+    // The resolved PL should revert to the original admin-only state
+    let final_pl_id = resolved_v22.get(&pl_key).unwrap();
+    assert_ne!(
+        final_pl_id, "$nexy_promo",
+        "CDO: Nexy\'s promotion must be dropped, resolving to the safe baseline"
+    );
+}
