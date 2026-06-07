@@ -1,8 +1,8 @@
 use ruma_lean::{resolve_lean, LeanEvent, StateResVersion};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-type ResolvedStateMap = BTreeMap<(String, Option<String>), String>;
+type ResolvedStateMap = HashMap<(String, Option<String>), String>;
 type EventMap = HashMap<String, LeanEvent>;
 
 fn load_fixture(path: &std::path::Path) -> Vec<LeanEvent> {
@@ -31,6 +31,123 @@ fn to_event_map(events: &[LeanEvent]) -> EventMap {
         .iter()
         .map(|e| (e.event_id.clone(), e.clone()))
         .collect()
+}
+
+fn get_heads(events: &[LeanEvent]) -> Vec<String> {
+    // Look for the merge event (which has multiple prev_events)
+    if let Some(merge_event) = events.iter().find(|e| e.prev_events.len() > 1) {
+        merge_event.prev_events.clone()
+    } else {
+        // Fallback: overall leaf events of the DAG
+        let mut prevs = HashSet::new();
+        for e in events {
+            for p in &e.prev_events {
+                prevs.insert(p.clone());
+            }
+        }
+        events
+            .iter()
+            .filter(|e| !prevs.contains(&e.event_id))
+            .map(|e| e.event_id.clone())
+            .collect()
+    }
+}
+
+fn get_state_map_for_head(
+    head: &str,
+    events_map: &EventMap,
+) -> HashMap<(String, Option<String>), String> {
+    let mut visited = HashSet::new();
+    let mut stack = vec![head.to_string()];
+    let mut ancestors = Vec::new();
+    while let Some(id) = stack.pop() {
+        if visited.insert(id.clone()) {
+            if let Some(ev) = events_map.get(&id) {
+                ancestors.push(ev.clone());
+                for p in &ev.prev_events {
+                    stack.push(p.clone());
+                }
+            }
+        }
+    }
+    // Sort ancestors to build state chronologically/topologically
+    ancestors.sort_by(|a, b| {
+        a.depth
+            .cmp(&b.depth)
+            .then_with(|| a.origin_server_ts.cmp(&b.origin_server_ts))
+            .then_with(|| a.event_id.cmp(&b.event_id))
+    });
+    let mut state = HashMap::new();
+    for ev in ancestors {
+        if let Some(ref sk) = ev.state_key {
+            state.insert(
+                (ev.event_type.clone(), Some(sk.clone())),
+                ev.event_id.clone(),
+            );
+        } else if ev.event_type == "m.room.create"
+            || ev.event_type == "m.room.join_rules"
+            || ev.event_type == "m.room.power_levels"
+            || ev.event_type == "m.room.name"
+        {
+            state.insert(
+                (ev.event_type.clone(), Some("".to_string())),
+                ev.event_id.clone(),
+            );
+        }
+    }
+    state
+}
+
+fn resolve_full(events: &[LeanEvent], version: StateResVersion) -> ResolvedStateMap {
+    let events_map = to_event_map(events);
+    let heads = get_heads(events);
+    let mut state_maps = Vec::new();
+    for h in &heads {
+        state_maps.push(get_state_map_for_head(h, &events_map));
+    }
+
+    let num_sets = state_maps.len();
+    let mut occurrences: HashMap<(String, Option<String>), HashMap<String, usize>> = HashMap::new();
+    for map in &state_maps {
+        for (key, id) in map {
+            *occurrences
+                .entry(key.clone())
+                .or_default()
+                .entry(id.clone())
+                .or_insert(0) += 1;
+        }
+    }
+
+    let mut unconflicted_state = BTreeMap::new();
+    let mut conflicted_state_set = Vec::new();
+    for (key, ids) in occurrences {
+        if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
+            let id = ids.keys().next().unwrap();
+            unconflicted_state.insert(key, id.clone());
+        } else {
+            for id in ids.keys() {
+                conflicted_state_set.push(id.clone());
+            }
+        }
+    }
+
+    let conflicted_events =
+        ruma_lean::compute_v2_1_conflicted_subgraph(&events_map, &conflicted_state_set);
+    let resolved = resolve_lean(
+        unconflicted_state.clone(),
+        conflicted_events,
+        &events_map,
+        version,
+    );
+
+    let mut full_state = HashMap::new();
+    for (k, v) in unconflicted_state {
+        full_state.insert(k, v);
+    }
+    for (k, v) in resolved {
+        full_state.insert(k, v);
+    }
+    full_state
 }
 
 fn get_user_power_level(resolved: &ResolvedStateMap, map: &EventMap, user_id: &str) -> i64 {
@@ -66,7 +183,7 @@ fn resolve_pathology(jsonl_filename: &str) -> (ResolvedStateMap, EventMap) {
     .join(jsonl_filename);
     let events = load_fixture(&absolute_path);
     let map = to_event_map(&events);
-    let resolved = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1_1);
+    let resolved = resolve_full(&events, StateResVersion::V2_1_1);
     (resolved, map)
 }
 
@@ -78,8 +195,8 @@ fn assert_benign_convergence(jsonl_filename: &str) -> (ResolvedStateMap, EventMa
     let events = load_fixture(&absolute_path);
     let map = to_event_map(&events);
 
-    let resolved_v2_1 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1);
-    let resolved_v2_1_1 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1_1);
+    let resolved_v2_1 = resolve_full(&events, StateResVersion::V2_1);
+    let resolved_v2_1_1 = resolve_full(&events, StateResVersion::V2_1_1);
 
     assert_eq!(
         resolved_v2_1_1, resolved_v2_1,
@@ -92,7 +209,6 @@ fn assert_benign_convergence(jsonl_filename: &str) -> (ResolvedStateMap, EventMa
 #[test]
 fn test_anomaly_01_state_reset() {
     let (resolved, map) = assert_benign_convergence("01_state_reset.jsonl");
-    // Assert specific state values: Alice and Bob are joined, Bob has power level 0
     assert_eq!(
         get_membership(&resolved, &map, "@alice:example.com"),
         "join"
@@ -104,7 +220,6 @@ fn test_anomaly_01_state_reset() {
 #[test]
 fn test_anomaly_02_admin_lockout() {
     let (resolved, map) = assert_benign_convergence("02_admin_lockout.jsonl");
-    // Assert Alice is joined and remains secure, Bob has power level 0
     assert_eq!(
         get_membership(&resolved, &map, "@alice:example.com"),
         "join"
@@ -116,12 +231,10 @@ fn test_anomaly_02_admin_lockout() {
 #[test]
 fn test_anomaly_03_phantom_join_rules() {
     let (resolved, map) = resolve_pathology("03_phantom_join_rules.jsonl");
-    // Under CDO, Charlie's concurrent join during lockdown is dropped
     assert_ne!(
         get_membership(&resolved, &map, "@charlie:example.com"),
         "join"
     );
-    // Assert Alice and Charlie's baseline states
     assert_eq!(
         get_membership(&resolved, &map, "@alice:example.com"),
         "join"
@@ -131,7 +244,6 @@ fn test_anomaly_03_phantom_join_rules() {
 #[test]
 fn test_anomaly_04_ban_evasion() {
     let (resolved, map) = resolve_pathology("04_ban_evasion.jsonl");
-    // Under CDO, Bob's concurrent ban evasion is dropped, Bob remains banned (membership "ban")
     assert_eq!(get_membership(&resolved, &map, "@bob:ServerB"), "ban");
     assert_eq!(get_membership(&resolved, &map, "@alice:ServerA"), "join");
 }
@@ -164,14 +276,12 @@ fn test_anomaly_06_action_evaporation() {
 #[test]
 fn test_anomaly_06b_mod_membership_evaporation() {
     let (resolved, map) = resolve_pathology("06b_mod_membership_evaporation.jsonl");
-    // Under CDO, Nexy's mod join was dropped, so Nexy is not joined
     assert_ne!(get_membership(&resolved, &map, "@nexy:example.com"), "join");
 }
 
 #[test]
 fn test_anomaly_06c_zombie_invite_reset() {
     let (resolved, map) = assert_benign_convergence("06c_zombie_invite_reset.jsonl");
-    // Verifies Spammer is banned and Nexy remains joined
     assert_eq!(
         get_membership(&resolved, &map, "@admin:example.com"),
         "join"
@@ -213,6 +323,9 @@ fn test_anomaly_08_problem_b() {
 #[test]
 fn test_anomaly_09_moderator_disappearance() {
     let (resolved, map) = assert_benign_convergence("09_moderator_disappearance.jsonl");
+    for (k, v) in &resolved {
+        println!("DEBUGLOG: k={:?}, v={:?}", k, v);
+    }
     assert_eq!(
         get_membership(&resolved, &map, "@alice:example.com"),
         "join"
@@ -267,7 +380,6 @@ fn test_anomaly_12_zombie_resurrection() {
 #[test]
 fn test_anomaly_13_large_cascading_lockout() {
     let (resolved, map) = resolve_pathology("13_large_cascading_lockout.jsonl");
-    // Under CDO, Grace is not banned, Bob and Charlie keep their administrative levels
     assert_ne!(get_membership(&resolved, &map, "@grace:example.com"), "ban");
     assert_eq!(
         get_membership(&resolved, &map, "@alice:example.com"),
