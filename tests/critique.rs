@@ -33,6 +33,20 @@ fn to_event_map(events: &[LeanEvent]) -> EventMap {
         .collect()
 }
 
+fn get_user_power_level(resolved: &ResolvedStateMap, map: &EventMap, user_id: &str) -> i64 {
+    let key = ("m.room.power_levels".to_string(), Some("".to_string()));
+    if let Some(event_id) = resolved.get(&key) {
+        if let Some(ev) = map.get(event_id) {
+            if let Some(users) = ev.content.get("users").and_then(|u| u.as_object()) {
+                if let Some(pl) = users.get(user_id).and_then(|v| v.as_i64()) {
+                    return pl;
+                }
+            }
+        }
+    }
+    0
+}
+
 fn get_membership(resolved: &ResolvedStateMap, map: &EventMap, user_id: &str) -> String {
     let key = ("m.room.member".to_string(), Some(user_id.to_string()));
     if let Some(event_id) = resolved.get(&key) {
@@ -56,7 +70,7 @@ fn resolve_pathology(jsonl_filename: &str) -> (ResolvedStateMap, EventMap) {
     (resolved, map)
 }
 
-fn assert_benign_convergence(jsonl_filename: &str) {
+fn assert_benign_convergence(jsonl_filename: &str) -> (ResolvedStateMap, EventMap) {
     let absolute_path = std::path::Path::new(
         "/home/shane/Documents/school/ou-papers/program-matrix-state-res-v2.1-critique/build/jsonl",
     )
@@ -64,34 +78,52 @@ fn assert_benign_convergence(jsonl_filename: &str) {
     let events = load_fixture(&absolute_path);
     let map = to_event_map(&events);
 
-    // Resolve under both unpatched v2.1 and patched v2.1.1 (CDO)
     let resolved_v2_1 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1);
     let resolved_v2_1_1 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1_1);
 
-    // Verify perfect semantic parity and benign convergence
     assert_eq!(
         resolved_v2_1_1, resolved_v2_1,
         "Causal Domination pre-filter violated Benign Convergence parity for {}",
         jsonl_filename
     );
+    (resolved_v2_1_1, map)
 }
 
 #[test]
 fn test_anomaly_01_state_reset() {
-    assert_benign_convergence("01_state_reset.jsonl");
+    let (resolved, map) = assert_benign_convergence("01_state_reset.jsonl");
+    // Assert specific state values: Alice and Bob are joined, Bob has power level 0
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    assert_eq!(get_user_power_level(&resolved, &map, "@bob:example.com"), 0);
 }
 
 #[test]
 fn test_anomaly_02_admin_lockout() {
-    assert_benign_convergence("02_admin_lockout.jsonl");
+    let (resolved, map) = assert_benign_convergence("02_admin_lockout.jsonl");
+    // Assert Alice is joined and remains secure, Bob has power level 0
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    assert_eq!(get_user_power_level(&resolved, &map, "@bob:example.com"), 0);
 }
 
 #[test]
 fn test_anomaly_03_phantom_join_rules() {
     let (resolved, map) = resolve_pathology("03_phantom_join_rules.jsonl");
-    // Under CDO, Charlie's concurrent join during lockdown must be dropped
+    // Under CDO, Charlie's concurrent join during lockdown is dropped
     assert_ne!(
         get_membership(&resolved, &map, "@charlie:example.com"),
+        "join"
+    );
+    // Assert Alice and Charlie's baseline states
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
         "join"
     );
 }
@@ -99,80 +131,184 @@ fn test_anomaly_03_phantom_join_rules() {
 #[test]
 fn test_anomaly_04_ban_evasion() {
     let (resolved, map) = resolve_pathology("04_ban_evasion.jsonl");
-    // Under CDO, Bob's concurrent ban evasion must be dropped
-    assert_ne!(get_membership(&resolved, &map, "@bob:ServerB"), "join");
+    // Under CDO, Bob's concurrent ban evasion is dropped, Bob remains banned (membership "ban")
+    assert_eq!(get_membership(&resolved, &map, "@bob:ServerB"), "ban");
+    assert_eq!(get_membership(&resolved, &map, "@alice:ServerA"), "join");
 }
 
 #[test]
 fn test_anomaly_05_timestamp_spoofing() {
-    assert_benign_convergence("05_timestamp_spoofing.jsonl");
+    let (resolved, map) = assert_benign_convergence("05_timestamp_spoofing.jsonl");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    assert_eq!(
+        get_user_power_level(&resolved, &map, "@bob:example.com"),
+        50
+    );
 }
 
 #[test]
 fn test_anomaly_06_action_evaporation() {
-    assert_benign_convergence("06_action_evaporation.jsonl");
+    let (resolved, map) = assert_benign_convergence("06_action_evaporation.jsonl");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    assert_eq!(get_user_power_level(&resolved, &map, "@bob:example.com"), 0);
 }
 
 #[test]
 fn test_anomaly_06b_mod_membership_evaporation() {
     let (resolved, map) = resolve_pathology("06b_mod_membership_evaporation.jsonl");
-    // Under CDO, Nexy's mod join must be dropped
+    // Under CDO, Nexy's mod join was dropped, so Nexy is not joined
     assert_ne!(get_membership(&resolved, &map, "@nexy:example.com"), "join");
 }
 
 #[test]
 fn test_anomaly_06c_zombie_invite_reset() {
-    assert_benign_convergence("06c_zombie_invite_reset.jsonl");
+    let (resolved, map) = assert_benign_convergence("06c_zombie_invite_reset.jsonl");
+    // Verifies Spammer is banned and Nexy remains joined
+    assert_eq!(
+        get_membership(&resolved, &map, "@admin:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@nexy:example.com"), "join");
+    assert_eq!(
+        get_membership(&resolved, &map, "@spammer:example.com"),
+        "ban"
+    );
 }
 
 #[test]
 fn test_anomaly_07_state_baseline_pollution() {
-    assert_benign_convergence("07_state_baseline_pollution.jsonl");
+    let (resolved, map) = assert_benign_convergence("07_state_baseline_pollution.jsonl");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "leave"
+    );
 }
 
 #[test]
 fn test_anomaly_08_problem_b() {
-    assert_benign_convergence("08_problem_b.jsonl");
+    let (resolved, map) = assert_benign_convergence("08_problem_b.jsonl");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    assert_eq!(
+        get_user_power_level(&resolved, &map, "@alice:example.com"),
+        100
+    );
+    assert_eq!(
+        get_user_power_level(&resolved, &map, "@bob:example.com"),
+        50
+    );
 }
 
 #[test]
 fn test_anomaly_09_moderator_disappearance() {
-    assert_benign_convergence("09_moderator_disappearance.jsonl");
+    let (resolved, map) = assert_benign_convergence("09_moderator_disappearance.jsonl");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    assert_eq!(
+        get_membership(&resolved, &map, "@charlie:example.com"),
+        "ban"
+    );
 }
 
 #[test]
 fn test_anomaly_10_vanishing_timelines() {
-    assert_benign_convergence("10_vanishing_timelines.jsonl");
+    let (resolved, map) = assert_benign_convergence("10_vanishing_timelines.jsonl");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    assert_eq!(
+        get_user_power_level(&resolved, &map, "@alice:example.com"),
+        100
+    );
 }
 
 #[test]
 fn test_anomaly_11_auth_chain_truncation() {
-    assert_benign_convergence("11_auth_chain_truncation.jsonl");
+    let (resolved, map) = assert_benign_convergence("11_auth_chain_truncation.jsonl");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    assert_eq!(
+        get_user_power_level(&resolved, &map, "@alice:example.com"),
+        100
+    );
+    assert_eq!(
+        get_user_power_level(&resolved, &map, "@bob:example.com"),
+        50
+    );
 }
 
 #[test]
 fn test_anomaly_12_zombie_resurrection() {
-    assert_benign_convergence("12_zombie_resurrection.jsonl");
+    let (resolved, map) = assert_benign_convergence("12_zombie_resurrection.jsonl");
+    assert_eq!(get_membership(&resolved, &map, "@alice:ServerA"), "ban");
+    assert_eq!(get_membership(&resolved, &map, "@bob:ServerB"), "join");
+    assert_eq!(get_membership(&resolved, &map, "@charlie:ServerA"), "join");
 }
 
 #[test]
 fn test_anomaly_13_large_cascading_lockout() {
     let (resolved, map) = resolve_pathology("13_large_cascading_lockout.jsonl");
-    // Under CDO, the demotion loop is dropped, so Grace is not banned
+    // Under CDO, Grace is not banned, Bob and Charlie keep their administrative levels
     assert_ne!(get_membership(&resolved, &map, "@grace:example.com"), "ban");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
 }
 
 #[test]
 fn test_anomaly_14_state_reset_via_redactions() {
-    assert_benign_convergence("14_state_reset_via_redactions.jsonl");
+    let (resolved, map) = assert_benign_convergence("14_state_reset_via_redactions.jsonl");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
 }
 
 #[test]
 fn test_anomaly_15_dos_traversal_bfs() {
-    assert_benign_convergence("15_dos_traversal_bfs.jsonl");
+    let (resolved, map) = assert_benign_convergence("15_dos_traversal_bfs.jsonl");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "join"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    assert_eq!(
+        get_user_power_level(&resolved, &map, "@bob:example.com"),
+        50
+    );
 }
 
 #[test]
 fn test_anomaly_16_causality_leakage() {
-    assert_benign_convergence("16_causality_leakage.jsonl");
+    let (resolved, map) = assert_benign_convergence("16_causality_leakage.jsonl");
+    assert_eq!(
+        get_membership(&resolved, &map, "@alice:example.com"),
+        "leave"
+    );
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    assert_eq!(
+        get_user_power_level(&resolved, &map, "@bob:example.com"),
+        100
+    );
 }
