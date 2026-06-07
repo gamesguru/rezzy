@@ -414,6 +414,7 @@ fn test_v2_1_1_fixes_invite_lock() {
         origin_server_ts: 400,
         content: serde_json::json!({ "join_rule": "invite" }),
         auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        prev_events: vec!["$hist_join".to_string()],
         ..Default::default()
     };
 
@@ -928,9 +929,23 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
     conflicted_events.insert("$nexy_promo".to_string(), nexy_promo);
     conflicted_events.insert("$nexy_bans_spammer".to_string(), nexy_bans_spammer);
 
+    let mut unconflicted_state = std::collections::BTreeMap::new();
+    unconflicted_state.insert(
+        ("m.room.create".to_string(), Some("".to_string())),
+        "$create".to_string(),
+    );
+    unconflicted_state.insert(
+        ("m.room.power_levels".to_string(), Some("".to_string())),
+        "$pl".to_string(),
+    );
+    unconflicted_state.insert(
+        ("m.room.join_rules".to_string(), Some("".to_string())),
+        "$jr_pub".to_string(),
+    );
+
     // Run V2.2 (CDO Enabled / State Res v2.2)
     let resolved_v211 = ruma_lean::resolve_lean(
-        std::collections::BTreeMap::new(),
+        unconflicted_state,
         conflicted_events.clone(),
         &auth_context,
         ruma_lean::StateResVersion::V2_1_1,
