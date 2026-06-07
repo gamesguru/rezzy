@@ -1,13 +1,14 @@
 import z3
 
+
 def main():
     solver = z3.Solver()
-    
+
     # 1. ADD jr_pub TO YOUR NODES ARRAY
     nodes = [
         "root",
         "alice_join",
-        "jr_pub",       # <--- CRITICAL ADDITION
+        "jr_pub",  # <--- CRITICAL ADDITION
         "charlie_join",
         "bob_join",
         "pl_init",
@@ -19,8 +20,8 @@ def main():
     # 2. UPDATE TOPOLOGICAL EDGES
     edges = [
         ("root", "alice_join"),
-        ("alice_join", "jr_pub"),       # <--- CRITICAL ADDITION
-        ("jr_pub", "charlie_join"),     # <--- CRITICAL ADDITION
+        ("alice_join", "jr_pub"),  # <--- CRITICAL ADDITION
+        ("jr_pub", "charlie_join"),  # <--- CRITICAL ADDITION
         ("charlie_join", "bob_join"),
         ("bob_join", "pl_init"),
         ("pl_init", "ban_alice"),
@@ -28,33 +29,33 @@ def main():
         ("ban_alice", "merge"),
         ("zombie_action", "merge"),
     ]
-    
+
     depth_vals = {node: z3.Int(f"depth_{node}") for node in nodes}
     ts_vals = {node: z3.Int(f"ts_{node}") for node in nodes}
-    
+
     # Standard properties: depth >= 1, ts >= 1000
     for node in nodes:
         solver.add(depth_vals[node] >= 1)
         solver.add(ts_vals[node] >= 1000)
-        
+
     # Edge constraints: depth of child > depth of parent, ts of child > ts of parent
     for parent, child in edges:
         solver.add(depth_vals[child] > depth_vals[parent])
         solver.add(ts_vals[child] > ts_vals[parent])
-        
+
     # 3. ENFORCE STRICT TEMPORAL CHRONOLOGY FOR THE BASELINE
     # This prevents Z3 from assigning the same timestamp and scrambling Kahn's sort
     solver.add(ts_vals["root"] < ts_vals["alice_join"])
     solver.add(ts_vals["alice_join"] < ts_vals["jr_pub"])
     solver.add(ts_vals["jr_pub"] < ts_vals["charlie_join"])
-    
+
     if solver.check() == z3.sat:
         model = solver.model()
         depth_resolved = {node: model[depth_vals[node]].as_long() for node in nodes}
         ts_resolved = {node: model[ts_vals[node]].as_long() for node in nodes}
-        
+
         dsl_output = []
-        
+
         # 4. ADD DSL OUTPUT LOGIC
         dsl_output.append(
             f'node root [type="m.room.create", '
@@ -101,10 +102,11 @@ def main():
             f'sender="", state_key="", depth={depth_resolved["merge"]}, '
             f'origin_server_ts={ts_resolved["merge"]}, content={{}}]'
         )
-        
+
         print("\n".join(dsl_output))
     else:
         print("Unsatisfiable constraints")
+
 
 if __name__ == "__main__":
     main()

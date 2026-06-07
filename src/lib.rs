@@ -1442,11 +1442,9 @@ impl LeanEvent {
         if self.is_ban_or_kick() || self.is_demotion() {
             return self.restricts_sender(&other.sender);
         }
-        if self.is_lockdown() {
-            if other.event_type == "m.room.member" {
-                if let Some(membership) = other.content.get("membership").and_then(|v| v.as_str()) {
-                    return membership == "join";
-                }
+        if self.is_lockdown() && other.event_type == "m.room.member" {
+            if let Some(membership) = other.content.get("membership").and_then(|v| v.as_str()) {
+                return membership == "join";
             }
         }
         false
@@ -1494,26 +1492,51 @@ pub fn apply_cdo_filter(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
+    // Sort conflicted events chronologically/topologically:
+    // 1. origin_server_ts ascending (earlier comes first)
+    // 2. power_level descending (higher power level comes first)
+    // 3. event_id ascending (smaller lexicographical order comes first)
+    let mut sorted_events: Vec<&LeanEvent> = conflicted_events.values().collect();
+    sorted_events.sort_by(|a, b| {
+        let cmp_ts = a.origin_server_ts.cmp(&b.origin_server_ts);
+        if cmp_ts != Ordering::Equal {
+            return cmp_ts;
+        }
+
+        let cmp_pl = b.power_level.cmp(&a.power_level); // descending
+        if cmp_pl != Ordering::Equal {
+            return cmp_pl;
+        }
+
+        a.event_id.cmp(&b.event_id)
+    });
+
     let mut dropped_ids = BTreeSet::new();
+    let mut active_admin_actions: Vec<&LeanEvent> = Vec::new();
 
-    // Pass 1: Extract restrictive administrative actions (Bans, Kicks, Demotions, Lockdowns)
-    let admin_actions: Vec<&LeanEvent> = conflicted_events
-        .values()
-        .filter(|e| e.is_ban_or_kick() || e.is_demotion() || e.is_lockdown())
-        .collect();
+    // Pass 2: Direct Domination (Sender / Type Restriction) in priority order
+    for event in &sorted_events {
+        let mut is_dominated = false;
 
-    // Pass 2: Direct Domination (Sender / Type Restriction)
-    for (id, event) in conflicted_events.iter() {
-        for admin_ev in &admin_actions {
+        for admin_ev in &active_admin_actions {
             if admin_ev.restricts_event(event) {
                 // Check Concurrency (e_a || e_x): Ensure neither is an ancestor of the other
-                let is_ancestor_admin = is_ancestor(&admin_ev.event_id, &event.event_id, &dag_context);
-                let is_descendant_admin = is_ancestor(&event.event_id, &admin_ev.event_id, &dag_context);
+                let is_ancestor_admin =
+                    is_ancestor(&admin_ev.event_id, &event.event_id, &dag_context);
+                let is_descendant_admin =
+                    is_ancestor(&event.event_id, &admin_ev.event_id, &dag_context);
                 if !is_ancestor_admin && !is_descendant_admin {
-                    dropped_ids.insert(id.clone());
+                    is_dominated = true;
                     break;
                 }
             }
+        }
+
+        if is_dominated {
+            dropped_ids.insert(event.event_id.clone());
+        } else if event.is_ban_or_kick() || event.is_demotion() || event.is_lockdown() {
+            // Event survived and is an admin action, so it is active for subsequent events
+            active_admin_actions.push(event);
         }
     }
 
