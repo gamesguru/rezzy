@@ -1484,12 +1484,24 @@ pub fn apply_cdo_filter(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    // Sort conflicted events chronologically/topologically:
-    // 1. origin_server_ts ascending (earlier comes first)
-    // 2. power_level descending (higher power level comes first)
-    // 3. event_id ascending (smaller lexicographical order comes first)
+    // Sort conflicted events topologically and chronologically:
+    // 1. Type priority: lockdowns (power levels, join rules) come first
+    // 2. origin_server_ts ascending (earlier comes first)
+    // 3. power_level descending (higher power level comes first)
+    // 4. event_id ascending (smaller lexicographical order comes first)
     let mut sorted_events: Vec<&LeanEvent> = conflicted_events.values().collect();
     sorted_events.sort_by(|a, b| {
+        let type_priority = |t: &str| match t {
+            "m.room.power_levels" => 0,
+            "m.room.join_rules" => 1,
+            _ => 2,
+        };
+
+        let cmp_type = type_priority(&a.event_type).cmp(&type_priority(&b.event_type));
+        if cmp_type != Ordering::Equal {
+            return cmp_type;
+        }
+
         let cmp_ts = a.origin_server_ts.cmp(&b.origin_server_ts);
         if cmp_ts != Ordering::Equal {
             return cmp_ts;
@@ -1532,24 +1544,25 @@ pub fn apply_cdo_filter(
         }
     }
 
-    // Pass 3: Auth-Dependency Domination (Transitive Closure / The "Icing")
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for (id, event) in conflicted_events.iter() {
-            if dropped_ids.contains(id) {
-                continue;
-            }
+    // Pass 3: Auth-Dependency Domination (Transitive Closure / Linear-Time propagation)
+    let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
+    for (id, event) in conflicted_events.iter() {
+        for auth_id in &event.auth_events {
+            dependents
+                .entry(auth_id.clone())
+                .or_default()
+                .push(id.clone());
+        }
+    }
 
-            // If any of this event's required auth_events were dropped, it must also be dropped
-            let relies_on_dropped = event
-                .auth_events
-                .iter()
-                .any(|auth_id| dropped_ids.contains(auth_id));
-
-            if relies_on_dropped {
-                dropped_ids.insert(id.clone());
-                changed = true;
+    let mut queue: Vec<String> = dropped_ids.iter().cloned().collect();
+    while let Some(current_dropped) = queue.pop() {
+        if let Some(children) = dependents.get(&current_dropped) {
+            for child in children {
+                if !dropped_ids.contains(child) {
+                    dropped_ids.insert(child.clone());
+                    queue.push(child.clone());
+                }
             }
         }
     }

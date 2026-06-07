@@ -929,11 +929,11 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
     conflicted_events.insert("$nexy_bans_spammer".to_string(), nexy_bans_spammer);
 
     // Run V2.2 (CDO Enabled / State Res v2.2)
-    let resolved_v22 = ruma_lean::resolve_lean(
+    let resolved_v211 = ruma_lean::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events.clone(),
         &auth_context,
-        ruma_lean::StateResVersion::V2_2,
+        ruma_lean::StateResVersion::V2_1_1,
     );
 
     let nexy_member_key = (
@@ -948,16 +948,16 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
 
     // CDO\'s transitive closure drops nexy_join (dominated by lock) AND nexy_promo/nexy_bans_spammer (transitively dependent)
     assert!(
-        !resolved_v22.contains_key(&nexy_member_key),
+        !resolved_v211.contains_key(&nexy_member_key),
         "CDO: Nexy join must be dropped because of the concurrent lockdown"
     );
     assert!(
-        !resolved_v22.contains_key(&spammer_member_key),
+        !resolved_v211.contains_key(&spammer_member_key),
         "CDO: Spammer ban must be transitively dropped since Nexy never legally joined"
     );
 
     // The resolved PL should revert to the original admin-only state
-    let final_pl_id = resolved_v22.get(&pl_key).unwrap();
+    let final_pl_id = resolved_v211.get(&pl_key).unwrap();
     assert_ne!(
         final_pl_id, "$nexy_promo",
         "CDO: Nexy\'s promotion must be dropped, resolving to the safe baseline"
