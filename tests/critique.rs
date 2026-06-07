@@ -220,10 +220,9 @@ fn get_membership(resolved: &ResolvedStateMap, map: &EventMap, user_id: &str) ->
 }
 
 fn resolve_pathology(jsonl_filename: &str) -> (ResolvedStateMap, EventMap) {
-    let absolute_path = std::path::Path::new(
-        "/home/shane/Documents/school/ou-papers/program-matrix-state-res-v2.1-critique/build/jsonl",
-    )
-    .join(jsonl_filename);
+    let absolute_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/critique_data")
+        .join(jsonl_filename);
     let events = load_fixture(&absolute_path);
     let map = to_event_map(&events);
     let resolved = resolve_full(&events, StateResVersion::V2_1_1);
@@ -231,10 +230,9 @@ fn resolve_pathology(jsonl_filename: &str) -> (ResolvedStateMap, EventMap) {
 }
 
 fn assert_benign_convergence(jsonl_filename: &str) -> (ResolvedStateMap, EventMap) {
-    let absolute_path = std::path::Path::new(
-        "/home/shane/Documents/school/ou-papers/program-matrix-state-res-v2.1-critique/build/jsonl",
-    )
-    .join(jsonl_filename);
+    let absolute_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/critique_data")
+        .join(jsonl_filename);
     let events = load_fixture(&absolute_path);
     let map = to_event_map(&events);
 
