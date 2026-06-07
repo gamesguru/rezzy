@@ -863,7 +863,13 @@ pub fn resolve_lean(
         _ => unconflicted_state.clone(),
     };
 
-    let sort_set = &conflicted_events;
+    let filtered_conflicted = if version == StateResVersion::V2_1_1 {
+        apply_cdo_filter(&conflicted_events, auth_context)
+    } else {
+        conflicted_events.clone()
+    };
+
+    let sort_set = &filtered_conflicted;
 
     // Route all events through Kahn sort (reverse topological power ordering).
     let mut power_events = HashMap::new();
@@ -1390,4 +1396,161 @@ pub fn compute_v2_1_conflicted_subgraph_bounded(
         missing_auth_events: missing_auth_events.into_iter().collect(),
     }
 }
+
+impl LeanEvent {
+    pub fn is_ban_or_kick(&self) -> bool {
+        if self.event_type == "m.room.member" {
+            if let Some(membership) = self.content.get("membership").and_then(|v| v.as_str()) {
+                return membership == "ban" || membership == "leave";
+            }
+        }
+        false
+    }
+
+    pub fn is_demotion(&self) -> bool {
+        self.event_type == "m.room.power_levels"
+    }
+
+    pub fn is_lockdown(&self) -> bool {
+        if self.event_type == "m.room.join_rules" {
+            if let Some(rule) = self.content.get("join_rule").and_then(|v| v.as_str()) {
+                return rule == "invite";
+            }
+        }
+        false
+    }
+
+    pub fn restricts_sender(&self, sender: &str) -> bool {
+        if self.is_ban_or_kick() {
+            if let Some(ref state_key) = self.state_key {
+                return state_key == sender;
+            }
+        }
+        if self.is_demotion() {
+            if let Some(users) = self.content.get("users").and_then(|u| u.as_object()) {
+                if let Some(pl) = users.get(sender) {
+                    if let Some(pl_int) = pl.as_i64() {
+                        return pl_int == 0;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    pub fn restricts_event(&self, other: &LeanEvent) -> bool {
+        if self.is_ban_or_kick() || self.is_demotion() {
+            return self.restricts_sender(&other.sender);
+        }
+        if self.is_lockdown() {
+            if other.event_type == "m.room.member" {
+                if let Some(membership) = other.content.get("membership").and_then(|v| v.as_str()) {
+                    return membership == "join";
+                }
+            }
+        }
+        false
+    }
+}
+
+pub fn is_ancestor(
+    child_id: &str,
+    possible_ancestor_id: &str,
+    context: &HashMap<String, LeanEvent>,
+) -> bool {
+    if child_id == possible_ancestor_id {
+        return true;
+    }
+    let mut stack = Vec::new();
+    stack.push(String::from(child_id));
+    let mut visited = BTreeSet::new();
+    visited.insert(String::from(child_id));
+
+    while let Some(current) = stack.pop() {
+        if current == possible_ancestor_id {
+            return true;
+        }
+        if let Some(ev) = context.get(&current) {
+            for parent in ev.prev_events.iter().chain(ev.auth_events.iter()) {
+                if visited.insert(parent.clone()) {
+                    stack.push(parent.clone());
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Cycle 0 Topological Filter: Vectorized Causal Domination Operator (CDO)
+/// Executes strictly on the Conflicted State Subgraph (C).
+pub fn apply_cdo_filter(
+    conflicted_events: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent>,
+) -> HashMap<String, LeanEvent> {
+    // Build sort/DAG context to determine ancestries
+    let dag_context: HashMap<String, LeanEvent> = auth_context
+        .iter()
+        .chain(conflicted_events.iter())
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let mut dropped_ids = BTreeSet::new();
+
+    // Pass 1: Extract restrictive administrative actions (Bans, Kicks, Demotions, Lockdowns)
+    let admin_actions: Vec<&LeanEvent> = conflicted_events
+        .values()
+        .filter(|e| e.is_ban_or_kick() || e.is_demotion() || e.is_lockdown())
+        .collect();
+
+    // Pass 2: Direct Domination (Sender / Type Restriction)
+    for (id, event) in conflicted_events.iter() {
+        for admin_ev in &admin_actions {
+            if admin_ev.restricts_event(event) {
+                // Check Concurrency (e_a || e_x): Ensure neither is an ancestor of the other
+                let is_ancestor_admin = is_ancestor(&admin_ev.event_id, &event.event_id, &dag_context);
+                let is_descendant_admin = is_ancestor(&event.event_id, &admin_ev.event_id, &dag_context);
+                if !is_ancestor_admin && !is_descendant_admin {
+                    dropped_ids.insert(id.clone());
+                    break;
+                }
+            }
+        }
+    }
+
+    // Pass 3: Auth-Dependency Domination (Transitive Closure / The "Icing")
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (id, event) in conflicted_events.iter() {
+            if dropped_ids.contains(id) {
+                continue;
+            }
+
+            // If any of this event's required auth_events were dropped, it must also be dropped
+            let relies_on_dropped = event
+                .auth_events
+                .iter()
+                .any(|auth_id| dropped_ids.contains(auth_id));
+
+            if relies_on_dropped {
+                dropped_ids.insert(id.clone());
+                changed = true;
+            }
+        }
+    }
+
+    // Return strictly the transitively safe set
+    let mut safe_set = HashMap::new();
+    for (id, event) in conflicted_events.iter() {
+        if !dropped_ids.contains(id) {
+            safe_set.insert(id.clone(), event.clone());
+        }
+    }
+
+    safe_set
+}
+
 pub mod roaring_auth;
+
+#[cfg(test)]
+mod test_lib;

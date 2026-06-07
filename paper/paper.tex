@@ -193,6 +193,26 @@ While State Resolution v2.1 successfully patched the logic flaws of earlier algo
 
 To definitively crush these "Storm" room bottlenecks, v2.1.1 formally adopts a \textbf{Bounded BFS (Breadth-First Search)} traversal coupled with Mainline Depth Memoization. By strictly bounding the subgraph depth during the iterative auth check and aggressively pruning disconnected branches, the algorithm bypasses the exponential overhead of broken subgraphs. The \texttt{ruma-lean} framework proves that this data-oriented approach successfully resolves massive unredacted spam DAGs without triggering a state wipeout, bringing pathological resolution times down from over 10 minutes to under 2 seconds.
 
+\section{The Causal Domination Operator (CDO)}
+To mathematically guarantee that chronological timestamps cannot be weaponized during federated split resolution, we introduce the Causal Domination Operator (CDO). The CDO serves as a defensive shield by identifying and neutralizing concurrent, unauthorized administrative actions before chronological sorting can occur.
+
+\subsection{The Cycle 0 Topological Filter (Auth-Transitive Closure)}
+The CDO is executed as a constant-time pre-filter at Cycle 0. To prevent \textbf{Ghost Actions} (where a user's join is invalidated but their concurrent administrative actions survive via isolated \texttt{auth\_events} fallback or phase-ordering), the dropped set must enforce strict causal auth-chain closure.
+
+We calculate the dropped set $C_{\text{dropped}}$ as a minimal fixed-point satisfying both Direct Domination and Auth-Dependency Domination:
+\begin{equation}
+    C_{\text{dropped}}^{(0)} = \{ e_x \in C \mid \exists e_a \in C \text{ s.t. } e_a \sqsupset e_x \}
+\end{equation}
+\begin{equation}
+    C_{\text{dropped}}^{(k+1)} = C_{\text{dropped}}^{(k)} \cup \left\{ e_y \in C \mid \exists e_x \in C_{\text{dropped}}^{(k)} \text{ s.t. } e_x \in \text{AuthChain}(e_y) \right\}
+\end{equation}
+The fixed point is reached when $C_{\text{dropped}}^{(k+1)} = C_{\text{dropped}}^{(k)}$, producing the final, transitively closed dropped set.
+\begin{equation}
+    C_{\text{safe}} = C \setminus C_{\text{dropped}}^{(\infty)}
+\end{equation}
+
+By recursively filtering the conflicted set along auth-chain dependencies, the operator mathematically guarantees that if a user's concurrent join is invalidated by an administrative lockdown, all subsequent concurrent actions reliant on that join are cleanly and simultaneously evaporated before Kahn's sort can evaluate them.
+
 \section{Implementation Defects in MSC4297}
 Beyond the theoretical algorithm flaws, naive implementations of the MSC4297 (v2.1) specification suffered from severe mechanical and security defects when deployed in production (e.g., Room Version 12). During our formally verified reconstruction, we identified and patched six critical implementation failures:
 

@@ -2,6 +2,7 @@
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::*;
 	use alloc::string::ToString;
 	use alloc::vec;
 
@@ -46,11 +47,13 @@ mod tests {
 		let p_base = SortPriority {
 			power_level: e_base.power_level,
 			event: &e_base,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 		let p_worst_pl = SortPriority {
 			power_level: e_worst_pl.power_level,
 			event: &e_worst_pl,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 
@@ -66,6 +69,7 @@ mod tests {
 		let p_later_ts = SortPriority {
 			power_level: e_later_ts.power_level,
 			event: &e_later_ts,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 		// p_later_ts has ts 20 (better — wins); later ts pops LAST = is Smaller.
@@ -81,6 +85,7 @@ mod tests {
 		let p_larger_id = SortPriority {
 			power_level: e_larger_id.power_level,
 			event: &e_larger_id,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 		// p_larger_id has id "$2" (better — wins); larger id pops LAST = is Smaller.
@@ -444,11 +449,13 @@ mod tests {
 		let p1 = SortPriority {
 			power_level: e1.power_level,
 			event: &e1,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 		let p2 = SortPriority {
 			power_level: e2.power_level,
 			event: &e2,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 		assert!(p1.partial_cmp(&p2).is_some());
@@ -838,6 +845,7 @@ mod tests {
 		let p = SortPriority {
 			power_level: e.power_level,
 			event: &e,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 		let p2 = p;
@@ -1097,6 +1105,7 @@ mod tests {
 		let p_base = SortPriority {
 			power_level: e_base.power_level,
 			event: &e_base,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 		let e_high_power = LeanEvent {
@@ -1106,6 +1115,7 @@ mod tests {
 		let p_high_power = SortPriority {
 			power_level: e_high_power.power_level,
 			event: &e_high_power,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 		// p_base is WORSE (PL 50 < 100). Higher PL is Greater (pops first). So p_base < p_high_power.
@@ -1117,6 +1127,7 @@ mod tests {
 		let p_best = SortPriority {
 			power_level: e_best.power_level,
 			event: &e_best,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 		// p_best has TS 100 (better: later wins). Better must be Smaller (pops last).
@@ -1129,6 +1140,7 @@ mod tests {
 		let p_early_id = SortPriority {
 			power_level: e_early_id.power_level,
 			event: &e_early_id,
+			auth_chain_distance: 0,
 			version: StateResVersion::V2,
 		};
 		// p_base has ID "m" (better — larger id wins). Better must be Smaller (pops last). So p_base < p_early_id.
@@ -1136,6 +1148,7 @@ mod tests {
 		let p_v1_base = SortPriority {
 			power_level: e_base.power_level,
 			event: &e_base,
+			auth_chain_distance: 0,
 			version: StateResVersion::V1,
 		};
 		let e_shallow = LeanEvent {
@@ -1145,6 +1158,7 @@ mod tests {
 		let p_shallow = SortPriority {
 			power_level: e_shallow.power_level,
 			event: &e_shallow,
+			auth_chain_distance: 0,
 			version: StateResVersion::V1,
 		};
 		// V1: shallow depth (1) is better. Better must be Smaller (pops last). So p_v1_base > p_shallow.
@@ -1152,6 +1166,7 @@ mod tests {
 		let p_v1_early_id = SortPriority {
 			power_level: e_early_id.power_level,
 			event: &e_early_id,
+			auth_chain_distance: 0,
 			version: StateResVersion::V1,
 		};
 		// V1: early ID "a" is better. Better must be Smaller (pops last). So p_v1_base > p_v1_early_id.
@@ -1491,5 +1506,201 @@ mod tests {
 		// $m waits for $n. After $n pops, $m becomes eligible and beats $p ("m" > "p"? no:
 		// "$m" < "$p" → $m pops first). So order: [$o, $l, $n, $m, $p].
 		assert_eq!(sorted_ids, vec!["$o", "$l", "$n", "$m", "$p"]);
+	}
+
+	#[test]
+	fn test_cdo_causal_domination_filter() {
+		use serde_json::json;
+
+		let mut conflicted = HashMap::new();
+		let mut auth = HashMap::new();
+
+		let root = LeanEvent {
+			event_id: "$root".into(),
+			event_type: "m.room.create".into(),
+			state_key: Some("".into()),
+			sender: "@alice:example.com".into(),
+			origin_server_ts: 1000,
+			..Default::default()
+		};
+		auth.insert(root.event_id.clone(), root.clone());
+
+		let alice_join = LeanEvent {
+			event_id: "$alice_join".into(),
+			event_type: "m.room.member".into(),
+			state_key: Some("@alice:example.com".into()),
+			sender: "@alice:example.com".into(),
+			origin_server_ts: 1100,
+			prev_events: vec!["$root".into()],
+			auth_events: vec!["$root".into()],
+			..Default::default()
+		};
+		auth.insert(alice_join.event_id.clone(), alice_join.clone());
+
+		let bob_join = LeanEvent {
+			event_id: "$bob_join".into(),
+			event_type: "m.room.member".into(),
+			state_key: Some("@bob:example.com".into()),
+			sender: "@bob:example.com".into(),
+			origin_server_ts: 1200,
+			prev_events: vec!["$alice_join".into()],
+			auth_events: vec!["$root".into(), "$alice_join".into()],
+			..Default::default()
+		};
+		auth.insert(bob_join.event_id.clone(), bob_join.clone());
+
+		// Concurrent events (conflicted)
+		let alice_bans_bob = LeanEvent {
+			event_id: "$alice_bans_bob".into(),
+			event_type: "m.room.member".into(),
+			state_key: Some("@bob:example.com".into()),
+			sender: "@alice:example.com".into(),
+			origin_server_ts: 1300,
+			prev_events: vec!["$bob_join".into()],
+			auth_events: vec!["$root".into(), "$alice_join".into(), "$bob_join".into()],
+			content: json!({ "membership": "ban" }),
+			..Default::default()
+		};
+		conflicted.insert(alice_bans_bob.event_id.clone(), alice_bans_bob.clone());
+
+		let bob_name_change = LeanEvent {
+			event_id: "$bob_name_change".into(),
+			event_type: "m.room.name".into(),
+			state_key: Some("".into()),
+			sender: "@bob:example.com".into(),
+			origin_server_ts: 1350,
+			prev_events: vec!["$bob_join".into()],
+			auth_events: vec!["$root".into(), "$alice_join".into(), "$bob_join".into()],
+			content: json!({ "name": "Bob's Malicious Name" }),
+			..Default::default()
+		};
+		conflicted.insert(bob_name_change.event_id.clone(), bob_name_change.clone());
+
+		// In StateResVersion::V2_2, Bob's name change is causally dominated by Alice's ban and filtered out.
+		let filtered = apply_cdo_filter(&conflicted, &auth);
+		
+		assert!(filtered.contains_key("$alice_bans_bob"));
+		assert!(!filtered.contains_key("$bob_name_change"));
+	}
+
+	#[test]
+	fn test_anomaly_06b_mod_membership_evaporation() {
+		use serde_json::json;
+
+		let mut conflicted = HashMap::new();
+		let mut auth = HashMap::new();
+
+		let root = LeanEvent {
+			event_id: "$root".into(),
+			event_type: "m.room.create".into(),
+			state_key: Some("".into()),
+			sender: "@alice:example.com".into(),
+			origin_server_ts: 1000,
+			..Default::default()
+		};
+		auth.insert(root.event_id.clone(), root.clone());
+
+		let alice_join = LeanEvent {
+			event_id: "$alice_join".into(),
+			event_type: "m.room.member".into(),
+			state_key: Some("@alice:example.com".into()),
+			sender: "@alice:example.com".into(),
+			origin_server_ts: 1100,
+			prev_events: vec!["$root".into()],
+			auth_events: vec!["$root".into()],
+			..Default::default()
+		};
+		auth.insert(alice_join.event_id.clone(), alice_join.clone());
+
+		let jr_pub = LeanEvent {
+			event_id: "$jr_pub".into(),
+			event_type: "m.room.join_rules".into(),
+			state_key: Some("".into()),
+			sender: "@alice:example.com".into(),
+			origin_server_ts: 1150,
+			prev_events: vec!["$alice_join".into()],
+			auth_events: vec!["$root".into(), "$alice_join".into()],
+			content: json!({ "join_rule": "public" }),
+			..Default::default()
+		};
+		auth.insert(jr_pub.event_id.clone(), jr_pub.clone());
+
+		let pl_init = LeanEvent {
+			event_id: "$pl_init".into(),
+			event_type: "m.room.power_levels".into(),
+			state_key: Some("".into()),
+			sender: "@alice:example.com".into(),
+			origin_server_ts: 1200,
+			prev_events: vec!["$jr_pub".into()],
+			auth_events: vec!["$root".into(), "$alice_join".into(), "$jr_pub".into()],
+			content: json!({ "users": { "@alice:example.com": 100 } }),
+			..Default::default()
+		};
+		auth.insert(pl_init.event_id.clone(), pl_init.clone());
+
+		// Fork A: Lockdown to invite
+		let rules_invite = LeanEvent {
+			event_id: "$rules_invite".into(),
+			event_type: "m.room.join_rules".into(),
+			state_key: Some("".into()),
+			sender: "@alice:example.com".into(),
+			origin_server_ts: 1300,
+			prev_events: vec!["$pl_init".into()],
+			auth_events: vec!["$root".into(), "$alice_join".into(), "$pl_init".into()],
+			content: json!({ "join_rule": "invite" }),
+			..Default::default()
+		};
+		conflicted.insert(rules_invite.event_id.clone(), rules_invite.clone());
+
+		// Fork B: Nexy's actions (dependent on public join rules)
+		let nexy_join = LeanEvent {
+			event_id: "$nexy_join".into(),
+			event_type: "m.room.member".into(),
+			state_key: Some("@nexy:example.com".into()),
+			sender: "@nexy:example.com".into(),
+			origin_server_ts: 1310,
+			prev_events: vec!["$pl_init".into()],
+			auth_events: vec!["$root".into(), "$alice_join".into(), "$jr_pub".into(), "$pl_init".into()],
+			content: json!({ "membership": "join" }),
+			..Default::default()
+		};
+		conflicted.insert(nexy_join.event_id.clone(), nexy_join.clone());
+
+		let nexy_promo = LeanEvent {
+			event_id: "$nexy_promo".into(),
+			event_type: "m.room.power_levels".into(),
+			state_key: Some("".into()),
+			sender: "@alice:example.com".into(),
+			origin_server_ts: 1320,
+			prev_events: vec!["$nexy_join".into()],
+			auth_events: vec!["$root".into(), "$alice_join".into(), "$nexy_join".into(), "$pl_init".into()],
+			content: json!({ "users": { "@alice:example.com": 100, "@nexy:example.com": 50 } }),
+			..Default::default()
+		};
+		conflicted.insert(nexy_promo.event_id.clone(), nexy_promo.clone());
+
+		let nexy_bans_spammer = LeanEvent {
+			event_id: "$nexy_bans_spammer".into(),
+			event_type: "m.room.member".into(),
+			state_key: Some("@spammer:example.com".into()),
+			sender: "@nexy:example.com".into(),
+			origin_server_ts: 1330,
+			prev_events: vec!["$nexy_promo".into()],
+			auth_events: vec!["$root".into(), "$alice_join".into(), "$nexy_join".into(), "$nexy_promo".into()],
+			content: json!({ "membership": "ban" }),
+			..Default::default()
+		};
+		conflicted.insert(nexy_bans_spammer.event_id.clone(), nexy_bans_spammer.clone());
+
+		// Under v2.1.1, apply_cdo_filter is executed.
+		// 1. $rules_invite (invite lockdown) is concurrent with $nexy_join, and restricts joins, dropping $nexy_join.
+		// 2. $nexy_promo requires $nexy_join in its auth_events. Since $nexy_join was dropped, $nexy_promo is dropped transitively.
+		// 3. $nexy_bans_spammer requires $nexy_promo. Since $nexy_promo was dropped, it is dropped transitively.
+		let filtered = apply_cdo_filter(&conflicted, &auth);
+
+		assert!(filtered.contains_key("$rules_invite"));
+		assert!(!filtered.contains_key("$nexy_join"), "Nexy's join must be dropped by direct invite lockdown");
+		assert!(!filtered.contains_key("$nexy_promo"), "Nexy's promotion must be dropped by auth transitive closure");
+		assert!(!filtered.contains_key("$nexy_bans_spammer"), "Nexy's ban on spammer must be dropped by auth transitive closure cascade");
 	}
 }
