@@ -1,3 +1,0 @@
-[submodule "ruma"]
-	path = ruma
-	url = https://github.com/ruma/ruma.git
