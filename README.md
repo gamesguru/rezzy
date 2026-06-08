@@ -1,40 +1,35 @@
-# Ruma-Lean: ZK-Accelerated Matrix State Resolution
+# Ruma-Lean: Matrix State Resolution v2.1.1
 
-Ruma-Lean is a high-performance, formally verified implementation of Matrix State Resolution (v2.1), featuring a native Zero-Knowledge STARK prover.
+Ruma-Lean is a formally verified, dependency-free Rust research engine for Matrix State Resolution. It serves as the reference implementation for the proposed **v2.1.1** standard, addressing critical topological anomalies and accumulator-retention defects found in production implementations (like Ruma v2.1 and Synapse).
 
-## The Architecture: "The Whitepaper with Teeth"
+_Note: ZK (Zero-Knowledge) acceleration experiments are currently paused to focus on formal verification and algorithmic stabilization of the core protocol._
 
-Unlike traditional Zero-Knowledge projects that rely on heavy RISC-V emulators (zkVMs), Ruma-Lean uses a **Custom AIR (Algebraic Intermediate Representation)**. This separates the mathematical truth from the cryptographic execution.
+## Architectural Innovations
 
-### Layer 1: The Formal Specification (Lean 4)
+Ruma-Lean introduces several mathematically rigorous solutions to state resolution, heavily leveraging applied graph theory and distributed systems security:
 
-The `RumaLean/` directory contains the mathematical bedrock of the protocol.
+### 1. The Causal Domination Operator (CDO)
 
-- **`Kahn.lean` & `StateRes.lean`**: Proves that the sorting and resolution logic is strictly deterministic and arrival-order independent (using `Finset`).
-- **`Arithmetization.lean`**: Proves that the polynomial constraints ($X \cdot (X-1) = 0$) perfectly represent the state transition logic.
-- **`Merkle.lean` & `MergeBase.lean`**: Formalizes the cryptographic boundary and fork-resolution logic.
+A vectorized topological filter executing on the Conflicted State Subgraph. By enforcing a strict partial order of administrative actions via a Bounded BFS algorithmic fix, CDO eliminates bypass windows like Phantom Join Rules and Mod Membership Evaporation.
 
-### Layer 2: The Cryptographic Engine (Rust)
+### 2. $I_{\text{PL}}$ Fallback Context (Semantic vs. Syntactic)
 
-The `src/` directory contains the high-speed implementation of the math proved in Lean.
+Production engines often conflate **Syntactic Representation** (JSON payloads) with **Semantic Authority** (evaluated permissions), leading to strict schema panics when `m.room.power_levels` are redacted. Ruma-Lean decouples evaluation from validation: $I_{\text{PL}}$ is defined purely as an Evaluation-Time Closure parameterized by the immutable `m.room.create` event. It bypasses schema assertions while preserving total function safety.
 
-- **Custom STARK Prover**: Built with **Plonky3** and **Binius**, targeting the **Boolean Hypercube** for $O(\log N)$ verification.
-- **Trace Compiler**: Natively compiles Matrix event DAGs into a continuous hypercube walk, including the 31,000 "padding nodes" required for hypercube symmetry.
+### 3. $\mathcal{O}(1)$ Lazy Projection
 
-## Performance & Scalability
+To solve the accumulator-retention defect without the massive memory bottleneck of _Eager State Supplementation_, Ruma-Lean employs a Lazy Projection closure (`.or_else(|| unconflicted_state.get(&key))`). This $\mathcal{O}(1)$ memory/time logical union safely preloads unconflicted memberships into the initial auth overlay ($S_0$), completely neutralizing state reset attacks without scaling penalties.
 
-By mapping the Matrix DAG onto a **Boolean Hypercube**, Ruma-Lean achieves:
+### 4. Z3 SMT Verification
 
-- **Logarithmic Verification**: Servers verify proofs in milliseconds, regardless of room size.
-- **No zkVM Tax**: Bypassing RISC-V emulation reduces prover overhead by 100x-1000x.
-- **Heterogeneous Federation**: Different languages (Python, Go, JS) can verify the same **Verification Key (VK)** metadata, ensuring global consensus without identical binaries.
+Instead of interactive game-theoretic models, safety is proven using a post-hoc Z3 SMT/CDCL topological framework. By universally quantifying over the unbounded space of all topologically valid partial orders (DAG configurations), the solver inherently proves deterministic safety against _any_ adversarial server collusion or network scheduler.
 
 ## Usage
 
 ```bash
-# Run the formally verified Kahn sort and State Res
-cargo run --release -- -i res/benchmark_1k.json
+# Run the core standard compliance test suite
+cargo test
 
-# Generate a ZK trace benchmark (Hypercube routing tax)
-cargo run --release -- --benchmark-trace -i res/benchmark_1k.json
+# Run the upstream runner against official Ruma integration tests
+cargo test --test upstream_runner --features="mock-ruma"
 ```
