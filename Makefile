@@ -28,33 +28,33 @@ lint: ##H Run all linters
 # Lean targets
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.PHONY: lean/build
-lean/build: ##H Build Lean proofs
-	$(LAKE) build
-	@printf "\n$${STYLE_GREEN}--- Verification Complete ---$${STYLE_RESET}\n"
-	@printf "$${STYLE_CYAN}Mapped Theorems & Definitions:$${STYLE_RESET}\n"
-	@grep -E '^(theorem|def|class|instance|structure) ' RumaLean/*.lean RumaLean.lean || true
-	@printf "$${STYLE_GREEN}--------------------------------$${STYLE_RESET}\n"
-
-.PHONY: lean/clean
-lean/clean: ##H Remove Lean build artifacts (preserves packages)
-	rm -rf .lake/build/
-
-.PHONY: lean/cache
-lean/cache: ##H Fetch Lean/Mathlib oleans from cache
-	$(LAKE) exe cache get
-
-.PHONY: lean/docs
-lean/docs: ##H Generate Lean docs
-	DOCGEN_SKIP_LEAN=1 DOCGEN_SKIP_STD=1 DOCGEN_SKIP_LAKE=1 DOCGEN_SKIP_DEPS=1 $(LAKE) build RumaLean:docs
-
-.PHONY: lean/nuke
-lean/nuke: ##H Full Lean reset (removes packages too — will re-clone)
-	rm -rf .lake/
-
-# Convenience alias
-.PHONY: lean
-lean: lean/build ##H Alias for lean/build
+#.PHONY: lean/build
+#lean/build: ##H Build Lean proofs
+#	$(LAKE) build
+#	@printf "\n$${STYLE_GREEN}--- Verification Complete ---$${STYLE_RESET}\n"
+#	@printf "$${STYLE_CYAN}Mapped Theorems & Definitions:$${STYLE_RESET}\n"
+#	@grep -E '^(theorem|def|class|instance|structure) ' RumaLean/*.lean RumaLean.lean || true
+#	@printf "$${STYLE_GREEN}--------------------------------$${STYLE_RESET}\n"
+#
+#.PHONY: lean/clean
+#lean/clean: ##H Remove Lean build artifacts (preserves packages)
+#	rm -rf .lake/build/
+#
+#.PHONY: lean/cache
+#lean/cache: ##H Fetch Lean/Mathlib oleans from cache
+#	$(LAKE) exe cache get
+#
+#.PHONY: lean/docs
+#lean/docs: ##H Generate Lean docs
+#	DOCGEN_SKIP_LEAN=1 DOCGEN_SKIP_STD=1 DOCGEN_SKIP_LAKE=1 DOCGEN_SKIP_DEPS=1 $(LAKE) build RumaLean:docs
+#
+#.PHONY: lean/nuke
+#lean/nuke: ##H Full Lean reset (removes packages too — will re-clone)
+#	rm -rf .lake/
+#
+## Convenience alias
+#.PHONY: lean
+#lean: lean/build ##H Alias for lean/build
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -109,7 +109,9 @@ rust/publish: ##H Preview package and simulate dry-run publish
 build:   rust/build   ##H Alias for rust/build
 test:    rust/test    ##H Alias for rust/test
 install: rust/install ##H Alias for rust/install
-clean:   rust/clean lean/clean ##H Remove all build artifacts
+
+clean:   rust/clean	##H Remove all build artifacts
+	find . -name __pycache__ | xargs -r rm -rf
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
