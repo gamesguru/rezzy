@@ -41,7 +41,7 @@ fn to_event_map(events: &[LeanEvent]) -> HashMap<String, LeanEvent> {
         .collect()
 }
 
-const FIXTURE_DIR: &str = "ruma/crates/ruma-state-res/tests/it/resolve/fixtures";
+const FIXTURE_DIR: &str = "res/ruma_upstream";
 
 fn sort_and_verify(events: &[LeanEvent], version: StateResVersion) -> Vec<String> {
     let map = to_event_map(events);

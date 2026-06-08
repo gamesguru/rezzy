@@ -1212,7 +1212,8 @@ dependencies = [
 [[package]]
 name = "ruma-common"
 version = "0.19.0"
-source = "git+https://github.com/ruma/ruma#d5299243e3dc060e173fd9f94024e11ad99b7eeb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c3b4f00112791b490acce57df1ce3eb3f88899b045bebcff8a29f75369640cc"
 dependencies = [
  "as_variant",
  "base64",
@@ -1239,7 +1240,8 @@ dependencies = [
 [[package]]
 name = "ruma-events"
 version = "0.34.0"
-source = "git+https://github.com/ruma/ruma#d5299243e3dc060e173fd9f94024e11ad99b7eeb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85d2f90830fc131691349b96a69ff53444eb6c3e8dc7869c77961b43cfaf3344"
 dependencies = [
  "as_variant",
  "indexmap",
@@ -1259,7 +1261,8 @@ dependencies = [
 [[package]]
 name = "ruma-identifiers-validation"
 version = "0.12.1"
-source = "git+https://github.com/ruma/ruma#d5299243e3dc060e173fd9f94024e11ad99b7eeb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d6cff00317675f487c4e7ccfb18875a14c5a14867b51d13f2a826053f03c432"
 dependencies = [
  "js_int",
  "thiserror",
@@ -1290,7 +1293,8 @@ dependencies = [
 [[package]]
 name = "ruma-macros"
 version = "0.19.0"
-source = "git+https://github.com/ruma/ruma#d5299243e3dc060e173fd9f94024e11ad99b7eeb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8cfb39eaa9b9fd389126ff941e060b496add5cbbfef559d80c46e571dda459c"
 dependencies = [
  "as_variant",
  "cfg-if",
@@ -1306,7 +1310,8 @@ dependencies = [
 [[package]]
 name = "ruma-signatures"
 version = "0.21.0"
-source = "git+https://github.com/ruma/ruma#d5299243e3dc060e173fd9f94024e11ad99b7eeb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d374cdc542bcb881da80fcb3e58403e5fd17cfe5e0ab03939fdf12f99ef9ba2"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -1321,7 +1326,8 @@ dependencies = [
 [[package]]
 name = "ruma-state-res"
 version = "0.17.0"
-source = "git+https://github.com/ruma/ruma#d5299243e3dc060e173fd9f94024e11ad99b7eeb"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0301d24b3e3f570aa5a37fbeaf829fd68e1a395e9d7a1efef5d2d9d79354ae9d"
 dependencies = [
  "criterion",
  "js_int",
