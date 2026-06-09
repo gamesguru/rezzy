@@ -21,7 +21,7 @@ use serde_json::{
 use similar::{Algorithm, udiff::unified_diff};
 
 static FIXTURES_PATH: LazyLock<&'static Path> =
-    LazyLock::new(|| Path::new("tests/it/resolve/fixtures"));
+    LazyLock::new(|| Path::new("tests/resolve/fixtures"));
 
 /// Create a snapshot test attempting the state resolution of several batches of PDUs.
 ///
@@ -34,7 +34,7 @@ static FIXTURES_PATH: LazyLock<&'static Path> =
 /// # Arguments
 ///
 /// * `name` - The test function's name.
-/// * `pdus_paths` - A list of JSON files relative to `tests/it/fixtures/resolve` containing each a
+/// * `pdus_paths` - A list of JSON files relative to `tests/resolve/fixtures` containing each a
 ///   batch of PDUs.
 ///
 /// # Panics
@@ -65,9 +65,9 @@ macro_rules! snapshot_test_batches {
 /// # Arguments
 ///
 /// * `name` - The test function's name.
-/// * `state_maps_paths` - A list of JSON files relative to `tests/it/fixtures/resolve` containing
+/// * `state_maps_paths` - A list of JSON files relative to `tests/resolve/fixtures` containing
 ///   each the list of event IDs forming a state map.
-/// * `pdus_paths` - A list of JSON files relative to `tests/it/fixtures/resolve` containing each a
+/// * `pdus_paths` - A list of JSON files relative to `tests/resolve/fixtures` containing each a
 ///   batch of PDUs.
 ///
 /// # Panics
@@ -122,7 +122,7 @@ macro_rules! assert_eq_diff {
 ///
 /// # Arguments
 ///
-/// * `pdus_paths` - A list of JSON files relative to `tests/it/fixtures/resolve` containing each a
+/// * `pdus_paths` - A list of JSON files relative to `tests/resolve/fixtures` containing each a
 ///   batch of PDUs.
 ///
 /// # Returns
@@ -193,9 +193,9 @@ pub(super) fn test_resolve_batches(pdus_paths: &[&str]) -> String {
 ///
 /// # Arguments
 ///
-/// * `state_maps_paths` - A list of JSON files relative to `tests/it/fixtures/resolve` containing
+/// * `state_maps_paths` - A list of JSON files relative to `tests/resolve/fixtures` containing
 ///   each the list of event IDs forming a state map.
-/// * `pdus_paths` - A list of JSON files relative to `tests/it/fixtures/resolve` containing each a
+/// * `pdus_paths` - A list of JSON files relative to `tests/resolve/fixtures` containing each a
 ///   batch of PDUs.
 ///
 /// # Returns
@@ -249,7 +249,7 @@ pub(super) fn test_resolve_state_maps(state_maps_paths: &[&str], pdus_paths: &[&
 ///
 /// # Arguments
 ///
-/// * `pdus_paths` - A list of JSON files relative to `tests/it/fixtures/resolve` containing each an
+/// * `pdus_paths` - A list of JSON files relative to `tests/resolve/fixtures` containing each an
 ///   array of PDUs.
 fn load_pdus_and_room_version_rules(
     pdus_paths: &[&str],
@@ -292,7 +292,7 @@ fn load_pdus_and_room_version_rules(
 ///
 /// # Arguments
 ///
-/// * `state_maps_paths` - A list of JSON files relative to `tests/it/fixtures/resolve` containing
+/// * `state_maps_paths` - A list of JSON files relative to `tests/resolve/fixtures` containing
 ///   each the list of event IDs forming a state map.
 /// * `pdus_map` - A map containing the PDUs referenced in the state maps, used to get their `type`
 ///   and `state_key`.

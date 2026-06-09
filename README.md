@@ -24,6 +24,15 @@ To solve the accumulator-retention defect without the massive memory bottleneck 
 
 Instead of interactive game-theoretic models, safety is proven using a post-hoc Z3 SMT/CDCL topological framework. By universally quantifying over the unbounded space of all topologically valid partial orders (DAG configurations), the solver inherently proves deterministic safety against _any_ adversarial server collusion or network scheduler.
 
+## Limitations: Model vs. Upstream Code
+
+To ensure the highest level of scientific integrity, we explicitly distinguish between this research model and production homeserver libraries:
+
+- **`ruma-lean` Model:** This repository serves as a _formal verification reference model_. While it strictly replicates the core state resolution equations and implements the proposed CDO and Lazy Projection logic, it operates in a clean, dependency-free environment. Its evaluation results should be read as **ruma-lean Model (v2.1)** and **ruma-lean Model (v2.1.1)**. It does not contain the millions of lines of real-world asynchronous networking code found in production libraries.
+- **Synapse Baseline:** In contrast, references to Synapse in our test harnesses invoke the _actual, unmodified upstream production `matrix-synapse` Python library_, capturing authentic production exploits.
+
+## Usage
+
 ## Usage
 
 ```bash
