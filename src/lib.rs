@@ -269,10 +269,6 @@ pub enum StateResVersion {
     V1,
     V2,
     V2_1,
-    V2_1_Synapse,
-    V2_1_Ruma,
-    V2_1_Tuwunel,
-    V2_1_C10y,
     V2_1_1, // The V3 / Ban Evasion Fix
     V2_2,   // Reserved for State DAGs (MSC4242)
 }
@@ -657,10 +653,6 @@ impl<'a> Ord for SortPriority<'a> {
             }
             StateResVersion::V2
             | StateResVersion::V2_1
-            | StateResVersion::V2_1_Synapse
-            | StateResVersion::V2_1_Ruma
-            | StateResVersion::V2_1_Tuwunel
-            | StateResVersion::V2_1_C10y
             | StateResVersion::V2_1_1
             | StateResVersion::V2_2 => {
                 // V2 reverse topological power ordering: worst events pop FIRST.
@@ -854,10 +846,6 @@ pub fn resolve_lean(
     // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
     let mut resolved = match version {
         StateResVersion::V2_1
-        | StateResVersion::V2_1_Synapse
-        | StateResVersion::V2_1_Ruma
-        | StateResVersion::V2_1_Tuwunel
-        | StateResVersion::V2_1_C10y
         | StateResVersion::V2_1_1
         | StateResVersion::V2_2 => BTreeMap::new(),
         _ => unconflicted_state.clone(),
