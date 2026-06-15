@@ -743,13 +743,16 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 .map(|e| e.event_id.as_str())
                 .unwrap_or("");
 
-            let mut num_components = 0;
+            let mut component_roots = Vec::new();
             if !events_map.is_empty() {
                 let mut parent: Vec<usize> = (0..events_map.len()).collect();
                 let mut id_to_index: HashMap<&str, usize> =
                     HashMap::with_capacity(events_map.len());
-                for (i, id) in events_map.keys().enumerate() {
-                    id_to_index.insert(id.as_str(), i);
+                let mut index_to_ev: Vec<&ruma_lean::LeanEvent> =
+                    Vec::with_capacity(events_map.len());
+                for (i, ev) in events_map.values().enumerate() {
+                    id_to_index.insert(ev.event_id.as_str(), i);
+                    index_to_ev.push(ev);
                 }
                 for ev in events_map.values() {
                     if let Some(&u) = id_to_index.get(ev.event_id.as_str()) {
@@ -772,11 +775,27 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                         }
                     }
                 }
-                for i in 0..parent.len() {
-                    if parent[i] == i {
-                        num_components += 1;
+                let mut comp_roots_map: HashMap<usize, &ruma_lean::LeanEvent> = HashMap::new();
+                for (i, &ev) in index_to_ev.iter().enumerate() {
+                    let mut u = i;
+                    while parent[u] != u {
+                        parent[u] = parent[parent[u]];
+                        u = parent[u];
                     }
+                    comp_roots_map
+                        .entry(u)
+                        .and_modify(|e| {
+                            if ev.depth < e.depth || (ev.depth == e.depth && ev.event_id < e.event_id) {
+                                *e = ev;
+                            }
+                        })
+                        .or_insert(ev);
                 }
+                component_roots = comp_roots_map
+                    .values()
+                    .map(|e| e.event_id.clone())
+                    .collect();
+                component_roots.sort();
             }
 
             Ok(serde_json::json!({
@@ -789,7 +808,8 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 "min_depth": min_depth,
                 "max_depth": max_depth,
                 "root_event_id": root_event_id,
-                "num_components": num_components,
+                "num_components": component_roots.len(),
+                "component_roots": component_roots,
                 "heads": heads,
                 "membership": membership_obj,
                 "state": state_entries
