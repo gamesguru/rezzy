@@ -75,7 +75,11 @@ rust/clean: ##H Remove Rust build artifacts
 
 .PHONY: rust/install
 rust/install: ##H Install ruma-lean binary to cargo bin
-	$(CARGO) install --features cli,hashing --path .
+	$(CARGO) install --features cli,hashing --path . --bin ruma-lean
+
+.PHONY: rust/uninstall
+rust/uninstall: ##H Uninstall ruma-lean binary from cargo bin
+	$(CARGO) uninstall ruma-lean
 
 .PHONY: rust/coverage
 rust/coverage: ##H Run code coverage and generate HTML report
@@ -105,10 +109,11 @@ rust/publish: ##H Preview package and simulate dry-run publish
 	$(CARGO) publish --dry-run
 
 # Convenience aliases
-.PHONY: build test install clean
+.PHONY: build test install clean uninstall
 build:   rust/build   ##H Alias for rust/build
 test:    rust/test    ##H Alias for rust/test
 install: rust/install ##H Alias for rust/install
+uninstall: rust/uninstall ##H Alias for rust/uninstall
 
 clean:   rust/clean	##H Remove all build artifacts
 	find . -name __pycache__ | xargs -r rm -rf
