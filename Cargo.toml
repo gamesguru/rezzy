@@ -39,8 +39,19 @@ name = "regen-oracles"
 path = "src/bin/regen_oracles.rs"
 required-features = ["regen"]
 
+[[bin]]
+name = "dump_jsonl"
+path = "src/bin/dump_jsonl.rs"
+required-features = ["tools"]
+
+[[bin]]
+name = "prove"
+path = "src/bin/prove.rs"
+required-features = ["tools"]
+
 [features]
 default = ["std"]
+tools = ["std"]
 std = ["alloc", "serde_json/std", "serde/std"]
 alloc = []
 zkvm = []
