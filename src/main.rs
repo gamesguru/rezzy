@@ -743,6 +743,42 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 .map(|e| e.event_id.as_str())
                 .unwrap_or("");
 
+            let mut num_components = 0;
+            if !events_map.is_empty() {
+                let mut parent: Vec<usize> = (0..events_map.len()).collect();
+                let mut id_to_index: HashMap<&str, usize> =
+                    HashMap::with_capacity(events_map.len());
+                for (i, id) in events_map.keys().enumerate() {
+                    id_to_index.insert(id.as_str(), i);
+                }
+                for ev in events_map.values() {
+                    if let Some(&u) = id_to_index.get(ev.event_id.as_str()) {
+                        for prev in &ev.prev_events {
+                            if let Some(&v) = id_to_index.get(prev.as_str()) {
+                                let mut root_u = u;
+                                while parent[root_u] != root_u {
+                                    parent[root_u] = parent[parent[root_u]];
+                                    root_u = parent[root_u];
+                                }
+                                let mut root_v = v;
+                                while parent[root_v] != root_v {
+                                    parent[root_v] = parent[parent[root_v]];
+                                    root_v = parent[root_v];
+                                }
+                                if root_u != root_v {
+                                    parent[root_u] = root_v;
+                                }
+                            }
+                        }
+                    }
+                }
+                for i in 0..parent.len() {
+                    if parent[i] == i {
+                        num_components += 1;
+                    }
+                }
+            }
+
             Ok(serde_json::json!({
                 "status": "success",
                 "version": version,
@@ -753,6 +789,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 "min_depth": min_depth,
                 "max_depth": max_depth,
                 "root_event_id": root_event_id,
+                "num_components": num_components,
                 "heads": heads,
                 "membership": membership_obj,
                 "state": state_entries
