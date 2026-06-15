@@ -785,7 +785,9 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                     comp_roots_map
                         .entry(u)
                         .and_modify(|e| {
-                            if ev.depth < e.depth || (ev.depth == e.depth && ev.event_id < e.event_id) {
+                            if ev.depth < e.depth
+                                || (ev.depth == e.depth && ev.event_id < e.event_id)
+                            {
                                 *e = ev;
                             }
                         })
