@@ -674,7 +674,7 @@ impl<'a> Ord for SortPriority<'a> {
                         // V2.2 Invite-Lock Fix: prioritize topological depth over origin_server_ts.
                         // Smaller Depth -> Greater TieBreaker -> Pops First -> Loses.
                         // Larger Depth -> Smaller TieBreaker -> Pops Last -> Wins.
-                        if self.version == StateResVersion::V2_2 {
+                        if self.version == StateResVersion::V2_2 || self.version == StateResVersion::V2_1_1 {
                             match other.auth_chain_distance.cmp(&self.auth_chain_distance) {
                                 Ordering::Equal => {}
                                 ord => return ord,
@@ -846,7 +846,7 @@ pub fn resolve_lean(
 
     // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
     let mut resolved = match version {
-        StateResVersion::V2_1 | StateResVersion::V2_1_1 | StateResVersion::V2_2 => BTreeMap::new(),
+        StateResVersion::V2_1 | StateResVersion::V2_2 => BTreeMap::new(),
         _ => unconflicted_state.clone(),
     };
 
@@ -1300,7 +1300,7 @@ pub fn compute_v2_1_conflicted_subgraph(
     auth_graph: &HashMap<String, LeanEvent>,
     conflicted_set: &[String],
 ) -> HashMap<String, LeanEvent> {
-    compute_v2_1_conflicted_subgraph_bounded(auth_graph, conflicted_set, None).subgraph
+    compute_v2_1_conflicted_subgraph_bounded(auth_graph, conflicted_set, Some(2000)).subgraph
 }
 
 /// Bounded version of conflicted subgraph computation.
