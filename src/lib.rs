@@ -595,38 +595,37 @@ fn get_power_level_from_auth_chain(
 }
 
 /// Computes the shortest distance from the event to the m.room.create event via auth_events.
-fn compute_auth_chain_distance(
-    event: &LeanEvent,
-    auth_context: &HashMap<String, LeanEvent>,
-    create_ev: Option<&LeanEvent>,
+fn memoized_auth_distance<'a>(
+    curr_id: &'a str,
+    auth_context: &'a HashMap<String, LeanEvent>,
+    create_id: &str,
+    memo: &mut HashMap<&'a str, u64>,
 ) -> u64 {
-    let mut queue = alloc::collections::VecDeque::new();
-    let mut visited = alloc::collections::BTreeSet::new();
-
-    queue.push_back((event.event_id.clone(), 0));
-
-    while let Some((curr_id, dist)) = queue.pop_front() {
-        if let Some(create) = create_ev {
-            if curr_id == create.event_id {
-                return dist;
-            }
-        }
-
-        if !visited.insert(curr_id.clone()) {
-            continue;
-        }
-
-        if let Some(ev) = auth_context.get(&curr_id) {
-            if ev.auth_events.is_empty() {
-                return dist;
-            }
-            for parent in &ev.auth_events {
-                queue.push_back((parent.clone(), dist + 1));
-            }
-        }
+    if curr_id == create_id {
+        return 0;
     }
 
-    0
+    if let Some(&dist) = memo.get(curr_id) {
+        return dist;
+    }
+
+    let ev = match auth_context.get(curr_id) {
+        Some(ev) => ev,
+        None => return 0,
+    };
+
+    if ev.auth_events.is_empty() {
+        return 0;
+    }
+
+    let mut min_dist = u64::MAX;
+    for parent in &ev.auth_events {
+        let p_dist = memoized_auth_distance(parent, auth_context, create_id, memo);
+        min_dist = min_dist.min(p_dist.saturating_add(1));
+    }
+
+    memo.insert(curr_id, min_dist);
+    min_dist
 }
 
 impl<'a> PartialEq for SortPriority<'a> {
@@ -742,12 +741,14 @@ pub fn lean_kahn_sort_detailed(
         .collect();
 
     let depth_cache: HashMap<String, u64> = if version == StateResVersion::V2_2 {
+        let mut memo = HashMap::new();
+        let create_id = create_ev.map(|e| e.event_id.as_str()).unwrap_or("");
         events
             .iter()
-            .map(|(id, ev)| {
+            .map(|(id, _ev)| {
                 (
                     id.clone(),
-                    compute_auth_chain_distance(ev, auth_context, create_ev),
+                    memoized_auth_distance(id, auth_context, create_id, &mut memo),
                 )
             })
             .collect()
