@@ -44,8 +44,8 @@ Room members are no longer represented as User IDs. Instead, they are represente
 Member Keys can present _linkage information_ in the `m.room.member` event:
 
 - The `content` of the `m.room.member` event is modified to include new fields:
-  - `localpart`: The claimed localpart for this Member Key. Redactable for GDPR / moderation.
-  - `domain`: The claimed domain for this Member Key. Not redactable as it provides routing information.
+    - `localpart`: The claimed localpart for this Member Key. Redactable for GDPR / moderation.
+    - `domain`: The claimed domain for this Member Key. Not redactable as it provides routing information.
 - The `m.room.member` event is _additionally signed_ by the server signing key for the `content.domain` specified.
 
 This link can be _verified_ by:
@@ -68,18 +68,18 @@ An example event with the new identifiers:
 
 ```json
 {
-  "type": "m.room.name",
-  "state_key": "",
-  "content": {
-    "name": "My Room Name"
-  },
-  "room_id": "!K3DOWWLmkHLl52yJ-vT8J5jX5wuYZati_KvC6PliIPE",
-  "sender": "@l8Hft5qXKn1vfHrg3p4-W8gELQVo8N13JkluMfmn2sQ",
-  "signatures": {
-    "sender": {
-      "ed25519:1": "these86bytesofbase64signaturecoveressentialfieldsincludinghashessocancheckredactedpdus"
+    "type": "m.room.name",
+    "state_key": "",
+    "content": {
+        "name": "My Room Name"
+    },
+    "room_id": "!K3DOWWLmkHLl52yJ-vT8J5jX5wuYZati_KvC6PliIPE",
+    "sender": "@l8Hft5qXKn1vfHrg3p4-W8gELQVo8N13JkluMfmn2sQ",
+    "signatures": {
+        "sender": {
+            "ed25519:1": "these86bytesofbase64signaturecoveressentialfieldsincludinghashessocancheckredactedpdus"
+        }
     }
-  }
 }
 ```
 
@@ -87,24 +87,24 @@ The `m.room.member` event with co-signatures from the server signing key:
 
 ```json
 {
-  "type": "m.room.member",
-  "state_key": "@l8Hft5qXKn1vfHrg3p4-W8gELQVo8N13JkluMfmn2sQ",
-  "content": {
-    "membership": "join",
-    "localpart": "alice", // <-- NEW
-    "domain": "matrix.org" // <-- NEW
-  },
-  "room_id": "!K3DOWWLmkHLl52yJ-vT8J5jX5wuYZati_KvC6PliIPE",
-  "sender": "@l8Hft5qXKn1vfHrg3p4-W8gELQVo8N13JkluMfmn2sQ",
-  "signatures": {
-    // NEW: co-signed by the member key and matrix.org server
-    "sender": {
-      "ed25519:1": "these86bytesofbase64signaturecoveressentialfieldsincludinghashessocancheckredactedpdus"
+    "type": "m.room.member",
+    "state_key": "@l8Hft5qXKn1vfHrg3p4-W8gELQVo8N13JkluMfmn2sQ",
+    "content": {
+        "membership": "join",
+        "localpart": "alice", // <-- NEW
+        "domain": "matrix.org" // <-- NEW
     },
-    "matrix.org": {
-      "ed25519:123def": "these86bytesofbase64signaturecoveressentialfieldsincludinghashessocancheckredactedpdus"
+    "room_id": "!K3DOWWLmkHLl52yJ-vT8J5jX5wuYZati_KvC6PliIPE",
+    "sender": "@l8Hft5qXKn1vfHrg3p4-W8gELQVo8N13JkluMfmn2sQ",
+    "signatures": {
+        // NEW: co-signed by the member key and matrix.org server
+        "sender": {
+            "ed25519:1": "these86bytesofbase64signaturecoveressentialfieldsincludinghashessocancheckredactedpdus"
+        },
+        "matrix.org": {
+            "ed25519:123def": "these86bytesofbase64signaturecoveressentialfieldsincludinghashessocancheckredactedpdus"
+        }
     }
-  }
 }
 ```
 
@@ -126,7 +126,7 @@ The `join_authorised_via_users_server` field is currently a _user ID_, so this i
 >
 > - [...]
 > - If `content` has a `join_authorised_via_users_server` key:
->   - If the event is not validly signed by the ~~homeserver of the user ID denoted by the key~~ member key, reject.
+>     - If the event is not validly signed by the ~~homeserver of the user ID denoted by the key~~ member key, reject.
 
 The following `m.federate` auth rule is no longer enforceable because the `sender` field no longer has a domain:
 

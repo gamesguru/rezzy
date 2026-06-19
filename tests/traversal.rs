@@ -709,10 +709,10 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
         "Bob should be banned in the final state"
     );
 
-    // V2.1 accepts Bob's concurrent name change!
+    // V2.1 now correctly REJECTS Bob's concurrent name change!
     assert!(
-        resolved_v21.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
-        "V2.1 flaw: Mistakenly accepted Bob's name change because it ignored his concurrent ban!"
+        !resolved_v21.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        "V2.1 now correctly rejects Bob's name change because it evaluates his concurrent ban!"
     );
 
     // Run V2.1.1 Resolution (The V3 Fix)

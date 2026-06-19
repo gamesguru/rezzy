@@ -317,13 +317,13 @@ servers from agreeing on the same current state. Consider this scenario (green n
 ![sf1](https://github.com/user-attachments/assets/d4135ffa-b5c8-431e-8314-4a58dd3372d9)
 
 - there are 3 concurrent events:
-  - A) PL100 bans PL75
-  - B) PL75 bans PL50
-  - C) PL50 sets the join rules to invite
+    - A) PL100 bans PL75
+    - B) PL75 bans PL50
+    - C) PL50 sets the join rules to invite
 - If you see all 3 events, state res says that PL100 banned PL75 and invalidates the ban of PL50,
   thus PL50 is allowed to set the join rules to invite.
 - Now suppose there is a bystander server observing these concurrent events
-  - If you see B then C, C is soft failed. You then see A and come to the correct current state.
+    - If you see B then C, C is soft failed. You then see A and come to the correct current state.
 - Now the bystander server sends some events which are unimportant ending at some event X.
 - The servers which sent the concurrent events are now unreachable.
 - A long dead server comes back and sees event X, and asks the bystander server for the `prev_state_events`
@@ -364,10 +364,10 @@ Example:
 
 ```json
 {
-  "earliest_events": ["$last_known_state_events_fwd_extremities"],
-  "latest_events": ["$event_received_via_send"],
-  "limit": 10,
-  "state_dag": true
+    "earliest_events": ["$last_known_state_events_fwd_extremities"],
+    "latest_events": ["$event_received_via_send"],
+    "limit": 10,
+    "state_dag": true
 }
 ```
 
@@ -421,9 +421,9 @@ Walking with `latest_events={D,E}` returns `[B,C]`. Algorithmically, the server 
 - map `earliest_events` to a set of 'seen' event IDs.
 - sort the provided `latest_events` and put them into a queue, removing any in 'seen'.
 - while the queue is not empty and the limit has not been reached:
-  - dequeue an event ID and find its `prev_state_events` PSE.
-  - Remove IDs from PSE if they are in 'seen'.
-  - add the remaining event IDs from PSE to the result list and the end of the queue, sorting them first lexicographically.
+    - dequeue an event ID and find its `prev_state_events` PSE.
+    - Remove IDs from PSE if they are in 'seen'.
+    - add the remaining event IDs from PSE to the result list and the end of the queue, sorting them first lexicographically.
 - the result list must not be reversed at the end, unlike non-state DAG `/get_missing_events` responses.
 
 ##### `/send_join`
@@ -452,21 +452,21 @@ The intended server behaviour would be:
 #### Auth rules changes
 
 1. If type is `m.room.create`:
-   1. If it has any `prev_events`, reject.
-   2. If the event has a `room_id`, reject.
-   3. **[Added in this version]** If it has any `prev_state_events`, reject.=
-   4. If `content.room_version` is present and is not a recognised version, reject.
-   5. If `additional_creators` is present in `content` and is not an array of strings where each string passes the same user ID validation applied to `sender`, reject.
-   6. Otherwise, allow.
+    1. If it has any `prev_events`, reject.
+    2. If the event has a `room_id`, reject.
+    3. **[Added in this version]** If it has any `prev_state_events`, reject.=
+    4. If `content.room_version` is present and is not a recognised version, reject.
+    5. If `additional_creators` is present in `content` and is not an array of strings where each string passes the same user ID validation applied to `sender`, reject.
+    6. Otherwise, allow.
 2. **[Added in this version]** Considering the event's `prev_state_events`:
-   1. If there are entries which do not belong in the same room, reject.
-   2. If there are entries which do not have a `state_key`, reject.
-   3. If there are entries which were themselves rejected under the checks performed on receipt of a PDU, reject.
+    1. If there are entries which do not belong in the same room, reject.
+    2. If there are entries which do not have a `state_key`, reject.
+    3. If there are entries which were themselves rejected under the checks performed on receipt of a PDU, reject.
 3. **[Changed in this version]** Considering the event’s calculated `auth_events`:
-   1. **[Removed in this version]** If there are duplicate entries for a given `type` and `state_key` pair, reject.
-   2. **[Removed in this version]** If there are entries whose `type` and `state_key` don’t match those specified by the auth events selection algorithm described in the server specification, reject.
-   3. If there are entries which were themselves rejected under the checks performed on receipt of a PDU, reject.
-   4. **[Removed in this version]** If any event in `auth_events` has a `room_id` which does not match that of the event being authorised, reject.
+    1. **[Removed in this version]** If there are duplicate entries for a given `type` and `state_key` pair, reject.
+    2. **[Removed in this version]** If there are entries whose `type` and `state_key` don’t match those specified by the auth events selection algorithm described in the server specification, reject.
+    3. If there are entries which were themselves rejected under the checks performed on receipt of a PDU, reject.
+    4. **[Removed in this version]** If any event in `auth_events` has a `room_id` which does not match that of the event being authorised, reject.
 
 ##### Rationale
 
@@ -548,10 +548,10 @@ The joining server should then perform the following:
 - In the background, verify the entire state DAG with all steps of the PDU checks as usual. Ensure the claimed auth chain is deleted
   and replaced with its calculated counterpart.
 - If the state DAG is valid:
-  - destroy the state associated with the room and replace it with the verified state. Invalidate client caches.
-  - reverify all events in the `timeline`, as well as any live events which arrived in the interim.
+    - destroy the state associated with the room and replace it with the verified state. Invalidate client caches.
+    - reverify all events in the `timeline`, as well as any live events which arrived in the interim.
 - If the state DAG is not valid:
-  - destroy the state associated with the room. Invalidate client caches.
+    - destroy the state associated with the room. Invalidate client caches.
 
 This technique makes several tradeoffs:
 
@@ -636,10 +636,10 @@ for member events. Consider the following example for an invite-only room:
 - A room with 4 members, Alice=invite, Bob=join, Charlie=leave, Doris=rejoined.
 - The auth chains for these members is as follows (omitting create event, join rules and power levels
   event as they do not change in this example):
-  - Alice (invite) = []
-  - Bob (join) = [BOB_INVITE]
-  - Charlie (leave) = [CHARLIE_INVITE, CHARLIE_JOIN]
-  - Doris (rejoined) = [DORIS_INVITE, DORIS_JOIN, DORIS_LEAVE, DORIS_INVITE]
+    - Alice (invite) = []
+    - Bob (join) = [BOB_INVITE]
+    - Charlie (leave) = [CHARLIE_INVITE, CHARLIE_JOIN]
+    - Doris (rejoined) = [DORIS_INVITE, DORIS_JOIN, DORIS_LEAVE, DORIS_INVITE]
 
 The state DAG representation still includes all these events, just in a causal representation.
 Other than this, the set of events in the state DAG may exceed those in auth chains in cases where

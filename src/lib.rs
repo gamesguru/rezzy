@@ -745,7 +745,9 @@ pub fn lean_kahn_sort_detailed(
     let depth_cache: HashMap<String, u64> = if version == StateResVersion::V2_2 {
         let mut memo = HashMap::new();
         let create_id = create_ev.map(|e| e.event_id.as_str()).unwrap_or("");
-        events.keys().map(|id| {
+        events
+            .keys()
+            .map(|id| {
                 (
                     id.clone(),
                     memoized_auth_distance(id, auth_context, create_id, &mut memo),
@@ -924,6 +926,7 @@ pub fn resolve_lean(
                 local_auth,
                 create_ev,
                 version,
+                true,
             ) {
                 resolved.insert(
                     (event.event_type.clone(), event.state_key.clone()),
@@ -951,6 +954,7 @@ pub fn resolve_lean(
             local_auth,
             create_ev,
             version,
+            false,
         ) {
             resolved.insert(
                 (ev.event_type.clone(), ev.state_key.clone()),
@@ -973,16 +977,23 @@ struct OverlayState<'a> {
     local_auth: BTreeMap<(String, Option<String>), LeanEvent>,
     create_ev: Option<&'a LeanEvent>,
     version: StateResVersion,
+    is_power_phase: bool,
 }
 
 impl<'a> crate::auth::StateProvider for OverlayState<'a> {
     fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent> {
         let query: &dyn crate::auth::StateKeyDyn = &(event_type, state_key);
 
-        // In V2.1 (Stock MSC4297), we supplement with ONLY m.room.power_levels.
-        // In V2.1.1 ...
+        // In V2.1 (Stock MSC4297), we supplement with ONLY m.room.power_levels during Step 2 (power phase).
+        // In Step 4 (remaining events phase), we supplement with all event types.
         let should_supplement = match self.version {
-            StateResVersion::V2_1 => event_type == "m.room.power_levels" && state_key == Some(""),
+            StateResVersion::V2_1 => {
+                if self.is_power_phase {
+                    event_type == "m.room.power_levels" && state_key == Some("")
+                } else {
+                    true
+                }
+            }
             StateResVersion::V2_1_1 => {
                 (event_type == "m.room.power_levels" && state_key == Some(""))
                     || (event_type == "m.room.member")
@@ -1040,6 +1051,7 @@ fn iterative_auth_ok(
     local_auth: BTreeMap<(String, Option<String>), LeanEvent>,
     cached_create: Option<&LeanEvent>,
     version: StateResVersion,
+    is_power_phase: bool,
 ) -> bool {
     let overlay = OverlayState {
         resolved,
@@ -1048,6 +1060,7 @@ fn iterative_auth_ok(
         local_auth,
         create_ev: cached_create,
         version,
+        is_power_phase,
     };
 
     crate::auth::check_auth(event, &overlay).is_ok()
