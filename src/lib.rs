@@ -674,7 +674,9 @@ impl<'a> Ord for SortPriority<'a> {
                         // V2.2 Invite-Lock Fix: prioritize topological depth over origin_server_ts.
                         // Smaller Depth -> Greater TieBreaker -> Pops First -> Loses.
                         // Larger Depth -> Smaller TieBreaker -> Pops Last -> Wins.
-                        if self.version == StateResVersion::V2_2 || self.version == StateResVersion::V2_1_1 {
+                        if self.version == StateResVersion::V2_2
+                            || self.version == StateResVersion::V2_1_1
+                        {
                             match other.auth_chain_distance.cmp(&self.auth_chain_distance) {
                                 Ordering::Equal => {}
                                 ord => return ord,
@@ -743,9 +745,7 @@ pub fn lean_kahn_sort_detailed(
     let depth_cache: HashMap<String, u64> = if version == StateResVersion::V2_2 {
         let mut memo = HashMap::new();
         let create_id = create_ev.map(|e| e.event_id.as_str()).unwrap_or("");
-        events
-            .iter()
-            .map(|(id, _ev)| {
+        events.keys().map(|id| {
                 (
                     id.clone(),
                     memoized_auth_distance(id, auth_context, create_id, &mut memo),
