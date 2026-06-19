@@ -164,7 +164,7 @@ where
 
     let mut to_fetch = Vec::new();
     for map in &state_sets {
-        for (_key, id) in map.iter() {
+        for id in map.values() {
             to_fetch.push(id.clone());
             id_map.insert(id.to_string(), id.clone());
         }
@@ -1043,6 +1043,7 @@ impl<'a> crate::auth::StateProvider for OverlayState<'a> {
 
 /// Targeted iterative auth check. Per Matrix spec, the auth context for event 'e'
 /// consists of the events in the conflict set (E) and the currently resolved state (S).
+#[allow(clippy::too_many_arguments)]
 fn iterative_auth_ok(
     event: &LeanEvent,
     resolved: &BTreeMap<(String, Option<String>), String>,

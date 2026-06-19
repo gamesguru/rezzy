@@ -1091,3 +1091,113 @@ fn test_v2_1_1_anomaly_02_admin_lockout() {
         "CDO: Spammer join must be dropped because of the concurrent lockdown"
     );
 }
+
+#[test]
+fn test_v2_1_spec_compliant_step_4_supplementation() {
+    // This test explicitly verifies that in the spec-compliant V2.1 implementation,
+    // lookups in Step 4 of non-power events (like m.room.topic) successfully supplement
+    // from the partially resolved state (S), which correctly blocks banned users from
+    // sending state changes concurrently.
+
+    let create_ev = LeanEvent {
+        event_id: "$create".to_string(),
+        event_type: "m.room.create".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 100,
+        ..Default::default()
+    };
+
+    let pl_ev = LeanEvent {
+        event_id: "$pl".to_string(),
+        event_type: "m.room.power_levels".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 200,
+        content: serde_json::json!({
+            "users": { "@bob:example.com": 50 },
+            "state_default": 50
+        }),
+        auth_events: vec!["$create".to_string()],
+        ..Default::default()
+    };
+
+    let bob_join = LeanEvent {
+        event_id: "$bob_join".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@bob:example.com".to_string()),
+        sender: "@bob:example.com".to_string(),
+        origin_server_ts: 300,
+        content: serde_json::json!({ "membership": "join" }),
+        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        ..Default::default()
+    };
+
+    // FORK A: Alice bans Bob
+    let alice_bans_bob = LeanEvent {
+        event_id: "$alice_bans_bob".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@bob:example.com".to_string()),
+        sender: "@alice:example.com".to_string(),
+        origin_server_ts: 400,
+        content: serde_json::json!({ "membership": "ban" }),
+        auth_events: vec![
+            "$create".to_string(),
+            "$pl".to_string(),
+            "$bob_join".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    // FORK B: Bob changes the room topic (concurrently)
+    let bob_topic_change = LeanEvent {
+        event_id: "$bob_topic_change".to_string(),
+        event_type: "m.room.topic".to_string(),
+        state_key: Some("".to_string()),
+        sender: "@bob:example.com".to_string(),
+        origin_server_ts: 405,
+        content: serde_json::json!({ "topic": "Bob's Space" }),
+        auth_events: vec![
+            "$create".to_string(),
+            "$bob_join".to_string(),
+            "$pl".to_string(),
+        ],
+        ..Default::default()
+    };
+
+    let mut auth_context = std::collections::HashMap::new();
+    auth_context.insert("$create".to_string(), create_ev);
+    auth_context.insert("$pl".to_string(), pl_ev);
+    auth_context.insert("$bob_join".to_string(), bob_join);
+
+    let mut conflicted_events = std::collections::HashMap::new();
+    conflicted_events.insert("$alice_bans_bob".to_string(), alice_bans_bob);
+    conflicted_events.insert("$bob_topic_change".to_string(), bob_topic_change);
+
+    // Run V2.1 Resolution (Fixed & Spec-Compliant)
+    let resolved_v21 = ruma_lean::resolve_lean(
+        std::collections::BTreeMap::new(),
+        conflicted_events,
+        &auth_context,
+        ruma_lean::StateResVersion::V2_1,
+    );
+
+    // Bob's ban must be resolved first in Step 2.
+    assert_eq!(
+        resolved_v21
+            .get(&(
+                "m.room.member".to_string(),
+                Some("@bob:example.com".to_string())
+            ))
+            .unwrap(),
+        "$alice_bans_bob",
+        "Bob should be banned in the final resolved state"
+    );
+
+    // Bob's topic change must be REJECTED in Step 4 because Step 4 correctly
+    // supplements Bob's membership status (which is 'ban' in the partially resolved state S).
+    assert!(
+        !resolved_v21.contains_key(&("m.room.topic".to_string(), Some("".to_string()))),
+        "V2.1 must reject Bob's topic change because he is banned in the partially resolved state"
+    );
+}
