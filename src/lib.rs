@@ -1487,8 +1487,8 @@ pub fn apply_cdo_filter(
 
     // Sort conflicted events topologically and chronologically:
     // 1. Type priority: lockdowns (power levels, join rules) come first
-    // 2. origin_server_ts ascending (earlier comes first)
-    // 3. power_level descending (higher power level comes first)
+    // 2. power_level descending (higher power level comes first)
+    // 3. origin_server_ts ascending (earlier comes first)
     // 4. event_id ascending (smaller lexicographical order comes first)
     let mut sorted_events: Vec<&LeanEvent> = conflicted_events.values().collect();
     sorted_events.sort_by(|a, b| {
@@ -1498,19 +1498,22 @@ pub fn apply_cdo_filter(
             _ => 2,
         };
 
+        // 1. power_level descending (highest authority evaluates first)
+        let cmp_pl = b.power_level.cmp(&a.power_level);
+        if cmp_pl != Ordering::Equal {
+            return cmp_pl;
+        }
+
+        // 2. Type priority: lockdowns (power levels, join rules) come first
         let cmp_type = type_priority(&a.event_type).cmp(&type_priority(&b.event_type));
         if cmp_type != Ordering::Equal {
             return cmp_type;
         }
 
+        // 3. origin_server_ts ascending (earlier comes first)
         let cmp_ts = a.origin_server_ts.cmp(&b.origin_server_ts);
         if cmp_ts != Ordering::Equal {
             return cmp_ts;
-        }
-
-        let cmp_pl = b.power_level.cmp(&a.power_level); // descending
-        if cmp_pl != Ordering::Equal {
-            return cmp_pl;
         }
 
         a.event_id.cmp(&b.event_id)
