@@ -154,6 +154,10 @@ impl StateProvider for RoomState {
 /// 3. Sender must not be banned.
 /// 4. Sender's power level must meet the event type requirement.
 /// 5. For `m.room.member` events, the `state_key` must match transition rules.
+///
+/// # Errors
+///
+/// Returns an `AuthError` if the event fails authorization validation.
 pub fn check_auth(event: &LeanEvent, state: &impl StateProvider) -> Result<(), AuthError> {
     // Rule 0: Custom syntactic validation
     event
@@ -232,7 +236,7 @@ pub fn check_auth(event: &LeanEvent, state: &impl StateProvider) -> Result<(), A
     Ok(())
 }
 
-const MAX_POWER_LEVEL: i64 = 9007199254740991; // 2^53 - 1
+const MAX_POWER_LEVEL: i64 = 9_007_199_254_740_991; // 2^53 - 1
 
 /// Get the power level of a user from the current room state.
 fn get_sender_power_level(sender: &str, state: &impl StateProvider) -> i64 {
@@ -329,56 +333,7 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
         .unwrap_or("");
 
     match new_membership {
-        "join" => {
-            // A user can only join as themselves
-            if target_user != event.sender {
-                return Err(AuthError::InvalidStateKey {
-                    expected: event.sender.clone(),
-                    actual: target_user.into(),
-                });
-            }
-
-            let current_membership = state
-                .get_event("m.room.member", Some(target_user))
-                .and_then(|ev| ev.content.get("membership"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("");
-
-            if current_membership == "ban" {
-                return Err(AuthError::BannedUser {
-                    sender: event.sender.clone(),
-                    event_id: event.event_id.clone(),
-                });
-            }
-
-            let join_rule = state
-                .get_event("m.room.join_rules", Some(""))
-                .and_then(|ev| ev.content.get("join_rule"))
-                .and_then(|r| r.as_str())
-                .unwrap_or("invite"); // Default to invite
-
-            let is_creator = state
-                .get_event("m.room.create", Some(""))
-                .is_some_and(|ev| ev.sender == event.sender);
-
-            if is_creator {
-                // Room creator can always join
-            } else if join_rule == "invite" || join_rule == "knock" {
-                if current_membership == "invite" || current_membership == "join" {
-                    // Allowed
-                } else {
-                    return Err(AuthError::NotMember {
-                        sender: event.sender.clone(),
-                        event_id: event.event_id.clone(),
-                    });
-                }
-            } else if join_rule != "public" {
-                return Err(AuthError::NotMember {
-                    sender: event.sender.clone(),
-                    event_id: event.event_id.clone(),
-                });
-            }
-        }
+        "join" => check_join_rules(event, state, target_user)?,
         "leave"
             // If target_user != sender, this is a kick — requires power level
             if target_user != event.sender => {
@@ -441,6 +396,62 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
         _ => {}
     }
 
+    Ok(())
+}
+
+fn check_join_rules(
+    event: &LeanEvent,
+    state: &impl StateProvider,
+    target_user: &str,
+) -> Result<(), AuthError> {
+    // A user can only join as themselves
+    if target_user != event.sender {
+        return Err(AuthError::InvalidStateKey {
+            expected: event.sender.clone(),
+            actual: target_user.into(),
+        });
+    }
+
+    let current_membership = state
+        .get_event("m.room.member", Some(target_user))
+        .and_then(|ev| ev.content.get("membership"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+
+    if current_membership == "ban" {
+        return Err(AuthError::BannedUser {
+            sender: event.sender.clone(),
+            event_id: event.event_id.clone(),
+        });
+    }
+
+    let join_rule = state
+        .get_event("m.room.join_rules", Some(""))
+        .and_then(|ev| ev.content.get("join_rule"))
+        .and_then(|r| r.as_str())
+        .unwrap_or("invite"); // Default to invite
+
+    let is_creator = state
+        .get_event("m.room.create", Some(""))
+        .is_some_and(|ev| ev.sender == event.sender);
+
+    if is_creator {
+        // Room creator can always join
+    } else if join_rule == "invite" || join_rule == "knock" {
+        if current_membership == "invite" || current_membership == "join" {
+            // Allowed
+        } else {
+            return Err(AuthError::NotMember {
+                sender: event.sender.clone(),
+                event_id: event.event_id.clone(),
+            });
+        }
+    } else if join_rule != "public" {
+        return Err(AuthError::NotMember {
+            sender: event.sender.clone(),
+            event_id: event.event_id.clone(),
+        });
+    }
     Ok(())
 }
 

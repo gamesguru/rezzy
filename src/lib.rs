@@ -64,43 +64,22 @@ fn ruma_to_lean_event<E: Event>(ev: &E) -> crate::LeanEvent {
 }
 
 #[cfg(feature = "mock-ruma")]
-pub fn resolve<'a, E, MapsIter>(
-    _auth_rules: &ruma_common::room_version_rules::AuthorizationRules,
-    _state_res_rules: &ruma_common::room_version_rules::StateResolutionV2Rules,
-    _state_maps: impl IntoIterator<IntoIter = MapsIter>,
-    _auth_chains: Vec<ruma_state_res::utils::event_id_set::EventIdSet<E::Id>>,
-    _fetch_event: impl Fn(&ruma_common::EventId) -> Option<E>,
-    _fetch_conflicted_state_subgraph: impl Fn(
-        &StateMap<Vec<E::Id>>,
-    ) -> Option<
-        ruma_state_res::utils::event_id_set::EventIdSet<E::Id>,
-    >,
-) -> core::result::Result<StateMap<E::Id>, RumaError>
+fn partition_state<'a, E>(
+    state_sets: &[StateMap<E::Id>],
+) -> (
+    std::collections::BTreeMap<(String, Option<String>), String>,
+    std::collections::HashSet<(ruma_events::StateEventType, String)>,
+)
 where
     E: Event + Clone,
     E::Id: 'a,
-    MapsIter: Iterator<Item = &'a StateMap<E::Id>> + Clone,
 {
     use alloc::string::ToString;
-    use core::borrow::Borrow;
     use std::collections::{BTreeMap, HashMap, HashSet};
-
-    let mut state_sets = Vec::new();
-    let mut id_map: HashMap<String, E::Id> = HashMap::new();
-
-    for map in _state_maps {
-        state_sets.push(map.clone());
-        for id in map.values() {
-            id_map.insert(id.to_string(), id.clone());
-        }
-    }
-    if state_sets.is_empty() {
-        return Ok(StateMap::new());
-    }
 
     let mut counts: HashMap<(&(ruma_events::StateEventType, String), &E::Id), usize> =
         HashMap::new();
-    for map in &state_sets {
+    for map in state_sets {
         for (key, id) in map {
             *counts.entry((key, id)).or_insert(0) += 1;
         }
@@ -110,7 +89,7 @@ where
     let mut conflicted_keys = HashSet::new();
     let mut unconflicted_state = BTreeMap::new();
 
-    for map in &state_sets {
+    for map in state_sets {
         for (key, id) in map {
             if counts.get(&(key, id)).copied().unwrap_or(0) == num_maps {
                 let state_key_opt = if key.1.is_empty() {
@@ -125,26 +104,44 @@ where
         }
     }
 
-    let mut conflicted_events = HashMap::new();
-    let mut auth_context = HashMap::new();
+    (unconflicted_state, conflicted_keys)
+}
 
-    for map in &state_sets {
+#[cfg(feature = "mock-ruma")]
+fn build_conflicted_events<'a, E>(
+    state_sets: &[StateMap<E::Id>],
+    conflicted_keys: &std::collections::HashSet<(ruma_events::StateEventType, String)>,
+    state_res_rules: &ruma_common::room_version_rules::StateResolutionV2Rules,
+    fetch_event: &impl Fn(&ruma_common::EventId) -> Option<E>,
+    fetch_conflicted_state_subgraph: &impl Fn(
+        &StateMap<Vec<E::Id>>,
+    ) -> Option<
+        ruma_state_res::utils::event_id_set::EventIdSet<E::Id>,
+    >,
+) -> (
+    std::collections::HashMap<String, LeanEvent>,
+    StateMap<Vec<E::Id>>,
+)
+where
+    E: Event + Clone,
+    E::Id: 'a,
+{
+    use alloc::string::ToString;
+    use core::borrow::Borrow;
+    use std::collections::HashMap;
+
+    let mut conflicted_events = HashMap::new();
+    let mut conflicted_state_set: StateMap<Vec<E::Id>> = StateMap::new();
+
+    for map in state_sets {
         for (key, id) in map {
             if conflicted_keys.contains(key) {
                 let id_str = id.to_string();
                 if !conflicted_events.contains_key(&id_str) {
-                    if let Some(ev) = _fetch_event(id.borrow()) {
+                    if let Some(ev) = fetch_event(id.borrow()) {
                         conflicted_events.insert(id_str.clone(), ruma_to_lean_event(&ev));
                     }
                 }
-            }
-        }
-    }
-
-    let mut conflicted_state_set: StateMap<Vec<E::Id>> = StateMap::new();
-    for map in &state_sets {
-        for (key, id) in map {
-            if conflicted_keys.contains(key) {
                 let list = conflicted_state_set
                     .entry(key.clone())
                     .or_insert_with(Vec::new);
@@ -155,18 +152,73 @@ where
         }
     }
 
-    if _state_res_rules.begin_iterative_auth_checks_with_empty_state_map {
-        if let Some(subgraph) = _fetch_conflicted_state_subgraph(&conflicted_state_set) {
+    if state_res_rules.begin_iterative_auth_checks_with_empty_state_map {
+        if let Some(subgraph) = fetch_conflicted_state_subgraph(&conflicted_state_set) {
             for id in subgraph {
                 let id_str = id.to_string();
                 if !conflicted_events.contains_key(&id_str) {
-                    if let Some(ev) = _fetch_event(id.borrow()) {
+                    if let Some(ev) = fetch_event(id.borrow()) {
                         conflicted_events.insert(id_str.clone(), ruma_to_lean_event(&ev));
                     }
                 }
             }
         }
     }
+
+    (conflicted_events, conflicted_state_set)
+}
+
+/// Resolve state conflicts across multiple state maps.
+///
+/// # Errors
+///
+/// Returns a `RumaError` if state resolution fails.
+#[cfg(feature = "mock-ruma")]
+pub fn resolve<'a, E, MapsIter>(
+    _auth_rules: &ruma_common::room_version_rules::AuthorizationRules,
+    state_res_rules: &ruma_common::room_version_rules::StateResolutionV2Rules,
+    state_maps: impl IntoIterator<IntoIter = MapsIter>,
+    auth_chains: Vec<ruma_state_res::utils::event_id_set::EventIdSet<E::Id>>,
+    fetch_event: impl Fn(&ruma_common::EventId) -> Option<E>,
+    fetch_conflicted_state_subgraph: impl Fn(
+        &StateMap<Vec<E::Id>>,
+    ) -> Option<
+        ruma_state_res::utils::event_id_set::EventIdSet<E::Id>,
+    >,
+) -> core::result::Result<StateMap<E::Id>, RumaError>
+where
+    E: Event + Clone,
+    E::Id: 'a,
+    MapsIter: Iterator<Item = &'a StateMap<E::Id>> + Clone,
+{
+    use alloc::string::ToString;
+    use core::borrow::Borrow;
+    use std::collections::HashMap;
+
+    let mut state_sets = Vec::new();
+    let mut id_map: HashMap<String, E::Id> = HashMap::new();
+
+    for map in state_maps {
+        state_sets.push(map.clone());
+        for id in map.values() {
+            id_map.insert(id.to_string(), id.clone());
+        }
+    }
+    if state_sets.is_empty() {
+        return Ok(StateMap::new());
+    }
+
+    let (unconflicted_state, conflicted_keys) = partition_state::<E>(&state_sets);
+
+    let (mut conflicted_events, _conflicted_state_set) = build_conflicted_events::<E>(
+        &state_sets,
+        &conflicted_keys,
+        state_res_rules,
+        &fetch_event,
+        &fetch_conflicted_state_subgraph,
+    );
+
+    let mut auth_context = HashMap::new();
 
     let mut to_fetch = Vec::new();
     for map in &state_sets {
@@ -180,15 +232,15 @@ where
     // Also handle odd number of auth chains if applicable (ruma does not do this for symmetric_diff, but wait, ruma chunks by 2. Let's just do exactly what ruma does, or just compute union minus intersection)
     // Actually, an easier way is just union all chains, and intersect all chains, then diff = union - intersection.
     let mut union_auth = std::collections::HashSet::new();
-    let mut intersect_auth = if _auth_chains.is_empty() {
+    let mut intersect_auth = if auth_chains.is_empty() {
         std::collections::HashSet::new()
     } else {
-        _auth_chains[0]
+        auth_chains[0]
             .iter()
             .map(alloc::string::ToString::to_string)
             .collect::<std::collections::HashSet<_>>()
     };
-    for chain in &_auth_chains {
+    for chain in &auth_chains {
         let set: std::collections::HashSet<_> = chain
             .iter()
             .map(alloc::string::ToString::to_string)
@@ -202,13 +254,13 @@ where
     for id_str in auth_diff {
         if !conflicted_events.contains_key(&id_str) {
             if let Some(id) = id_map.get(&id_str) {
-                if let Some(ev) = _fetch_event(id.borrow()) {
+                if let Some(ev) = fetch_event(id.borrow()) {
                     conflicted_events.insert(id_str.clone(), ruma_to_lean_event(&ev));
                 }
             }
         }
     }
-    for chain in _auth_chains {
+    for chain in auth_chains {
         for id in &chain {
             to_fetch.push(id.clone());
             id_map.insert(id.to_string(), id.clone());
@@ -223,7 +275,7 @@ where
             continue;
         }
 
-        if let Some(ev) = _fetch_event(id.borrow()) {
+        if let Some(ev) = fetch_event(id.borrow()) {
             if !conflicted_events.contains_key(&id_str) {
                 auth_context.insert(id_str.clone(), ruma_to_lean_event(&ev));
             }
@@ -240,7 +292,7 @@ where
         unconflicted_state,
         conflicted_events,
         &auth_context,
-        if _state_res_rules.begin_iterative_auth_checks_with_empty_state_map {
+        if state_res_rules.begin_iterative_auth_checks_with_empty_state_map {
             crate::StateResVersion::V2_1
         } else {
             crate::StateResVersion::V2
@@ -534,7 +586,7 @@ struct SortPriority<'a> {
     version: StateResVersion,
 }
 
-const MAX_POWER_LEVEL: i64 = 9007199254740991; // 2^53 - 1
+const MAX_POWER_LEVEL: i64 = 9_007_199_254_740_991; // 2^53 - 1
 
 /// Dynamically fetches the sender's power level by inspecting the event's immediate `auth_events`.
 /// Recursive traversal of the auth chain is avoided to prevent bypassing immediate restrictions.
