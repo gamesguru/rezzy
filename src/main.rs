@@ -88,28 +88,28 @@ fn detect_version(events: &[serde_json::Value], debug: bool) -> anyhow::Result<S
 fn compute_state_hash(
     state: &std::collections::BTreeMap<(String, Option<String>), String>,
 ) -> String {
-    let mut hash: u64 = 14695981039346656037; // FNV offset basis
+    let mut hash: u64 = 14_695_981_039_346_656_037; // FNV offset basis
     for ((event_type, state_key), event_id) in state {
         for &byte in event_type.as_bytes() {
             hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(1099511628211); // FNV prime
+            hash = hash.wrapping_mul(1_099_511_628_211); // FNV prime
         }
         hash ^= 0x00;
-        hash = hash.wrapping_mul(1099511628211);
+        hash = hash.wrapping_mul(1_099_511_628_211);
         if let Some(key) = state_key {
             for &byte in key.as_bytes() {
                 hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(1099511628211);
+                hash = hash.wrapping_mul(1_099_511_628_211);
             }
         }
         hash ^= 0x00;
-        hash = hash.wrapping_mul(1099511628211);
+        hash = hash.wrapping_mul(1_099_511_628_211);
         for &byte in event_id.as_bytes() {
             hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(1099511628211);
+            hash = hash.wrapping_mul(1_099_511_628_211);
         }
         hash ^= 0xff;
-        hash = hash.wrapping_mul(1099511628211);
+        hash = hash.wrapping_mul(1_099_511_628_211);
     }
     format!("{hash:016x}")
 }
@@ -206,7 +206,7 @@ fn load_file(input_path: &PathBuf) -> anyhow::Result<Vec<serde_json::Value>> {
 /// Merge multiple event sets by `event_id` (first-seen wins, PDUs are immutable).
 /// Returns the merged events and reports stats to stderr.
 fn merge_event_sets(
-    file_sets: Vec<(String, Vec<serde_json::Value>)>,
+    file_sets: &[(String, Vec<serde_json::Value>)],
     debug: bool,
     quiet: bool,
 ) -> anyhow::Result<Vec<serde_json::Value>> {
@@ -360,7 +360,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 let events = load_file(path)?;
                 file_sets.push((label, events));
             }
-            let merged = merge_event_sets(file_sets, args.debug, args.quiet)?;
+            let merged = merge_event_sets(&file_sets, args.debug, args.quiet)?;
             serde_json::Value::Array(merged)
         }
     } else {
@@ -1191,15 +1191,15 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
 /// Convert days since Unix epoch to (year, month, day).
 fn epoch_days_to_ymd(days: i64) -> (i64, u32, u32) {
     // Civil calendar algorithm from Howard Hinnant
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = u64::try_from(z - era * 146_097).unwrap();
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = i64::try_from(yoe).unwrap() + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap();
+    let m = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).unwrap();
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }

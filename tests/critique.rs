@@ -6,14 +6,15 @@ type ResolvedStateMap = HashMap<(String, Option<String>), String>;
 type EventMap = HashMap<String, LeanEvent>;
 
 fn load_fixture(path: &std::path::Path) -> Vec<LeanEvent> {
-    let content = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Missing {path:?}"));
+    let content =
+        std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Missing {}", path.display()));
     if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
         content
             .lines()
             .filter(|line| !line.trim().is_empty())
             .map(|line| {
                 serde_json::from_str(line)
-                    .unwrap_or_else(|_| panic!("Failed to parse line in {path:?}"))
+                    .unwrap_or_else(|_| panic!("Failed to parse line in {}", path.display()))
             })
             .collect()
     } else {
@@ -141,7 +142,7 @@ fn resolve_full(events: &[LeanEvent], version: StateResVersion) -> ResolvedState
         let mut chain = HashSet::new();
         get_auth_chain(head_id, &events_map, &mut chain);
         if first {
-            union = chain.clone();
+            union.clone_from(&chain);
             intersection = chain;
             first = false;
         } else {

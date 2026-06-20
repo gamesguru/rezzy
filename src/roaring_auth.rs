@@ -13,6 +13,11 @@ pub struct AuthGraph {
 }
 
 impl AuthGraph {
+    /// Build the AuthGraph topological structure.
+    ///
+    /// # Panics
+    ///
+    /// Will panic if any internal graph invariants are violated during topological sorting.
     #[must_use]
     pub fn build(sort_context: &HashMap<String, LeanEvent>) -> Self {
         let mut in_degree: HashMap<&str, usize> = HashMap::new();
@@ -55,7 +60,7 @@ impl AuthGraph {
         let mut id_to_index = HashMap::with_capacity(sorted.len());
         let mut index_to_id = Vec::with_capacity(sorted.len());
         for (idx, &id) in sorted.iter().enumerate() {
-            id_to_index.insert(id.to_string(), idx as u32);
+            id_to_index.insert(id.to_string(), u32::try_from(idx).unwrap());
             index_to_id.push(id.to_string());
         }
 

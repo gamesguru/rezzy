@@ -223,7 +223,8 @@ fn test_large_room_10k_auth_chain() {
     let (accepted, _rejected) = check_auth_chain(&events, &RoomState::new());
     // Not all events will pass auth (spammers, unauthorized PL changes),
     // but the generator tries to keep it somewhat coherent.
-    let pass_rate = accepted.len() as f64 / events.len() as f64;
+    let pass_rate = f64::from(u32::try_from(accepted.len()).unwrap())
+        / f64::from(u32::try_from(events.len()).unwrap());
     assert!(
         pass_rate > 0.20,
         "Auth pass rate should be >20%, got {:.1}% ({}/{})",

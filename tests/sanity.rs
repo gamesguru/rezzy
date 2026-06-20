@@ -59,17 +59,18 @@ fn test_compute_state_at_correctness_and_performance() {
             (None, "m.room.message".to_string())
         };
 
+        let u_i = u64::try_from(i).unwrap();
         let ev = LeanEvent {
             event_id: event_id.clone(),
             event_type,
             state_key,
             power_level: 0,
-            origin_server_ts: (i * 1000) as u64,
+            origin_server_ts: u_i * 1000,
             sender: "alice".to_string(),
             content: serde_json::Value::Null,
             prev_events,
             auth_events: Vec::new(),
-            depth: i as u64,
+            depth: u_i,
         };
 
         events_map.insert(event_id, ev);
@@ -137,38 +138,40 @@ fn test_compute_state_at_correctness_and_performance() {
     );
 }
 
+// Helper FNV-1a state hash calculation to match main.rs
+fn compute_state_hash(
+    state: &std::collections::BTreeMap<(String, Option<String>), String>,
+) -> String {
+    let mut hash: u64 = 14_695_981_039_346_656_037;
+    for ((event_type, state_key), event_id) in state {
+        for &byte in event_type.as_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+        hash ^= 0x00;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+        if let Some(key) = state_key {
+            for &byte in key.as_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(1_099_511_628_211);
+            }
+        }
+        hash ^= 0x00;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+        for &byte in event_id.as_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(1_099_511_628_211);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    format!("{hash:016x}")
+}
+
 #[test]
 fn test_delta_chain_generation_correctness() {
     use ruma_lean::LeanEvent;
     use std::collections::{BTreeMap, HashMap};
-
-    // Helper FNV-1a state hash calculation to match main.rs
-    fn compute_state_hash(state: &BTreeMap<(String, Option<String>), String>) -> String {
-        let mut hash: u64 = 14695981039346656037;
-        for ((event_type, state_key), event_id) in state {
-            for &byte in event_type.as_bytes() {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(1099511628211);
-            }
-            hash ^= 0x00;
-            hash = hash.wrapping_mul(1099511628211);
-            if let Some(key) = state_key {
-                for &byte in key.as_bytes() {
-                    hash ^= u64::from(byte);
-                    hash = hash.wrapping_mul(1099511628211);
-                }
-            }
-            hash ^= 0x00;
-            hash = hash.wrapping_mul(1099511628211);
-            for &byte in event_id.as_bytes() {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(1099511628211);
-            }
-            hash ^= 0xff;
-            hash = hash.wrapping_mul(1099511628211);
-        }
-        format!("{hash:016x}")
-    }
 
     // 1. Create three chronological events
     // Event 1: state creation

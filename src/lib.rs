@@ -64,12 +64,13 @@ fn ruma_to_lean_event<E: Event>(ev: &E) -> crate::LeanEvent {
 }
 
 #[cfg(feature = "mock-ruma")]
-fn partition_state<'a, E>(
-    state_sets: &[StateMap<E::Id>],
-) -> (
+type PartitionedState = (
     std::collections::BTreeMap<(String, Option<String>), String>,
     std::collections::HashSet<(ruma_events::StateEventType, String)>,
-)
+);
+
+#[cfg(feature = "mock-ruma")]
+fn partition_state<'a, E>(state_sets: &[StateMap<E::Id>]) -> PartitionedState
 where
     E: Event + Clone,
     E::Id: 'a,
@@ -111,7 +112,7 @@ where
 fn build_conflicted_events<'a, E>(
     state_sets: &[StateMap<E::Id>],
     conflicted_keys: &std::collections::HashSet<(ruma_events::StateEventType, String)>,
-    state_res_rules: &ruma_common::room_version_rules::StateResolutionV2Rules,
+    state_res_rules: ruma_common::room_version_rules::StateResolutionV2Rules,
     fetch_event: &impl Fn(&ruma_common::EventId) -> Option<E>,
     fetch_conflicted_state_subgraph: &impl Fn(
         &StateMap<Vec<E::Id>>,
@@ -213,19 +214,19 @@ where
     let (mut conflicted_events, _conflicted_state_set) = build_conflicted_events::<E>(
         &state_sets,
         &conflicted_keys,
-        state_res_rules,
+        *state_res_rules,
         &fetch_event,
         &fetch_conflicted_state_subgraph,
     );
 
     let mut auth_context = HashMap::new();
 
-    let mut to_fetch = Vec::new();
-    for map in &state_sets {
-        for id in map.values() {
-            to_fetch.push(id.clone());
-            id_map.insert(id.to_string(), id.clone());
-        }
+    let mut to_fetch: Vec<E::Id> = state_sets
+        .iter()
+        .flat_map(|m| m.values().cloned())
+        .collect();
+    for id in &to_fetch {
+        id_map.insert(id.to_string(), id.clone());
     }
 
     // Compute auth difference
@@ -390,7 +391,7 @@ where
         }
 
         fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> {
-            Ok(v as i64)
+            Ok(i64::try_from(v).unwrap_or(i64::MAX))
         }
 
         fn visit_f64<E: de::Error>(self, v: f64) -> Result<i64, E> {
@@ -432,14 +433,11 @@ pub struct LeanEvent {
 
 impl LeanEvent {
     /// Validates basic syntactic limits and strict event whitelists as defined by the custom subset.
+    ///
+    /// # Errors
+    ///
+    /// Returns static string error if syntactic checks fail.
     pub fn validate_syntactic(&self) -> Result<(), &'static str> {
-        if self.prev_events.len() > 20 {
-            return Err("prev_events exceeds maximum allowed length of 20");
-        }
-        if self.auth_events.len() > 10 {
-            return Err("auth_events exceeds maximum allowed length of 10");
-        }
-
         const ALLOWED_EVENT_TYPES: &[&str] = &[
             "m.room.create",
             "m.room.join_rules",
@@ -460,6 +458,13 @@ impl LeanEvent {
             "m.space.child",
             "m.space.parent",
         ];
+
+        if self.prev_events.len() > 20 {
+            return Err("prev_events exceeds maximum allowed length of 20");
+        }
+        if self.auth_events.len() > 10 {
+            return Err("auth_events exceeds maximum allowed length of 10");
+        }
 
         if !ALLOWED_EVENT_TYPES.contains(&self.event_type.as_str()) {
             return Err("event_type is not a recognized Matrix specification event");
@@ -677,9 +682,8 @@ fn memoized_auth_distance<'a>(
         return dist;
     }
 
-    let ev = match auth_context.get(curr_id) {
-        Some(ev) => ev,
-        None => return 0,
+    let Some(ev) = auth_context.get(curr_id) else {
+        return 0;
     };
 
     if ev.auth_events.is_empty() {
@@ -898,6 +902,26 @@ pub fn lean_kahn_sort(
     }
 }
 
+fn is_v2_2_duplicate_auth_key(
+    ev: &LeanEvent,
+    auth_context: &std::collections::HashMap<String, LeanEvent>,
+    conflicted_events: &std::collections::HashMap<String, LeanEvent>,
+) -> bool {
+    let mut seen_keys = alloc::collections::BTreeSet::new();
+    for auth_id in &ev.auth_events {
+        if let Some(auth_ev) = auth_context
+            .get(auth_id)
+            .or_else(|| conflicted_events.get(auth_id))
+        {
+            let key = (auth_ev.event_type.clone(), auth_ev.state_key.clone());
+            if !seen_keys.insert(key) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[must_use]
 pub fn resolve_lean(
     unconflicted_state: BTreeMap<(String, Option<String>), String>,
@@ -933,26 +957,10 @@ pub fn resolve_lean(
 
     for (id, ev) in sort_set {
         // V2.2: Hard Rejection of Duplicate Auth Keys
-        if version == StateResVersion::V2_2 {
-            let mut seen_keys = alloc::collections::BTreeSet::new();
-            let mut duplicate = false;
-            for auth_id in &ev.auth_events {
-                if let Some(auth_ev) = auth_context
-                    .get(auth_id)
-                    .or_else(|| conflicted_events.get(auth_id))
-                {
-                    let key = (auth_ev.event_type.clone(), auth_ev.state_key.clone());
-                    if !seen_keys.insert(key) {
-                        duplicate = true;
-                        break;
-                    }
-                }
-            }
-            if duplicate {
-                // Hard reject: skip inserting it into power_events or non_power_events.
-                // It will be completely ignored by the state resolution algorithm.
-                continue;
-            }
+        if version == StateResVersion::V2_2
+            && is_v2_2_duplicate_auth_key(ev, auth_context, &conflicted_events)
+        {
+            continue;
         }
 
         if ev.event_type == "m.room.member"
