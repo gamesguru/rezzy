@@ -588,9 +588,9 @@ const MAX_POWER_LEVEL: i64 = 9_007_199_254_740_991; // 2^53 - 1
 
 /// Dynamically fetches the sender's power level by inspecting the event's immediate `auth_events`.
 /// Recursive traversal of the auth chain is avoided to prevent bypassing immediate restrictions.
-fn get_power_level_from_auth_chain(
+fn get_power_level_from_auth_chain<S: std::hash::BuildHasher>(
     event: &LeanEvent,
-    auth_context: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent, S>,
     create_ev: Option<&LeanEvent>,
 ) -> i64 {
     let mut pl_event = None;
@@ -661,9 +661,9 @@ fn get_power_level_from_auth_chain(
 }
 
 /// Computes the shortest distance from the event to the m.room.create event via `auth_events`.
-fn memoized_auth_distance<'a>(
+fn memoized_auth_distance<'a, S: std::hash::BuildHasher>(
     curr_id: &'a str,
-    auth_context: &'a HashMap<String, LeanEvent>,
+    auth_context: &'a HashMap<String, LeanEvent, S>,
     create_id: &str,
     memo: &mut HashMap<&'a str, u64>,
 ) -> u64 {
@@ -773,10 +773,15 @@ impl PartialOrd for SortPriority<'_> {
 /// Kahn's Topological Sort with full diagnostic output.
 /// Returns a `KahnSortResult` that distinguishes between successful sorts
 /// and cycle detection, providing the stuck set for debugging.
+///
+/// # Panics
+///
+/// This function can panic if an internal invariant is violated, such as a
+/// missing in-degree entry during node processing.
 #[must_use]
-pub fn lean_kahn_sort_detailed(
-    events: &HashMap<String, LeanEvent>,
-    auth_context: &HashMap<String, LeanEvent>,
+pub fn lean_kahn_sort_detailed<S: std::hash::BuildHasher>(
+    events: &HashMap<String, LeanEvent, S>,
+    auth_context: &HashMap<String, LeanEvent, S>,
     create_ev: Option<&LeanEvent>,
     version: StateResVersion,
 ) -> KahnSortResult {
@@ -880,9 +885,9 @@ pub fn lean_kahn_sort_detailed(
 /// A simplified implementation of Kahn's Topological Sort.
 /// Backward-compatible wrapper that returns an empty Vec on cycles.
 #[must_use]
-pub fn lean_kahn_sort(
-    events: &HashMap<String, LeanEvent>,
-    auth_context: &HashMap<String, LeanEvent>,
+pub fn lean_kahn_sort<S: std::hash::BuildHasher>(
+    events: &HashMap<String, LeanEvent, S>,
+    auth_context: &HashMap<String, LeanEvent, S>,
     create_ev: Option<&LeanEvent>,
     version: StateResVersion,
 ) -> Vec<String> {
@@ -895,10 +900,10 @@ pub fn lean_kahn_sort(
     }
 }
 
-fn is_v2_2_duplicate_auth_key(
+fn is_v2_2_duplicate_auth_key<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     ev: &LeanEvent,
-    auth_context: &std::collections::HashMap<String, LeanEvent>,
-    conflicted_events: &std::collections::HashMap<String, LeanEvent>,
+    auth_context: &std::collections::HashMap<String, LeanEvent, S1>,
+    conflicted_events: &std::collections::HashMap<String, LeanEvent, S2>,
 ) -> bool {
     let mut seen_keys = alloc::collections::BTreeSet::new();
     for auth_id in &ev.auth_events {
@@ -916,10 +921,10 @@ fn is_v2_2_duplicate_auth_key(
 }
 
 #[must_use]
-pub fn resolve_lean(
+pub fn resolve_lean<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     unconflicted_state: BTreeMap<(String, Option<String>), String>,
-    conflicted_events: HashMap<String, LeanEvent>,
-    auth_context: &HashMap<String, LeanEvent>,
+    conflicted_events: HashMap<String, LeanEvent, S1>,
+    auth_context: &HashMap<String, LeanEvent, S2>,
     version: StateResVersion,
 ) -> BTreeMap<(String, Option<String>), String> {
     // Build a merged lookup map for sort/mainline operations.
@@ -1036,17 +1041,17 @@ pub fn resolve_lean(
     final_resolved
 }
 
-struct OverlayState<'a> {
+struct OverlayState<'a, S1, S2> {
     resolved: &'a BTreeMap<(String, Option<String>), String>,
-    auth_context: &'a HashMap<String, LeanEvent>,
-    conflicted: &'a HashMap<String, LeanEvent>,
+    auth_context: &'a HashMap<String, LeanEvent, S1>,
+    conflicted: &'a HashMap<String, LeanEvent, S2>,
     local_auth: BTreeMap<(String, Option<String>), LeanEvent>,
     create_ev: Option<&'a LeanEvent>,
     version: StateResVersion,
     is_power_phase: bool,
 }
 
-impl crate::auth::StateProvider for OverlayState<'_> {
+impl<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher> crate::auth::StateProvider for OverlayState<'_, S1, S2> {
     fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent> {
         let query: &dyn crate::auth::StateKeyDyn = &(event_type, state_key);
 
@@ -1110,11 +1115,11 @@ impl crate::auth::StateProvider for OverlayState<'_> {
 /// Targeted iterative auth check. Per Matrix spec, the auth context for event 'e'
 /// consists of the events in the conflict set (E) and the currently resolved state (S).
 #[allow(clippy::too_many_arguments)]
-fn iterative_auth_ok(
+fn iterative_auth_ok<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     event: &LeanEvent,
     resolved: &BTreeMap<(String, Option<String>), String>,
-    auth_context: &HashMap<String, LeanEvent>,
-    conflicted_events: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent, S1>,
+    conflicted_events: &HashMap<String, LeanEvent, S2>,
     local_auth: BTreeMap<(String, Option<String>), LeanEvent>,
     cached_create: Option<&LeanEvent>,
     version: StateResVersion,
@@ -1137,10 +1142,10 @@ fn iterative_auth_ok(
 /// to avoid redundant graph walks. The context is represented as a map of
 /// (type, `state_key`) -> (`LeanEvent`, depth), ensuring that for each key, the "closest"
 /// auth event in the chain is preserved (shortest path).
-fn compute_local_auth(
+fn compute_local_auth<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     event: &LeanEvent,
-    auth_context: &HashMap<String, LeanEvent>,
-    conflicted_events: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent, S1>,
+    conflicted_events: &HashMap<String, LeanEvent, S2>,
     cache: &mut LocalAuthCache,
     version: StateResVersion,
 ) -> BTreeMap<(String, Option<String>), LeanEvent> {
@@ -1377,8 +1382,8 @@ pub struct SubgraphResult {
 }
 
 #[must_use]
-pub fn compute_v2_1_conflicted_subgraph(
-    auth_graph: &HashMap<String, LeanEvent>,
+pub fn compute_v2_1_conflicted_subgraph<S: std::hash::BuildHasher>(
+    auth_graph: &HashMap<String, LeanEvent, S>,
     conflicted_set: &[String],
 ) -> HashMap<String, LeanEvent> {
     compute_v2_1_conflicted_subgraph_bounded(auth_graph, conflicted_set, Some(2000)).subgraph
@@ -1389,8 +1394,8 @@ pub fn compute_v2_1_conflicted_subgraph(
 /// history-flooding `DoS` attacks where a rogue admin generates millions of
 /// spoofed events on a dead-end fork.
 #[must_use]
-pub fn compute_v2_1_conflicted_subgraph_bounded(
-    auth_graph: &HashMap<String, LeanEvent>,
+pub fn compute_v2_1_conflicted_subgraph_bounded<S: std::hash::BuildHasher>(
+    auth_graph: &HashMap<String, LeanEvent, S>,
     conflicted_set: &[String],
     max_auth_depth: Option<usize>,
 ) -> SubgraphResult {
@@ -1518,10 +1523,10 @@ impl LeanEvent {
 }
 
 #[must_use]
-pub fn is_ancestor(
+pub fn is_ancestor<S: std::hash::BuildHasher>(
     child_id: &str,
     possible_ancestor_id: &str,
-    context: &HashMap<String, LeanEvent>,
+    context: &HashMap<String, LeanEvent, S>,
 ) -> bool {
     if child_id == possible_ancestor_id {
         return true;
@@ -1549,9 +1554,9 @@ pub fn is_ancestor(
 /// Cycle 0 Topological Filter: Vectorized Causal Domination Operator (CDO)
 /// Executes strictly on the Conflicted State Subgraph (C).
 #[must_use]
-pub fn apply_cdo_filter(
-    conflicted_events: &HashMap<String, LeanEvent>,
-    auth_context: &HashMap<String, LeanEvent>,
+pub fn apply_cdo_filter<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
+    conflicted_events: &HashMap<String, LeanEvent, S1>,
+    auth_context: &HashMap<String, LeanEvent, S2>,
 ) -> HashMap<String, LeanEvent> {
     // Build sort/DAG context to determine ancestries
     let dag_context: HashMap<String, LeanEvent> = auth_context
@@ -1660,9 +1665,9 @@ pub fn apply_cdo_filter(
 /// Computes the state map at (after) a given target event ID,
 /// assuming all ancestral events are present in `events_map`.
 #[must_use]
-pub fn compute_state_at(
+pub fn compute_state_at<S: std::hash::BuildHasher>(
     target_event_id: &str,
-    events_map: &HashMap<String, LeanEvent>,
+    events_map: &HashMap<String, LeanEvent, S>,
 ) -> Option<BTreeMap<(String, Option<String>), String>> {
     if !events_map.contains_key(target_event_id) {
         return None;
