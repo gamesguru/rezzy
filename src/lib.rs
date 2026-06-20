@@ -388,13 +388,20 @@ where
         }
 
         fn visit_f64<E: de::Error>(self, v: f64) -> Result<i64, E> {
-            Ok(v as i64)
+            let s = alloc::format!("{v:.0}");
+            s.parse::<i64>().map_err(E::custom)
         }
 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<i64, E> {
-            Ok(v.parse::<i64>()
-                .or_else(|_| v.parse::<f64>().map(|f| f as i64))
-                .unwrap_or(0))
+            if let Ok(i) = v.parse::<i64>() {
+                return Ok(i);
+            }
+            if let Ok(f) = v.parse::<f64>() {
+                if let Ok(i) = alloc::format!("{f:.0}").parse::<i64>() {
+                    return Ok(i);
+                }
+            }
+            Ok(0)
         }
     }
 
@@ -1038,6 +1045,7 @@ pub fn resolve_lean<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     for (k, v) in resolved {
         final_resolved.insert(k, v);
     }
+    drop(conflicted_events);
     final_resolved
 }
 
@@ -1051,7 +1059,9 @@ struct OverlayState<'a, S1, S2> {
     is_power_phase: bool,
 }
 
-impl<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher> crate::auth::StateProvider for OverlayState<'_, S1, S2> {
+impl<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher> crate::auth::StateProvider
+    for OverlayState<'_, S1, S2>
+{
     fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent> {
         let query: &dyn crate::auth::StateKeyDyn = &(event_type, state_key);
 
