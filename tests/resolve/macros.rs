@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_lines, clippy::type_complexity, clippy::similar_names)]
 use std::{
     cmp::Ordering, collections::BTreeSet, error::Error, fs, ops::Deref, path::Path, sync::LazyLock,
 };

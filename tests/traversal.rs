@@ -1,3 +1,4 @@
+#![allow(clippy::too_many_lines, clippy::type_complexity, clippy::similar_names)]
 use ruma_lean::{resolve_lean, LeanEvent, StateResVersion};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};

@@ -930,10 +930,18 @@ fn is_v2_2_duplicate_auth_key<S1: std::hash::BuildHasher, S2: std::hash::BuildHa
 #[must_use]
 pub fn resolve_lean<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     unconflicted_state: BTreeMap<(String, Option<String>), String>,
-    conflicted_events: HashMap<String, LeanEvent, S1>,
+    mut conflicted_events: HashMap<String, LeanEvent, S1>,
     auth_context: &HashMap<String, LeanEvent, S2>,
     version: StateResVersion,
 ) -> BTreeMap<(String, Option<String>), String> {
+    if version == StateResVersion::V2_1_1 {
+        let filtered = apply_cdo_filter(&conflicted_events, auth_context);
+        conflicted_events.clear();
+        for (k, v) in filtered {
+            conflicted_events.insert(k, v);
+        }
+    }
+
     // Build a merged lookup map for sort/mainline operations.
     // auth_context intentionally excludes events that are in conflicted_events;
     // however, a conflicted event (e.g. $01-power_levels) may appear in the

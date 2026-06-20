@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::type_complexity, clippy::similar_names)]
 mod tests {
 
     use crate::*;
