@@ -640,13 +640,13 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
 
             let mut state_after_map: HashMap<
                 String,
-                std::collections::BTreeMap<(String, Option<String>), String>,
+                std::sync::Arc<std::collections::BTreeMap<(String, Option<String>), String>>,
             > = HashMap::new();
             let mut state_hash_map: HashMap<String, String> = HashMap::new();
             let mut checkpoints = Vec::new();
 
             for ev in &sorted_events {
-                let mut state_before = std::collections::BTreeMap::new();
+                let mut state_before = std::sync::Arc::new(std::collections::BTreeMap::new());
                 let mut parent_hash = None;
 
                 if ev.prev_events.is_empty() {
@@ -675,59 +675,86 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                         if parent_states.len() == 1 {
                             state_before = parent_states[0].clone();
                         } else {
-                            // Run state-res on parent states
-                            let num_sets = parent_states.len();
-                            let mut occurrences: HashMap<
-                                (String, Option<String>),
-                                HashMap<String, usize>,
-                            > = HashMap::new();
-                            for map in &parent_states {
-                                for (key, id) in map {
-                                    *occurrences
-                                        .entry(key.clone())
-                                        .or_default()
-                                        .entry(id.clone())
-                                        .or_insert(0) += 1;
+                            // High-performance optimization: if all parent states are identical,
+                            // we don't need to run heavy state-res.
+                            let mut all_identical = true;
+                            let first_state = &parent_states[0];
+                            for state in &parent_states[1..] {
+                                if !std::sync::Arc::ptr_eq(state, first_state)
+                                    && state != first_state
+                                {
+                                    all_identical = false;
+                                    break;
                                 }
                             }
 
-                            let mut unconflicted_state = std::collections::BTreeMap::new();
-                            let mut conflicted_state_set = Vec::new();
-
-                            for (key, ids) in occurrences {
-                                if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
-                                    let id = ids.keys().next().unwrap();
-                                    unconflicted_state.insert(key, id.clone());
-                                } else {
-                                    for id in ids.keys() {
-                                        conflicted_state_set.push(id.clone());
+                            if all_identical {
+                                state_before = first_state.clone();
+                            } else {
+                                // Run state-res on parent states
+                                let num_sets = parent_states.len();
+                                let mut occurrences: HashMap<
+                                    (String, Option<String>),
+                                    HashMap<String, usize>,
+                                > = HashMap::new();
+                                for map in &parent_states {
+                                    for (key, id) in map.as_ref() {
+                                        *occurrences
+                                            .entry(key.clone())
+                                            .or_default()
+                                            .entry(id.clone())
+                                            .or_insert(0) += 1;
                                     }
                                 }
-                            }
 
-                            let mut conflicted_events = HashMap::new();
-                            for id in &conflicted_state_set {
-                                if let Some(parent_ev) = events_map.get(id) {
-                                    conflicted_events.insert(id.clone(), parent_ev.clone());
+                                let mut unconflicted_state = std::collections::BTreeMap::new();
+                                let mut conflicted_state_set = Vec::new();
+
+                                for (key, ids) in occurrences {
+                                    if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
+                                        let id = ids.keys().next().unwrap();
+                                        unconflicted_state.insert(key, id.clone());
+                                    } else {
+                                        for id in ids.keys() {
+                                            conflicted_state_set.push(id.clone());
+                                        }
+                                    }
                                 }
-                            }
 
-                            state_before = ruma_lean::resolve_lean(
-                                unconflicted_state,
-                                conflicted_events,
-                                &events_map,
-                                version,
-                            );
+                                let mut conflicted_events = HashMap::new();
+                                for id in &conflicted_state_set {
+                                    if let Some(parent_ev) = events_map.get(id) {
+                                        conflicted_events.insert(id.clone(), parent_ev.clone());
+                                    }
+                                }
+
+                                // Optimize resolve_lean by only passing the transitively pruned
+                                // conflicted auth subgraph instead of the entire events_map.
+                                let auth_context = ruma_lean::compute_v2_1_conflicted_subgraph(
+                                    &events_map,
+                                    &conflicted_state_set,
+                                );
+
+                                let resolved = ruma_lean::resolve_lean(
+                                    unconflicted_state,
+                                    conflicted_events,
+                                    &auth_context,
+                                    version,
+                                );
+                                state_before = std::sync::Arc::new(resolved);
+                            }
                         }
                     }
                 }
 
                 let mut state_after = state_before.clone();
                 if ev.state_key.is_some() {
-                    state_after.insert(
+                    let mut modified = state_before.as_ref().clone();
+                    modified.insert(
                         (ev.event_type.clone(), ev.state_key.clone()),
                         ev.event_id.clone(),
                     );
+                    state_after = std::sync::Arc::new(modified);
                 }
 
                 let hash_str = compute_state_hash(&state_after);
@@ -741,7 +768,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                     .and_then(|p_id| state_after_map.get(p_id));
 
                 if let Some(parent_state) = primary_parent_state {
-                    for (key, event_id) in &state_after {
+                    for (key, event_id) in state_after.as_ref() {
                         match parent_state.get(key) {
                             Some(parent_event_id) if parent_event_id == event_id => {}
                             _ => {
@@ -753,7 +780,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                             }
                         }
                     }
-                    for (key, _) in parent_state {
+                    for (key, _) in parent_state.as_ref() {
                         if !state_after.contains_key(key) {
                             deltas.push(serde_json::json!({
                                 "type": key.0,
@@ -763,7 +790,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                         }
                     }
                 } else {
-                    for (key, event_id) in &state_after {
+                    for (key, event_id) in state_after.as_ref() {
                         deltas.push(serde_json::json!({
                             "type": key.0,
                             "state_key": key.1,

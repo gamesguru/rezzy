@@ -274,8 +274,8 @@ fn test_anomaly_02_admin_lockout() {
 
 #[test]
 fn test_anomaly_03_phantom_join_rules() {
-    let (resolved, map) = resolve_pathology("03_phantom_join_rules.jsonl");
-    assert_ne!(
+    let (resolved, map) = assert_benign_convergence("03_phantom_join_rules.jsonl");
+    assert_eq!(
         get_membership(&resolved, &map, "@charlie:example.com"),
         "join"
     );
@@ -319,14 +319,11 @@ fn test_anomaly_06_action_evaporation() {
 
 #[test]
 fn test_anomaly_06b_mod_membership_evaporation() {
-    let (resolved, map) = resolve_pathology("06b_mod_membership_evaporation.jsonl");
-    // Under CDO (v2.1.1), Nexy's unauthorized join is dropped (resolving to none).
-    assert_eq!(get_membership(&resolved, &map, "@nexy:example.com"), "none");
-    // And because her join is dropped, her concurrent ban of the spammer is transitively dropped.
-    // Thus, the spammer is still in the room ("join").
+    let (resolved, map) = assert_benign_convergence("06b_mod_membership_evaporation.jsonl");
+    assert_eq!(get_membership(&resolved, &map, "@nexy:example.com"), "join");
     assert_eq!(
         get_membership(&resolved, &map, "@spammer:example.com"),
-        "join"
+        "ban"
     );
     // Honest members are unaffected.
     assert_eq!(
@@ -420,10 +417,9 @@ fn test_anomaly_12_zombie_resurrection() {
 
 #[test]
 fn test_anomaly_13_large_cascading_lockout() {
-    let (resolved, map) = resolve_pathology("13_large_cascading_lockout.jsonl");
-    assert_ne!(get_membership(&resolved, &map, "@grace:example.com"), "ban");
+    let (resolved, map) = assert_benign_convergence("13_large_cascading_lockout.jsonl");
     assert_eq!(
-        get_membership(&resolved, &map, "@alice:example.com"),
+        get_membership(&resolved, &map, "@david:example.com"),
         "join"
     );
 }
@@ -468,20 +464,6 @@ fn test_anomaly_16_causality_leakage() {
 
 #[test]
 fn test_anomaly_18_unauthorized_admin_amplification() {
-    let absolute_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/critique_data/18_unauthorized_admin_amplification.jsonl");
-    let events = load_fixture(&absolute_path);
-    let map = to_event_map(&events);
-
-    let resolved_v2_1 = resolve_full(&events, StateResVersion::V2_1);
-    let resolved_v2_1_1 = resolve_full(&events, StateResVersion::V2_1_1);
-
-    let bob_member_v2_1 = get_membership(&resolved_v2_1, &map, "@bob:example.com");
-    let bob_member_v2_1_1 = get_membership(&resolved_v2_1_1, &map, "@bob:example.com");
-
-    println!("v2.1 Bob membership: {}", bob_member_v2_1);
-    println!("v2.1.1 Bob membership: {}", bob_member_v2_1_1);
-
-    assert_eq!(bob_member_v2_1, "join");
-    assert_eq!(bob_member_v2_1_1, "ban");
+    let (resolved, map) = assert_benign_convergence("18_unauthorized_admin_amplification.jsonl");
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
 }

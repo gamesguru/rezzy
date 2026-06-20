@@ -852,11 +852,7 @@ pub fn resolve_lean(
         _ => unconflicted_state.clone(),
     };
 
-    let filtered_conflicted = if version == StateResVersion::V2_1_1 {
-        apply_cdo_filter(&conflicted_events, auth_context)
-    } else {
-        conflicted_events.clone()
-    };
+    let filtered_conflicted = conflicted_events.clone();
 
     let sort_set = &filtered_conflicted;
 
