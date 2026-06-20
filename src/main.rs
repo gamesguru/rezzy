@@ -215,7 +215,7 @@ fn merge_event_sets(
     let mut merged: Vec<serde_json::Value> = Vec::new();
     let mut per_file_ids: Vec<HashSet<String>> = Vec::with_capacity(num_files);
 
-    for (label, events) in &file_sets {
+    for (label, events) in file_sets {
         let mut file_ids = HashSet::with_capacity(events.len());
         let mut added = 0usize;
         let mut dupes = 0usize;

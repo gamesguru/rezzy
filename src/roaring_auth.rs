@@ -13,7 +13,7 @@ pub struct AuthGraph {
 }
 
 impl AuthGraph {
-    /// Build the AuthGraph topological structure.
+    /// Build the `AuthGraph` topological structure.
     ///
     /// # Panics
     ///

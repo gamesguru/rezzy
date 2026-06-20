@@ -174,7 +174,6 @@ fn test_delta_chain_generation_correctness() {
     use std::collections::{BTreeMap, HashMap};
 
     // 1. Create three chronological events
-    // Event 1: state creation
     let ev1 = LeanEvent {
         event_id: "$1".to_string(),
         event_type: "m.room.create".to_string(),
@@ -182,7 +181,6 @@ fn test_delta_chain_generation_correctness() {
         depth: 1,
         ..Default::default()
     };
-    // Event 2: state member join
     let ev2 = LeanEvent {
         event_id: "$2".to_string(),
         event_type: "m.room.member".to_string(),
@@ -191,7 +189,6 @@ fn test_delta_chain_generation_correctness() {
         depth: 2,
         ..Default::default()
     };
-    // Event 3: non-state message
     let ev3 = LeanEvent {
         event_id: "$3".to_string(),
         event_type: "m.room.message".to_string(),

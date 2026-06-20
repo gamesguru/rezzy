@@ -134,7 +134,7 @@ fn simulate_federation_lag(
         }
 
         // Simulate network lag: 1 second per batch of 3 events fetched over federation
-        let batches = u64::try_from((result.missing_auth_events.len() + 2) / 3).unwrap();
+        let batches = u64::try_from(result.missing_auth_events.len().div_ceil(3)).unwrap();
         simulated_latency_secs += batches;
 
         for missing_id in result.missing_auth_events {

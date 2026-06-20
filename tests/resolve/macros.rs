@@ -173,9 +173,9 @@ pub(super) fn test_resolve_batches(pdus_paths: &[&str]) -> String {
     .expect("atomic state resolution should succeed");
 
     let iteratively_resolved_state =
-        state_map_to_json_string(iteratively_resolved_state, &pdus_map);
-    let batched_resolved_state = state_map_to_json_string(batched_resolved_state, &pdus_map);
-    let atomic_resolved_state = state_map_to_json_string(atomic_resolved_state, &pdus_map);
+        state_map_to_json_string(&iteratively_resolved_state, &pdus_map);
+    let batched_resolved_state = state_map_to_json_string(&batched_resolved_state, &pdus_map);
+    let atomic_resolved_state = state_map_to_json_string(&atomic_resolved_state, &pdus_map);
 
     assert_eq_diff!(
         "iterative" => iteratively_resolved_state,
@@ -239,7 +239,7 @@ pub(super) fn test_resolve_state_maps(state_maps_paths: &[&str], pdus_paths: &[&
     )
     .expect("atomic state resolution should succeed");
 
-    state_map_to_json_string(resolved_state, &pdus_map)
+    state_map_to_json_string(&resolved_state, &pdus_map)
 }
 
 /// Load PDUs from JSON files and extract the room version rules.
@@ -733,7 +733,7 @@ impl PartialOrd for ResolvedStateEvent<'_> {
 /// are pretty printed using a simplified format containing only the `event_id`, `type`, `state_key`
 /// and `content` fields.
 fn state_map_to_json_string(
-    state_map: StateMap<OwnedEventId>,
+    state_map: &StateMap<OwnedEventId>,
     pdus_map: &EventIdMap<OwnedEventId, Pdu>,
 ) -> String {
     let resolved_state = state_map
