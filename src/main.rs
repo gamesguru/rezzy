@@ -324,8 +324,8 @@ fn merge_event_sets(
     Ok(merged)
 }
 
-fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
-    let input_val: serde_json::Value = if let Some(room_id) = &args.room {
+fn load_or_fetch_input_value(args: &Args) -> anyhow::Result<serde_json::Value> {
+    if let Some(room_id) = &args.room {
         let homeserver = args
             .homeserver
             .as_deref()
@@ -343,12 +343,12 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
             );
             std::env::var(&env_key).ok()
         });
-        fetch_room_state(homeserver, room_id, token.as_deref())?
+        fetch_room_state(homeserver, room_id, token.as_deref())
     } else if !args.input.is_empty() {
         if args.input.len() == 1 {
             // Single input: preserve existing behavior (supports {events, heads} wrapper)
             let events = load_file(&args.input[0])?;
-            serde_json::Value::Array(events)
+            Ok(serde_json::Value::Array(events))
         } else {
             // Multiple inputs: merge DAGs by event_id
             let mut file_sets = Vec::with_capacity(args.input.len());
@@ -361,12 +361,16 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 file_sets.push((label, events));
             }
             let merged = merge_event_sets(&file_sets, args.debug, args.quiet)?;
-            serde_json::Value::Array(merged)
+            Ok(serde_json::Value::Array(merged))
         }
     } else {
         anyhow::bail!("Either --input or --room must be provided.");
-    };
+    }
+}
 
+fn parse_and_extract_heads(
+    input_val: &serde_json::Value,
+) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
     let (raw_events, heads) = if let Some(obj) = input_val.as_object() {
         if obj.contains_key("events") && obj.contains_key("heads") {
             let evs = obj
@@ -390,13 +394,780 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
             }
             (evs, hds)
         } else {
-            (vec![input_val], Vec::new())
+            (vec![input_val.clone()], Vec::new())
         }
     } else if let Some(arr) = input_val.as_array() {
         (arr.clone(), Vec::new())
     } else {
         anyhow::bail!("Unexpected JSON format");
     };
+    Ok((raw_events, heads))
+}
+
+fn compute_state_maps(
+    heads: &[String],
+    events_map: &HashMap<String, LeanEvent>,
+    raw_map: &HashMap<String, serde_json::Value>,
+) -> Vec<HashMap<(String, Option<String>), String>> {
+    if heads.len() <= 1 {
+        // Single head (or no heads): forward walk — sort by Matrix depth ascending,
+        // keep the highest-depth (most recent) event for each (type, state_key).
+        // This correctly matches production server state resolution for linear DAGs.
+        let reachable: std::collections::HashSet<String> = if heads.len() == 1 {
+            // Only include events reachable from the head via prev_events
+            let mut visited = std::collections::HashSet::new();
+            let mut stack = vec![heads[0].clone()];
+            while let Some(ev_id) = stack.pop() {
+                if visited.insert(ev_id.clone()) {
+                    if let Some(ev) = events_map.get(&ev_id) {
+                        for pe in &ev.prev_events {
+                            stack.push(pe.clone());
+                        }
+                    }
+                }
+            }
+            visited
+        } else {
+            events_map.keys().cloned().collect()
+        };
+
+        let mut sorted_events: Vec<&LeanEvent> = events_map
+            .values()
+            .filter(|ev| reachable.contains(&ev.event_id))
+            .collect();
+        sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
+
+        let mut state_map = std::collections::HashMap::new();
+        for ev in sorted_events {
+            if raw_map
+                .get(&ev.event_id)
+                .is_some_and(|r| r.get("state_key").is_some())
+            {
+                let key = (ev.event_type.clone(), ev.state_key.clone());
+                // Later (higher depth) events overwrite earlier ones
+                state_map.insert(key, ev.event_id.clone());
+            }
+        }
+        vec![state_map]
+    } else {
+        // Multi-head (forked DAG): compute separate state sets per head
+        // via backward walk, then let resolve_lean handle conflicts.
+        let mut maps = Vec::new();
+        for head_id in heads {
+            let mut reachable: Vec<&LeanEvent> = Vec::new();
+            let mut visited = std::collections::HashSet::new();
+            let mut stack = vec![head_id.clone()];
+
+            while let Some(ev_id) = stack.pop() {
+                if visited.insert(ev_id.clone()) {
+                    if let Some(ev) = events_map.get(&ev_id) {
+                        reachable.push(ev);
+                        for prev_ev_id in &ev.prev_events {
+                            stack.push(prev_ev_id.clone());
+                        }
+                    }
+                }
+            }
+
+            // Sort by depth ascending, keep latest for each key
+            reachable.sort_by(|a, b| a.cmp_by_depth(b));
+            let mut state_map = std::collections::HashMap::new();
+            for ev in reachable {
+                if raw_map
+                    .get(&ev.event_id)
+                    .is_some_and(|r| r.get("state_key").is_some())
+                {
+                    let key = (ev.event_type.clone(), ev.state_key.clone());
+                    state_map.insert(key, ev.event_id.clone());
+                }
+            }
+            maps.push(state_map);
+        }
+        maps
+    }
+}
+
+struct FormattingContext<'a> {
+    args: &'a Args,
+    events_map: &'a HashMap<String, LeanEvent>,
+    raw_map: &'a HashMap<String, serde_json::Value>,
+    heads: &'a [String],
+    final_state_map: &'a std::collections::BTreeMap<(String, Option<String>), String>,
+    resolved_state_list: &'a [String],
+    auth_chain_ids: &'a [String],
+    version: StateResVersion,
+    duration: std::time::Duration,
+    event_count: usize,
+}
+
+type SharedStateMap = std::sync::Arc<std::collections::BTreeMap<(String, Option<String>), String>>;
+
+fn resolve_parent_states(
+    parent_states: &[SharedStateMap],
+    events_map: &HashMap<String, LeanEvent>,
+    version: StateResVersion,
+) -> SharedStateMap {
+    let mut all_identical = true;
+    let first_state = &parent_states[0];
+    for state in &parent_states[1..] {
+        if !std::sync::Arc::ptr_eq(state, first_state) && state != first_state {
+            all_identical = false;
+            break;
+        }
+    }
+
+    if all_identical {
+        first_state.clone()
+    } else {
+        // Run state-res on parent states
+        let num_sets = parent_states.len();
+        let mut occurrences: HashMap<(String, Option<String>), HashMap<String, usize>> =
+            HashMap::new();
+        for map in parent_states {
+            for (key, id) in map.as_ref() {
+                *occurrences
+                    .entry(key.clone())
+                    .or_default()
+                    .entry(id.clone())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        let mut unconflicted_state = std::collections::BTreeMap::new();
+        let mut conflicted_state_set = Vec::new();
+
+        for (key, ids) in occurrences {
+            if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
+                let id = ids.keys().next().unwrap();
+                unconflicted_state.insert(key, id.clone());
+            } else {
+                for id in ids.keys() {
+                    conflicted_state_set.push(id.clone());
+                }
+            }
+        }
+
+        let mut conflicted_events = HashMap::new();
+        for id in &conflicted_state_set {
+            if let Some(parent_ev) = events_map.get(id) {
+                conflicted_events.insert(id.clone(), parent_ev.clone());
+            }
+        }
+
+        // Optimize resolve_lean by only passing the transitively pruned
+        // conflicted auth subgraph instead of the entire events_map.
+        let auth_context =
+            ruma_lean::compute_v2_1_conflicted_subgraph(events_map, &conflicted_state_set);
+
+        let resolved = ruma_lean::resolve_lean(
+            unconflicted_state,
+            conflicted_events,
+            &auth_context,
+            version,
+        );
+        std::sync::Arc::new(resolved)
+    }
+}
+
+fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
+    let mut sorted_events: Vec<&LeanEvent> = ctx.events_map.values().collect();
+    sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
+
+    let mut state_after_map: HashMap<String, SharedStateMap> = HashMap::new();
+    let mut state_hash_map: HashMap<String, String> = HashMap::new();
+    let mut checkpoints = Vec::new();
+
+    for ev in &sorted_events {
+        let mut state_before = std::sync::Arc::new(std::collections::BTreeMap::new());
+        let mut parent_hash = None;
+
+        if ev.prev_events.is_empty() {
+            // Empty state before
+        } else if ev.prev_events.len() == 1 {
+            let prev_id = &ev.prev_events[0];
+            if let Some(prev_state) = state_after_map.get(prev_id) {
+                state_before = prev_state.clone();
+                parent_hash = state_hash_map.get(prev_id).cloned();
+            }
+        } else {
+            // Multi-head merge
+            let mut parent_states = Vec::new();
+            let mut first_parent_hash = None;
+            for prev_id in &ev.prev_events {
+                if let Some(prev_state) = state_after_map.get(prev_id) {
+                    parent_states.push(prev_state.clone());
+                    if first_parent_hash.is_none() {
+                        first_parent_hash = state_hash_map.get(prev_id).cloned();
+                    }
+                }
+            }
+
+            if !parent_states.is_empty() {
+                parent_hash = first_parent_hash;
+                if parent_states.len() == 1 {
+                    state_before = parent_states[0].clone();
+                } else {
+                    state_before =
+                        resolve_parent_states(&parent_states, ctx.events_map, ctx.version);
+                }
+            }
+        }
+
+        let mut state_after = state_before.clone();
+        if ev.state_key.is_some() {
+            let mut modified = state_before.as_ref().clone();
+            modified.insert(
+                (ev.event_type.clone(), ev.state_key.clone()),
+                ev.event_id.clone(),
+            );
+            state_after = std::sync::Arc::new(modified);
+        }
+
+        let hash_str = compute_state_hash(&state_after);
+        state_after_map.insert(ev.event_id.clone(), state_after.clone());
+        state_hash_map.insert(ev.event_id.clone(), hash_str.clone());
+
+        let mut deltas = Vec::new();
+        let primary_parent_state = ev
+            .prev_events
+            .first()
+            .and_then(|p_id| state_after_map.get(p_id));
+
+        if let Some(parent_state) = primary_parent_state {
+            for (key, event_id) in state_after.as_ref() {
+                match parent_state.get(key) {
+                    Some(parent_event_id) if parent_event_id == event_id => {}
+                    _ => {
+                        deltas.push(serde_json::json!({
+                            "type": key.0,
+                            "state_key": key.1,
+                            "event_id": event_id,
+                        }));
+                    }
+                }
+            }
+            for key in parent_state.as_ref().keys() {
+                if !state_after.contains_key(key) {
+                    deltas.push(serde_json::json!({
+                        "type": key.0,
+                        "state_key": key.1,
+                        "event_id": serde_json::Value::Null,
+                    }));
+                }
+            }
+        } else {
+            for (key, event_id) in state_after.as_ref() {
+                deltas.push(serde_json::json!({
+                    "type": key.0,
+                    "state_key": key.1,
+                    "event_id": event_id,
+                }));
+            }
+        }
+
+        checkpoints.push(serde_json::json!({
+            "hash": hash_str,
+            "parent": parent_hash,
+            "event_id": ev.event_id,
+            "deltas": deltas,
+        }));
+    }
+
+    serde_json::json!(checkpoints)
+}
+
+fn compute_component_roots(events_map: &HashMap<String, LeanEvent>) -> Vec<String> {
+    let mut component_roots = Vec::new();
+    if !events_map.is_empty() {
+        let mut parent: Vec<usize> = (0..events_map.len()).collect();
+        let mut id_to_index: HashMap<&str, usize> = HashMap::with_capacity(events_map.len());
+        let mut index_to_ev: Vec<&LeanEvent> = Vec::with_capacity(events_map.len());
+        for (i, ev) in events_map.values().enumerate() {
+            id_to_index.insert(ev.event_id.as_str(), i);
+            index_to_ev.push(ev);
+        }
+        for ev in events_map.values() {
+            if let Some(&u) = id_to_index.get(ev.event_id.as_str()) {
+                for prev in &ev.prev_events {
+                    if let Some(&v) = id_to_index.get(prev.as_str()) {
+                        let mut root_u = u;
+                        while parent[root_u] != root_u {
+                            parent[root_u] = parent[parent[root_u]];
+                            root_u = parent[root_u];
+                        }
+                        let mut root_v = v;
+                        while parent[root_v] != root_v {
+                            parent[root_v] = parent[parent[root_v]];
+                            root_v = parent[root_v];
+                        }
+                        if root_u != root_v {
+                            parent[root_u] = root_v;
+                        }
+                    }
+                }
+            }
+        }
+        let mut comp_roots_map: HashMap<usize, &LeanEvent> = HashMap::new();
+        for (i, &ev) in index_to_ev.iter().enumerate() {
+            let mut u = i;
+            while parent[u] != u {
+                parent[u] = parent[parent[u]];
+                u = parent[u];
+            }
+            comp_roots_map
+                .entry(u)
+                .and_modify(|e| {
+                    if ev.depth < e.depth || (ev.depth == e.depth && ev.event_id < e.event_id) {
+                        *e = ev;
+                    }
+                })
+                .or_insert(ev);
+        }
+        component_roots = comp_roots_map
+            .values()
+            .map(|e| e.event_id.clone())
+            .collect();
+        component_roots.sort();
+    }
+    component_roots
+}
+
+fn format_summary_output(ctx: &FormattingContext) -> serde_json::Value {
+    let mut state_entries: Vec<serde_json::Value> = Vec::new();
+    let mut members: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+
+    for ((typ, sk), eid) in ctx.final_state_map {
+        let ev = ctx.events_map.get(eid);
+        if typ == "m.room.member" {
+            let membership = ev
+                .and_then(|e| e.content.get("membership"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown");
+            let displayname = ev
+                .and_then(|e| e.content.get("displayname"))
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
+            members
+                .entry(membership.to_string())
+                .or_default()
+                .push(serde_json::json!({
+                    "user_id": sk,
+                    "displayname": displayname,
+                    "event_id": eid,
+                    "depth": ev.map_or(0, |e| e.depth),
+                }));
+        } else {
+            state_entries.push(serde_json::json!({
+                "type": typ,
+                "state_key": sk,
+                "event_id": eid,
+                "sender": ev.map_or("?", |e| e.sender.as_str()),
+                "depth": ev.map_or(0, |e| e.depth),
+            }));
+        }
+    }
+
+    state_entries.sort_by(|a, b| {
+        let ta = a["type"].as_str().unwrap_or("");
+        let tb = b["type"].as_str().unwrap_or("");
+        ta.cmp(tb).then_with(|| {
+            let sa = a["state_key"].as_str().unwrap_or("");
+            let sb = b["state_key"].as_str().unwrap_or("");
+            sa.cmp(sb)
+        })
+    });
+
+    // Sort members within each group by user_id
+    for list in members.values_mut() {
+        list.sort_by(|a, b| {
+            let ua = a["user_id"].as_str().unwrap_or("");
+            let ub = b["user_id"].as_str().unwrap_or("");
+            ua.cmp(ub)
+        });
+    }
+
+    // Build ordered membership object
+    let membership_order = ["join", "invite", "knock", "leave", "ban"];
+    let mut membership_obj = serde_json::Map::new();
+    for status in &membership_order {
+        if let Some(list) = members.get(*status) {
+            membership_obj.insert(
+                status.to_string(),
+                serde_json::json!({
+                    "count": list.len(),
+                    "users": list
+                }),
+            );
+        }
+    }
+    // Include any unexpected membership values
+    for (status, list) in &members {
+        if !membership_order.contains(&status.as_str()) {
+            membership_obj.insert(
+                status.clone(),
+                serde_json::json!({
+                    "count": list.len(),
+                    "users": list
+                }),
+            );
+        }
+    }
+
+    let min_depth = ctx.events_map.values().map(|e| e.depth).min().unwrap_or(0);
+    let max_depth = ctx.events_map.values().map(|e| e.depth).max().unwrap_or(0);
+    let root_event_id = ctx
+        .events_map
+        .values()
+        .min_by_key(|e| e.depth)
+        .map_or("", |e| e.event_id.as_str());
+
+    let component_roots = compute_component_roots(ctx.events_map);
+
+    serde_json::json!({
+        "status": "success",
+        "version": ctx.version,
+        "duration_ms": ctx.duration.as_millis(),
+        "total_events": ctx.event_count,
+        "resolved_state_size": state_entries.len() + members.values().map(std::vec::Vec::len).sum::<usize>(),
+        "auth_chain_size": ctx.auth_chain_ids.len(),
+        "min_depth": min_depth,
+        "max_depth": max_depth,
+        "root_event_id": root_event_id,
+        "num_components": component_roots.len(),
+        "component_roots": component_roots,
+        "heads": ctx.heads,
+        "membership": membership_obj,
+        "state": state_entries
+    })
+}
+
+fn format_timeline_output(ctx: &FormattingContext) -> serde_json::Value {
+    // Build displayname lookup from m.room.member events
+    let mut displaynames: HashMap<String, String> = HashMap::new();
+    let mut sorted_events: Vec<&LeanEvent> = ctx.events_map.values().collect();
+    sorted_events.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.event_id.cmp(&b.event_id)));
+
+    // First pass: collect displaynames
+    for ev in &sorted_events {
+        if ev.event_type == "m.room.member" {
+            if let Some(dn) = ev.content.get("displayname").and_then(|v| v.as_str()) {
+                if !dn.is_empty() {
+                    displaynames.insert(ev.state_key.clone().unwrap_or_default(), dn.to_string());
+                }
+            }
+        }
+    }
+
+    let get_name = |user_id: &str| -> String {
+        displaynames.get(user_id).cloned().unwrap_or_else(|| {
+            user_id
+                .split(':')
+                .next()
+                .unwrap_or(user_id)
+                .trim_start_matches('@')
+                .to_string()
+        })
+    };
+
+    let mut output = String::new();
+    let mut last_date = String::new();
+
+    for ev in &sorted_events {
+        let ts_ms = ev.origin_server_ts;
+        let ts_secs = i64::try_from(ts_ms / 1000).unwrap();
+        let time_of_day = u64::try_from((ts_secs % 86_400 + 86_400) % 86_400).unwrap();
+        let hours = time_of_day / 3_600;
+        let minutes = (time_of_day % 3_600) / 60;
+        let days = ts_secs.div_euclid(86_400);
+
+        let (y, m, d) = epoch_days_to_ymd(days);
+        let month_names = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        let month_str = month_names.get((m - 1) as usize).unwrap_or(&"???");
+        let ampm = if hours < 12 { "AM" } else { "PM" };
+        let h12 = if hours == 0 {
+            12
+        } else if hours > 12 {
+            hours - 12
+        } else {
+            hours
+        };
+        let date = format!("{d} {month_str} {y} {h12:02}:{minutes:02} {ampm}");
+
+        let sender = get_name(&ev.sender);
+        let desc = match ev.event_type.as_str() {
+            "m.room.create" => format!("{sender} sent m.room.create state event"),
+            "m.room.member" => {
+                let membership = ev
+                    .content
+                    .get("membership")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let target = get_name(ev.state_key.as_deref().unwrap_or_default());
+                let reason = ev
+                    .content
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match membership {
+                    "join" => format!("{target} joined the room"),
+                    "leave" if ev.state_key.as_ref() == Some(&ev.sender) => {
+                        format!("{target} left the room")
+                    }
+                    "leave" => format!(
+                        "{} kicked {}{}",
+                        sender,
+                        target,
+                        if reason.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {reason}")
+                        }
+                    ),
+                    "ban" => format!(
+                        "{} banned {}{}",
+                        sender,
+                        target,
+                        if reason.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" {reason}")
+                        }
+                    ),
+                    "invite" => format!("{sender} invited {target}"),
+                    "knock" => format!("{target} knocked"),
+                    _ => {
+                        format!("{sender} set {target}'s membership to {membership}")
+                    }
+                }
+            }
+            "m.room.message" => {
+                let body = ev
+                    .content
+                    .get("body")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let msgtype = ev
+                    .content
+                    .get("msgtype")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("m.text");
+                match msgtype {
+                    "m.text" | "m.notice" => format!("{sender}: {body}"),
+                    "m.image" => format!("{sender} sent an image"),
+                    "m.video" => format!("{sender} sent a video"),
+                    "m.audio" => format!("{sender} sent an audio file"),
+                    "m.file" => format!("{sender} sent a file"),
+                    "m.emote" => format!("* {sender} {body}"),
+                    _ => format!("{sender} sent {msgtype}"),
+                }
+            }
+            "m.room.name" => {
+                let name = ev
+                    .content
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                format!("{sender} changed room name to \"{name}\"")
+            }
+            "m.room.topic" => {
+                let topic = ev
+                    .content
+                    .get("topic")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                format!("{sender} changed room topic to \"{topic}\"")
+            }
+            "m.room.avatar" => format!("{sender} changed room avatar"),
+            "m.room.redaction" => format!("{sender} redacted an event"),
+            "m.reaction" => continue,
+            "m.sticker" => format!("{sender} sent a sticker"),
+            typ => format!("{sender} sent {typ} state event"),
+        };
+
+        if date != last_date {
+            if !last_date.is_empty() {
+                output.push('\n');
+            }
+            last_date.clone_from(&date);
+        }
+
+        output.push_str(&desc);
+        output.push('\n');
+        output.push_str(&date);
+        output.push('\n');
+    }
+
+    eprint!("{output}");
+    serde_json::json!({
+        "status": "success",
+        "format": "timeline",
+        "events": ctx.event_count
+    })
+}
+
+fn format_cli_output(ctx: &FormattingContext) -> serde_json::Value {
+    match ctx.args.format {
+        OutputFormat::Deltas => format_deltas_output(ctx),
+        OutputFormat::Summary => format_summary_output(ctx),
+        OutputFormat::Timeline => format_timeline_output(ctx),
+        OutputFormat::Events => {
+            let mut state_events: Vec<&serde_json::Value> = ctx
+                .resolved_state_list
+                .iter()
+                .filter_map(|id| ctx.raw_map.get(id))
+                .collect();
+            state_events.sort_by(|a, b| {
+                let a_ev = a
+                    .get("event_id")
+                    .and_then(|id| id.as_str())
+                    .and_then(|id| ctx.events_map.get(id));
+                let b_ev = b
+                    .get("event_id")
+                    .and_then(|id| id.as_str())
+                    .and_then(|id| ctx.events_map.get(id));
+
+                let a_depth = a_ev.map_or(0, |e| e.depth);
+                let b_depth = b_ev.map_or(0, |e| e.depth);
+
+                a_depth.cmp(&b_depth).then_with(|| {
+                    let a_id = a_ev.map_or("", |e| e.event_id.as_str());
+                    let b_id = b_ev.map_or("", |e| e.event_id.as_str());
+                    a_id.cmp(b_id)
+                })
+            });
+            serde_json::json!(state_events)
+        }
+        OutputFormat::Federation => {
+            let state_events: Vec<&serde_json::Value> = ctx
+                .resolved_state_list
+                .iter()
+                .filter_map(|id| ctx.raw_map.get(id))
+                .collect();
+            let auth_chain_events: Vec<&serde_json::Value> = ctx
+                .auth_chain_ids
+                .iter()
+                .filter_map(|id| ctx.raw_map.get(id))
+                .collect();
+
+            serde_json::json!({
+                "origin": ctx.args.origin,
+                "state": state_events,
+                "auth_chain": auth_chain_events
+            })
+        }
+        OutputFormat::Default => serde_json::json!({
+            "status": "success",
+            "version": ctx.version,
+            "duration_ms": ctx.duration.as_millis(),
+            "resolved_state_size": ctx.resolved_state_list.len(),
+            "auth_chain_size": ctx.auth_chain_ids.len(),
+            "state_event_ids": ctx.resolved_state_list
+        }),
+    }
+}
+
+fn partition_and_resolve_state(
+    heads: &[String],
+    events_map: &HashMap<String, LeanEvent>,
+    state_maps: &[HashMap<(String, Option<String>), String>],
+    version: StateResVersion,
+    auth_graph: &ruma_lean::roaring_auth::AuthGraph,
+) -> (
+    std::collections::BTreeMap<(String, Option<String>), String>,
+    std::time::Duration,
+) {
+    let start = Instant::now();
+    let mut occurrences: HashMap<(String, Option<String>), HashMap<String, usize>> = HashMap::new();
+    let num_sets = state_maps.len();
+    for map in state_maps {
+        for (key, id) in map {
+            *occurrences
+                .entry(key.clone())
+                .or_default()
+                .entry(id.clone())
+                .or_insert(0) += 1;
+        }
+    }
+
+    let mut unconflicted_state = std::collections::BTreeMap::new();
+    let mut conflicted_state_set = Vec::new();
+
+    for (key, ids) in occurrences {
+        if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
+            // All heads agree on this event ID for this key
+            let id = ids.keys().next().unwrap();
+            unconflicted_state.insert(key, id.clone());
+        } else {
+            // Heads disagree, add all events for this key to the conflicted set
+            for id in ids.keys() {
+                conflicted_state_set.push(id.clone());
+            }
+        }
+    }
+
+    // Auth difference: events in the auth chain of at least one head, but not all heads.
+    let mut auth_difference = std::collections::HashSet::new();
+    if !heads.is_empty() {
+        let mut union = roaring::RoaringBitmap::new();
+        let mut intersection = roaring::RoaringBitmap::new();
+        let mut first = true;
+
+        for head_id in heads {
+            if let Some(&idx) = auth_graph.id_to_index.get(head_id) {
+                let chain_bitmap = &auth_graph.auth_bitmaps[idx as usize];
+                if first {
+                    union.clone_from(chain_bitmap);
+                    intersection.clone_from(chain_bitmap);
+                    first = false;
+                } else {
+                    union |= chain_bitmap;
+                    intersection &= chain_bitmap;
+                }
+            }
+        }
+
+        let diff = union - intersection;
+        for idx in diff {
+            auth_difference.insert(auth_graph.index_to_id[idx as usize].clone());
+        }
+    }
+
+    let mut conflicted_events = HashMap::new();
+    // Add conflicted state set
+    for id in &conflicted_state_set {
+        if let Some(ev) = events_map.get(id) {
+            conflicted_events.insert(id.clone(), ev.clone());
+        }
+    }
+
+    // Add auth difference
+    for id in &auth_difference {
+        if let Some(ev) = events_map.get(id) {
+            conflicted_events.insert(id.clone(), ev.clone());
+        }
+    }
+
+    // Add conflicted state subgraph (MSC4297 / v2.1+)
+    if version == StateResVersion::V2_1 || version == StateResVersion::V2_1_1 {
+        let subgraph =
+            ruma_lean::compute_v2_1_conflicted_subgraph(events_map, &conflicted_state_set);
+        for (id, ev) in subgraph {
+            conflicted_events.insert(id, ev);
+        }
+    }
+
+    let final_state_map =
+        ruma_lean::resolve_lean(unconflicted_state, conflicted_events, events_map, version);
+
+    let duration = start.elapsed();
+    (final_state_map, duration)
+}
+
+fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
+    let input_val = load_or_fetch_input_value(args)?;
+    let (raw_events, heads) = parse_and_extract_heads(&input_val)?;
 
     let event_count = raw_events.len();
     let version = match args.state_res {
@@ -449,174 +1220,17 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
         heads
     };
 
-    let state_maps = if heads.len() <= 1 {
-        // Single head (or no heads): forward walk — sort by Matrix depth ascending,
-        // keep the highest-depth (most recent) event for each (type, state_key).
-        // This correctly matches production server state resolution for linear DAGs.
-        let reachable: std::collections::HashSet<String> = if heads.len() == 1 {
-            // Only include events reachable from the head via prev_events
-            let mut visited = std::collections::HashSet::new();
-            let mut stack = vec![heads[0].clone()];
-            while let Some(ev_id) = stack.pop() {
-                if visited.insert(ev_id.clone()) {
-                    if let Some(ev) = events_map.get(&ev_id) {
-                        for pe in &ev.prev_events {
-                            stack.push(pe.clone());
-                        }
-                    }
-                }
-            }
-            visited
-        } else {
-            events_map.keys().cloned().collect()
-        };
-
-        let mut sorted_events: Vec<&LeanEvent> = events_map
-            .values()
-            .filter(|ev| reachable.contains(&ev.event_id))
-            .collect();
-        sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
-
-        let mut state_map = std::collections::HashMap::new();
-        for ev in sorted_events {
-            if raw_map
-                .get(&ev.event_id)
-                .is_some_and(|r| r.get("state_key").is_some())
-            {
-                let key = (ev.event_type.clone(), ev.state_key.clone());
-                // Later (higher depth) events overwrite earlier ones
-                state_map.insert(key, ev.event_id.clone());
-            }
-        }
-        vec![state_map]
-    } else {
-        // Multi-head (forked DAG): compute separate state sets per head
-        // via backward walk, then let resolve_lean handle conflicts.
-        let mut maps = Vec::new();
-        for head_id in &heads {
-            let mut reachable: Vec<&LeanEvent> = Vec::new();
-            let mut visited = std::collections::HashSet::new();
-            let mut stack = vec![head_id.clone()];
-
-            while let Some(ev_id) = stack.pop() {
-                if visited.insert(ev_id.clone()) {
-                    if let Some(ev) = events_map.get(&ev_id) {
-                        reachable.push(ev);
-                        for prev_ev_id in &ev.prev_events {
-                            stack.push(prev_ev_id.clone());
-                        }
-                    }
-                }
-            }
-
-            // Sort by depth ascending, keep latest for each key
-            reachable.sort_by(|a, b| a.cmp_by_depth(b));
-            let mut state_map = std::collections::HashMap::new();
-            for ev in reachable {
-                if raw_map
-                    .get(&ev.event_id)
-                    .is_some_and(|r| r.get("state_key").is_some())
-                {
-                    let key = (ev.event_type.clone(), ev.state_key.clone());
-                    state_map.insert(key, ev.event_id.clone());
-                }
-            }
-            maps.push(state_map);
-        }
-        maps
-    };
+    let state_maps = compute_state_maps(&heads, &events_map, &raw_map);
 
     if version != ruma_lean::StateResVersion::V2_1 && version != ruma_lean::StateResVersion::V2_1_1
     {
         apply_global_power_levels(&mut events_map, &creator_user_id, version);
     }
 
-    let start = Instant::now();
-    let mut occurrences: HashMap<(String, Option<String>), HashMap<String, usize>> = HashMap::new();
-    let num_sets = state_maps.len();
-    for map in &state_maps {
-        for (key, id) in map {
-            *occurrences
-                .entry(key.clone())
-                .or_default()
-                .entry(id.clone())
-                .or_insert(0) += 1;
-        }
-    }
-
-    let mut unconflicted_state = std::collections::BTreeMap::new();
-    let mut conflicted_state_set = Vec::new();
-
-    for (key, ids) in occurrences {
-        if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
-            // All heads agree on this event ID for this key
-            let id = ids.keys().next().unwrap();
-            unconflicted_state.insert(key, id.clone());
-        } else {
-            // Heads disagree, add all events for this key to the conflicted set
-            for id in ids.keys() {
-                conflicted_state_set.push(id.clone());
-            }
-        }
-    }
-
-    // Auth difference: events in the auth chain of at least one head, but not all heads.
     let auth_graph = ruma_lean::roaring_auth::AuthGraph::build(&events_map);
 
-    let mut auth_difference = std::collections::HashSet::new();
-    if !heads.is_empty() {
-        let mut union = roaring::RoaringBitmap::new();
-        let mut intersection = roaring::RoaringBitmap::new();
-        let mut first = true;
-
-        for head_id in &heads {
-            if let Some(&idx) = auth_graph.id_to_index.get(head_id) {
-                let chain_bitmap = &auth_graph.auth_bitmaps[idx as usize];
-                if first {
-                    union.clone_from(chain_bitmap);
-                    intersection.clone_from(chain_bitmap);
-                    first = false;
-                } else {
-                    union |= chain_bitmap;
-                    intersection &= chain_bitmap;
-                }
-            }
-        }
-
-        let diff = union - intersection;
-        for idx in diff {
-            auth_difference.insert(auth_graph.index_to_id[idx as usize].clone());
-        }
-    }
-
-    let mut conflicted_events = HashMap::new();
-    // Add conflicted state set
-    for id in &conflicted_state_set {
-        if let Some(ev) = events_map.get(id) {
-            conflicted_events.insert(id.clone(), ev.clone());
-        }
-    }
-
-    // Add auth difference
-    for id in &auth_difference {
-        if let Some(ev) = events_map.get(id) {
-            conflicted_events.insert(id.clone(), ev.clone());
-        }
-    }
-
-    // Add conflicted state subgraph (MSC4297 / v2.1+)
-    if version == StateResVersion::V2_1 || version == StateResVersion::V2_1_1 {
-        let subgraph =
-            ruma_lean::compute_v2_1_conflicted_subgraph(&events_map, &conflicted_state_set);
-        for (id, ev) in subgraph {
-            conflicted_events.insert(id, ev);
-        }
-    }
-
-    let final_state_map =
-        ruma_lean::resolve_lean(unconflicted_state, conflicted_events, &events_map, version);
-
-    let duration = start.elapsed();
+    let (final_state_map, duration) =
+        partition_and_resolve_state(&heads, &events_map, &state_maps, version, &auth_graph);
 
     let resolved_state_list: Vec<String> = final_state_map.values().cloned().collect();
     let mut auth_chain_bitmap = roaring::RoaringBitmap::new();
@@ -630,561 +1244,20 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
         .map(|idx| auth_graph.index_to_id[idx as usize].clone())
         .collect();
 
-    match args.format {
-        OutputFormat::Deltas => {
-            type SharedStateMap =
-                std::sync::Arc<std::collections::BTreeMap<(String, Option<String>), String>>;
-            let mut sorted_events: Vec<&LeanEvent> = events_map.values().collect();
-            sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
+    let ctx = FormattingContext {
+        args,
+        events_map: &events_map,
+        raw_map: &raw_map,
+        heads: &heads,
+        final_state_map: &final_state_map,
+        resolved_state_list: &resolved_state_list,
+        auth_chain_ids: &auth_chain_ids,
+        version,
+        duration,
+        event_count,
+    };
 
-            let mut state_after_map: HashMap<String, SharedStateMap> = HashMap::new();
-            let mut state_hash_map: HashMap<String, String> = HashMap::new();
-            let mut checkpoints = Vec::new();
-
-            for ev in &sorted_events {
-                let mut state_before = std::sync::Arc::new(std::collections::BTreeMap::new());
-                let mut parent_hash = None;
-
-                if ev.prev_events.is_empty() {
-                    // Empty state before
-                } else if ev.prev_events.len() == 1 {
-                    let prev_id = &ev.prev_events[0];
-                    if let Some(prev_state) = state_after_map.get(prev_id) {
-                        state_before = prev_state.clone();
-                        parent_hash = state_hash_map.get(prev_id).cloned();
-                    }
-                } else {
-                    // Multi-head merge
-                    let mut parent_states = Vec::new();
-                    let mut first_parent_hash = None;
-                    for prev_id in &ev.prev_events {
-                        if let Some(prev_state) = state_after_map.get(prev_id) {
-                            parent_states.push(prev_state.clone());
-                            if first_parent_hash.is_none() {
-                                first_parent_hash = state_hash_map.get(prev_id).cloned();
-                            }
-                        }
-                    }
-
-                    if !parent_states.is_empty() {
-                        parent_hash = first_parent_hash;
-                        if parent_states.len() == 1 {
-                            state_before = parent_states[0].clone();
-                        } else {
-                            // High-performance optimization: if all parent states are identical,
-                            // we don't need to run heavy state-res.
-                            let mut all_identical = true;
-                            let first_state = &parent_states[0];
-                            for state in &parent_states[1..] {
-                                if !std::sync::Arc::ptr_eq(state, first_state)
-                                    && state != first_state
-                                {
-                                    all_identical = false;
-                                    break;
-                                }
-                            }
-
-                            if all_identical {
-                                state_before = first_state.clone();
-                            } else {
-                                // Run state-res on parent states
-                                let num_sets = parent_states.len();
-                                let mut occurrences: HashMap<
-                                    (String, Option<String>),
-                                    HashMap<String, usize>,
-                                > = HashMap::new();
-                                for map in &parent_states {
-                                    for (key, id) in map.as_ref() {
-                                        *occurrences
-                                            .entry(key.clone())
-                                            .or_default()
-                                            .entry(id.clone())
-                                            .or_insert(0) += 1;
-                                    }
-                                }
-
-                                let mut unconflicted_state = std::collections::BTreeMap::new();
-                                let mut conflicted_state_set = Vec::new();
-
-                                for (key, ids) in occurrences {
-                                    if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
-                                        let id = ids.keys().next().unwrap();
-                                        unconflicted_state.insert(key, id.clone());
-                                    } else {
-                                        for id in ids.keys() {
-                                            conflicted_state_set.push(id.clone());
-                                        }
-                                    }
-                                }
-
-                                let mut conflicted_events = HashMap::new();
-                                for id in &conflicted_state_set {
-                                    if let Some(parent_ev) = events_map.get(id) {
-                                        conflicted_events.insert(id.clone(), parent_ev.clone());
-                                    }
-                                }
-
-                                // Optimize resolve_lean by only passing the transitively pruned
-                                // conflicted auth subgraph instead of the entire events_map.
-                                let auth_context = ruma_lean::compute_v2_1_conflicted_subgraph(
-                                    &events_map,
-                                    &conflicted_state_set,
-                                );
-
-                                let resolved = ruma_lean::resolve_lean(
-                                    unconflicted_state,
-                                    conflicted_events,
-                                    &auth_context,
-                                    version,
-                                );
-                                state_before = std::sync::Arc::new(resolved);
-                            }
-                        }
-                    }
-                }
-
-                let mut state_after = state_before.clone();
-                if ev.state_key.is_some() {
-                    let mut modified = state_before.as_ref().clone();
-                    modified.insert(
-                        (ev.event_type.clone(), ev.state_key.clone()),
-                        ev.event_id.clone(),
-                    );
-                    state_after = std::sync::Arc::new(modified);
-                }
-
-                let hash_str = compute_state_hash(&state_after);
-                state_after_map.insert(ev.event_id.clone(), state_after.clone());
-                state_hash_map.insert(ev.event_id.clone(), hash_str.clone());
-
-                let mut deltas = Vec::new();
-                let primary_parent_state = ev
-                    .prev_events
-                    .first()
-                    .and_then(|p_id| state_after_map.get(p_id));
-
-                if let Some(parent_state) = primary_parent_state {
-                    for (key, event_id) in state_after.as_ref() {
-                        match parent_state.get(key) {
-                            Some(parent_event_id) if parent_event_id == event_id => {}
-                            _ => {
-                                deltas.push(serde_json::json!({
-                                    "type": key.0,
-                                    "state_key": key.1,
-                                    "event_id": event_id,
-                                }));
-                            }
-                        }
-                    }
-                    for key in parent_state.as_ref().keys() {
-                        if !state_after.contains_key(key) {
-                            deltas.push(serde_json::json!({
-                                "type": key.0,
-                                "state_key": key.1,
-                                "event_id": serde_json::Value::Null,
-                            }));
-                        }
-                    }
-                } else {
-                    for (key, event_id) in state_after.as_ref() {
-                        deltas.push(serde_json::json!({
-                            "type": key.0,
-                            "state_key": key.1,
-                            "event_id": event_id,
-                        }));
-                    }
-                }
-
-                checkpoints.push(serde_json::json!({
-                    "hash": hash_str,
-                    "parent": parent_hash,
-                    "event_id": ev.event_id,
-                    "deltas": deltas,
-                }));
-            }
-
-            Ok(serde_json::json!(checkpoints))
-        }
-        OutputFormat::Events => {
-            let mut state_events: Vec<&serde_json::Value> = resolved_state_list
-                .iter()
-                .filter_map(|id| raw_map.get(id))
-                .collect();
-            state_events.sort_by(|a, b| {
-                let a_ev = a
-                    .get("event_id")
-                    .and_then(|id| id.as_str())
-                    .and_then(|id| events_map.get(id));
-                let b_ev = b
-                    .get("event_id")
-                    .and_then(|id| id.as_str())
-                    .and_then(|id| events_map.get(id));
-
-                let a_depth = a_ev.map_or(0, |e| e.depth);
-                let b_depth = b_ev.map_or(0, |e| e.depth);
-
-                a_depth.cmp(&b_depth).then_with(|| {
-                    let a_id = a_ev.map_or("", |e| e.event_id.as_str());
-                    let b_id = b_ev.map_or("", |e| e.event_id.as_str());
-                    a_id.cmp(b_id)
-                })
-            });
-            Ok(serde_json::json!(state_events))
-        }
-        OutputFormat::Federation => {
-            let state_events: Vec<&serde_json::Value> = resolved_state_list
-                .iter()
-                .filter_map(|id| raw_map.get(id))
-                .collect();
-            let auth_chain_events: Vec<&serde_json::Value> = auth_chain_ids
-                .iter()
-                .filter_map(|id| raw_map.get(id))
-                .collect();
-
-            Ok(serde_json::json!({
-                "origin": args.origin,
-                "state": state_events,
-                "auth_chain": auth_chain_events
-            }))
-        }
-        OutputFormat::Default => Ok(serde_json::json!({
-            "status": "success",
-            "version": version,
-            "duration_ms": duration.as_millis(),
-            "resolved_state_size": resolved_state_list.len(),
-            "auth_chain_size": auth_chain_ids.len(),
-            "state_event_ids": resolved_state_list
-        })),
-        OutputFormat::Summary => {
-            let mut state_entries: Vec<serde_json::Value> = Vec::new();
-            let mut members: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
-
-            for ((typ, sk), eid) in &final_state_map {
-                let ev = events_map.get(eid);
-                if typ == "m.room.member" {
-                    let membership = ev
-                        .and_then(|e| e.content.get("membership"))
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("unknown");
-                    let displayname = ev
-                        .and_then(|e| e.content.get("displayname"))
-                        .and_then(|d| d.as_str())
-                        .unwrap_or("");
-                    members
-                        .entry(membership.to_string())
-                        .or_default()
-                        .push(serde_json::json!({
-                            "user_id": sk,
-                            "displayname": displayname,
-                            "event_id": eid,
-                            "depth": ev.map_or(0, |e| e.depth),
-                        }));
-                } else {
-                    state_entries.push(serde_json::json!({
-                        "type": typ,
-                        "state_key": sk,
-                        "event_id": eid,
-                        "sender": ev.map_or("?", |e| e.sender.as_str()),
-                        "depth": ev.map_or(0, |e| e.depth),
-                    }));
-                }
-            }
-
-            state_entries.sort_by(|a, b| {
-                let ta = a["type"].as_str().unwrap_or("");
-                let tb = b["type"].as_str().unwrap_or("");
-                ta.cmp(tb).then_with(|| {
-                    let sa = a["state_key"].as_str().unwrap_or("");
-                    let sb = b["state_key"].as_str().unwrap_or("");
-                    sa.cmp(sb)
-                })
-            });
-
-            // Sort members within each group by user_id
-            for list in members.values_mut() {
-                list.sort_by(|a, b| {
-                    let ua = a["user_id"].as_str().unwrap_or("");
-                    let ub = b["user_id"].as_str().unwrap_or("");
-                    ua.cmp(ub)
-                });
-            }
-
-            // Build ordered membership object
-            let membership_order = ["join", "invite", "knock", "leave", "ban"];
-            let mut membership_obj = serde_json::Map::new();
-            for status in &membership_order {
-                if let Some(list) = members.get(*status) {
-                    membership_obj.insert(
-                        status.to_string(),
-                        serde_json::json!({
-                            "count": list.len(),
-                            "users": list
-                        }),
-                    );
-                }
-            }
-            // Include any unexpected membership values
-            for (status, list) in &members {
-                if !membership_order.contains(&status.as_str()) {
-                    membership_obj.insert(
-                        status.clone(),
-                        serde_json::json!({
-                            "count": list.len(),
-                            "users": list
-                        }),
-                    );
-                }
-            }
-
-            let min_depth = events_map.values().map(|e| e.depth).min().unwrap_or(0);
-            let max_depth = events_map.values().map(|e| e.depth).max().unwrap_or(0);
-            let root_event_id = events_map
-                .values()
-                .min_by_key(|e| e.depth)
-                .map_or("", |e| e.event_id.as_str());
-
-            let mut component_roots = Vec::new();
-            if !events_map.is_empty() {
-                let mut parent: Vec<usize> = (0..events_map.len()).collect();
-                let mut id_to_index: HashMap<&str, usize> =
-                    HashMap::with_capacity(events_map.len());
-                let mut index_to_ev: Vec<&ruma_lean::LeanEvent> =
-                    Vec::with_capacity(events_map.len());
-                for (i, ev) in events_map.values().enumerate() {
-                    id_to_index.insert(ev.event_id.as_str(), i);
-                    index_to_ev.push(ev);
-                }
-                for ev in events_map.values() {
-                    if let Some(&u) = id_to_index.get(ev.event_id.as_str()) {
-                        for prev in &ev.prev_events {
-                            if let Some(&v) = id_to_index.get(prev.as_str()) {
-                                let mut root_u = u;
-                                while parent[root_u] != root_u {
-                                    parent[root_u] = parent[parent[root_u]];
-                                    root_u = parent[root_u];
-                                }
-                                let mut root_v = v;
-                                while parent[root_v] != root_v {
-                                    parent[root_v] = parent[parent[root_v]];
-                                    root_v = parent[root_v];
-                                }
-                                if root_u != root_v {
-                                    parent[root_u] = root_v;
-                                }
-                            }
-                        }
-                    }
-                }
-                let mut comp_roots_map: HashMap<usize, &ruma_lean::LeanEvent> = HashMap::new();
-                for (i, &ev) in index_to_ev.iter().enumerate() {
-                    let mut u = i;
-                    while parent[u] != u {
-                        parent[u] = parent[parent[u]];
-                        u = parent[u];
-                    }
-                    comp_roots_map
-                        .entry(u)
-                        .and_modify(|e| {
-                            if ev.depth < e.depth
-                                || (ev.depth == e.depth && ev.event_id < e.event_id)
-                            {
-                                *e = ev;
-                            }
-                        })
-                        .or_insert(ev);
-                }
-                component_roots = comp_roots_map
-                    .values()
-                    .map(|e| e.event_id.clone())
-                    .collect();
-                component_roots.sort();
-            }
-
-            Ok(serde_json::json!({
-                "status": "success",
-                "version": version,
-                "duration_ms": duration.as_millis(),
-                "total_events": event_count,
-                "resolved_state_size": state_entries.len() + members.values().map(std::vec::Vec::len).sum::<usize>(),
-                "auth_chain_size": auth_chain_ids.len(),
-                "min_depth": min_depth,
-                "max_depth": max_depth,
-                "root_event_id": root_event_id,
-                "num_components": component_roots.len(),
-                "component_roots": component_roots,
-                "heads": heads,
-                "membership": membership_obj,
-                "state": state_entries
-            }))
-        }
-        OutputFormat::Timeline => {
-            // Build displayname lookup from m.room.member events
-            let mut displaynames: HashMap<String, String> = HashMap::new();
-            let mut sorted_events: Vec<&LeanEvent> = events_map.values().collect();
-            sorted_events.sort_by(|a, b| a.depth.cmp(&b.depth).then(a.event_id.cmp(&b.event_id)));
-
-            // First pass: collect displaynames
-            for ev in &sorted_events {
-                if ev.event_type == "m.room.member" {
-                    if let Some(dn) = ev.content.get("displayname").and_then(|v| v.as_str()) {
-                        if !dn.is_empty() {
-                            displaynames
-                                .insert(ev.state_key.clone().unwrap_or_default(), dn.to_string());
-                        }
-                    }
-                }
-            }
-
-            let get_name = |user_id: &str| -> String {
-                displaynames.get(user_id).cloned().unwrap_or_else(|| {
-                    user_id
-                        .split(':')
-                        .next()
-                        .unwrap_or(user_id)
-                        .trim_start_matches('@')
-                        .to_string()
-                })
-            };
-
-            let mut output = String::new();
-            let mut last_date = String::new();
-
-            for ev in &sorted_events {
-                let ts_ms = ev.origin_server_ts;
-                let ts_secs = i64::try_from(ts_ms / 1000).unwrap();
-                let time_of_day = u64::try_from((ts_secs % 86_400 + 86_400) % 86_400).unwrap();
-                let hours = time_of_day / 3_600;
-                let minutes = (time_of_day % 3_600) / 60;
-                let days = ts_secs.div_euclid(86_400);
-
-                let (y, m, d) = epoch_days_to_ymd(days);
-                let month_names = [
-                    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov",
-                    "Dec",
-                ];
-                let month_str = month_names.get((m - 1) as usize).unwrap_or(&"???");
-                let ampm = if hours < 12 { "AM" } else { "PM" };
-                let h12 = if hours == 0 {
-                    12
-                } else if hours > 12 {
-                    hours - 12
-                } else {
-                    hours
-                };
-                let date = format!("{d} {month_str} {y} {h12:02}:{minutes:02} {ampm}");
-
-                let sender = get_name(&ev.sender);
-                let desc = match ev.event_type.as_str() {
-                    "m.room.create" => format!("{sender} sent m.room.create state event"),
-                    "m.room.member" => {
-                        let membership = ev
-                            .content
-                            .get("membership")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
-                        let target = get_name(ev.state_key.as_deref().unwrap_or_default());
-                        let reason = ev
-                            .content
-                            .get("reason")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        match membership {
-                            "join" => format!("{target} joined the room"),
-                            "leave" if ev.state_key.as_ref() == Some(&ev.sender) => {
-                                format!("{target} left the room")
-                            }
-                            "leave" => format!(
-                                "{} kicked {}{}",
-                                sender,
-                                target,
-                                if reason.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" {reason}")
-                                }
-                            ),
-                            "ban" => format!(
-                                "{} banned {}{}",
-                                sender,
-                                target,
-                                if reason.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" {reason}")
-                                }
-                            ),
-                            "invite" => format!("{sender} invited {target}"),
-                            "knock" => format!("{target} knocked"),
-                            _ => {
-                                format!("{sender} set {target}'s membership to {membership}")
-                            }
-                        }
-                    }
-                    "m.room.message" => {
-                        let body = ev
-                            .content
-                            .get("body")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-                        let msgtype = ev
-                            .content
-                            .get("msgtype")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("m.text");
-                        match msgtype {
-                            "m.text" | "m.notice" => format!("{sender}: {body}"),
-                            "m.image" => format!("{sender} sent an image"),
-                            "m.video" => format!("{sender} sent a video"),
-                            "m.audio" => format!("{sender} sent an audio file"),
-                            "m.file" => format!("{sender} sent a file"),
-                            "m.emote" => format!("* {sender} {body}"),
-                            _ => format!("{sender} sent {msgtype}"),
-                        }
-                    }
-                    "m.room.name" => {
-                        let name = ev
-                            .content
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
-                        format!("{sender} changed room name to \"{name}\"")
-                    }
-                    "m.room.topic" => {
-                        let topic = ev
-                            .content
-                            .get("topic")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
-                        format!("{sender} changed room topic to \"{topic}\"")
-                    }
-                    "m.room.avatar" => format!("{sender} changed room avatar"),
-                    "m.room.redaction" => format!("{sender} redacted an event"),
-                    "m.reaction" => continue,
-                    "m.sticker" => format!("{sender} sent a sticker"),
-                    typ => format!("{sender} sent {typ} state event"),
-                };
-
-                if date != last_date {
-                    if !last_date.is_empty() {
-                        output.push('\n');
-                    }
-                    last_date.clone_from(&date);
-                }
-
-                output.push_str(&desc);
-                output.push('\n');
-                output.push_str(&date);
-                output.push('\n');
-            }
-
-            eprint!("{output}");
-            Ok(serde_json::json!({
-                "status": "success",
-                "format": "timeline",
-                "events": event_count
-            }))
-        }
-    }
+    Ok(format_cli_output(&ctx))
 }
 
 /// Convert days since Unix epoch to (year, month, day).
