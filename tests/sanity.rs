@@ -168,11 +168,8 @@ fn compute_state_hash(
     format!("{hash:016x}")
 }
 
-#[test]
-fn test_delta_chain_generation_correctness() {
+fn make_chronological_test_events() -> Vec<ruma_lean::LeanEvent> {
     use ruma_lean::LeanEvent;
-    use std::collections::{BTreeMap, HashMap};
-
     // 1. Create three chronological events
     let ev1 = LeanEvent {
         event_id: "$1".to_string(),
@@ -197,8 +194,14 @@ fn test_delta_chain_generation_correctness() {
         depth: 3,
         ..Default::default()
     };
+    vec![ev1, ev2, ev3]
+}
 
-    let events = vec![ev1, ev2, ev3];
+#[test]
+fn test_delta_chain_generation_correctness() {
+    use std::collections::{BTreeMap, HashMap};
+
+    let events = make_chronological_test_events();
 
     // 2. Perform delta-chain sequential processing
     let mut state_after_map: HashMap<String, BTreeMap<(String, Option<String>), String>> =

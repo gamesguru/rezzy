@@ -2,11 +2,7 @@ use ruma_lean::{resolve_lean, LeanEvent, StateResVersion};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 
-fn run_auth_lookup_scenario(
-    join_auth_includes_pl: bool,
-    expected_v21_success: bool,
-    expected_v211_success: bool,
-) {
+fn run_auth_lookup_scenario(join_auth_includes_pl: bool, exp_v21: bool, exp_v211: bool) {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
@@ -76,10 +72,10 @@ fn run_auth_lookup_scenario(
         &auth_context,
         StateResVersion::V2_1,
     );
-    let v21_success = resolved_v21.contains_key(&("m.room.name".to_string(), Some(String::new())));
+    let ok_v21 = resolved_v21.contains_key(&("m.room.name".to_string(), Some(String::new())));
     assert_eq!(
-        v21_success, expected_v21_success,
-        "V2.1 success expectation mismatched: got {v21_success}, expected {expected_v21_success}"
+        ok_v21, exp_v21,
+        "V2.1 success expectation mismatched: got {ok_v21}, expected {exp_v21}"
     );
 
     let resolved_v211 = resolve_lean(
@@ -88,11 +84,10 @@ fn run_auth_lookup_scenario(
         &auth_context,
         StateResVersion::V2_1_1,
     );
-    let v211_success =
-        resolved_v211.contains_key(&("m.room.name".to_string(), Some(String::new())));
+    let ok_v211 = resolved_v211.contains_key(&("m.room.name".to_string(), Some(String::new())));
     assert_eq!(
-        v211_success, expected_v211_success,
-        "V2.1.1 success expectation mismatched: got {v211_success}, expected {expected_v211_success}"
+        ok_v211, exp_v211,
+        "V2.1.1 success expectation mismatched: got {ok_v211}, expected {exp_v211}"
     );
 }
 

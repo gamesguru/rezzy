@@ -448,8 +448,8 @@ where
     let mut leaves = Vec::new();
 
     'outer: while let Some(event_id) = stack.pop() {
-        let mut states_before_event = Vec::new();
-        let mut auth_chains_before_event = Vec::new();
+        let mut incoming_parent_states = Vec::new();
+        let mut incoming_parent_auth_chains = Vec::new();
 
         let current_pdu = pdus_map.get(&event_id).expect("every pdu should be available");
 
@@ -461,15 +461,15 @@ where
             };
             let auth_chain_at_event = auth_chain_from_state_map(state_at_event)?;
 
-            states_before_event.push(state_at_event.clone());
-            auth_chains_before_event.push(auth_chain_at_event);
+            incoming_parent_states.push(state_at_event.clone());
+            incoming_parent_auth_chains.push(auth_chain_at_event);
         }
 
         let state_before_event = resolve(
             auth_rules,
             &state_res_rules,
-            &states_before_event,
-            auth_chains_before_event.clone(),
+            &incoming_parent_states,
+            incoming_parent_auth_chains.clone(),
             |x| pdus_map.get(x).cloned(),
             |conflicted_state_set| conflicted_state_subgraph(conflicted_state_set, &pdus_map),
         )?;

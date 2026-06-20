@@ -841,6 +841,114 @@ fn format_summary_output(ctx: &FormattingContext) -> serde_json::Value {
     })
 }
 
+fn get_user_displayname(user_id: &str, displaynames: &HashMap<String, String>) -> String {
+    displaynames.get(user_id).cloned().unwrap_or_else(|| {
+        user_id
+            .split(':')
+            .next()
+            .unwrap_or(user_id)
+            .trim_start_matches('@')
+            .to_string()
+    })
+}
+
+fn format_event_description(
+    ev: &LeanEvent,
+    sender: &str,
+    displaynames: &HashMap<String, String>,
+) -> Option<String> {
+    match ev.event_type.as_str() {
+        "m.room.create" => Some(format!("{sender} sent m.room.create state event")),
+        "m.room.member" => {
+            let membership = ev
+                .content
+                .get("membership")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let target =
+                get_user_displayname(ev.state_key.as_deref().unwrap_or_default(), displaynames);
+            let reason = ev
+                .content
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            match membership {
+                "join" => Some(format!("{target} joined the room")),
+                "leave" if ev.state_key.as_ref() == Some(&ev.sender) => {
+                    Some(format!("{target} left the room"))
+                }
+                "leave" => Some(format!(
+                    "{} kicked {}{}",
+                    sender,
+                    target,
+                    if reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {reason}")
+                    }
+                )),
+                "ban" => Some(format!(
+                    "{} banned {}{}",
+                    sender,
+                    target,
+                    if reason.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {reason}")
+                    }
+                )),
+                "invite" => Some(format!("{sender} invited {target}")),
+                "knock" => Some(format!("{target} knocked")),
+                _ => Some(format!(
+                    "{sender} set {target}'s membership to {membership}"
+                )),
+            }
+        }
+        "m.room.message" => {
+            let body = ev
+                .content
+                .get("body")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let msgtype = ev
+                .content
+                .get("msgtype")
+                .and_then(|v| v.as_str())
+                .unwrap_or("m.text");
+            match msgtype {
+                "m.text" | "m.notice" => Some(format!("{sender}: {body}")),
+                "m.image" => Some(format!("{sender} sent an image")),
+                "m.video" => Some(format!("{sender} sent a video")),
+                "m.audio" => Some(format!("{sender} sent an audio file")),
+                "m.file" => Some(format!("{sender} sent a file")),
+                "m.emote" => Some(format!("* {sender} {body}")),
+                _ => Some(format!("{sender} sent {msgtype}")),
+            }
+        }
+        "m.room.name" => {
+            let name = ev
+                .content
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            Some(format!("{sender} changed room name to \"{name}\""))
+        }
+        "m.room.topic" => {
+            let topic = ev
+                .content
+                .get("topic")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            Some(format!("{sender} changed room topic to \"{topic}\""))
+        }
+        "m.room.avatar" => Some(format!("{sender} changed room avatar")),
+        "m.room.redaction" => Some(format!("{sender} redacted an event")),
+        "m.reaction" => None,
+        "m.sticker" => Some(format!("{sender} sent a sticker")),
+        typ => Some(format!("{sender} sent {typ} state event")),
+    }
+}
+
 fn format_timeline_output(ctx: &FormattingContext) -> serde_json::Value {
     // Build displayname lookup from m.room.member events
     let mut displaynames: HashMap<String, String> = HashMap::new();
@@ -858,21 +966,15 @@ fn format_timeline_output(ctx: &FormattingContext) -> serde_json::Value {
         }
     }
 
-    let get_name = |user_id: &str| -> String {
-        displaynames.get(user_id).cloned().unwrap_or_else(|| {
-            user_id
-                .split(':')
-                .next()
-                .unwrap_or(user_id)
-                .trim_start_matches('@')
-                .to_string()
-        })
-    };
-
     let mut output = String::new();
     let mut last_date = String::new();
 
     for ev in &sorted_events {
+        let sender = get_user_displayname(&ev.sender, &displaynames);
+        let Some(desc) = format_event_description(ev, &sender, &displaynames) else {
+            continue;
+        };
+
         let ts_ms = ev.origin_server_ts;
         let ts_secs = i64::try_from(ts_ms / 1000).unwrap();
         let time_of_day = u64::try_from((ts_secs % 86_400 + 86_400) % 86_400).unwrap();
@@ -894,97 +996,6 @@ fn format_timeline_output(ctx: &FormattingContext) -> serde_json::Value {
             hours
         };
         let date = format!("{d} {month_str} {y} {h12:02}:{minutes:02} {ampm}");
-
-        let sender = get_name(&ev.sender);
-        let desc = match ev.event_type.as_str() {
-            "m.room.create" => format!("{sender} sent m.room.create state event"),
-            "m.room.member" => {
-                let membership = ev
-                    .content
-                    .get("membership")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                let target = get_name(ev.state_key.as_deref().unwrap_or_default());
-                let reason = ev
-                    .content
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                match membership {
-                    "join" => format!("{target} joined the room"),
-                    "leave" if ev.state_key.as_ref() == Some(&ev.sender) => {
-                        format!("{target} left the room")
-                    }
-                    "leave" => format!(
-                        "{} kicked {}{}",
-                        sender,
-                        target,
-                        if reason.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" {reason}")
-                        }
-                    ),
-                    "ban" => format!(
-                        "{} banned {}{}",
-                        sender,
-                        target,
-                        if reason.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" {reason}")
-                        }
-                    ),
-                    "invite" => format!("{sender} invited {target}"),
-                    "knock" => format!("{target} knocked"),
-                    _ => {
-                        format!("{sender} set {target}'s membership to {membership}")
-                    }
-                }
-            }
-            "m.room.message" => {
-                let body = ev
-                    .content
-                    .get("body")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let msgtype = ev
-                    .content
-                    .get("msgtype")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("m.text");
-                match msgtype {
-                    "m.text" | "m.notice" => format!("{sender}: {body}"),
-                    "m.image" => format!("{sender} sent an image"),
-                    "m.video" => format!("{sender} sent a video"),
-                    "m.audio" => format!("{sender} sent an audio file"),
-                    "m.file" => format!("{sender} sent a file"),
-                    "m.emote" => format!("* {sender} {body}"),
-                    _ => format!("{sender} sent {msgtype}"),
-                }
-            }
-            "m.room.name" => {
-                let name = ev
-                    .content
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                format!("{sender} changed room name to \"{name}\"")
-            }
-            "m.room.topic" => {
-                let topic = ev
-                    .content
-                    .get("topic")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
-                format!("{sender} changed room topic to \"{topic}\"")
-            }
-            "m.room.avatar" => format!("{sender} changed room avatar"),
-            "m.room.redaction" => format!("{sender} redacted an event"),
-            "m.reaction" => continue,
-            "m.sticker" => format!("{sender} sent a sticker"),
-            typ => format!("{sender} sent {typ} state event"),
-        };
 
         if date != last_date {
             if !last_date.is_empty() {
