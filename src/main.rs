@@ -18,7 +18,7 @@ struct Args {
     #[arg(long, env = "MATRIX_HOMESERVER")]
     homeserver: Option<String>,
 
-    /// Matrix access token. Falls back to per-domain env var (e.g. MTOKEN_MATRIX_UNREDACTED_ORG)
+    /// Matrix access token. Falls back to per-domain env var (e.g. `MTOKEN_MATRIX_UNREDACTED_ORG`)
     #[arg(long, env = "MATRIX_TOKEN", hide_env_values = true)]
     token: Option<String>,
 
@@ -72,7 +72,7 @@ fn detect_version(events: &[serde_json::Value], debug: bool) -> anyhow::Result<S
                 .and_then(|v| v.as_str())
             {
                 if debug {
-                    eprintln!("[DEBUG] Found m.room.create with version: {}", ver);
+                    eprintln!("[DEBUG] Found m.room.create with version: {ver}");
                 }
                 return parse_room_version(ver);
             }
@@ -91,27 +91,27 @@ fn compute_state_hash(
     let mut hash: u64 = 14695981039346656037; // FNV offset basis
     for ((event_type, state_key), event_id) in state {
         for &byte in event_type.as_bytes() {
-            hash ^= byte as u64;
+            hash ^= u64::from(byte);
             hash = hash.wrapping_mul(1099511628211); // FNV prime
         }
         hash ^= 0x00;
         hash = hash.wrapping_mul(1099511628211);
         if let Some(key) = state_key {
             for &byte in key.as_bytes() {
-                hash ^= byte as u64;
+                hash ^= u64::from(byte);
                 hash = hash.wrapping_mul(1099511628211);
             }
         }
         hash ^= 0x00;
         hash = hash.wrapping_mul(1099511628211);
         for &byte in event_id.as_bytes() {
-            hash ^= byte as u64;
+            hash ^= u64::from(byte);
             hash = hash.wrapping_mul(1099511628211);
         }
         hash ^= 0xff;
         hash = hash.wrapping_mul(1099511628211);
     }
-    format!("{:016x}", hash)
+    format!("{hash:016x}")
 }
 
 fn fetch_room_state(
@@ -122,22 +122,22 @@ fn fetch_room_state(
     let base = if homeserver.starts_with("http://") || homeserver.starts_with("https://") {
         homeserver.to_string()
     } else {
-        format!("https://{}", homeserver)
+        format!("https://{homeserver}")
     };
-    let url = format!("{}/_matrix/client/v3/rooms/{}/state", base, room_id);
-    eprintln!("Fetching {}", url);
+    let url = format!("{base}/_matrix/client/v3/rooms/{room_id}/state");
+    eprintln!("Fetching {url}");
     let mut request = ureq::get(&url);
     if let Some(t) = token {
-        request = request.set("Authorization", &format!("Bearer {}", t));
+        request = request.set("Authorization", &format!("Bearer {t}"));
     }
 
     let response = match request.call() {
         Ok(resp) => resp,
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
-            anyhow::bail!("HTTP {}: {}", code, body);
+            anyhow::bail!("HTTP {code}: {body}");
         }
-        Err(e) => anyhow::bail!("Request failed: {}", e),
+        Err(e) => anyhow::bail!("Request failed: {e}"),
     };
     let body = response.into_string()?;
 
@@ -203,7 +203,7 @@ fn load_file(input_path: &PathBuf) -> anyhow::Result<Vec<serde_json::Value>> {
     }
 }
 
-/// Merge multiple event sets by event_id (first-seen wins, PDUs are immutable).
+/// Merge multiple event sets by `event_id` (first-seen wins, PDUs are immutable).
 /// Returns the merged events and reports stats to stderr.
 fn merge_event_sets(
     file_sets: Vec<(String, Vec<serde_json::Value>)>,
@@ -283,10 +283,7 @@ fn merge_event_sets(
         };
 
         if !quiet {
-            eprintln!(
-                "[merge] merge-base: {} shared events across {} inputs",
-                total_shared, num_files
-            );
+            eprintln!("[merge] merge-base: {total_shared} shared events across {num_files} inputs");
         }
 
         if debug {
@@ -356,10 +353,10 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
             // Multiple inputs: merge DAGs by event_id
             let mut file_sets = Vec::with_capacity(args.input.len());
             for path in &args.input {
-                let label = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_else(|| path.display().to_string());
+                let label = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |n| n.to_string_lossy().to_string(),
+                );
                 let events = load_file(path)?;
                 file_sets.push((label, events));
             }
@@ -422,7 +419,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
             }
             Err(e) => {
                 if args.debug {
-                    eprintln!("[DEBUG] Failed to parse event: {:?}. Error: {}", val, e);
+                    eprintln!("[DEBUG] Failed to parse event: {val:?}. Error: {e}");
                 }
                 let _ = serde_json::from_value::<LeanEvent>(val)?;
             }
@@ -780,7 +777,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                             }
                         }
                     }
-                    for (key, _) in parent_state.as_ref() {
+                    for key in parent_state.as_ref().keys() {
                         if !state_after.contains_key(key) {
                             deltas.push(serde_json::json!({
                                 "type": key.0,
@@ -824,12 +821,12 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                     .and_then(|id| id.as_str())
                     .and_then(|id| events_map.get(id));
 
-                let a_depth = a_ev.map(|e| e.depth).unwrap_or(0);
-                let b_depth = b_ev.map(|e| e.depth).unwrap_or(0);
+                let a_depth = a_ev.map_or(0, |e| e.depth);
+                let b_depth = b_ev.map_or(0, |e| e.depth);
 
                 a_depth.cmp(&b_depth).then_with(|| {
-                    let a_id = a_ev.map(|e| e.event_id.as_str()).unwrap_or("");
-                    let b_id = b_ev.map(|e| e.event_id.as_str()).unwrap_or("");
+                    let a_id = a_ev.map_or("", |e| e.event_id.as_str());
+                    let b_id = b_ev.map_or("", |e| e.event_id.as_str());
                     a_id.cmp(b_id)
                 })
             });
@@ -881,15 +878,15 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                             "user_id": sk,
                             "displayname": displayname,
                             "event_id": eid,
-                            "depth": ev.map(|e| e.depth).unwrap_or(0),
+                            "depth": ev.map_or(0, |e| e.depth),
                         }));
                 } else {
                     state_entries.push(serde_json::json!({
                         "type": typ,
                         "state_key": sk,
                         "event_id": eid,
-                        "sender": ev.map(|e| e.sender.as_str()).unwrap_or("?"),
-                        "depth": ev.map(|e| e.depth).unwrap_or(0),
+                        "sender": ev.map_or("?", |e| e.sender.as_str()),
+                        "depth": ev.map_or(0, |e| e.depth),
                     }));
                 }
             }
@@ -945,8 +942,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
             let root_event_id = events_map
                 .values()
                 .min_by_key(|e| e.depth)
-                .map(|e| e.event_id.as_str())
-                .unwrap_or("");
+                .map_or("", |e| e.event_id.as_str());
 
             let mut component_roots = Vec::new();
             if !events_map.is_empty() {
@@ -1010,7 +1006,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 "version": version,
                 "duration_ms": duration.as_millis(),
                 "total_events": event_count,
-                "resolved_state_size": state_entries.len() + members.values().map(|v| v.len()).sum::<usize>(),
+                "resolved_state_size": state_entries.len() + members.values().map(std::vec::Vec::len).sum::<usize>(),
                 "auth_chain_size": auth_chain_ids.len(),
                 "min_depth": min_depth,
                 "max_depth": max_depth,
@@ -1076,14 +1072,11 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 } else {
                     hours
                 };
-                let date = format!(
-                    "{} {} {} {:02}:{:02} {}",
-                    d, month_str, y, h12, minutes, ampm
-                );
+                let date = format!("{d} {month_str} {y} {h12:02}:{minutes:02} {ampm}");
 
                 let sender = get_name(&ev.sender);
                 let desc = match ev.event_type.as_str() {
-                    "m.room.create" => format!("{} sent m.room.create state event", sender),
+                    "m.room.create" => format!("{sender} sent m.room.create state event"),
                     "m.room.member" => {
                         let membership = ev
                             .content
@@ -1097,9 +1090,9 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
                         match membership {
-                            "join" => format!("{} joined the room", target),
+                            "join" => format!("{target} joined the room"),
                             "leave" if ev.state_key.as_ref() == Some(&ev.sender) => {
-                                format!("{} left the room", target)
+                                format!("{target} left the room")
                             }
                             "leave" => format!(
                                 "{} kicked {}{}",
@@ -1108,7 +1101,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                                 if reason.is_empty() {
                                     String::new()
                                 } else {
-                                    format!(" {}", reason)
+                                    format!(" {reason}")
                                 }
                             ),
                             "ban" => format!(
@@ -1118,13 +1111,13 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                                 if reason.is_empty() {
                                     String::new()
                                 } else {
-                                    format!(" {}", reason)
+                                    format!(" {reason}")
                                 }
                             ),
-                            "invite" => format!("{} invited {}", sender, target),
-                            "knock" => format!("{} knocked", target),
+                            "invite" => format!("{sender} invited {target}"),
+                            "knock" => format!("{target} knocked"),
                             _ => {
-                                format!("{} set {}'s membership to {}", sender, target, membership)
+                                format!("{sender} set {target}'s membership to {membership}")
                             }
                         }
                     }
@@ -1140,13 +1133,13 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                             .and_then(|v| v.as_str())
                             .unwrap_or("m.text");
                         match msgtype {
-                            "m.text" | "m.notice" => format!("{}: {}", sender, body),
-                            "m.image" => format!("{} sent an image", sender),
-                            "m.video" => format!("{} sent a video", sender),
-                            "m.audio" => format!("{} sent an audio file", sender),
-                            "m.file" => format!("{} sent a file", sender),
-                            "m.emote" => format!("* {} {}", sender, body),
-                            _ => format!("{} sent {}", sender, msgtype),
+                            "m.text" | "m.notice" => format!("{sender}: {body}"),
+                            "m.image" => format!("{sender} sent an image"),
+                            "m.video" => format!("{sender} sent a video"),
+                            "m.audio" => format!("{sender} sent an audio file"),
+                            "m.file" => format!("{sender} sent a file"),
+                            "m.emote" => format!("* {sender} {body}"),
+                            _ => format!("{sender} sent {msgtype}"),
                         }
                     }
                     "m.room.name" => {
@@ -1155,7 +1148,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                             .get("name")
                             .and_then(|v| v.as_str())
                             .unwrap_or("?");
-                        format!("{} changed room name to \"{}\"", sender, name)
+                        format!("{sender} changed room name to \"{name}\"")
                     }
                     "m.room.topic" => {
                         let topic = ev
@@ -1163,13 +1156,13 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                             .get("topic")
                             .and_then(|v| v.as_str())
                             .unwrap_or("?");
-                        format!("{} changed room topic to \"{}\"", sender, topic)
+                        format!("{sender} changed room topic to \"{topic}\"")
                     }
-                    "m.room.avatar" => format!("{} changed room avatar", sender),
-                    "m.room.redaction" => format!("{} redacted an event", sender),
+                    "m.room.avatar" => format!("{sender} changed room avatar"),
+                    "m.room.redaction" => format!("{sender} redacted an event"),
                     "m.reaction" => continue,
-                    "m.sticker" => format!("{} sent a sticker", sender),
-                    typ => format!("{} sent {} state event", sender, typ),
+                    "m.sticker" => format!("{sender} sent a sticker"),
+                    typ => format!("{sender} sent {typ} state event"),
                 };
 
                 if date != last_date {
@@ -1185,7 +1178,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 output.push('\n');
             }
 
-            eprint!("{}", output);
+            eprint!("{output}");
             Ok(serde_json::json!({
                 "status": "success",
                 "format": "timeline",
@@ -1225,14 +1218,15 @@ fn main() {
             serde_json::to_writer_pretty(&mut buffered_out, &output)
                 .expect("Failed to write output");
             if let Err(e) = writeln!(buffered_out) {
-                if e.kind() != std::io::ErrorKind::BrokenPipe {
-                    panic!("Failed to write trailing newline: {}", e);
-                }
+                assert!(
+                    e.kind() == std::io::ErrorKind::BrokenPipe,
+                    "Failed to write trailing newline: {e}"
+                );
             }
             buffered_out.flush().expect("Failed to flush output buffer");
         }
         Err(e) => {
-            eprintln!("Error: {}", e);
+            eprintln!("Error: {e}");
             let err_json = serde_json::json!({
                 "status": "error",
                 "error": e.to_string()
@@ -1284,7 +1278,7 @@ fn apply_global_power_levels(
     let mut user_power_levels = HashMap::new();
     let mut default_power_level = 0;
     if let Some(id) =
-        resolved_power_state.get(&("m.room.power_levels".to_string(), Some("".to_string())))
+        resolved_power_state.get(&("m.room.power_levels".to_string(), Some(String::new())))
     {
         if let Some(ev) = events_map.get(id) {
             if let Some(users) = ev.content.get("users").and_then(|u| u.as_object()) {
@@ -1294,7 +1288,11 @@ fn apply_global_power_levels(
                     }
                 }
             }
-            if let Some(pl_val) = ev.content.get("users_default").and_then(|v| v.as_i64()) {
+            if let Some(pl_val) = ev
+                .content
+                .get("users_default")
+                .and_then(serde_json::Value::as_i64)
+            {
                 default_power_level = pl_val;
             }
         }
