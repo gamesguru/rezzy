@@ -1009,7 +1009,7 @@ mod tests {
                 event_type: "m.room.member".into(),
                 state_key: Some("@spammer:evil.com".into()),
                 power_level: 50,
-                origin_server_ts: 1772724243891,
+                origin_server_ts: 1_772_724_243_891,
                 auth_events: vec![],
                 ..Default::default()
             },
@@ -1021,7 +1021,7 @@ mod tests {
                 event_type: "m.room.member".into(),
                 state_key: Some("@spammer:evil.com".into()),
                 power_level: 50,
-                origin_server_ts: 1772724243893, // 2ms later
+                origin_server_ts: 1_772_724_243_893, // 2ms later
                 auth_events: vec![],
                 ..Default::default()
             },

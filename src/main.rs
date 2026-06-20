@@ -412,7 +412,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
         match serde_json::from_value::<LeanEvent>(val.clone()) {
             Ok(ev) => {
                 if ev.event_type == "m.room.create" {
-                    creator_user_id = ev.sender.clone();
+                    creator_user_id.clone_from(&ev.sender);
                 }
                 raw_map.insert(ev.event_id.clone(), val);
                 events_map.insert(ev.event_id.clone(), ev);
@@ -573,8 +573,8 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
             if let Some(&idx) = auth_graph.id_to_index.get(head_id) {
                 let chain_bitmap = &auth_graph.auth_bitmaps[idx as usize];
                 if first {
-                    union = chain_bitmap.clone();
-                    intersection = chain_bitmap.clone();
+                    union.clone_from(chain_bitmap);
+                    intersection.clone_from(chain_bitmap);
                     first = false;
                 } else {
                     union |= chain_bitmap;
@@ -632,13 +632,12 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
 
     match args.format {
         OutputFormat::Deltas => {
+            type SharedStateMap =
+                std::sync::Arc<std::collections::BTreeMap<(String, Option<String>), String>>;
             let mut sorted_events: Vec<&LeanEvent> = events_map.values().collect();
             sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
 
-            let mut state_after_map: HashMap<
-                String,
-                std::sync::Arc<std::collections::BTreeMap<(String, Option<String>), String>>,
-            > = HashMap::new();
+            let mut state_after_map: HashMap<String, SharedStateMap> = HashMap::new();
             let mut state_hash_map: HashMap<String, String> = HashMap::new();
             let mut checkpoints = Vec::new();
 
@@ -1052,11 +1051,11 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
 
             for ev in &sorted_events {
                 let ts_ms = ev.origin_server_ts;
-                let ts_secs = (ts_ms / 1000) as i64;
-                let time_of_day = ((ts_secs % 86400 + 86400) % 86400) as u64;
-                let hours = time_of_day / 3600;
-                let minutes = (time_of_day % 3600) / 60;
-                let days = ts_secs.div_euclid(86400);
+                let ts_secs = i64::try_from(ts_ms / 1000).unwrap();
+                let time_of_day = u64::try_from((ts_secs % 86_400 + 86_400) % 86_400).unwrap();
+                let hours = time_of_day / 3_600;
+                let minutes = (time_of_day % 3_600) / 60;
+                let days = ts_secs.div_euclid(86_400);
 
                 let (y, m, d) = epoch_days_to_ymd(days);
                 let month_names = [
@@ -1169,7 +1168,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                     if !last_date.is_empty() {
                         output.push('\n');
                     }
-                    last_date = date.clone();
+                    last_date.clone_from(&date);
                 }
 
                 output.push_str(&desc);

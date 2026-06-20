@@ -140,7 +140,7 @@ pub(super) fn test_resolve_batches(pdus_paths: &[&str]) -> String {
     let iteratively_resolved_state = resolve_iteratively(
         pdu_batches.iter().flat_map(|x| x.iter()),
         &auth_rules,
-        &state_res_rules,
+        state_res_rules,
     )
     .expect("iterative state resolution should succeed");
 
@@ -152,7 +152,7 @@ pub(super) fn test_resolve_batches(pdus_paths: &[&str]) -> String {
             resolve_batch(
                 pdus,
                 &auth_rules,
-                &state_res_rules,
+                state_res_rules,
                 &mut pdus_map,
                 batched_resolved_state,
             )
@@ -166,7 +166,7 @@ pub(super) fn test_resolve_batches(pdus_paths: &[&str]) -> String {
     let atomic_resolved_state = resolve_batch(
         pdu_batches.iter().flat_map(|x| x.iter()),
         &auth_rules,
-        &state_res_rules,
+        state_res_rules,
         &mut EventIdMap::new(),
         None,
     )
@@ -347,7 +347,7 @@ fn load_state_maps(
 fn resolve_batch<'a, I>(
     pdus: I,
     auth_rules: &AuthorizationRules,
-    state_res_rules: &StateResolutionV2Rules,
+    state_res_rules: StateResolutionV2Rules,
     pdus_map: &mut EventIdMap<OwnedEventId, Pdu>,
     prev_state: Option<StateMap<OwnedEventId>>,
 ) -> Result<StateMap<OwnedEventId>, Box<dyn Error>>
@@ -380,7 +380,7 @@ where
 
     resolve(
         auth_rules,
-        state_res_rules,
+        &state_res_rules,
         &state_maps,
         auth_chain_sets,
         |x| pdus_map.get(x).cloned(),
@@ -409,7 +409,7 @@ where
 fn resolve_iteratively<'a, I>(
     pdus: I,
     auth_rules: &AuthorizationRules,
-    state_res_rules: &StateResolutionV2Rules,
+    state_res_rules: StateResolutionV2Rules,
 ) -> Result<StateMap<OwnedEventId>, Box<dyn Error>>
 where
     I: IntoIterator<Item = &'a Pdu> + Clone,
@@ -467,7 +467,7 @@ where
 
         let state_before_event = resolve(
             auth_rules,
-            state_res_rules,
+            &state_res_rules,
             &states_before_event,
             auth_chains_before_event.clone(),
             |x| pdus_map.get(x).cloned(),
@@ -490,7 +490,7 @@ where
 
         let state_at_event = resolve(
             auth_rules,
-            state_res_rules,
+            &state_res_rules,
             &[state_before_event, proposed_state_at_event],
             vec![auth_chain_before_event, auth_chain_at_event],
             |x| pdus_map.get(x).cloned(),
@@ -525,7 +525,7 @@ where
 
     resolve(
         auth_rules,
-        state_res_rules,
+        &state_res_rules,
         &leaf_states,
         auth_chain_sets,
         |x| pdus_map.get(x).cloned(),

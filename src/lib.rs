@@ -201,9 +201,7 @@ where
 
     for map in state_maps {
         state_sets.push(map.clone());
-        for id in map.values() {
-            id_map.insert(id.to_string(), id.clone());
-        }
+        id_map.extend(map.values().map(|id| (id.to_string(), id.clone())));
     }
     if state_sets.is_empty() {
         return Ok(StateMap::new());
@@ -230,17 +228,12 @@ where
     }
 
     // Compute auth difference
-    // Also handle odd number of auth chains if applicable (ruma does not do this for symmetric_diff, but wait, ruma chunks by 2. Let's just do exactly what ruma does, or just compute union minus intersection)
-    // Actually, an easier way is just union all chains, and intersect all chains, then diff = union - intersection.
     let mut union_auth = std::collections::HashSet::new();
-    let mut intersect_auth = if auth_chains.is_empty() {
-        std::collections::HashSet::new()
-    } else {
-        auth_chains[0]
-            .iter()
-            .map(alloc::string::ToString::to_string)
-            .collect::<std::collections::HashSet<_>>()
-    };
+    let mut intersect_auth = auth_chains
+        .first()
+        .map_or_else(std::collections::HashSet::new, |first| {
+            first.iter().map(ToString::to_string).collect()
+        });
     for chain in &auth_chains {
         let set: std::collections::HashSet<_> = chain
             .iter()
@@ -947,9 +940,7 @@ pub fn resolve_lean(
         _ => unconflicted_state.clone(),
     };
 
-    let filtered_conflicted = conflicted_events.clone();
-
-    let sort_set = &filtered_conflicted;
+    let sort_set = &conflicted_events;
 
     // Route all events through Kahn sort (reverse topological power ordering).
     let mut power_events = HashMap::new();
