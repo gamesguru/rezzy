@@ -465,3 +465,23 @@ fn test_anomaly_16_causality_leakage() {
         100
     );
 }
+
+#[test]
+fn test_anomaly_18_unauthorized_admin_amplification() {
+    let absolute_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/critique_data/18_unauthorized_admin_amplification.jsonl");
+    let events = load_fixture(&absolute_path);
+    let map = to_event_map(&events);
+
+    let resolved_v2_1 = resolve_full(&events, StateResVersion::V2_1);
+    let resolved_v2_1_1 = resolve_full(&events, StateResVersion::V2_1_1);
+
+    let bob_member_v2_1 = get_membership(&resolved_v2_1, &map, "@bob:example.com");
+    let bob_member_v2_1_1 = get_membership(&resolved_v2_1_1, &map, "@bob:example.com");
+
+    println!("v2.1 Bob membership: {}", bob_member_v2_1);
+    println!("v2.1.1 Bob membership: {}", bob_member_v2_1_1);
+
+    assert_eq!(bob_member_v2_1, "join");
+    assert_eq!(bob_member_v2_1_1, "ban");
+}
