@@ -46,6 +46,7 @@ enum OutputFormat {
     #[default]
     Events,
     Default,
+    Deltas,
     Federation,
     Summary,
     Timeline,
@@ -82,6 +83,35 @@ fn detect_version(events: &[serde_json::Value], debug: bool) -> anyhow::Result<S
         "No m.room.create event found — cannot detect room version. \
          Use --state-res to specify the algorithm manually."
     )
+}
+
+fn compute_state_hash(
+    state: &std::collections::BTreeMap<(String, Option<String>), String>,
+) -> String {
+    let mut hash: u64 = 14695981039346656037; // FNV offset basis
+    for ((event_type, state_key), event_id) in state {
+        for &byte in event_type.as_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(1099511628211); // FNV prime
+        }
+        hash ^= 0x00;
+        hash = hash.wrapping_mul(1099511628211);
+        if let Some(key) = state_key {
+            for &byte in key.as_bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(1099511628211);
+            }
+        }
+        hash ^= 0x00;
+        hash = hash.wrapping_mul(1099511628211);
+        for &byte in event_id.as_bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(1099511628211);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    format!("{:016x}", hash)
 }
 
 fn fetch_room_state(
@@ -604,6 +634,154 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
         .collect();
 
     match args.format {
+        OutputFormat::Deltas => {
+            let mut sorted_events: Vec<&LeanEvent> = events_map.values().collect();
+            sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
+
+            let mut state_after_map: HashMap<
+                String,
+                std::collections::BTreeMap<(String, Option<String>), String>,
+            > = HashMap::new();
+            let mut state_hash_map: HashMap<String, String> = HashMap::new();
+            let mut checkpoints = Vec::new();
+
+            for ev in &sorted_events {
+                let mut state_before = std::collections::BTreeMap::new();
+                let mut parent_hash = None;
+
+                if ev.prev_events.is_empty() {
+                    // Empty state before
+                } else if ev.prev_events.len() == 1 {
+                    let prev_id = &ev.prev_events[0];
+                    if let Some(prev_state) = state_after_map.get(prev_id) {
+                        state_before = prev_state.clone();
+                        parent_hash = state_hash_map.get(prev_id).cloned();
+                    }
+                } else {
+                    // Multi-head merge
+                    let mut parent_states = Vec::new();
+                    let mut first_parent_hash = None;
+                    for prev_id in &ev.prev_events {
+                        if let Some(prev_state) = state_after_map.get(prev_id) {
+                            parent_states.push(prev_state.clone());
+                            if first_parent_hash.is_none() {
+                                first_parent_hash = state_hash_map.get(prev_id).cloned();
+                            }
+                        }
+                    }
+
+                    if !parent_states.is_empty() {
+                        parent_hash = first_parent_hash;
+                        if parent_states.len() == 1 {
+                            state_before = parent_states[0].clone();
+                        } else {
+                            // Run state-res on parent states
+                            let num_sets = parent_states.len();
+                            let mut occurrences: HashMap<
+                                (String, Option<String>),
+                                HashMap<String, usize>,
+                            > = HashMap::new();
+                            for map in &parent_states {
+                                for (key, id) in map {
+                                    *occurrences
+                                        .entry(key.clone())
+                                        .or_default()
+                                        .entry(id.clone())
+                                        .or_insert(0) += 1;
+                                }
+                            }
+
+                            let mut unconflicted_state = std::collections::BTreeMap::new();
+                            let mut conflicted_state_set = Vec::new();
+
+                            for (key, ids) in occurrences {
+                                if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
+                                    let id = ids.keys().next().unwrap();
+                                    unconflicted_state.insert(key, id.clone());
+                                } else {
+                                    for id in ids.keys() {
+                                        conflicted_state_set.push(id.clone());
+                                    }
+                                }
+                            }
+
+                            let mut conflicted_events = HashMap::new();
+                            for id in &conflicted_state_set {
+                                if let Some(parent_ev) = events_map.get(id) {
+                                    conflicted_events.insert(id.clone(), parent_ev.clone());
+                                }
+                            }
+
+                            state_before = ruma_lean::resolve_lean(
+                                unconflicted_state,
+                                conflicted_events,
+                                &events_map,
+                                version,
+                            );
+                        }
+                    }
+                }
+
+                let mut state_after = state_before.clone();
+                if ev.state_key.is_some() {
+                    state_after.insert(
+                        (ev.event_type.clone(), ev.state_key.clone()),
+                        ev.event_id.clone(),
+                    );
+                }
+
+                let hash_str = compute_state_hash(&state_after);
+                state_after_map.insert(ev.event_id.clone(), state_after.clone());
+                state_hash_map.insert(ev.event_id.clone(), hash_str.clone());
+
+                let mut deltas = Vec::new();
+                let primary_parent_state = ev
+                    .prev_events
+                    .first()
+                    .and_then(|p_id| state_after_map.get(p_id));
+
+                if let Some(parent_state) = primary_parent_state {
+                    for (key, event_id) in &state_after {
+                        match parent_state.get(key) {
+                            Some(parent_event_id) if parent_event_id == event_id => {}
+                            _ => {
+                                deltas.push(serde_json::json!({
+                                    "type": key.0,
+                                    "state_key": key.1,
+                                    "event_id": event_id,
+                                }));
+                            }
+                        }
+                    }
+                    for (key, _) in parent_state {
+                        if !state_after.contains_key(key) {
+                            deltas.push(serde_json::json!({
+                                "type": key.0,
+                                "state_key": key.1,
+                                "event_id": serde_json::Value::Null,
+                            }));
+                        }
+                    }
+                } else {
+                    for (key, event_id) in &state_after {
+                        deltas.push(serde_json::json!({
+                            "type": key.0,
+                            "state_key": key.1,
+                            "event_id": event_id,
+                        }));
+                    }
+                }
+
+                checkpoints.push(serde_json::json!({
+                    "hash": hash_str,
+                    "parent": parent_hash,
+                    "event_id": ev.event_id,
+                    "deltas": deltas,
+                }));
+            }
+
+            Ok(serde_json::json!(checkpoints))
+        }
         OutputFormat::Events => {
             let mut state_events: Vec<&serde_json::Value> = resolved_state_list
                 .iter()

@@ -1582,6 +1582,48 @@ pub fn apply_cdo_filter(
     safe_set
 }
 
+/// Computes the state map at (after) a given target event ID,
+/// assuming all ancestral events are present in `events_map`.
+pub fn compute_state_at(
+    target_event_id: &str,
+    events_map: &HashMap<String, LeanEvent>,
+) -> Option<BTreeMap<(String, Option<String>), String>> {
+    if !events_map.contains_key(target_event_id) {
+        return None;
+    }
+
+    // 1. Backward walk to find causal history (prev_events)
+    let mut visited = BTreeSet::new();
+    let mut stack = alloc::vec![String::from(target_event_id)];
+    while let Some(ev_id) = stack.pop() {
+        if visited.insert(ev_id.clone()) {
+            if let Some(ev) = events_map.get(&ev_id) {
+                for pe in &ev.prev_events {
+                    stack.push(pe.clone());
+                }
+            }
+        }
+    }
+
+    // 2. Filter and sort by depth ascending, then event_id ascending
+    let mut sorted_events: Vec<&LeanEvent> = events_map
+        .values()
+        .filter(|ev| visited.contains(&ev.event_id))
+        .collect();
+    sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
+
+    // 3. Build state map (latest-wins)
+    let mut state_map = BTreeMap::new();
+    for ev in sorted_events {
+        if ev.state_key.is_some() {
+            let key = (ev.event_type.clone(), ev.state_key.clone());
+            state_map.insert(key, ev.event_id.clone());
+        }
+    }
+
+    Some(state_map)
+}
+
 pub mod roaring_auth;
 
 #[cfg(test)]
