@@ -44,7 +44,7 @@ pub enum AuthError {
     CreateWithPrevEvents,
     /// An auth event referenced by this event is missing from the provided state.
     MissingAuthEvent(String),
-    /// The event failed basic syntactic validation (e.g. invalid event type, too many prev_events).
+    /// The event failed basic syntactic validation (e.g. invalid event type, too many `prev_events`).
     InvalidSyntax(String),
 }
 
@@ -52,27 +52,27 @@ impl fmt::Display for AuthError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AuthError::NotMember { sender, .. } => {
-                write!(f, "sender {} is not joined", sender)
+                write!(f, "sender {sender} is not joined")
             }
             AuthError::InsufficientPowerLevel {
                 required,
                 actual,
                 event_type,
-            } => write!(f, "PL {} < {} for {}", actual, required, event_type),
+            } => write!(f, "PL {actual} < {required} for {event_type}"),
             AuthError::BannedUser { sender, .. } => {
-                write!(f, "sender {} is banned", sender)
+                write!(f, "sender {sender} is banned")
             }
             AuthError::InvalidStateKey { expected, actual } => {
-                write!(f, "invalid state_key: {} (expected {})", actual, expected)
+                write!(f, "invalid state_key: {actual} (expected {expected})")
             }
             AuthError::CreateWithPrevEvents => {
                 write!(f, "m.room.create has prev_events")
             }
             AuthError::MissingAuthEvent(id) => {
-                write!(f, "missing auth event: {}", id)
+                write!(f, "missing auth event: {id}")
             }
             AuthError::InvalidSyntax(reason) => {
-                write!(f, "invalid syntax: {}", reason)
+                write!(f, "invalid syntax: {reason}")
             }
         }
     }
@@ -136,7 +136,7 @@ pub trait StateProvider {
     fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent>;
 }
 
-/// The room state at a specific point in the DAG (keyed by (type, state_key) -> event).
+/// The room state at a specific point in the DAG (keyed by (type, `state_key`) -> event).
 pub type RoomState = alloc::collections::BTreeMap<(String, Option<String>), LeanEvent>;
 
 impl StateProvider for RoomState {
@@ -149,11 +149,11 @@ impl StateProvider for RoomState {
 /// Check whether `event` is authorized given the room state at its `prev_events`.
 ///
 /// This implements the core Matrix authorization rules:
-/// 1. `m.room.create` must be the first event (no prev_events).
+/// 1. `m.room.create` must be the first event (no `prev_events`).
 /// 2. Sender must be a joined member (unless joining/being invited).
 /// 3. Sender must not be banned.
 /// 4. Sender's power level must meet the event type requirement.
-/// 5. For `m.room.member` events, the state_key must match transition rules.
+/// 5. For `m.room.member` events, the `state_key` must match transition rules.
 pub fn check_auth(event: &LeanEvent, state: &impl StateProvider) -> Result<(), AuthError> {
     // Rule 0: Custom syntactic validation
     event
@@ -213,8 +213,7 @@ pub fn check_auth(event: &LeanEvent, state: &impl StateProvider) -> Result<(), A
 
         let _pl_ev_id = state
             .get_event("m.room.power_levels", Some(""))
-            .map(|ev| ev.event_id.clone())
-            .unwrap_or_else(|| "NONE".into());
+            .map_or_else(|| "NONE".into(), |ev| ev.event_id.clone());
 
         if sender_pl < required_pl {
             return Err(AuthError::InsufficientPowerLevel {
@@ -269,7 +268,7 @@ fn get_sender_power_level(sender: &str, state: &impl StateProvider) -> i64 {
     // 2. State-based Power Levels
     if let Some(pl_event) = state.get_event("m.room.power_levels", Some("")) {
         if let Some(users) = pl_event.content.get("users").and_then(|u| u.as_object()) {
-            if let Some(pl) = users.get(sender).and_then(|v| v.as_i64()) {
+            if let Some(pl) = users.get(sender).and_then(serde_json::Value::as_i64) {
                 return pl;
             }
         }
@@ -277,7 +276,7 @@ fn get_sender_power_level(sender: &str, state: &impl StateProvider) -> i64 {
         if let Some(default) = pl_event
             .content
             .get("users_default")
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
         {
             return default;
         }
@@ -290,7 +289,10 @@ fn get_required_power_level(event: &LeanEvent, state: &impl StateProvider) -> i6
     if let Some(pl_event) = state.get_event("m.room.power_levels", Some("")) {
         // Check specific event type overrides
         if let Some(events) = pl_event.content.get("events").and_then(|e| e.as_object()) {
-            if let Some(pl) = events.get(&event.event_type).and_then(|v| v.as_i64()) {
+            if let Some(pl) = events
+                .get(&event.event_type)
+                .and_then(serde_json::Value::as_i64)
+            {
                 return pl;
             }
         }
@@ -299,13 +301,13 @@ fn get_required_power_level(event: &LeanEvent, state: &impl StateProvider) -> i6
             return pl_event
                 .content
                 .get("state_default")
-                .and_then(|v| v.as_i64())
+                .and_then(serde_json::Value::as_i64)
                 .unwrap_or(50);
         }
         return pl_event
             .content
             .get("events_default")
-            .and_then(|v| v.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(0);
     }
     // No restrictions if no power_levels event exists
@@ -445,7 +447,11 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
 /// Get the kick power level from room state.
 fn get_kick_power_level(state: &impl StateProvider) -> i64 {
     if let Some(pl_event) = state.get_event("m.room.power_levels", Some("")) {
-        if let Some(kick) = pl_event.content.get("kick").and_then(|v| v.as_i64()) {
+        if let Some(kick) = pl_event
+            .content
+            .get("kick")
+            .and_then(serde_json::Value::as_i64)
+        {
             return kick;
         }
     }
@@ -455,7 +461,11 @@ fn get_kick_power_level(state: &impl StateProvider) -> i64 {
 /// Get the ban power level from room state.
 fn get_invite_power_level(state: &impl StateProvider) -> i64 {
     if let Some(pl_event) = state.get_event("m.room.power_levels", Some("")) {
-        if let Some(invite) = pl_event.content.get("invite").and_then(|v| v.as_i64()) {
+        if let Some(invite) = pl_event
+            .content
+            .get("invite")
+            .and_then(serde_json::Value::as_i64)
+        {
             return invite;
         }
     }
@@ -464,7 +474,11 @@ fn get_invite_power_level(state: &impl StateProvider) -> i64 {
 
 fn get_ban_power_level(state: &impl StateProvider) -> i64 {
     if let Some(pl_event) = state.get_event("m.room.power_levels", Some("")) {
-        if let Some(ban) = pl_event.content.get("ban").and_then(|v| v.as_i64()) {
+        if let Some(ban) = pl_event
+            .content
+            .get("ban")
+            .and_then(serde_json::Value::as_i64)
+        {
             return ban;
         }
     }
@@ -474,6 +488,7 @@ fn get_ban_power_level(state: &impl StateProvider) -> i64 {
 /// Iteratively apply auth checks to a list of events in topological order.
 /// Returns the list of events that passed auth checks, and the list that failed
 /// with their respective errors.
+#[must_use]
 pub fn check_auth_chain(
     sorted_events: &[LeanEvent],
     initial_state: &RoomState,

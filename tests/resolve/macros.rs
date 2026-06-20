@@ -208,9 +208,9 @@ pub(super) fn test_resolve_batches(pdus_paths: &[&str]) -> String {
 pub(super) fn test_resolve_state_maps(state_maps_paths: &[&str], pdus_paths: &[&str]) -> String {
     let (pdu_batches, auth_rules, state_res_rules) = load_pdus_and_room_version_rules(pdus_paths);
 
-    let pdus = pdu_batches.into_iter().flat_map(|x| x.into_iter()).collect::<Vec<_>>();
+    let pdus = pdu_batches.into_iter().flat_map(std::iter::IntoIterator::into_iter).collect::<Vec<_>>();
     let pdus_map: EventIdMap<OwnedEventId, Pdu> =
-        pdus.clone().into_iter().map(|pdu| (pdu.event_id().to_owned(), pdu.to_owned())).collect();
+        pdus.clone().into_iter().map(|pdu| (pdu.event_id().to_owned(), pdu.clone())).collect();
 
     let state_maps = load_state_maps(state_maps_paths, &pdus_map);
 
@@ -482,7 +482,7 @@ where
                 current_pdu.event_type().to_string().into(),
                 current_pdu.state_key().expect("all pdus are state events").to_owned(),
             ),
-            event_id.to_owned(),
+            event_id.clone(),
         );
 
         let mut auth_chain_at_event = auth_chain_before_event.clone();
@@ -507,12 +507,10 @@ where
         }
     }
 
-    if state_at_events.len() != pdus_map.len() {
-        panic!(
-            "Not all events have a state calculated! This is likely due to an \
-             event having a `prev_events` which points to a non-existent PDU."
-        );
-    }
+    assert!(state_at_events.len() == pdus_map.len(),
+        "Not all events have a state calculated! This is likely due to an \
+         event having a `prev_events` which points to a non-existent PDU."
+    );
 
     let mut leaf_states = Vec::new();
     let mut auth_chain_sets = Vec::new();
@@ -579,12 +577,12 @@ fn conflicted_state_subgraph(
     let mut seen_events = EventIdSet::new();
 
     let next_event = |stack: &mut Vec<Vec<_>>, path: &mut Vec<_>| {
-        while stack.last().is_some_and(|s| s.is_empty()) {
+        while stack.last().is_some_and(std::vec::Vec::is_empty) {
             stack.pop();
             path.pop();
         }
 
-        stack.last_mut().and_then(|s| s.pop())
+        stack.last_mut().and_then(std::vec::Vec::pop)
     };
 
     while let Some(event_id) = next_event(&mut stack, &mut path) {

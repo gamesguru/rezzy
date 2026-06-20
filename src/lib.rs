@@ -51,8 +51,14 @@ fn ruma_to_lean_event<E: Event>(ev: &E) -> crate::LeanEvent {
         origin_server_ts: ev.origin_server_ts().0.into(),
         sender: ev.sender().to_string(),
         content: content_val,
-        prev_events: ev.prev_events().map(|id| id.to_string()).collect(),
-        auth_events: ev.auth_events().map(|id| id.to_string()).collect(),
+        prev_events: ev
+            .prev_events()
+            .map(alloc::string::ToString::to_string)
+            .collect(),
+        auth_events: ev
+            .auth_events()
+            .map(alloc::string::ToString::to_string)
+            .collect(),
         depth: 0,
     }
 }
@@ -95,7 +101,7 @@ where
     let mut counts: HashMap<(&(ruma_events::StateEventType, String), &E::Id), usize> =
         HashMap::new();
     for map in &state_sets {
-        for (key, id) in map.iter() {
+        for (key, id) in map {
             *counts.entry((key, id)).or_insert(0) += 1;
         }
     }
@@ -105,7 +111,7 @@ where
     let mut unconflicted_state = BTreeMap::new();
 
     for map in &state_sets {
-        for (key, id) in map.iter() {
+        for (key, id) in map {
             if counts.get(&(key, id)).copied().unwrap_or(0) == num_maps {
                 let state_key_opt = if key.1.is_empty() {
                     None
@@ -123,7 +129,7 @@ where
     let mut auth_context = HashMap::new();
 
     for map in &state_sets {
-        for (key, id) in map.iter() {
+        for (key, id) in map {
             if conflicted_keys.contains(key) {
                 let id_str = id.to_string();
                 if !conflicted_events.contains_key(&id_str) {
@@ -137,7 +143,7 @@ where
 
     let mut conflicted_state_set: StateMap<Vec<E::Id>> = StateMap::new();
     for map in &state_sets {
-        for (key, id) in map.iter() {
+        for (key, id) in map {
             if conflicted_keys.contains(key) {
                 let list = conflicted_state_set
                     .entry(key.clone())
@@ -179,11 +185,14 @@ where
     } else {
         _auth_chains[0]
             .iter()
-            .map(|id| id.to_string())
+            .map(alloc::string::ToString::to_string)
             .collect::<std::collections::HashSet<_>>()
     };
     for chain in &_auth_chains {
-        let set: std::collections::HashSet<_> = chain.iter().map(|id| id.to_string()).collect();
+        let set: std::collections::HashSet<_> = chain
+            .iter()
+            .map(alloc::string::ToString::to_string)
+            .collect();
         union_auth.extend(set.clone());
         intersect_auth.retain(|id| set.contains(id));
     }
@@ -200,7 +209,7 @@ where
         }
     }
     for chain in _auth_chains {
-        for id in chain.iter() {
+        for id in &chain {
             to_fetch.push(id.clone());
             id_map.insert(id.to_string(), id.clone());
         }
@@ -292,6 +301,7 @@ pub enum KahnSortResult {
 impl KahnSortResult {
     /// Returns the sorted event IDs, or an empty vec if a cycle was detected.
     /// This preserves backward compatibility with the old API.
+    #[must_use]
     pub fn into_sorted(self) -> Vec<String> {
         match self {
             KahnSortResult::Ok(v) => v,
@@ -300,6 +310,7 @@ impl KahnSortResult {
     }
 
     /// Returns true if sorting completed without cycles.
+    #[must_use]
     pub fn is_ok(&self) -> bool {
         matches!(self, KahnSortResult::Ok(_))
     }
@@ -315,7 +326,7 @@ where
 
     struct PowerLevelVisitor;
 
-    impl<'de> de::Visitor<'de> for PowerLevelVisitor {
+    impl de::Visitor<'_> for PowerLevelVisitor {
         type Value = i64;
 
         fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
@@ -503,9 +514,10 @@ impl PartialOrd for LeanEvent {
 }
 
 impl LeanEvent {
-    /// Deterministic ordering: depth ascending, then event_id ascending.
+    /// Deterministic ordering: depth ascending, then `event_id` ascending.
     /// Use this instead of `sort_by_key(|ev| ev.depth)` to avoid
-    /// non-determinism from HashMap iteration order on equal depths.
+    /// non-determinism from `HashMap` iteration order on equal depths.
+    #[must_use]
     pub fn cmp_by_depth(&self, other: &Self) -> Ordering {
         self.depth
             .cmp(&other.depth)
@@ -513,7 +525,7 @@ impl LeanEvent {
     }
 }
 
-/// A wrapper to ensure BinaryHeap pops the "Best" event FIRST.
+/// A wrapper to ensure `BinaryHeap` pops the "Best" event FIRST.
 #[derive(Debug, Clone, Copy)]
 struct SortPriority<'a> {
     event: &'a LeanEvent,
@@ -524,7 +536,7 @@ struct SortPriority<'a> {
 
 const MAX_POWER_LEVEL: i64 = 9007199254740991; // 2^53 - 1
 
-/// Dynamically fetches the sender's power level by inspecting the event's immediate auth_events.
+/// Dynamically fetches the sender's power level by inspecting the event's immediate `auth_events`.
 /// Recursive traversal of the auth chain is avoided to prevent bypassing immediate restrictions.
 fn get_power_level_from_auth_chain(
     event: &LeanEvent,
@@ -580,12 +592,16 @@ fn get_power_level_from_auth_chain(
 
     if let Some(pl_ev) = pl_event {
         if let Some(users) = pl_ev.content.get("users").and_then(|u| u.as_object()) {
-            if let Some(pl) = users.get(&event.sender).and_then(|p| p.as_i64()) {
+            if let Some(pl) = users.get(&event.sender).and_then(serde_json::Value::as_i64) {
                 return pl;
             }
         }
 
-        if let Some(default_pl) = pl_ev.content.get("users_default").and_then(|p| p.as_i64()) {
+        if let Some(default_pl) = pl_ev
+            .content
+            .get("users_default")
+            .and_then(serde_json::Value::as_i64)
+        {
             return default_pl;
         }
         return 0; // Default if PL event exists but no users_default
@@ -594,7 +610,7 @@ fn get_power_level_from_auth_chain(
     event.power_level // Fallback to explicitly specified PL (e.g. for dump_jsonl compatibility)
 }
 
-/// Computes the shortest distance from the event to the m.room.create event via auth_events.
+/// Computes the shortest distance from the event to the m.room.create event via `auth_events`.
 fn memoized_auth_distance<'a>(
     curr_id: &'a str,
     auth_context: &'a HashMap<String, LeanEvent>,
@@ -628,7 +644,7 @@ fn memoized_auth_distance<'a>(
     min_dist
 }
 
-impl<'a> PartialEq for SortPriority<'a> {
+impl PartialEq for SortPriority<'_> {
     fn eq(&self, other: &Self) -> bool {
         self.power_level == other.power_level
             && self.event.origin_server_ts == other.event.origin_server_ts
@@ -636,9 +652,9 @@ impl<'a> PartialEq for SortPriority<'a> {
     }
 }
 
-impl<'a> Eq for SortPriority<'a> {}
+impl Eq for SortPriority<'_> {}
 
-impl<'a> Ord for SortPriority<'a> {
+impl Ord for SortPriority<'_> {
     fn cmp(&self, other: &Self) -> Ordering {
         match self.version {
             StateResVersion::V1 => {
@@ -699,7 +715,7 @@ impl<'a> Ord for SortPriority<'a> {
     }
 }
 
-impl<'a> PartialOrd for SortPriority<'a> {
+impl PartialOrd for SortPriority<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -708,6 +724,7 @@ impl<'a> PartialOrd for SortPriority<'a> {
 /// Kahn's Topological Sort with full diagnostic output.
 /// Returns a `KahnSortResult` that distinguishes between successful sorts
 /// and cycle detection, providing the stuck set for debugging.
+#[must_use]
 pub fn lean_kahn_sort_detailed(
     events: &HashMap<String, LeanEvent>,
     auth_context: &HashMap<String, LeanEvent>,
@@ -744,7 +761,7 @@ pub fn lean_kahn_sort_detailed(
 
     let depth_cache: HashMap<String, u64> = if version == StateResVersion::V2_2 {
         let mut memo = HashMap::new();
-        let create_id = create_ev.map(|e| e.event_id.as_str()).unwrap_or("");
+        let create_id = create_ev.map_or("", |e| e.event_id.as_str());
         events
             .keys()
             .map(|id| {
@@ -813,6 +830,7 @@ pub fn lean_kahn_sort_detailed(
 
 /// A simplified implementation of Kahn's Topological Sort.
 /// Backward-compatible wrapper that returns an empty Vec on cycles.
+#[must_use]
 pub fn lean_kahn_sort(
     events: &HashMap<String, LeanEvent>,
     auth_context: &HashMap<String, LeanEvent>,
@@ -822,12 +840,13 @@ pub fn lean_kahn_sort(
     match lean_kahn_sort_detailed(events, auth_context, create_ev, version) {
         KahnSortResult::Ok(sorted) => sorted,
         KahnSortResult::CycleDetected { sorted, stuck } => {
-            std::eprintln!("KAHN CYCLE DETECTED! Stuck: {:?}", stuck);
+            std::eprintln!("KAHN CYCLE DETECTED! Stuck: {stuck:?}");
             sorted
         }
     }
 }
 
+#[must_use]
 pub fn resolve_lean(
     unconflicted_state: BTreeMap<(String, Option<String>), String>,
     conflicted_events: HashMap<String, LeanEvent>,
@@ -976,7 +995,7 @@ struct OverlayState<'a> {
     is_power_phase: bool,
 }
 
-impl<'a> crate::auth::StateProvider for OverlayState<'a> {
+impl crate::auth::StateProvider for OverlayState<'_> {
     fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent> {
         let query: &dyn crate::auth::StateKeyDyn = &(event_type, state_key);
 
@@ -1065,7 +1084,7 @@ fn iterative_auth_ok(
 
 /// Recursively compute the local auth context for an event, using memoization
 /// to avoid redundant graph walks. The context is represented as a map of
-/// (type, state_key) -> (LeanEvent, depth), ensuring that for each key, the "closest"
+/// (type, `state_key`) -> (`LeanEvent`, depth), ensuring that for each key, the "closest"
 /// auth event in the chain is preserved (shortest path).
 fn compute_local_auth(
     event: &LeanEvent,
@@ -1158,7 +1177,7 @@ fn compute_local_auth(
     cache.insert(event.event_id.clone(), local_auth.clone());
     local_auth.into_iter().map(|(k, (v, _))| (k, v)).collect()
 }
-/// from the resolved PL event backwards through auth_events.
+/// from the resolved PL event backwards through `auth_events`.
 fn build_mainline(
     resolved: &BTreeMap<(String, Option<String>), String>,
     auth_context: &HashMap<String, LeanEvent>,
@@ -1200,14 +1219,14 @@ fn build_mainline(
 }
 
 /// Precompute the closest mainline position for every event reachable via
-/// auth_events using a single O(V+E) multi-source reverse-BFS.
+/// `auth_events` using a single O(V+E) multi-source reverse-BFS.
 ///
-/// The naive approach walks the auth chain per-event: O(events × chain_depth).
+/// The naive approach walks the auth chain per-event: O(events × `chain_depth`).
 /// On a dense DAG with 52k events this dominates runtime.
 ///
 /// This approach instead:
 /// 1. Seeds the BFS from ALL mainline events simultaneously at their positions.
-/// 2. Builds reverse auth-edges (auth_ev → events that list it) once: O(V+E).
+/// 2. Builds reverse auth-edges (`auth_ev` → events that list it) once: O(V+E).
 /// 3. BFS outward through those reverse edges; since we process in ascending
 ///    position order, the first time an event is reached gives the minimum
 ///    (closest) mainline position.
@@ -1266,8 +1285,8 @@ fn precompute_mainline_positions(
 
 /// Sort events by mainline ordering per the Matrix spec:
 /// 1. Closest mainline position (smaller index = closer to current PL = comes last)
-/// 2. origin_server_ts ascending (earlier first, later wins via last-write)
-/// 3. event_id ascending (smaller first)
+/// 2. `origin_server_ts` ascending (earlier first, later wins via last-write)
+/// 3. `event_id` ascending (smaller first)
 fn mainline_sort(
     events: &mut Vec<&LeanEvent>,
     mainline: &[String],
@@ -1306,6 +1325,7 @@ pub struct SubgraphResult {
     pub missing_auth_events: Vec<String>,
 }
 
+#[must_use]
 pub fn compute_v2_1_conflicted_subgraph(
     auth_graph: &HashMap<String, LeanEvent>,
     conflicted_set: &[String],
@@ -1315,8 +1335,9 @@ pub fn compute_v2_1_conflicted_subgraph(
 
 /// Bounded version of conflicted subgraph computation.
 /// `max_auth_depth`: If set, limits backwards traversal depth to prevent
-/// history-flooding DoS attacks where a rogue admin generates millions of
+/// history-flooding `DoS` attacks where a rogue admin generates millions of
 /// spoofed events on a dead-end fork.
+#[must_use]
 pub fn compute_v2_1_conflicted_subgraph_bounded(
     auth_graph: &HashMap<String, LeanEvent>,
     conflicted_set: &[String],
@@ -1387,6 +1408,7 @@ pub fn compute_v2_1_conflicted_subgraph_bounded(
 }
 
 impl LeanEvent {
+    #[must_use]
     pub fn is_ban_or_kick(&self) -> bool {
         if self.event_type == "m.room.member" {
             if let Some(membership) = self.content.get("membership").and_then(|v| v.as_str()) {
@@ -1396,10 +1418,12 @@ impl LeanEvent {
         false
     }
 
+    #[must_use]
     pub fn is_demotion(&self) -> bool {
         self.event_type == "m.room.power_levels"
     }
 
+    #[must_use]
     pub fn is_lockdown(&self) -> bool {
         if self.event_type == "m.room.join_rules" {
             if let Some(rule) = self.content.get("join_rule").and_then(|v| v.as_str()) {
@@ -1409,6 +1433,7 @@ impl LeanEvent {
         false
     }
 
+    #[must_use]
     pub fn restricts_sender(&self, sender: &str) -> bool {
         if self.is_ban_or_kick() {
             if let Some(ref state_key) = self.state_key {
@@ -1427,6 +1452,7 @@ impl LeanEvent {
         false
     }
 
+    #[must_use]
     pub fn restricts_event(&self, other: &LeanEvent) -> bool {
         if self.is_ban_or_kick() || self.is_demotion() {
             return self.restricts_sender(&other.sender);
@@ -1440,6 +1466,7 @@ impl LeanEvent {
     }
 }
 
+#[must_use]
 pub fn is_ancestor(
     child_id: &str,
     possible_ancestor_id: &str,
@@ -1470,6 +1497,7 @@ pub fn is_ancestor(
 
 /// Cycle 0 Topological Filter: Vectorized Causal Domination Operator (CDO)
 /// Executes strictly on the Conflicted State Subgraph (C).
+#[must_use]
 pub fn apply_cdo_filter(
     conflicted_events: &HashMap<String, LeanEvent>,
     auth_context: &HashMap<String, LeanEvent>,
@@ -1546,7 +1574,7 @@ pub fn apply_cdo_filter(
 
     // Pass 3: Auth-Dependency Domination (Transitive Closure / Linear-Time propagation)
     let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
-    for (id, event) in conflicted_events.iter() {
+    for (id, event) in conflicted_events {
         for auth_id in &event.auth_events {
             dependents
                 .entry(auth_id.clone())
@@ -1569,7 +1597,7 @@ pub fn apply_cdo_filter(
 
     // Return strictly the transitively safe set
     let mut safe_set = HashMap::new();
-    for (id, event) in conflicted_events.iter() {
+    for (id, event) in conflicted_events {
         if !dropped_ids.contains(id) {
             safe_set.insert(id.clone(), event.clone());
         }
@@ -1580,6 +1608,7 @@ pub fn apply_cdo_filter(
 
 /// Computes the state map at (after) a given target event ID,
 /// assuming all ancestral events are present in `events_map`.
+#[must_use]
 pub fn compute_state_at(
     target_event_id: &str,
     events_map: &HashMap<String, LeanEvent>,

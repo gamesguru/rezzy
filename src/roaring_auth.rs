@@ -13,6 +13,7 @@ pub struct AuthGraph {
 }
 
 impl AuthGraph {
+    #[must_use]
     pub fn build(sort_context: &HashMap<String, LeanEvent>) -> Self {
         let mut in_degree: HashMap<&str, usize> = HashMap::new();
         let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
