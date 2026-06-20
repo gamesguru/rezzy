@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-/// Helper to parse a JSONL file into a list of LeanEvents
+/// Helper to parse a JSONL file into a list of `LeanEvents`
 fn parse_jsonl_dag<P: AsRef<Path>>(path: P) -> Vec<LeanEvent> {
     let file = File::open(path).expect("Failed to open JSONL file");
     let reader = BufReader::new(file);
@@ -175,8 +175,8 @@ fn test_pathology_fruitless_search_bounded() {
     // Bounded BFS (Depth 5): Will only fetch 15 nodes over federation (5 batches = ~5 seconds latency)
     let dur_bounded = simulate_federation_lag(&full_graph, &conflicted_event_ids, Some(5));
 
-    println!("V2.1.1 UNBOUNDED Network Lag: {:?}", dur_unbounded);
-    println!("V2.1.1 BOUNDED Network Lag:   {:?}", dur_bounded);
+    println!("V2.1.1 UNBOUNDED Network Lag: {dur_unbounded:?}");
+    println!("V2.1.1 BOUNDED Network Lag:   {dur_bounded:?}");
 
     // Unbounded version must take significantly longer due to sequential network blocking
     assert!(

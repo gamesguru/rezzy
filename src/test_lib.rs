@@ -464,7 +464,7 @@ mod tests {
     fn test_trait_coverage() {
         let v = StateResVersion::V2;
         assert_eq!(v, StateResVersion::V2);
-        let _ = alloc::format!("{:?}", v);
+        let _ = alloc::format!("{v:?}");
 
         let e = LeanEvent {
             event_id: "a".into(),
@@ -478,7 +478,7 @@ mod tests {
             ..Default::default()
         };
         let _ = e.clone();
-        let _ = alloc::format!("{:?}", e);
+        let _ = alloc::format!("{e:?}");
     }
 
     #[test]
@@ -716,8 +716,8 @@ mod tests {
                     power_level: r.1,
                     origin_server_ts: r.2,
                     depth: r.3,
-                    prev_events: r.4.iter().map(|s| s.to_string()).collect(),
-                    auth_events: r.4.iter().map(|s| s.to_string()).collect(),
+                    prev_events: r.4.iter().map(alloc::string::ToString::to_string).collect(),
+                    auth_events: r.4.iter().map(alloc::string::ToString::to_string).collect(),
                     ..Default::default()
                 },
             );
@@ -730,7 +730,10 @@ mod tests {
         );
         assert_eq!(
             result,
-            expected.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+            expected
+                .iter()
+                .map(alloc::string::ToString::to_string)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -805,7 +808,7 @@ mod tests {
         let v = StateResVersion::V2;
         let v2 = v;
         assert_eq!(v, v2);
-        let debug_str = alloc::format!("{:?}", v);
+        let debug_str = alloc::format!("{v:?}");
         assert!(debug_str.contains("V2"));
     }
 
@@ -824,7 +827,7 @@ mod tests {
         };
         let e2 = e.clone();
         assert_eq!(e, e2);
-        let debug_str = alloc::format!("{:?}", e);
+        let debug_str = alloc::format!("{e:?}");
         assert!(debug_str.contains("event_id"));
     }
 
@@ -849,7 +852,7 @@ mod tests {
         };
         let p2 = p;
         assert_eq!(p, p2);
-        let debug_str = alloc::format!("{:?}", p);
+        let debug_str = alloc::format!("{p:?}");
         assert!(debug_str.contains("version"));
     }
 
@@ -945,7 +948,7 @@ mod tests {
         assert_eq!(sorted, vec!["A"]);
     }
 
-    /// Regression test: V2_1 uses the same "later timestamp wins" tie-break as V2.
+    /// Regression test: `V2_1` uses the same "later timestamp wins" tie-break as V2.
     /// Earlier events are sorted first (popped first from heap), later events
     /// come last and win via last-write-wins. This matches the Matrix spec.
     #[test]
@@ -995,7 +998,7 @@ mod tests {
     }
 
     /// Regression test: millisecond-close Draupnir ban races resolve identically
-    /// in V2 and V2_1 when processed through Kahn sort alone.
+    /// in V2 and `V2_1` when processed through Kahn sort alone.
     #[test]
     fn test_v2_1_millisecond_race_tiebreak() {
         let mut events = HashMap::new();
@@ -1314,7 +1317,7 @@ mod tests {
         // 1000-event deep chain: ev_0 <- ev_1 <- ev_2 <- ... <- ev_999
         let mut events = HashMap::new();
         for i in 0..1000u32 {
-            let id = alloc::format!("ev_{}", i);
+            let id = alloc::format!("ev_{i}");
             let auth = if i > 0 {
                 vec![alloc::format!("ev_{}", i - 1)]
             } else {
@@ -1327,9 +1330,9 @@ mod tests {
                     event_type: "m.room.member".into(),
                     state_key: Some("@alice:example.com".into()),
                     power_level: 100,
-                    origin_server_ts: i as u64,
+                    origin_server_ts: u64::from(i),
                     auth_events: auth,
-                    depth: i as u64,
+                    depth: u64::from(i),
                     ..Default::default()
                 },
             );
@@ -1363,7 +1366,10 @@ mod tests {
                     event_id: id.into(),
                     event_type: "m.room.member".into(),
                     state_key: Some("@alice:example.com".into()),
-                    auth_events: auths.iter().map(|s| s.to_string()).collect(),
+                    auth_events: auths
+                        .iter()
+                        .map(alloc::string::ToString::to_string)
+                        .collect(),
                     ..Default::default()
                 },
             );
@@ -1517,7 +1523,7 @@ mod tests {
         let root = LeanEvent {
             event_id: "$root".into(),
             event_type: "m.room.create".into(),
-            state_key: Some("".into()),
+            state_key: Some(String::new()),
             sender: "@alice:example.com".into(),
             origin_server_ts: 1000,
             ..Default::default()
@@ -1565,7 +1571,7 @@ mod tests {
         let bob_name_change = LeanEvent {
             event_id: "$bob_name_change".into(),
             event_type: "m.room.name".into(),
-            state_key: Some("".into()),
+            state_key: Some(String::new()),
             sender: "@bob:example.com".into(),
             origin_server_ts: 1350,
             prev_events: vec!["$bob_join".into()],
@@ -1592,7 +1598,7 @@ mod tests {
         let root = LeanEvent {
             event_id: "$root".into(),
             event_type: "m.room.create".into(),
-            state_key: Some("".into()),
+            state_key: Some(String::new()),
             sender: "@alice:example.com".into(),
             origin_server_ts: 1000,
             ..Default::default()
@@ -1614,7 +1620,7 @@ mod tests {
         let jr_pub = LeanEvent {
             event_id: "$jr_pub".into(),
             event_type: "m.room.join_rules".into(),
-            state_key: Some("".into()),
+            state_key: Some(String::new()),
             sender: "@alice:example.com".into(),
             origin_server_ts: 1150,
             prev_events: vec!["$alice_join".into()],
@@ -1627,7 +1633,7 @@ mod tests {
         let pl_init = LeanEvent {
             event_id: "$pl_init".into(),
             event_type: "m.room.power_levels".into(),
-            state_key: Some("".into()),
+            state_key: Some(String::new()),
             sender: "@alice:example.com".into(),
             origin_server_ts: 1200,
             prev_events: vec!["$jr_pub".into()],
@@ -1641,7 +1647,7 @@ mod tests {
         let rules_invite = LeanEvent {
             event_id: "$rules_invite".into(),
             event_type: "m.room.join_rules".into(),
-            state_key: Some("".into()),
+            state_key: Some(String::new()),
             sender: "@alice:example.com".into(),
             origin_server_ts: 1300,
             prev_events: vec!["$pl_init".into()],
@@ -1673,7 +1679,7 @@ mod tests {
         let nexy_promo = LeanEvent {
             event_id: "$nexy_promo".into(),
             event_type: "m.room.power_levels".into(),
-            state_key: Some("".into()),
+            state_key: Some(String::new()),
             sender: "@alice:example.com".into(),
             origin_server_ts: 1320,
             prev_events: vec!["$nexy_join".into()],

@@ -54,8 +54,8 @@ fn resolve_and_get_state(fixture_path: &str, version: StateResVersion) -> HashMa
         .collect()
 }
 
-/// STRICT cross-validation: if the oracle's event_id IS in our fixture,
-/// we MUST pick the same one. Mismatches where the oracle's event_id is
+/// STRICT cross-validation: if the oracle's `event_id` IS in our fixture,
+/// we MUST pick the same one. Mismatches where the oracle's `event_id` is
 /// absent from our fixture are expected (incomplete export).
 ///
 /// `max_oracle_approx_mismatches` is the number of mismatches that are

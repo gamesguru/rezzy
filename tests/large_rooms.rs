@@ -17,12 +17,11 @@ use ruma_lean::{resolve_lean, LeanEvent, StateResVersion};
 use std::collections::HashMap;
 
 /// Load a JSON fixture file into a Vec<LeanEvent>.
-/// The fixtures use "type" (not "event_type") which our serde rename handles.
+/// The fixtures use "type" (not "`event_type`") which our serde rename handles.
 fn load_fixture(path: &str) -> Vec<LeanEvent> {
     let content = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("Failed to read fixture {}: {}", path, e));
-    serde_json::from_str(&content)
-        .unwrap_or_else(|e| panic!("Failed to parse fixture {}: {}", path, e))
+        .unwrap_or_else(|e| panic!("Failed to read fixture {path}: {e}"));
+    serde_json::from_str(&content).unwrap_or_else(|e| panic!("Failed to parse fixture {path}: {e}"))
 }
 
 /// Load multiple fixture files and concatenate them into one event list.
@@ -30,10 +29,10 @@ fn load_fixture(path: &str) -> Vec<LeanEvent> {
 fn test_room_id() {
     let s = "!00-m-room-create";
     let id = ruma_common::RoomId::parse(s);
-    println!("id: {:?}", id);
+    println!("id: {id:?}");
 }
 
-/// Build a HashMap<String, LeanEvent> from a list of events (keyed by event_id).
+/// Build a `HashMap`<String, `LeanEvent`> from a list of events (keyed by `event_id`).
 fn to_event_map(events: &[LeanEvent]) -> HashMap<String, LeanEvent> {
     events
         .iter()
@@ -103,7 +102,7 @@ fn test_benchmark_1k_resolution_determinism() {
 fn test_ruma_bootstrap_auth_chain() {
     use ruma_lean::auth::{check_auth_chain, RoomState};
 
-    let events = load_fixture(&format!("{}/bootstrap-public-chat.json", FIXTURE_DIR));
+    let events = load_fixture(&format!("{FIXTURE_DIR}/bootstrap-public-chat.json"));
     let (accepted, rejected) = check_auth_chain(&events, &RoomState::new());
 
     // All bootstrap events should pass auth
@@ -138,7 +137,7 @@ fn test_large_room_10k_sort_no_cycles() {
     let sorted = sort_and_verify(&events, StateResVersion::V2);
     // Create must be first
     assert!(
-        sorted[0].starts_with("$"),
+        sorted[0].starts_with('$'),
         "First sorted event should be a valid event ID"
     );
     // All events accounted for
@@ -404,7 +403,7 @@ fn test_unredacted_spam_storm_v2_1_1() {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(e) => {
-            println!("Skipping test: could not open {}: {}", path, e);
+            println!("Skipping test: could not open {path}: {e}");
             return;
         }
     };
@@ -468,13 +467,13 @@ fn test_unredacted_spam_storm_v2_1_1() {
         "V2.1.1 Resolution should produce state for the unredacted storm"
     );
 
-    let v2_pl = resolved_v2.get(&("m.room.power_levels".into(), Some("".into())));
-    let v211_pl = resolved_v211.get(&("m.room.power_levels".into(), Some("".into())));
-    if v2_pl != v211_pl {
-        println!("V2 and V2.1.1 diverged on power levels!");
-        println!("V2 PL: {:?}", v2_pl);
-        println!("V2.1.1 PL: {:?}", v211_pl);
-    } else {
+    let v2_pl = resolved_v2.get(&("m.room.power_levels".into(), Some(String::new())));
+    let v211_pl = resolved_v211.get(&("m.room.power_levels".into(), Some(String::new())));
+    if v2_pl == v211_pl {
         println!("V2 and V2.1.1 produced identical power levels.");
+    } else {
+        println!("V2 and V2.1.1 diverged on power levels!");
+        println!("V2 PL: {v2_pl:?}");
+        println!("V2.1.1 PL: {v211_pl:?}");
     }
 }

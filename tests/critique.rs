@@ -6,14 +6,14 @@ type ResolvedStateMap = HashMap<(String, Option<String>), String>;
 type EventMap = HashMap<String, LeanEvent>;
 
 fn load_fixture(path: &std::path::Path) -> Vec<LeanEvent> {
-    let content = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Missing {:?}", path));
+    let content = std::fs::read_to_string(path).unwrap_or_else(|_| panic!("Missing {path:?}"));
     if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
         content
             .lines()
             .filter(|line| !line.trim().is_empty())
             .map(|line| {
                 serde_json::from_str(line)
-                    .unwrap_or_else(|_| panic!("Failed to parse line in {:?}", path))
+                    .unwrap_or_else(|_| panic!("Failed to parse line in {path:?}"))
             })
             .collect()
     } else {
@@ -194,11 +194,11 @@ fn resolve_full(events: &[LeanEvent], version: StateResVersion) -> ResolvedState
 }
 
 fn get_user_power_level(resolved: &ResolvedStateMap, map: &EventMap, user_id: &str) -> i64 {
-    let key = ("m.room.power_levels".to_string(), Some("".to_string()));
+    let key = ("m.room.power_levels".to_string(), Some(String::new()));
     if let Some(event_id) = resolved.get(&key) {
         if let Some(ev) = map.get(event_id) {
             if let Some(users) = ev.content.get("users").and_then(|u| u.as_object()) {
-                if let Some(pl) = users.get(user_id).and_then(|v| v.as_i64()) {
+                if let Some(pl) = users.get(user_id).and_then(serde_json::Value::as_i64) {
                     return pl;
                 }
             }
@@ -244,8 +244,7 @@ fn assert_benign_convergence(jsonl_filename: &str) -> (ResolvedStateMap, EventMa
 
     assert_eq!(
         resolved_v2_1_1, resolved_v2_1,
-        "Causal Domination pre-filter violated Benign Convergence parity for {}",
-        jsonl_filename
+        "Causal Domination pre-filter violated Benign Convergence parity for {jsonl_filename}"
     );
     (resolved_v2_1_1, map)
 }

@@ -26,8 +26,8 @@ fn test_heap_order() {
     let first = heap.pop().unwrap();
     let second = heap.pop().unwrap();
 
-    println!("First popped: {:?}", first);
-    println!("Second popped: {:?}", second);
+    println!("First popped: {first:?}");
+    println!("Second popped: {second:?}");
 
     assert_eq!(first.0, 50);
     assert_eq!(second.0, 100);
@@ -45,7 +45,7 @@ fn test_compute_state_at_correctness_and_performance() {
     let total_events = 1000;
 
     for i in 1..=total_events {
-        let event_id = format!("${}", i);
+        let event_id = format!("${i}");
         let prev_events = if i > 1 {
             vec![format!("${}", i - 1)]
         } else {
@@ -54,7 +54,7 @@ fn test_compute_state_at_correctness_and_performance() {
 
         // Every 10th event is state
         let (state_key, event_type) = if i % 10 == 0 {
-            (Some(format!("user_{}", i)), "m.room.member".to_string())
+            (Some(format!("user_{i}")), "m.room.member".to_string())
         } else {
             (None, "m.room.message".to_string())
         };
@@ -123,13 +123,10 @@ fn test_compute_state_at_correctness_and_performance() {
     }
     let dur_tip = start_tip.elapsed() / runs;
 
-    println!(
-        "\n=== compute_state_at Performance (Synthetic 1k Chain, average of {} runs) ===",
-        runs
-    );
-    println!("Early Event (depth 100):  {:?}", dur_early);
-    println!("Mid Event (depth 500):    {:?}", dur_mid);
-    println!("Tip Event (depth 1000):   {:?}", dur_tip);
+    println!("\n=== compute_state_at Performance (Synthetic 1k Chain, average of {runs} runs) ===");
+    println!("Early Event (depth 100):  {dur_early:?}");
+    println!("Mid Event (depth 500):    {dur_mid:?}");
+    println!("Tip Event (depth 1000):   {dur_tip:?}");
 
     // Assert logical scale progression:
     // Work for early (100 events traversed & sorted) <= mid (500 events) <= tip (1000 events)
@@ -150,27 +147,27 @@ fn test_delta_chain_generation_correctness() {
         let mut hash: u64 = 14695981039346656037;
         for ((event_type, state_key), event_id) in state {
             for &byte in event_type.as_bytes() {
-                hash ^= byte as u64;
+                hash ^= u64::from(byte);
                 hash = hash.wrapping_mul(1099511628211);
             }
             hash ^= 0x00;
             hash = hash.wrapping_mul(1099511628211);
             if let Some(key) = state_key {
                 for &byte in key.as_bytes() {
-                    hash ^= byte as u64;
+                    hash ^= u64::from(byte);
                     hash = hash.wrapping_mul(1099511628211);
                 }
             }
             hash ^= 0x00;
             hash = hash.wrapping_mul(1099511628211);
             for &byte in event_id.as_bytes() {
-                hash ^= byte as u64;
+                hash ^= u64::from(byte);
                 hash = hash.wrapping_mul(1099511628211);
             }
             hash ^= 0xff;
             hash = hash.wrapping_mul(1099511628211);
         }
-        format!("{:016x}", hash)
+        format!("{hash:016x}")
     }
 
     // 1. Create three chronological events
@@ -178,7 +175,7 @@ fn test_delta_chain_generation_correctness() {
     let ev1 = LeanEvent {
         event_id: "$1".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         depth: 1,
         ..Default::default()
     };
@@ -268,7 +265,7 @@ fn test_delta_chain_generation_correctness() {
         d1[0],
         (
             "m.room.create".to_string(),
-            Some("".to_string()),
+            Some(String::new()),
             "$1".to_string()
         )
     );

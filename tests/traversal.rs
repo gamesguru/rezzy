@@ -10,7 +10,7 @@ fn run_auth_lookup_scenario(
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@creator:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -19,7 +19,7 @@ fn run_auth_lookup_scenario(
     let pl_ev = LeanEvent {
         event_id: "$pl".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@creator:example.com".to_string(),
         origin_server_ts: 200,
         content: json!({
@@ -51,7 +51,7 @@ fn run_auth_lookup_scenario(
     let alice_name = LeanEvent {
         event_id: "$name".to_string(),
         event_type: "m.room.name".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 400,
         content: json!({ "name": "Alice's Room" }),
@@ -76,7 +76,7 @@ fn run_auth_lookup_scenario(
         &auth_context,
         StateResVersion::V2_1,
     );
-    let v21_success = resolved_v21.contains_key(&("m.room.name".to_string(), Some("".to_string())));
+    let v21_success = resolved_v21.contains_key(&("m.room.name".to_string(), Some(String::new())));
     assert_eq!(
         v21_success, expected_v21_success,
         "V2.1 success expectation mismatched: got {v21_success}, expected {expected_v21_success}"
@@ -89,7 +89,7 @@ fn run_auth_lookup_scenario(
         StateResVersion::V2_1_1,
     );
     let v211_success =
-        resolved_v211.contains_key(&("m.room.name".to_string(), Some("".to_string())));
+        resolved_v211.contains_key(&("m.room.name".to_string(), Some(String::new())));
     assert_eq!(
         v211_success, expected_v211_success,
         "V2.1.1 success expectation mismatched: got {v211_success}, expected {expected_v211_success}"
@@ -122,7 +122,7 @@ fn test_v2_1_1_ancient_prev_event_allowed() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@creator:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -131,7 +131,7 @@ fn test_v2_1_1_ancient_prev_event_allowed() {
     let pl_ev = LeanEvent {
         event_id: "$pl".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@creator:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
@@ -162,7 +162,7 @@ fn test_v2_1_1_ancient_prev_event_allowed() {
     let alice_name = LeanEvent {
         event_id: "$name".to_string(),
         event_type: "m.room.name".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 1000,
         content: serde_json::json!({ "name": "Alice's Room" }),
@@ -187,7 +187,7 @@ fn test_v2_1_1_ancient_prev_event_allowed() {
 
     // State resolution still passes because the auth_events are valid.
     assert!(
-        resolved_v211.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        resolved_v211.contains_key(&("m.room.name".to_string(), Some(String::new()))),
         "V2.1.1 should allow the event even with an ancient prev_event"
     );
 }
@@ -205,7 +205,7 @@ fn test_kahn_tiebreak_power_level_overwrites_via_auth() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -214,7 +214,7 @@ fn test_kahn_tiebreak_power_level_overwrites_via_auth() {
     let pl_ev = LeanEvent {
         event_id: "$pl".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 200,
         content: json!({
@@ -284,7 +284,7 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -293,7 +293,7 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
     let pl_ev = LeanEvent {
         event_id: "$pl".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
@@ -375,7 +375,7 @@ fn test_v2_1_1_fixes_invite_lock() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -384,7 +384,7 @@ fn test_v2_1_1_fixes_invite_lock() {
     let pl_ev = LeanEvent {
         event_id: "$pl".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
@@ -397,7 +397,7 @@ fn test_v2_1_1_fixes_invite_lock() {
     let public_rules = LeanEvent {
         event_id: "$public".to_string(),
         event_type: "m.room.join_rules".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 300,
         content: serde_json::json!({ "join_rule": "public" }),
@@ -409,7 +409,7 @@ fn test_v2_1_1_fixes_invite_lock() {
     let admin_lock = LeanEvent {
         event_id: "$admin_lock".to_string(),
         event_type: "m.room.join_rules".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 400,
         content: serde_json::json!({ "join_rule": "invite" }),
@@ -501,7 +501,7 @@ fn test_v2_1_1_cve_demotion_evasion() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -511,7 +511,7 @@ fn test_v2_1_1_cve_demotion_evasion() {
     let pl_promo = LeanEvent {
         event_id: "$pl_promo".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
@@ -538,7 +538,7 @@ fn test_v2_1_1_cve_demotion_evasion() {
     let pl_demote = LeanEvent {
         event_id: "$pl_demote".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 400,
         content: serde_json::json!({
@@ -555,7 +555,7 @@ fn test_v2_1_1_cve_demotion_evasion() {
     let eve_attack = LeanEvent {
         event_id: "$eve_attack".to_string(),
         event_type: "m.room.name".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@eve:evil.com".to_string(),
         origin_server_ts: 500,
         content: serde_json::json!({ "name": "Hacked by Eve" }),
@@ -584,7 +584,7 @@ fn test_v2_1_1_cve_demotion_evasion() {
         &auth_context,
         ruma_lean::StateResVersion::V2_1,
     );
-    let name_key = ("m.room.name".to_string(), Some("".to_string()));
+    let name_key = ("m.room.name".to_string(), Some(String::new()));
     assert!(
         !resolved_v21.contains_key(&name_key),
         "V2.1 Rightly Rejected the attack because Eve was demoted."
@@ -616,7 +616,7 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -625,7 +625,7 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
     let pl_ev = LeanEvent {
         event_id: "$pl".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
@@ -667,7 +667,7 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
     let bob_name_change = LeanEvent {
         event_id: "$bob_name_change".to_string(),
         event_type: "m.room.name".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@bob:example.com".to_string(),
         origin_server_ts: 405,
         content: serde_json::json!({ "name": "Bob Rules" }),
@@ -711,7 +711,7 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
 
     // V2.1 now correctly REJECTS Bob's concurrent name change!
     assert!(
-        !resolved_v21.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        !resolved_v21.contains_key(&("m.room.name".to_string(), Some(String::new()))),
         "V2.1 now correctly rejects Bob's name change because it evaluates his concurrent ban!"
     );
 
@@ -725,7 +725,7 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
 
     // V2.1.1 REJECTS Bob's concurrent name change!
     assert!(
-        !resolved_v211.contains_key(&("m.room.name".to_string(), Some("".to_string()))),
+        !resolved_v211.contains_key(&("m.room.name".to_string(), Some(String::new()))),
         "V2.1.1 Fixed: Rightfully rejected Bob's name change because it supplemented the concurrent ban!"
     );
 }
@@ -735,7 +735,7 @@ fn test_v2_1_strictness_future_v3_should_pass() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -745,7 +745,7 @@ fn test_v2_1_strictness_future_v3_should_pass() {
     let join_rules = LeanEvent {
         event_id: "$jr".to_string(),
         event_type: "m.room.join_rules".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({ "join_rule": "public" }),
@@ -809,7 +809,7 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -818,7 +818,7 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
     let pl_ev = LeanEvent {
         event_id: "$pl".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
@@ -831,7 +831,7 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
     let jr_pub = LeanEvent {
         event_id: "$jr_pub".to_string(),
         event_type: "m.room.join_rules".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 300,
         content: serde_json::json!({ "join_rule": "public" }),
@@ -858,7 +858,7 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
     let admin_lock = LeanEvent {
         event_id: "$admin_lock".to_string(),
         event_type: "m.room.join_rules".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 500,
         content: serde_json::json!({ "join_rule": "invite" }),
@@ -885,7 +885,7 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
     let nexy_promo = LeanEvent {
         event_id: "$nexy_promo".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 460,
         content: serde_json::json!({
@@ -931,15 +931,15 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
 
     let mut unconflicted_state = std::collections::BTreeMap::new();
     unconflicted_state.insert(
-        ("m.room.create".to_string(), Some("".to_string())),
+        ("m.room.create".to_string(), Some(String::new())),
         "$create".to_string(),
     );
     unconflicted_state.insert(
-        ("m.room.power_levels".to_string(), Some("".to_string())),
+        ("m.room.power_levels".to_string(), Some(String::new())),
         "$pl".to_string(),
     );
     unconflicted_state.insert(
-        ("m.room.join_rules".to_string(), Some("".to_string())),
+        ("m.room.join_rules".to_string(), Some(String::new())),
         "$jr_pub".to_string(),
     );
 
@@ -959,7 +959,7 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
         "m.room.member".to_string(),
         Some("@spammer:example.com".to_string()),
     );
-    let pl_key = ("m.room.power_levels".to_string(), Some("".to_string()));
+    let pl_key = ("m.room.power_levels".to_string(), Some(String::new()));
 
     // CDO\'s transitive closure drops nexy_join (dominated by lock) AND nexy_promo/nexy_bans_spammer (transitively dependent)
     assert!(
@@ -991,7 +991,7 @@ fn test_v2_1_1_anomaly_02_admin_lockout() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -1000,7 +1000,7 @@ fn test_v2_1_1_anomaly_02_admin_lockout() {
     let pl_ev = LeanEvent {
         event_id: "$pl".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
@@ -1013,7 +1013,7 @@ fn test_v2_1_1_anomaly_02_admin_lockout() {
     let jr_pub = LeanEvent {
         event_id: "$jr_pub".to_string(),
         event_type: "m.room.join_rules".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 300,
         content: serde_json::json!({ "join_rule": "public" }),
@@ -1025,7 +1025,7 @@ fn test_v2_1_1_anomaly_02_admin_lockout() {
     let admin_lock = LeanEvent {
         event_id: "$admin_lock".to_string(),
         event_type: "m.room.join_rules".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 400,
         content: serde_json::json!({ "join_rule": "invite" }),
@@ -1060,15 +1060,15 @@ fn test_v2_1_1_anomaly_02_admin_lockout() {
 
     let mut unconflicted_state = std::collections::BTreeMap::new();
     unconflicted_state.insert(
-        ("m.room.create".to_string(), Some("".to_string())),
+        ("m.room.create".to_string(), Some(String::new())),
         "$create".to_string(),
     );
     unconflicted_state.insert(
-        ("m.room.power_levels".to_string(), Some("".to_string())),
+        ("m.room.power_levels".to_string(), Some(String::new())),
         "$pl".to_string(),
     );
     unconflicted_state.insert(
-        ("m.room.join_rules".to_string(), Some("".to_string())),
+        ("m.room.join_rules".to_string(), Some(String::new())),
         "$jr_pub".to_string(),
     );
 
@@ -1102,7 +1102,7 @@ fn test_v2_1_spec_compliant_step_4_supplementation() {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 100,
         ..Default::default()
@@ -1111,7 +1111,7 @@ fn test_v2_1_spec_compliant_step_4_supplementation() {
     let pl_ev = LeanEvent {
         event_id: "$pl".to_string(),
         event_type: "m.room.power_levels".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
@@ -1153,7 +1153,7 @@ fn test_v2_1_spec_compliant_step_4_supplementation() {
     let bob_topic_change = LeanEvent {
         event_id: "$bob_topic_change".to_string(),
         event_type: "m.room.topic".to_string(),
-        state_key: Some("".to_string()),
+        state_key: Some(String::new()),
         sender: "@bob:example.com".to_string(),
         origin_server_ts: 405,
         content: serde_json::json!({ "topic": "Bob's Space" }),
@@ -1197,7 +1197,7 @@ fn test_v2_1_spec_compliant_step_4_supplementation() {
     // Bob's topic change must be REJECTED in Step 4 because Step 4 correctly
     // supplements Bob's membership status (which is 'ban' in the partially resolved state S).
     assert!(
-        !resolved_v21.contains_key(&("m.room.topic".to_string(), Some("".to_string()))),
+        !resolved_v21.contains_key(&("m.room.topic".to_string(), Some(String::new()))),
         "V2.1 must reject Bob's topic change because he is banned in the partially resolved state"
     );
 }
