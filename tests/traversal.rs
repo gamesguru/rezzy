@@ -790,17 +790,11 @@ fn test_v2_1_strictness_future_v3_should_pass() {
     // the room state via `prev_state_events` instead of relying on the fragile string array.
 }
 
-#[test]
-fn test_v2_1_1_anomaly_06b_ghost_moderator() {
-    // Anomaly 06b: Moderator Membership Evaporation / Ghost Moderator
-    // A moderator (Nexy) joins and gets promoted on a public fork, then bans a spammer.
-    // Concurrently, an Admin locks the room to "invite".
-    // Phase 1 evaluates the lockdown and Nexy\'s promotion and ban first (because they are Power Events).
-    // Phase 2 evaluates Nexy\'s join. Nexy\'s join is rejected due to the lockdown.
-    // In unpatched v2.1, her promotion and ban survive, leaving a "Ghost Moderator".
-    // In CDO (v2.2), her join is concurrent and dominated by the invite lockdown,
-    // and her subsequent actions (promotion, ban) are transitively dropped due to dependency.
-
+fn make_ghost_moderator_events() -> (
+    HashMap<String, LeanEvent>,
+    HashMap<String, LeanEvent>,
+    BTreeMap<(String, Option<String>), String>,
+) {
     let create_ev = LeanEvent {
         event_id: "$create".to_string(),
         event_type: "m.room.create".to_string(),
@@ -938,10 +932,26 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
         "$jr_pub".to_string(),
     );
 
+    (auth_context, conflicted_events, unconflicted_state)
+}
+
+#[test]
+fn test_v2_1_1_anomaly_06b_ghost_moderator() {
+    // Anomaly 06b: Moderator Membership Evaporation / Ghost Moderator
+    // A moderator (Nexy) joins and gets promoted on a public fork, then bans a spammer.
+    // Concurrently, an Admin locks the room to "invite".
+    // Phase 1 evaluates the lockdown and Nexy\'s promotion and ban first (because they are Power Events).
+    // Phase 2 evaluates Nexy\'s join. Nexy\'s join is rejected due to the lockdown.
+    // In unpatched v2.1, her promotion and ban survive, leaving a "Ghost Moderator".
+    // In CDO (v2.2), her join is concurrent and dominated by the invite lockdown,
+    // and her subsequent actions (promotion, ban) are transitively dropped due to dependency.
+
+    let (auth_context, conflicted_events, unconflicted_state) = make_ghost_moderator_events();
+
     // Run V2.2 (CDO Enabled / State Res v2.2)
     let resolved_v211 = ruma_lean::resolve_lean(
         unconflicted_state,
-        conflicted_events.clone(),
+        conflicted_events,
         &auth_context,
         ruma_lean::StateResVersion::V2_1_1,
     );
