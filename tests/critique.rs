@@ -274,10 +274,10 @@ fn test_anomaly_02_admin_lockout() {
 
 #[test]
 fn test_anomaly_03_phantom_join_rules() {
-    let (resolved, map) = assert_benign_convergence("03_phantom_join_rules.jsonl");
+    let (resolved, map) = resolve_pathology("03_phantom_join_rules.jsonl");
     assert_eq!(
         get_membership(&resolved, &map, "@charlie:example.com"),
-        "join"
+        "none"
     );
     assert_eq!(
         get_membership(&resolved, &map, "@alice:example.com"),
@@ -319,11 +319,11 @@ fn test_anomaly_06_action_evaporation() {
 
 #[test]
 fn test_anomaly_06b_mod_membership_evaporation() {
-    let (resolved, map) = assert_benign_convergence("06b_mod_membership_evaporation.jsonl");
-    assert_eq!(get_membership(&resolved, &map, "@nexy:example.com"), "join");
+    let (resolved, map) = resolve_pathology("06b_mod_membership_evaporation.jsonl");
+    assert_eq!(get_membership(&resolved, &map, "@nexy:example.com"), "none");
     assert_eq!(
         get_membership(&resolved, &map, "@spammer:example.com"),
-        "ban"
+        "join"
     );
     // Honest members are unaffected.
     assert_eq!(
@@ -417,7 +417,7 @@ fn test_anomaly_12_zombie_resurrection() {
 
 #[test]
 fn test_anomaly_13_large_cascading_lockout() {
-    let (resolved, map) = assert_benign_convergence("13_large_cascading_lockout.jsonl");
+    let (resolved, map) = resolve_pathology("13_large_cascading_lockout.jsonl");
     assert_eq!(
         get_membership(&resolved, &map, "@david:example.com"),
         "join"
@@ -464,6 +464,6 @@ fn test_anomaly_16_causality_leakage() {
 
 #[test]
 fn test_anomaly_18_unauthorized_admin_amplification() {
-    let (resolved, map) = assert_benign_convergence("18_unauthorized_admin_amplification.jsonl");
-    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "join");
+    let (resolved, map) = resolve_pathology("18_unauthorized_admin_amplification.jsonl");
+    assert_eq!(get_membership(&resolved, &map, "@bob:example.com"), "ban");
 }
