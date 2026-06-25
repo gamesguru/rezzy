@@ -293,3 +293,146 @@ fn test_delta_chain_generation_correctness() {
     assert_eq!(h3, h2); // State hash must be identical because it's a non-state event
     assert!(d3.is_empty()); // Delta list must be empty because state did not change
 }
+
+#[test]
+fn test_state_delta_compression_robustness() {
+    use ruma_lean::LeanEvent;
+    use std::collections::{BTreeMap, HashMap};
+
+    // Construct a micro-history with a merge where some state key gets deleted/overwritten
+    // E1: Create room (state: m.room.create => $1)
+    let ev1 = LeanEvent {
+        event_id: "$1".to_string(),
+        event_type: "m.room.create".to_string(),
+        state_key: Some(String::new()),
+        depth: 1,
+        ..Default::default()
+    };
+
+    // E2: Alice joins (state: m.room.create => $1, m.room.member:@alice => $2)
+    let ev2 = LeanEvent {
+        event_id: "$2".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@alice:example.com".to_string()),
+        prev_events: vec!["$1".to_string()],
+        depth: 2,
+        ..Default::default()
+    };
+
+    // E3: Fork A - Bob joins (state: m.room.create => $1, m.room.member:@alice => $2, m.room.member:@bob => $3)
+    let ev3 = LeanEvent {
+        event_id: "$3".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@bob:example.com".to_string()),
+        prev_events: vec!["$2".to_string()],
+        depth: 3,
+        ..Default::default()
+    };
+
+    // E4: Fork B - Alice leaves (state: m.room.create => $1, m.room.member:@alice => $4)
+    let ev4 = LeanEvent {
+        event_id: "$4".to_string(),
+        event_type: "m.room.member".to_string(),
+        state_key: Some("@alice:example.com".to_string()),
+        prev_events: vec!["$2".to_string()],
+        depth: 3,
+        ..Default::default()
+    };
+
+    let mut state_after_map: HashMap<String, BTreeMap<(String, Option<String>), String>> =
+        HashMap::new();
+    let mut state_hash_map: HashMap<String, String> = HashMap::new();
+    let mut checkpoints = Vec::new();
+
+    let events = vec![ev1, ev2, ev3, ev4];
+
+    for ev in &events {
+        let mut state_before = BTreeMap::new();
+        let mut parent_hash = None;
+
+        if !ev.prev_events.is_empty() {
+            let prev_id = &ev.prev_events[0];
+            if let Some(prev_state) = state_after_map.get(prev_id) {
+                state_before = prev_state.clone();
+                parent_hash = state_hash_map.get(prev_id).cloned();
+            }
+        }
+
+        let mut state_after = state_before.clone();
+        if ev.state_key.is_some() {
+            state_after.insert(
+                (ev.event_type.clone(), ev.state_key.clone()),
+                ev.event_id.clone(),
+            );
+        }
+
+        let hash_str = compute_state_hash(&state_after);
+        state_after_map.insert(ev.event_id.clone(), state_after.clone());
+        state_hash_map.insert(ev.event_id.clone(), hash_str.clone());
+
+        let mut deltas = Vec::new();
+        let primary_parent_state = ev
+            .prev_events
+            .first()
+            .and_then(|p_id| state_after_map.get(p_id));
+
+        if let Some(parent_state) = primary_parent_state {
+            for (key, event_id) in &state_after {
+                match parent_state.get(key) {
+                    Some(parent_event_id) if parent_event_id == event_id => {}
+                    _ => {
+                        deltas.push((key.0.clone(), key.1.clone(), Some(event_id.clone())));
+                    }
+                }
+            }
+            // Detect key deletion/removal
+            for key in parent_state.keys() {
+                if !state_after.contains_key(key) {
+                    deltas.push((key.0.clone(), key.1.clone(), None));
+                }
+            }
+        } else {
+            for (key, event_id) in &state_after {
+                deltas.push((key.0.clone(), key.1.clone(), Some(event_id.clone())));
+            }
+        }
+
+        checkpoints.push((hash_str, parent_hash, ev.event_id.clone(), deltas));
+    }
+
+    // Verify checkpoints
+    assert_eq!(checkpoints.len(), 4);
+
+    // E1
+    let (_, p1, id1, d1) = &checkpoints[0];
+    assert_eq!(id1, "$1");
+    assert_eq!(p1, &None);
+    assert_eq!(d1.len(), 1);
+
+    // E2
+    let (_, p2, id2, d2) = &checkpoints[1];
+    assert_eq!(id2, "$2");
+    assert_eq!(p2, &Some(checkpoints[0].0.clone()));
+    assert_eq!(d2.len(), 1);
+    assert_eq!(d2[0].0, "m.room.member");
+    assert_eq!(d2[0].1, Some("@alice:example.com".to_string()));
+    assert_eq!(d2[0].2, Some("$2".to_string()));
+
+    // E3 (Fork A - Bob joins)
+    let (_, p3, id3, d3) = &checkpoints[2];
+    assert_eq!(id3, "$3");
+    assert_eq!(p3, &Some(checkpoints[1].0.clone()));
+    assert_eq!(d3.len(), 1);
+    assert_eq!(d3[0].0, "m.room.member");
+    assert_eq!(d3[0].1, Some("@bob:example.com".to_string()));
+    assert_eq!(d3[0].2, Some("$3".to_string()));
+
+    // E4 (Fork B - Alice leaves)
+    let (_, p4, id4, d4) = &checkpoints[3];
+    assert_eq!(id4, "$4");
+    assert_eq!(p4, &Some(checkpoints[1].0.clone()));
+    assert_eq!(d4.len(), 1);
+    assert_eq!(d4[0].0, "m.room.member");
+    assert_eq!(d4[0].1, Some("@alice:example.com".to_string()));
+    assert_eq!(d4[0].2, Some("$4".to_string()));
+}
