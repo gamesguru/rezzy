@@ -676,7 +676,11 @@ fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
     serde_json::json!(checkpoints)
 }
 
-fn compute_component_roots(events_map: &HashMap<String, LeanEvent>) -> Vec<String> {
+fn compute_component_roots(
+    events_map: &HashMap<String, LeanEvent>,
+    include_prev: bool,
+    include_auth: bool,
+) -> Vec<String> {
     let mut component_roots = Vec::new();
     if !events_map.is_empty() {
         let mut parent: Vec<usize> = (0..events_map.len()).collect();
@@ -688,20 +692,41 @@ fn compute_component_roots(events_map: &HashMap<String, LeanEvent>) -> Vec<Strin
         }
         for ev in events_map.values() {
             if let Some(&u) = id_to_index.get(ev.event_id.as_str()) {
-                for prev in &ev.prev_events {
-                    if let Some(&v) = id_to_index.get(prev.as_str()) {
-                        let mut root_u = u;
-                        while parent[root_u] != root_u {
-                            parent[root_u] = parent[parent[root_u]];
-                            root_u = parent[root_u];
+                if include_prev {
+                    for prev in &ev.prev_events {
+                        if let Some(&v) = id_to_index.get(prev.as_str()) {
+                            let mut root_u = u;
+                            while parent[root_u] != root_u {
+                                parent[root_u] = parent[parent[root_u]];
+                                root_u = parent[root_u];
+                            }
+                            let mut root_v = v;
+                            while parent[root_v] != root_v {
+                                parent[root_v] = parent[parent[root_v]];
+                                root_v = parent[root_v];
+                            }
+                            if root_u != root_v {
+                                parent[root_u] = root_v;
+                            }
                         }
-                        let mut root_v = v;
-                        while parent[root_v] != root_v {
-                            parent[root_v] = parent[parent[root_v]];
-                            root_v = parent[root_v];
-                        }
-                        if root_u != root_v {
-                            parent[root_u] = root_v;
+                    }
+                }
+                if include_auth {
+                    for auth in &ev.auth_events {
+                        if let Some(&v) = id_to_index.get(auth.as_str()) {
+                            let mut root_u = u;
+                            while parent[root_u] != root_u {
+                                parent[root_u] = parent[parent[root_u]];
+                                root_u = parent[root_u];
+                            }
+                            let mut root_v = v;
+                            while parent[root_v] != root_v {
+                                parent[root_v] = parent[parent[root_v]];
+                                root_v = parent[root_v];
+                            }
+                            if root_u != root_v {
+                                parent[root_u] = root_v;
+                            }
                         }
                     }
                 }
@@ -821,7 +846,9 @@ fn format_summary_output(ctx: &FormattingContext) -> serde_json::Value {
         .min_by_key(|e| e.depth)
         .map_or("", |e| e.event_id.as_str());
 
-    let component_roots = compute_component_roots(ctx.events_map);
+    let component_roots_prev = compute_component_roots(ctx.events_map, true, false);
+    let component_roots_auth = compute_component_roots(ctx.events_map, false, true);
+    let component_roots_union = compute_component_roots(ctx.events_map, true, true);
 
     serde_json::json!({
         "status": "success",
@@ -833,8 +860,10 @@ fn format_summary_output(ctx: &FormattingContext) -> serde_json::Value {
         "min_depth": min_depth,
         "max_depth": max_depth,
         "root_event_id": root_event_id,
-        "num_components": component_roots.len(),
-        "component_roots": component_roots,
+        "n_components": component_roots_union.len(),
+        "n_components_prev": component_roots_prev.len(),
+        "n_components_auth": component_roots_auth.len(),
+        "component_roots_prev": component_roots_prev,
         "heads": ctx.heads,
         "membership": membership_obj,
         "state": state_entries

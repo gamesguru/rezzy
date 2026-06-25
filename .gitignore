@@ -8,6 +8,7 @@ target/
 /*.txt
 # misc
 /*.log
+/*.jsonl
 # paper
 paper.aux
 paper.log
