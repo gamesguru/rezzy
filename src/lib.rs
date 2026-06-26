@@ -1559,7 +1559,9 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
         return false;
     };
 
-    if and_ev.depth >= child_ev.depth {
+    // Only apply depth pruning if depths are populated (greater than 0).
+    // Test events created with Default::default() default to depth 0.
+    if child_ev.depth > 0 && and_ev.depth > 0 && and_ev.depth >= child_ev.depth {
         return false;
     }
 
@@ -1573,8 +1575,8 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
             return true;
         }
         if let Some(ev) = context.get(current) {
-            // Prune branches that are already at or below the ancestor's depth
-            if ev.depth <= and_ev.depth {
+            // Prune branches that are already at or below the ancestor's depth (if populated)
+            if ev.depth > 0 && and_ev.depth > 0 && ev.depth <= and_ev.depth {
                 continue;
             }
             for parent in ev.prev_events.iter().chain(ev.auth_events.iter()) {
