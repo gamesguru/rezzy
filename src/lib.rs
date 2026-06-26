@@ -1159,6 +1159,24 @@ fn iterative_auth_ok<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     crate::auth::check_auth(event, &overlay).is_ok()
 }
 
+fn update_local_auth(
+    local_auth: &mut BTreeMap<(String, Option<String>), (LeanEvent, usize)>,
+    aev: &LeanEvent,
+    current_depth: usize,
+) {
+    let key = (aev.event_type.clone(), aev.state_key.clone());
+    match local_auth.entry(key) {
+        alloc::collections::btree_map::Entry::Vacant(e) => {
+            e.insert((aev.clone(), current_depth));
+        }
+        alloc::collections::btree_map::Entry::Occupied(mut e) => {
+            if current_depth < e.get().1 {
+                e.insert((aev.clone(), current_depth));
+            }
+        }
+    }
+}
+
 /// Recursively compute the local auth context for an event, using memoization
 /// to avoid redundant graph walks. The context is represented as a map of
 /// (type, `state_key`) -> (`LeanEvent`, depth), ensuring that for each key, the "closest"
@@ -1196,17 +1214,7 @@ fn compute_local_auth<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
                 .get(&aid)
                 .or_else(|| conflicted_events.get(&aid))
             {
-                let key = (aev.event_type.clone(), aev.state_key.clone());
-                match local_auth.entry(key) {
-                    alloc::collections::btree_map::Entry::Vacant(e) => {
-                        e.insert((aev.clone(), current_depth));
-                    }
-                    alloc::collections::btree_map::Entry::Occupied(mut e) => {
-                        if current_depth < e.get().1 {
-                            e.insert((aev.clone(), current_depth));
-                        }
-                    }
-                }
+                update_local_auth(&mut local_auth, aev, current_depth);
             }
 
             for (key, (ev, cached_depth)) in cached_ancestor {
@@ -1229,17 +1237,7 @@ fn compute_local_auth<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
             .get(&aid)
             .or_else(|| conflicted_events.get(&aid))
         {
-            let key = (aev.event_type.clone(), aev.state_key.clone());
-            match local_auth.entry(key) {
-                alloc::collections::btree_map::Entry::Vacant(e) => {
-                    e.insert((aev.clone(), current_depth));
-                }
-                alloc::collections::btree_map::Entry::Occupied(mut e) => {
-                    if current_depth < e.get().1 {
-                        e.insert((aev.clone(), current_depth));
-                    }
-                }
-            }
+            update_local_auth(&mut local_auth, aev, current_depth);
 
             // Recursive traversal is NEW in V2.2.
             // For V2.1 and below, we only check the immediate auth_events.
