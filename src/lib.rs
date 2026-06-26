@@ -1552,19 +1552,34 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
     if child_id == possible_ancestor_id {
         return true;
     }
+    let Some(child_ev) = context.get(child_id) else {
+        return false;
+    };
+    let Some(and_ev) = context.get(possible_ancestor_id) else {
+        return false;
+    };
+
+    if and_ev.depth >= child_ev.depth {
+        return false;
+    }
+
     let mut stack = Vec::new();
-    stack.push(String::from(child_id));
+    stack.push(child_id);
     let mut visited = BTreeSet::new();
-    visited.insert(String::from(child_id));
+    visited.insert(child_id);
 
     while let Some(current) = stack.pop() {
         if current == possible_ancestor_id {
             return true;
         }
-        if let Some(ev) = context.get(&current) {
+        if let Some(ev) = context.get(current) {
+            // Prune branches that are already at or below the ancestor's depth
+            if ev.depth <= and_ev.depth {
+                continue;
+            }
             for parent in ev.prev_events.iter().chain(ev.auth_events.iter()) {
-                if visited.insert(parent.clone()) {
-                    stack.push(parent.clone());
+                if visited.insert(parent.as_str()) {
+                    stack.push(parent.as_str());
                 }
             }
         }
@@ -1622,6 +1637,7 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
 
     let mut dropped_ids = BTreeSet::new();
     let mut active_admin_actions: Vec<&LeanEvent> = Vec::new();
+    let mut ancestor_cache = HashMap::new();
 
     // Pass 2: Direct Domination (Sender / Type Restriction) in priority order
     for event in &sorted_events {
@@ -1630,10 +1646,27 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
         for admin_ev in &active_admin_actions {
             if admin_ev.restricts_event(event) {
                 // Check Concurrency (e_a || e_x): Ensure neither is an ancestor of the other
+                let admin_id = admin_ev.event_id.as_str();
+                let event_id = event.event_id.as_str();
+
                 let is_ancestor_admin =
-                    is_ancestor(&admin_ev.event_id, &event.event_id, &dag_context);
+                    if let Some(&res) = ancestor_cache.get(&(admin_id, event_id)) {
+                        res
+                    } else {
+                        let res = is_ancestor(admin_id, event_id, &dag_context);
+                        ancestor_cache.insert((admin_id, event_id), res);
+                        res
+                    };
+
                 let is_descendant_admin =
-                    is_ancestor(&event.event_id, &admin_ev.event_id, &dag_context);
+                    if let Some(&res) = ancestor_cache.get(&(event_id, admin_id)) {
+                        res
+                    } else {
+                        let res = is_ancestor(event_id, admin_id, &dag_context);
+                        ancestor_cache.insert((event_id, admin_id), res);
+                        res
+                    };
+
                 if !is_ancestor_admin && !is_descendant_admin {
                     is_dominated = true;
                     break;

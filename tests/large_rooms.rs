@@ -398,8 +398,7 @@ fn test_real_dag_nheko_room_106_heads() {
 #[test]
 fn test_unredacted_spam_storm_v2_1_1() {
     use std::io::BufRead;
-    let path =
-        ".tmp/remote-dag-sM2LwqNHGQOgLf35gqxPMy9D7oYde2q9ADg8HPBM3kE-v12-unredacted.org.jsonl";
+    let path = "res/remote-dag-sM2LwqNHGQOgLf35gqxPMy9D7oYde2q9ADg8HPBM3kE-v12-merged.jsonl";
 
     let file = match std::fs::File::open(path) {
         Ok(f) => f,

@@ -94,7 +94,7 @@ rust/coverage: ##H Run code coverage and generate HTML report
 
 .PHONY: rust/e2e
 rust/e2e: ##H Run e2e integration test on real JSON
-	for f in res/*.json; do \
+	for f in res/*.json res/*jsonl; do \
 		if [ "$$(basename "$$f")" = "canonical_res.json" ]; then continue; fi; \
 		$(CARGO) run --release --features cli,hashing -- -i "$$f" || exit 1; \
 	done
