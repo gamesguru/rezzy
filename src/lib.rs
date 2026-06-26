@@ -1918,12 +1918,86 @@ pub fn merge_event_sets(
     Ok(merged)
 }
 
+fn route_lattice_power_events<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
+    sort_set: &HashMap<String, LeanEvent, S1>,
+    auth_context: &HashMap<String, LeanEvent, S2>,
+    version: StateResVersion,
+    power_events: &mut HashMap<String, LeanEvent>,
+    non_power_events: &mut HashMap<String, LeanEvent>,
+) {
+    for (id, ev) in sort_set {
+        if version == StateResVersion::V2_2
+            && is_v2_2_duplicate_auth_key(ev, auth_context, sort_set)
+        {
+            continue;
+        }
+
+        if ev.event_type == "m.room.member"
+            || ev.event_type == "m.room.create"
+            || ev.event_type == "m.room.power_levels"
+            || ev.event_type == "m.room.join_rules"
+        {
+            power_events.insert(id.clone(), ev.clone());
+        } else {
+            non_power_events.insert(id.clone(), ev.clone());
+        }
+    }
+}
+
+fn compute_lattice_coordinatized_winners<'a>(
+    non_power_events: &'a HashMap<String, LeanEvent>,
+    mainline_indices: &HashMap<&str, usize>,
+    mainline_len: usize,
+    key_winners: &mut HashMap<(String, Option<String>), &'a LeanEvent>,
+) {
+    for ev in non_power_events.values() {
+        let key = (ev.event_type.clone(), ev.state_key.clone());
+
+        // O(1) Causal Coordinatization Projection: lookup mainline position directly
+        let mut ev_pos = mainline_len;
+        for auth_id in &ev.auth_events {
+            if let Some(&index) = mainline_indices.get(auth_id.as_str()) {
+                ev_pos = ev_pos.min(index);
+                break;
+            }
+        }
+
+        let is_better = if let Some(current_winner) = key_winners.get(&key) {
+            let mut winner_pos = mainline_len;
+            for auth_id in &current_winner.auth_events {
+                if let Some(&index) = mainline_indices.get(auth_id.as_str()) {
+                    winner_pos = winner_pos.min(index);
+                    break;
+                }
+            }
+
+            if ev_pos < winner_pos {
+                true
+            } else if ev_pos > winner_pos {
+                false
+            } else if ev.origin_server_ts > current_winner.origin_server_ts {
+                true
+            } else if ev.origin_server_ts < current_winner.origin_server_ts {
+                false
+            } else {
+                ev.event_id < current_winner.event_id
+            }
+        } else {
+            true
+        };
+
+        if is_better {
+            key_winners.insert(key, ev);
+        }
+    }
+}
+
 /// A revolutionary, mathematically optimal O(C) Lattice-based State Resolution implementation.
 /// Employs O(1) Causal Coordinatization Projection and Commutative Join-Semilattice folding
 /// to completely eliminate sequential sorting and backward graph traversals.
 #[must_use]
 pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
-    unconflicted_state: BTreeMap<(String, Option<String>), String>,
+    unconflicted_state: &BTreeMap<(String, Option<String>), String>,
     mut conflicted_events: HashMap<String, LeanEvent, S1>,
     auth_context: &HashMap<String, LeanEvent, S2>,
     version: StateResVersion,
@@ -1951,24 +2025,13 @@ pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher, S2: core::hash
     // Route power and non-power events
     let mut power_events = HashMap::new();
     let mut non_power_events = HashMap::new();
-
-    for (id, ev) in sort_set {
-        if version == StateResVersion::V2_2
-            && is_v2_2_duplicate_auth_key(ev, auth_context, &conflicted_events)
-        {
-            continue;
-        }
-
-        if ev.event_type == "m.room.member"
-            || ev.event_type == "m.room.create"
-            || ev.event_type == "m.room.power_levels"
-            || ev.event_type == "m.room.join_rules"
-        {
-            power_events.insert(id.clone(), ev.clone());
-        } else {
-            non_power_events.insert(id.clone(), ev.clone());
-        }
-    }
+    route_lattice_power_events(
+        sort_set,
+        auth_context,
+        version,
+        &mut power_events,
+        &mut non_power_events,
+    );
 
     let create_ev = auth_context
         .values()
@@ -2014,53 +2077,13 @@ pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher, S2: core::hash
     }
 
     // Step 4: Commutative Join-Semilattice reduction over all non-power events in a single O(C) pass!
-    let mut key_winners: HashMap<(String, Option<String>), &LeanEvent> = HashMap::new();
-    let mainline_len = mainline.len();
-
-    for ev in non_power_events.values() {
-        let key = (ev.event_type.clone(), ev.state_key.clone());
-
-        // O(1) Causal Coordinatization Projection: lookup mainline position directly
-        let mut ev_pos = mainline_len;
-        for auth_id in &ev.auth_events {
-            if let Some(&index) = mainline_indices.get(auth_id.as_str()) {
-                ev_pos = ev_pos.min(index);
-                break; // Since only one power levels event can authoritatively exist in auth_events
-            }
-        }
-
-        let is_better = if let Some(current_winner) = key_winners.get(&key) {
-            let mut winner_pos = mainline_len;
-            for auth_id in &current_winner.auth_events {
-                if let Some(&index) = mainline_indices.get(auth_id.as_str()) {
-                    winner_pos = winner_pos.min(index);
-                    break;
-                }
-            }
-
-            // Commutative Join Operator (LUB) under Lattice ordering:
-            // 1. Better mainline position (smaller index = closer to current PL = wins)
-            // 2. Later timestamp (larger timestamp wins)
-            // 3. Smaller Event ID lexicographically
-            if ev_pos < winner_pos {
-                true
-            } else if ev_pos > winner_pos {
-                false
-            } else if ev.origin_server_ts > current_winner.origin_server_ts {
-                true
-            } else if ev.origin_server_ts < current_winner.origin_server_ts {
-                false
-            } else {
-                ev.event_id < current_winner.event_id
-            }
-        } else {
-            true
-        };
-
-        if is_better {
-            key_winners.insert(key, ev);
-        }
-    }
+    let mut key_winners = HashMap::new();
+    compute_lattice_coordinatized_winners(
+        &non_power_events,
+        &mainline_indices,
+        mainline.len(),
+        &mut key_winners,
+    );
 
     // Apply the winners to the resolved state (fully authenticated)
     for (key, ev) in key_winners {

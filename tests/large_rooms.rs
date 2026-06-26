@@ -395,6 +395,20 @@ fn test_real_dag_nheko_room_106_heads() {
     assert!(!resolved.is_empty(), "Resolution should produce state");
 }
 
+fn parse_jsonl_line(line: &str) -> Option<LeanEvent> {
+    if let Ok(ev) = serde_json::from_str::<LeanEvent>(line) {
+        return Some(ev);
+    }
+    let val: serde_json::Value = serde_json::from_str(line).ok()?;
+    if let Some(source) = val.get("_source") {
+        serde_json::from_value::<LeanEvent>(source.clone()).ok()
+    } else if let Some(event) = val.get("event") {
+        serde_json::from_value::<LeanEvent>(event.clone()).ok()
+    } else {
+        None
+    }
+}
+
 #[test]
 fn test_unredacted_spam_storm_v2_1_1() {
     use std::io::BufRead;
@@ -412,24 +426,9 @@ fn test_unredacted_spam_storm_v2_1_1() {
     let mut events = Vec::new();
     for line in reader.lines() {
         let line = line.unwrap();
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        // It's a JSONL file, parse each line
-        if let Ok(ev) = serde_json::from_str::<LeanEvent>(&line) {
-            events.push(ev);
-        } else {
-            // Some jsonl files might wrap the event in {"_source": {...}} depending on how they were dumped from ElasticSearch or DB
-            let val: serde_json::Value = serde_json::from_str(&line).unwrap();
-            if let Some(source) = val.get("_source") {
-                if let Ok(ev) = serde_json::from_value::<LeanEvent>(source.clone()) {
-                    events.push(ev);
-                }
-            } else if let Some(event) = val.get("event") {
-                if let Ok(ev) = serde_json::from_value::<LeanEvent>(event.clone()) {
-                    events.push(ev);
-                }
+        if !line.trim().is_empty() {
+            if let Some(ev) = parse_jsonl_line(&line) {
+                events.push(ev);
             }
         }
     }
@@ -460,7 +459,7 @@ fn test_unredacted_spam_storm_v2_1_1() {
 
     let start_lattice = std::time::Instant::now();
     let resolved_lattice = ruma_lean::resolve_lattice_coordinatized(
-        BTreeMap::new(),
+        &BTreeMap::new(),
         map.clone(),
         &map,
         StateResVersion::V2_1_1,
@@ -472,16 +471,8 @@ fn test_unredacted_spam_storm_v2_1_1() {
     );
 
     assert!(
-        !resolved_v2.is_empty(),
-        "V2.0 Resolution should produce state for the unredacted storm"
-    );
-    assert!(
-        !resolved_v211.is_empty(),
-        "V2.1.1 Resolution should produce state for the unredacted storm"
-    );
-    assert!(
-        !resolved_lattice.is_empty(),
-        "Lattice-coordinatized Resolution should produce state for the unredacted storm"
+        !resolved_v2.is_empty() && !resolved_v211.is_empty() && !resolved_lattice.is_empty(),
+        "Resolution should produce non-empty state"
     );
 
     let v2_pl = resolved_v2.get(&("m.room.power_levels".into(), Some(String::new())));
@@ -490,15 +481,11 @@ fn test_unredacted_spam_storm_v2_1_1() {
         println!("V2 and V2.1.1 produced identical power levels.");
     } else {
         println!("V2 and V2.1.1 diverged on power levels!");
-        println!("V2 PL: {v2_pl:?}");
-        println!("V2.1.1 PL: {v211_pl:?}");
     }
 
     if resolved_v211 == resolved_lattice {
         println!("SUCCESS: Lattice-coordinatized state resolution matched V2.1.1 exactly!");
     } else {
-        println!("Lattice-coordinatized diverged from V2.1.1!");
-        // Let's print the count of differences
         let mut diff_count = 0;
         for (k, v) in &resolved_v211 {
             if resolved_lattice.get(k) != Some(v) {
