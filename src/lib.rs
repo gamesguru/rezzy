@@ -2036,15 +2036,58 @@ fn route_lattice_power_events<S1: core::hash::BuildHasher, S2: core::hash::Build
     }
 }
 
-fn compute_lattice_coordinatized_winners<'a>(
-    non_power_events: &'a HashMap<String, LeanEvent>,
+fn fold_lattice_chunk<'a>(
+    chunk: &[&'a LeanEvent],
     mainline_distances: &HashMap<String, usize>,
     mainline_len: usize,
-    key_winners: &mut HashMap<(String, Option<String>), &'a LeanEvent>,
-) {
-    for ev in non_power_events.values() {
+) -> HashMap<(String, Option<String>), &'a LeanEvent> {
+    let mut thread_res: HashMap<(String, Option<String>), &'a LeanEvent> = HashMap::new();
+    for &ev in chunk {
         let key = (ev.event_type.clone(), ev.state_key.clone());
 
+        // O(1) Geodesic coordinate mapped from the precomputed distances
+        let ev_pos = mainline_distances
+            .get(&ev.event_id)
+            .copied()
+            .unwrap_or(mainline_len);
+
+        let is_better = if let Some(current_winner) = thread_res.get(&key) {
+            let winner_pos = mainline_distances
+                .get(&current_winner.event_id)
+                .copied()
+                .unwrap_or(mainline_len);
+
+            // The Commutative Join Operator (Least Upper Bound):
+            if ev_pos < winner_pos {
+                true // Closer to mainline wins
+            } else if ev_pos > winner_pos {
+                false
+            } else if ev.origin_server_ts > current_winner.origin_server_ts {
+                true // Later timestamp wins
+            } else if ev.origin_server_ts < current_winner.origin_server_ts {
+                false
+            } else {
+                // Lexicographical flip fixed: LARGEST string wins.
+                ev.event_id > current_winner.event_id
+            }
+        } else {
+            true // First event for this state key inherently wins
+        };
+
+        if is_better {
+            thread_res.insert(key, ev);
+        }
+    }
+    thread_res
+}
+
+fn merge_lattice_winners<'a>(
+    key_winners: &mut HashMap<(String, Option<String>), &'a LeanEvent>,
+    thread_res: HashMap<(String, Option<String>), &'a LeanEvent>,
+    mainline_distances: &HashMap<String, usize>,
+    mainline_len: usize,
+) {
+    for (key, ev) in thread_res {
         // O(1) Geodesic coordinate mapped from the precomputed distances
         let ev_pos = mainline_distances
             .get(&ev.event_id)
@@ -2078,6 +2121,51 @@ fn compute_lattice_coordinatized_winners<'a>(
             key_winners.insert(key, ev);
         }
     }
+}
+
+fn compute_lattice_coordinatized_winners<'a>(
+    non_power_events: &'a HashMap<String, LeanEvent>,
+    mainline_distances: &HashMap<String, usize>,
+    mainline_len: usize,
+    key_winners: &mut HashMap<(String, Option<String>), &'a LeanEvent>,
+) {
+    #[cfg(feature = "std")]
+    {
+        let num_threads = std::thread::available_parallelism().map_or(4, core::num::NonZero::get);
+
+        if num_threads > 1 && non_power_events.len() > 1000 {
+            let events_vec: Vec<&'a LeanEvent> = non_power_events.values().collect();
+            let chunk_size = events_vec.len().div_ceil(num_threads);
+
+            let results = std::thread::scope(|s| {
+                let mut handles = Vec::with_capacity(num_threads);
+                for chunk in events_vec.chunks(chunk_size) {
+                    let handle = s
+                        .spawn(move || fold_lattice_chunk(chunk, mainline_distances, mainline_len));
+                    handles.push(handle);
+                }
+
+                let mut thread_results = Vec::with_capacity(num_threads);
+                for handle in handles {
+                    if let Ok(thread_res) = handle.join() {
+                        thread_results.push(thread_res);
+                    }
+                }
+                thread_results
+            });
+
+            // Reduce Phase
+            for thread_res in results {
+                merge_lattice_winners(key_winners, thread_res, mainline_distances, mainline_len);
+            }
+            return;
+        }
+    }
+
+    // Fallback/Sequential
+    let events_vec: Vec<&'a LeanEvent> = non_power_events.values().collect();
+    let thread_res = fold_lattice_chunk(&events_vec, mainline_distances, mainline_len);
+    merge_lattice_winners(key_winners, thread_res, mainline_distances, mainline_len);
 }
 
 /// A revolutionary, mathematically optimal O(C) Lattice-based State Resolution implementation.
