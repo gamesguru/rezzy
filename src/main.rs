@@ -235,9 +235,18 @@ fn load_or_fetch_input_value(args: &Args) -> anyhow::Result<serde_json::Value> {
         fetch_room_state(homeserver, room_id, token.as_deref())
     } else if !args.input.is_empty() {
         if args.input.len() == 1 {
-            // Single input: preserve existing behavior (supports {events, heads} wrapper)
-            let events = load_file(&args.input[0])?;
-            Ok(serde_json::Value::Array(events))
+            let input_path = &args.input[0];
+            let is_jsonl = input_path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"));
+            if is_jsonl {
+                let events = load_file(input_path)?;
+                Ok(serde_json::Value::Array(events))
+            } else {
+                let content = std::fs::read(input_path)?;
+                let val: serde_json::Value = serde_json::from_slice(&content)?;
+                Ok(val)
+            }
         } else {
             // Multiple inputs: merge DAGs by event_id
             let mut file_sets = Vec::with_capacity(args.input.len());
@@ -261,25 +270,22 @@ fn parse_and_extract_heads(
     input_val: &serde_json::Value,
 ) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
     let (raw_events, heads) = if let Some(obj) = input_val.as_object() {
-        if obj.contains_key("events") && obj.contains_key("heads") {
+        if obj.contains_key("events") {
             let evs = obj
                 .get("events")
                 .unwrap()
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("'events' field must be a JSON array"))?
                 .clone();
-            let hds_arr = obj
-                .get("heads")
-                .unwrap()
-                .as_array()
-                .ok_or_else(|| anyhow::anyhow!("'heads' field must be a JSON array"))?;
-            let mut hds = Vec::with_capacity(hds_arr.len());
-            for v in hds_arr {
-                hds.push(
-                    v.as_str()
-                        .ok_or_else(|| anyhow::anyhow!("each 'head' must be a string"))?
-                        .to_string(),
-                );
+            let mut hds = Vec::new();
+            if let Some(hds_arr) = obj.get("heads").and_then(|h| h.as_array()) {
+                for v in hds_arr {
+                    hds.push(
+                        v.as_str()
+                            .ok_or_else(|| anyhow::anyhow!("each 'head' must be a string"))?
+                            .to_string(),
+                    );
+                }
             }
             (evs, hds)
         } else {
