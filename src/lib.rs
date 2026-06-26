@@ -1133,8 +1133,8 @@ impl<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher> crate::auth::Stat
     }
 }
 
-/// Targeted iterative auth check. Per Matrix spec, the auth context for event 'e'
-/// consists of the events in the conflict set (E) and the currently resolved state (S).
+/// Evaluates whether an event passes authentication checks given a resolved state map,
+/// delegating to the core `crate::auth::check_auth` logic via a temporary `OverlayState` view.
 #[allow(clippy::too_many_arguments)]
 fn iterative_auth_ok<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     event: &LeanEvent,
