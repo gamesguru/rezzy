@@ -1587,6 +1587,119 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
     false
 }
 
+fn get_and_mask<'a, S: core::hash::BuildHasher>(
+    id: &'a str,
+    dag_context: &'a HashMap<String, LeanEvent, S>,
+    admin_masks: &HashMap<&str, u64>,
+    memo: &mut HashMap<&'a str, u64>,
+) -> u64 {
+    if let Some(&m) = memo.get(id) {
+        return m;
+    }
+    let mut m = admin_masks.get(id).copied().unwrap_or(0);
+    if let Some(ev) = dag_context.get(id) {
+        for p in ev.prev_events.iter().chain(ev.auth_events.iter()) {
+            m |= get_and_mask(p.as_str(), dag_context, admin_masks, memo);
+        }
+    }
+    memo.insert(id, m);
+    m
+}
+
+fn get_desc_mask<'a>(
+    id: &'a str,
+    children_map: &HashMap<&'a str, Vec<&'a str>>,
+    admin_masks: &HashMap<&str, u64>,
+    memo: &mut HashMap<&'a str, u64>,
+) -> u64 {
+    if let Some(&m) = memo.get(id) {
+        return m;
+    }
+    let mut m = admin_masks.get(id).copied().unwrap_or(0);
+    if let Some(children) = children_map.get(id) {
+        for &c in children {
+            m |= get_desc_mask(c, children_map, admin_masks, memo);
+        }
+    }
+    memo.insert(id, m);
+    m
+}
+
+fn compute_cdo_bit_masks<S: core::hash::BuildHasher>(
+    dag_context: &HashMap<String, LeanEvent, S>,
+    admin_actions: &[&str],
+    ancestor_masks: &mut HashMap<String, u64>,
+    descendant_masks: &mut HashMap<String, u64>,
+    admin_masks: &mut HashMap<String, u64>,
+) {
+    let mut admin_masks_local = HashMap::new();
+    for (i, &id) in admin_actions.iter().enumerate() {
+        admin_masks_local.insert(id, 1u64 << i);
+        admin_masks.insert(String::from(id), 1u64 << i);
+    }
+
+    let mut ancestor_memo = HashMap::new();
+    for id in dag_context.keys() {
+        let mask = get_and_mask(
+            id.as_str(),
+            dag_context,
+            &admin_masks_local,
+            &mut ancestor_memo,
+        );
+        ancestor_masks.insert(id.clone(), mask);
+    }
+
+    let mut children_map: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (id, ev) in dag_context {
+        for p in ev.prev_events.iter().chain(ev.auth_events.iter()) {
+            children_map
+                .entry(p.as_str())
+                .or_default()
+                .push(id.as_str());
+        }
+    }
+
+    let mut descendant_memo = HashMap::new();
+    for id in dag_context.keys() {
+        let mask = get_desc_mask(
+            id.as_str(),
+            &children_map,
+            &admin_masks_local,
+            &mut descendant_memo,
+        );
+        descendant_masks.insert(id.clone(), mask);
+    }
+}
+
+fn sort_cdo_events(events: &[&LeanEvent]) -> Vec<LeanEvent> {
+    let mut sorted = events.iter().copied().cloned().collect::<Vec<_>>();
+    sorted.sort_by(|a, b| {
+        let type_priority = |t: &str| match t {
+            "m.room.power_levels" => 0,
+            "m.room.join_rules" => 1,
+            _ => 2,
+        };
+
+        let cmp_pl = b.power_level.cmp(&a.power_level);
+        if cmp_pl != Ordering::Equal {
+            return cmp_pl;
+        }
+
+        let cmp_type = type_priority(&a.event_type).cmp(&type_priority(&b.event_type));
+        if cmp_type != Ordering::Equal {
+            return cmp_type;
+        }
+
+        let cmp_ts = a.origin_server_ts.cmp(&b.origin_server_ts);
+        if cmp_ts != Ordering::Equal {
+            return cmp_ts;
+        }
+
+        a.event_id.cmp(&b.event_id)
+    });
+    sorted
+}
+
 /// Cycle 0 Topological Filter: Vectorized Causal Domination Operator (CDO)
 /// Executes strictly on the Conflicted State Subgraph (C).
 #[must_use]
@@ -1601,39 +1714,30 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    // Sort conflicted events topologically and chronologically:
-    // 1. Type priority: lockdowns (power levels, join rules) come first
-    // 2. power_level descending (higher power level comes first)
-    // 3. origin_server_ts ascending (earlier comes first)
-    // 4. event_id ascending (smaller lexicographical order comes first)
-    let mut sorted_events: Vec<&LeanEvent> = conflicted_events.values().collect();
-    sorted_events.sort_by(|a, b| {
-        let type_priority = |t: &str| match t {
-            "m.room.power_levels" => 0,
-            "m.room.join_rules" => 1,
-            _ => 2,
-        };
+    // Identify all admin actions in conflicted events
+    let admin_actions: Vec<&str> = conflicted_events
+        .values()
+        .filter(|e| e.is_ban_or_kick() || e.is_demotion() || e.is_lockdown())
+        .map(|e| e.event_id.as_str())
+        .collect();
 
-        // 1. power_level descending (highest authority evaluates first)
-        let cmp_pl = b.power_level.cmp(&a.power_level);
-        if cmp_pl != Ordering::Equal {
-            return cmp_pl;
-        }
+    let use_fast_bit_sweep = admin_actions.len() <= 64;
 
-        // 2. Type priority: lockdowns (power levels, join rules) come first
-        let cmp_type = type_priority(&a.event_type).cmp(&type_priority(&b.event_type));
-        if cmp_type != Ordering::Equal {
-            return cmp_type;
-        }
+    let mut ancestor_masks = HashMap::new();
+    let mut descendant_masks = HashMap::new();
+    let mut admin_masks = HashMap::new();
 
-        // 3. origin_server_ts ascending (earlier comes first)
-        let cmp_ts = a.origin_server_ts.cmp(&b.origin_server_ts);
-        if cmp_ts != Ordering::Equal {
-            return cmp_ts;
-        }
+    if use_fast_bit_sweep {
+        compute_cdo_bit_masks(
+            &dag_context,
+            &admin_actions,
+            &mut ancestor_masks,
+            &mut descendant_masks,
+            &mut admin_masks,
+        );
+    }
 
-        a.event_id.cmp(&b.event_id)
-    });
+    let sorted_events = sort_cdo_events(&conflicted_events.values().collect::<Vec<_>>());
 
     let mut dropped_ids = BTreeSet::new();
     let mut active_admin_actions: Vec<&LeanEvent> = Vec::new();
@@ -1649,8 +1753,13 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
                 let admin_id = admin_ev.event_id.as_str();
                 let event_id = event.event_id.as_str();
 
-                let is_ancestor_admin =
-                    if let Some(&res) = ancestor_cache.get(&(admin_id, event_id)) {
+                let (is_ancestor_admin, is_descendant_admin) = if use_fast_bit_sweep {
+                    let admin_bit = admin_masks.get(admin_id).copied().unwrap_or(0);
+                    let ev_and = ancestor_masks.get(event_id).copied().unwrap_or(0);
+                    let ev_desc = descendant_masks.get(event_id).copied().unwrap_or(0);
+                    ((ev_and & admin_bit) != 0, (ev_desc & admin_bit) != 0)
+                } else {
+                    let is_and = if let Some(&res) = ancestor_cache.get(&(admin_id, event_id)) {
                         res
                     } else {
                         let res = is_ancestor(admin_id, event_id, &dag_context);
@@ -1658,14 +1767,15 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
                         res
                     };
 
-                let is_descendant_admin =
-                    if let Some(&res) = ancestor_cache.get(&(event_id, admin_id)) {
+                    let is_desc = if let Some(&res) = ancestor_cache.get(&(event_id, admin_id)) {
                         res
                     } else {
                         let res = is_ancestor(event_id, admin_id, &dag_context);
                         ancestor_cache.insert((event_id, admin_id), res);
                         res
                     };
+                    (is_and, is_desc)
+                };
 
                 if !is_ancestor_admin && !is_descendant_admin {
                     is_dominated = true;

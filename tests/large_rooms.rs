@@ -449,6 +449,14 @@ fn test_unredacted_spam_storm_v2_1_1() {
         start_v2.elapsed()
     );
 
+    let start_v21 = std::time::Instant::now();
+    let resolved_v21 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1);
+    println!(
+        "V2.1 State Resolution of {} events took: {:?}",
+        events.len(),
+        start_v21.elapsed()
+    );
+
     let start_v211 = std::time::Instant::now();
     let resolved_v211 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1_1);
     println!(
@@ -471,7 +479,10 @@ fn test_unredacted_spam_storm_v2_1_1() {
     );
 
     assert!(
-        !resolved_v2.is_empty() && !resolved_v211.is_empty() && !resolved_lattice.is_empty(),
+        !resolved_v2.is_empty()
+            && !resolved_v21.is_empty()
+            && !resolved_v211.is_empty()
+            && !resolved_lattice.is_empty(),
         "Resolution should produce non-empty state"
     );
 
