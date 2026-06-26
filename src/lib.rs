@@ -1307,9 +1307,9 @@ fn build_mainline(
 ///    (closest) mainline position.
 ///
 /// Total: O(V+E) — each vertex and edge touched at most once.
-fn precompute_mainline_positions(
+fn precompute_mainline_positions<S: ::std::hash::BuildHasher>(
     mainline: &[String],
-    auth_context: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent, S>,
 ) -> HashMap<String, usize> {
     let mainline_len = mainline.len();
 

@@ -45,12 +45,8 @@ fn test_filter_non_state_events() {
 fn test_merge_dedup_by_event_id() {
     let a = vec![ev("$1", 1), ev("$2", 2), ev("$3", 3)];
     let b = vec![ev("$2", 2), ev("$3", 3), ev("$4", 4)];
-    let result = merge_event_sets(
-        &[("a.jsonl".into(), a), ("b.jsonl".into(), b)],
-        false,
-        true,
-    )
-    .unwrap();
+    let result =
+        merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true).unwrap();
 
     let ids: Vec<&str> = result
         .iter()
@@ -63,11 +59,7 @@ fn test_merge_dedup_by_event_id() {
 fn test_merge_disjoint_fails() {
     let a = vec![ev("$1", 1), ev("$2", 2)];
     let b = vec![ev("$3", 3), ev("$4", 4)];
-    let result = merge_event_sets(
-        &[("a.jsonl".into(), a), ("b.jsonl".into(), b)],
-        false,
-        true,
-    );
+    let result = merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("Disjoint DAGs"));
 }
@@ -108,12 +100,8 @@ fn test_merge_single_file() {
 fn test_merge_complete_overlap() {
     let a = vec![ev("$1", 1), ev("$2", 2), ev("$3", 3)];
     let b = vec![ev("$1", 1), ev("$2", 2), ev("$3", 3)];
-    let result = merge_event_sets(
-        &[("a.jsonl".into(), a), ("b.jsonl".into(), b)],
-        false,
-        true,
-    )
-    .unwrap();
+    let result =
+        merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true).unwrap();
     assert_eq!(result.len(), 3);
 }
 
@@ -136,12 +124,8 @@ fn test_merge_debug_depths() {
     let a = vec![ev("$1", 10), ev("$2", 20)];
     let b = vec![ev("$2", 20), ev("$3", 30)];
     // Should not panic with debug=true
-    let result = merge_event_sets(
-        &[("a.jsonl".into(), a), ("b.jsonl".into(), b)],
-        true,
-        true,
-    )
-    .unwrap();
+    let result =
+        merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], true, true).unwrap();
     assert_eq!(result.len(), 3);
 }
 
@@ -149,12 +133,8 @@ fn test_merge_debug_depths() {
 fn test_merge_single_event_per_file() {
     let a = vec![ev("$1", 1)];
     let b = vec![ev("$1", 1)];
-    let result = merge_event_sets(
-        &[("a.jsonl".into(), a), ("b.jsonl".into(), b)],
-        false,
-        true,
-    )
-    .unwrap();
+    let result =
+        merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true).unwrap();
     assert_eq!(result.len(), 1);
 }
 
@@ -162,11 +142,7 @@ fn test_merge_single_event_per_file() {
 fn test_merge_two_single_events_disjoint() {
     let a = vec![ev("$1", 1)];
     let b = vec![ev("$2", 2)];
-    let result = merge_event_sets(
-        &[("a.jsonl".into(), a), ("b.jsonl".into(), b)],
-        false,
-        true,
-    );
+    let result = merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true);
     assert!(result.is_err());
 }
 
@@ -174,12 +150,8 @@ fn test_merge_two_single_events_disjoint() {
 fn test_merge_two_events_one_shared() {
     let a = vec![ev("$1", 1), ev("$2", 2)];
     let b = vec![ev("$2", 2), ev("$3", 3)];
-    let result = merge_event_sets(
-        &[("a.jsonl".into(), a), ("b.jsonl".into(), b)],
-        false,
-        true,
-    )
-    .unwrap();
+    let result =
+        merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true).unwrap();
     assert_eq!(result.len(), 3);
 }
 
