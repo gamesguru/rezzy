@@ -506,6 +506,7 @@ fn test_unredacted_spam_storm_v2_1_1() {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn verify_spam_storm_results(
     events: &[LeanEvent],
     resolved_v2: &BTreeMap<(String, Option<String>), String>,

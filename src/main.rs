@@ -485,6 +485,8 @@ fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
             if let Some(prev_state) = state_after_map.get(prev_id) {
                 state_before = prev_state.clone();
                 parent_hash = state_hash_map.get(prev_id).cloned();
+            }
+        } else {
             // Multi-head merge
             let mut parent_states = Vec::new();
             for prev_id in &ev.prev_events {
@@ -524,7 +526,15 @@ fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
         state_hash_map.insert(ev.event_id.clone(), hash_str.clone());
 
         let mut deltas = Vec::new();
-        if !ev.prev_events.is_empty() {
+        if ev.prev_events.is_empty() {
+            for (key, event_id) in state_after.as_ref() {
+                deltas.push(serde_json::json!({
+                    "type": key.0,
+                    "state_key": key.1,
+                    "event_id": event_id,
+                }));
+            }
+        } else {
             let parent_state = state_before.as_ref();
             for (key, event_id) in state_after.as_ref() {
                 match parent_state.get(key) {
@@ -538,7 +548,7 @@ fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
                     }
                 }
             }
-            for key in parent_state.as_ref().keys() {
+            for key in parent_state.keys() {
                 if !state_after.contains_key(key) {
                     deltas.push(serde_json::json!({
                         "type": key.0,
@@ -546,14 +556,6 @@ fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
                         "event_id": serde_json::Value::Null,
                     }));
                 }
-            }
-        } else {
-            for (key, event_id) in state_after.as_ref() {
-                deltas.push(serde_json::json!({
-                    "type": key.0,
-                    "state_key": key.1,
-                    "event_id": event_id,
-                }));
             }
         }
 
@@ -1222,10 +1224,10 @@ fn main() {
             serde_json::to_writer_pretty(&mut buffered_out, &output)
                 .expect("Failed to write output");
             if let Err(e) = writeln!(buffered_out) {
-                assert!(
-                    e.kind() == std::io::ErrorKind::BrokenPipe,
-                    "Failed to write trailing newline: {e}"
-                );
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    return;
+                }
+                panic!("Failed to write trailing newline: {e}");
             }
             buffered_out.flush().expect("Failed to flush output buffer");
         }
