@@ -1,8 +1,8 @@
 # Ruma-Lean: Matrix State Resolution v2.1.1
 
-Ruma-Lean is a formally verified, dependency-free Rust research engine for Matrix State Resolution. It serves as the reference implementation for the proposed **v2.1.1** standard, addressing critical topological anomalies and accumulator-retention defects found in production implementations (like Ruma v2.1 and Synapse).
+Ruma-Lean is a dependency-free, high-performance Rust reference engine for Matrix State Resolution. It serves as the reference implementation for the proposed **v2.1.1** standard, addressing critical topological anomalies and accumulator-retention defects found in production implementations (like Ruma v2.1 and Synapse).
 
-_Note: ZK (Zero-Knowledge) acceleration experiments are currently paused to focus on formal verification and algorithmic stabilization of the core protocol._
+_Note: Lean theorem-proving and ZK (Zero-Knowledge) acceleration experiments are no longer at the forefront of this repository, which is now primarily focused on stable algorithmic research, correctness, and reference compliance._
 
 ## Architectural Innovations
 

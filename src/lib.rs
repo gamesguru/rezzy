@@ -585,11 +585,11 @@ impl LeanEvent {
 
 /// A wrapper to ensure `BinaryHeap` pops the "Best" event FIRST.
 #[derive(Debug, Clone, Copy)]
-struct SortPriority<'a> {
-    event: &'a LeanEvent,
-    power_level: i64,
-    auth_chain_distance: u64,
-    version: StateResVersion,
+pub struct SortPriority<'a> {
+    pub event: &'a LeanEvent,
+    pub power_level: i64,
+    pub auth_chain_distance: u64,
+    pub version: StateResVersion,
 }
 
 const MAX_POWER_LEVEL: i64 = 9_007_199_254_740_991; // 2^53 - 1
@@ -1307,9 +1307,9 @@ fn build_mainline(
 ///    (closest) mainline position.
 ///
 /// Total: O(V+E) — each vertex and edge touched at most once.
-fn precompute_mainline_positions(
+fn precompute_mainline_positions<S: ::std::hash::BuildHasher>(
     mainline: &[String],
-    auth_context: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent, S>,
 ) -> HashMap<String, usize> {
     let mainline_len = mainline.len();
 
@@ -1362,10 +1362,10 @@ fn precompute_mainline_positions(
 /// 1. Closest mainline position (smaller index = closer to current PL = comes last)
 /// 2. `origin_server_ts` ascending (earlier first, later wins via last-write)
 /// 3. `event_id` ascending (smaller first)
-fn mainline_sort(
+pub fn mainline_sort<S: ::std::hash::BuildHasher>(
     events: &mut Vec<&LeanEvent>,
     mainline: &[String],
-    auth_context: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent, S>,
 ) {
     let mainline_len = mainline.len();
 
@@ -1724,6 +1724,71 @@ pub fn compute_state_at<S: std::hash::BuildHasher>(
     Some(state_map)
 }
 
+#[cfg(feature = "cli")]
+fn perform_connectivity_check(
+    per_file_ids: &[std::collections::HashSet<String>],
+) -> Result<(), anyhow::Error> {
+    extern crate anyhow;
+    let num_files = per_file_ids.len();
+    let mut any_shared = false;
+    for i in 0..num_files {
+        for j in (i + 1)..num_files {
+            let pair_shared = per_file_ids[i].intersection(&per_file_ids[j]).count();
+            if pair_shared > 0 {
+                any_shared = true;
+                break;
+            }
+        }
+        if any_shared {
+            break;
+        }
+    }
+
+    if !any_shared {
+        anyhow::bail!(
+            "Disjoint DAGs: no shared events found across inputs. \
+             Cannot compute meaningful merge — the DAGs share no history."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+fn report_highest_shared_depths(
+    per_file_ids: &[std::collections::HashSet<String>],
+    merged: &[serde_json::Value],
+) {
+    use std::collections::HashSet;
+    let num_files = per_file_ids.len();
+    let shared_all: HashSet<&String> = {
+        let mut s: HashSet<&String> = HashSet::new();
+        for i in 0..num_files {
+            for j in (i + 1)..num_files {
+                s.extend(per_file_ids[i].intersection(&per_file_ids[j]));
+            }
+        }
+        s
+    };
+    let mut shared_depths: Vec<(&String, u64)> = shared_all
+        .iter()
+        .filter_map(|id| {
+            merged.iter().find_map(|v| {
+                let eid = v.get("event_id")?.as_str()?;
+                if eid == id.as_str() {
+                    Some((*id, v.get("depth")?.as_u64().unwrap_or(0)))
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+    shared_depths.sort_by_key(|b| std::cmp::Reverse(b.1));
+    std::eprintln!(
+        "[merge] highest shared depths: {:?}",
+        &shared_depths[..shared_depths.len().min(5)]
+    );
+}
+
 /// Merge multiple event sets by `event_id` (first-seen wins, PDUs are immutable).
 /// Returns the merged events.
 ///
@@ -1766,7 +1831,6 @@ pub fn merge_event_sets(
             }
         }
 
-        #[cfg(feature = "cli")]
         if !quiet {
             std::eprintln!(
                 "[merge] {}: {} events ({} new, {} shared)",
@@ -1781,26 +1845,7 @@ pub fn merge_event_sets(
 
     // Merge-base check: verify each file shares at least one event with another
     if num_files >= 2 {
-        let mut any_shared = false;
-        for i in 0..num_files {
-            for j in (i + 1)..num_files {
-                let pair_shared = per_file_ids[i].intersection(&per_file_ids[j]).count();
-                if pair_shared > 0 {
-                    any_shared = true;
-                    break;
-                }
-            }
-            if any_shared {
-                break;
-            }
-        }
-
-        if !any_shared {
-            anyhow::bail!(
-                "Disjoint DAGs: no shared events found across inputs. \
-                 Cannot compute meaningful merge — the DAGs share no history."
-            );
-        }
+        perform_connectivity_check(&per_file_ids)?;
 
         // Report total shared count (union of all pairwise intersections)
         let total_shared: usize = {
@@ -1813,47 +1858,17 @@ pub fn merge_event_sets(
             shared_ids.len()
         };
 
-        #[cfg(feature = "cli")]
         if !quiet {
             std::eprintln!(
                 "[merge] merge-base: {total_shared} shared events across {num_files} inputs"
             );
         }
 
-        #[cfg(feature = "cli")]
         if debug {
-            // Find the merge-base frontier: shared events with the highest depths
-            let shared_all: HashSet<&String> = {
-                let mut s: HashSet<&String> = HashSet::new();
-                for i in 0..num_files {
-                    for j in (i + 1)..num_files {
-                        s.extend(per_file_ids[i].intersection(&per_file_ids[j]));
-                    }
-                }
-                s
-            };
-            let mut shared_depths: Vec<(&String, u64)> = shared_all
-                .iter()
-                .filter_map(|id| {
-                    merged.iter().find_map(|v| {
-                        let eid = v.get("event_id")?.as_str()?;
-                        if eid == id.as_str() {
-                            Some((*id, v.get("depth")?.as_u64().unwrap_or(0)))
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .collect();
-            shared_depths.sort_by_key(|b| std::cmp::Reverse(b.1));
-            std::eprintln!(
-                "[merge] highest shared depths: {:?}",
-                &shared_depths[..shared_depths.len().min(5)]
-            );
+            report_highest_shared_depths(&per_file_ids, &merged);
         }
     }
 
-    #[cfg(feature = "cli")]
     if !quiet {
         std::eprintln!("[merge] total: {} unique events", merged.len());
     }
