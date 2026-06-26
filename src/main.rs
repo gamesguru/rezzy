@@ -483,27 +483,26 @@ fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
             if let Some(prev_state) = state_after_map.get(prev_id) {
                 state_before = prev_state.clone();
                 parent_hash = state_hash_map.get(prev_id).cloned();
-            }
-        } else {
             // Multi-head merge
             let mut parent_states = Vec::new();
-            let mut first_parent_hash = None;
             for prev_id in &ev.prev_events {
                 if let Some(prev_state) = state_after_map.get(prev_id) {
                     parent_states.push(prev_state.clone());
-                    if first_parent_hash.is_none() {
-                        first_parent_hash = state_hash_map.get(prev_id).cloned();
-                    }
                 }
             }
 
             if !parent_states.is_empty() {
-                parent_hash = first_parent_hash;
                 if parent_states.len() == 1 {
                     state_before = parent_states[0].clone();
+                    parent_hash = ev
+                        .prev_events
+                        .first()
+                        .and_then(|prev_id| state_hash_map.get(prev_id))
+                        .cloned();
                 } else {
                     state_before =
                         resolve_parent_states(&parent_states, ctx.events_map, ctx.version);
+                    parent_hash = Some(compute_state_hash(state_before.as_ref()));
                 }
             }
         }
@@ -523,12 +522,8 @@ fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
         state_hash_map.insert(ev.event_id.clone(), hash_str.clone());
 
         let mut deltas = Vec::new();
-        let primary_parent_state = ev
-            .prev_events
-            .first()
-            .and_then(|p_id| state_after_map.get(p_id));
-
-        if let Some(parent_state) = primary_parent_state {
+        if !ev.prev_events.is_empty() {
+            let parent_state = state_before.as_ref();
             for (key, event_id) in state_after.as_ref() {
                 match parent_state.get(key) {
                     Some(parent_event_id) if parent_event_id == event_id => {}
