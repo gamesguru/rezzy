@@ -585,11 +585,11 @@ impl LeanEvent {
 
 /// A wrapper to ensure `BinaryHeap` pops the "Best" event FIRST.
 #[derive(Debug, Clone, Copy)]
-struct SortPriority<'a> {
-    event: &'a LeanEvent,
-    power_level: i64,
-    auth_chain_distance: u64,
-    version: StateResVersion,
+pub struct SortPriority<'a> {
+    pub event: &'a LeanEvent,
+    pub power_level: i64,
+    pub auth_chain_distance: u64,
+    pub version: StateResVersion,
 }
 
 const MAX_POWER_LEVEL: i64 = 9_007_199_254_740_991; // 2^53 - 1
@@ -1362,10 +1362,10 @@ fn precompute_mainline_positions(
 /// 1. Closest mainline position (smaller index = closer to current PL = comes last)
 /// 2. `origin_server_ts` ascending (earlier first, later wins via last-write)
 /// 3. `event_id` ascending (smaller first)
-fn mainline_sort(
+pub fn mainline_sort<S: ::std::hash::BuildHasher>(
     events: &mut Vec<&LeanEvent>,
     mainline: &[String],
-    auth_context: &HashMap<String, LeanEvent>,
+    auth_context: &HashMap<String, LeanEvent, S>,
 ) {
     let mainline_len = mainline.len();
 
@@ -1724,12 +1724,20 @@ pub fn compute_state_at<S: std::hash::BuildHasher>(
     Some(state_map)
 }
 
+/// Merge multiple event sets by `event_id` (first-seen wins, PDUs are immutable).
+/// Returns the merged events.
+///
+/// # Errors
+///
+/// Returns an error if the files describe disjoint DAGs that share no history.
 #[cfg(feature = "cli")]
 pub fn merge_event_sets(
     file_sets: &[(String, Vec<serde_json::Value>)],
     debug: bool,
     quiet: bool,
 ) -> Result<Vec<serde_json::Value>, anyhow::Error> {
+    extern crate anyhow;
+    use alloc::borrow::ToOwned;
     use std::collections::HashSet;
 
     let num_files = file_sets.len();
@@ -1747,7 +1755,7 @@ pub fn merge_event_sets(
                 .get("event_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
-                .to_string();
+                .to_owned();
 
             file_ids.insert(event_id.clone());
             if seen_ids.insert(event_id) {
@@ -1758,6 +1766,7 @@ pub fn merge_event_sets(
             }
         }
 
+        #[cfg(feature = "cli")]
         if !quiet {
             std::eprintln!(
                 "[merge] {}: {} events ({} new, {} shared)",
@@ -1804,12 +1813,14 @@ pub fn merge_event_sets(
             shared_ids.len()
         };
 
+        #[cfg(feature = "cli")]
         if !quiet {
             std::eprintln!(
                 "[merge] merge-base: {total_shared} shared events across {num_files} inputs"
             );
         }
 
+        #[cfg(feature = "cli")]
         if debug {
             // Find the merge-base frontier: shared events with the highest depths
             let shared_all: HashSet<&String> = {
@@ -1842,8 +1853,10 @@ pub fn merge_event_sets(
         }
     }
 
+    #[cfg(feature = "cli")]
     if !quiet {
         std::eprintln!("[merge] total: {} unique events", merged.len());
     }
+
     Ok(merged)
 }

@@ -106,3 +106,16 @@ name = "regen_oracles"
 path = "tests/regen_oracles.rs"
 harness = false
 required-features = ["regen"]
+
+[[test]]
+name = "test_auth"
+path = "tests/test_auth.rs"
+
+[[test]]
+name = "test_lib"
+path = "tests/test_lib.rs"
+
+[[test]]
+name = "test_main"
+path = "tests/test_main.rs"
+required-features = ["cli"]

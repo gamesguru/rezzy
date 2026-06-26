@@ -1,6 +1,6 @@
 use clap::{Parser, ValueEnum};
 use ruma_lean::{LeanEvent, StateResVersion};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;

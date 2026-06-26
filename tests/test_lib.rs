@@ -1,10 +1,14 @@
+extern crate alloc;
+
 #[cfg(test)]
 #[allow(clippy::too_many_lines, clippy::type_complexity, clippy::similar_names)]
 mod tests {
 
-    use ruma_lean::*;
+    use alloc::collections::BTreeMap;
     use alloc::string::ToString;
     use alloc::vec;
+    use core::cmp::Ordering;
+    use ruma_lean::*;
 
     #[cfg(not(feature = "std"))]
     use hashbrown::HashMap;
