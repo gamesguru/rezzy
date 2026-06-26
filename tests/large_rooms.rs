@@ -428,7 +428,9 @@ fn test_unredacted_spam_storm_v2_1_1() {
         let line = line.unwrap();
         if !line.trim().is_empty() {
             if let Some(ev) = parse_jsonl_line(&line) {
-                events.push(ev);
+                if ev.state_key.is_some() {
+                    events.push(ev);
+                }
             }
         }
     }
@@ -487,11 +489,17 @@ fn test_unredacted_spam_storm_v2_1_1() {
     );
 
     let v2_pl = resolved_v2.get(&("m.room.power_levels".into(), Some(String::new())));
+    let v21_pl = resolved_v21.get(&("m.room.power_levels".into(), Some(String::new())));
     let v211_pl = resolved_v211.get(&("m.room.power_levels".into(), Some(String::new())));
     if v2_pl == v211_pl {
         println!("V2 and V2.1.1 produced identical power levels.");
     } else {
         println!("V2 and V2.1.1 diverged on power levels!");
+    }
+    if v21_pl == v211_pl {
+        println!("V2.1 and V2.1.1 produced identical power levels.");
+    } else {
+        println!("V2.1 and V2.1.1 diverged on power levels!");
     }
 
     if resolved_v211 == resolved_lattice {
