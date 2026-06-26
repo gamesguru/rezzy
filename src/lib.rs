@@ -2262,31 +2262,16 @@ pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher, S2: core::hash
     for (key, ev) in sorted_winners {
         let local_auth =
             compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache, version);
-        let ok = iterative_auth_ok(
+        if iterative_auth_ok(
             ev,
             &resolved,
             auth_context,
             sort_set,
-            local_auth.clone(),
+            local_auth,
             create_ev,
             version,
             false,
-        );
-        if ev.event_id == "$daUmTAEewlgLRBYaNESenODdRgxAQ6dZqkFoza1FT3c" {
-            let overlay = OverlayState {
-                resolved: &resolved,
-                auth_context,
-                conflicted: sort_set,
-                local_auth: local_auth.clone(),
-                create_ev,
-                version,
-                is_power_phase: false,
-            };
-            std::eprintln!("DIAGNOSTIC: ok={}", ok);
-            std::eprintln!("DIAGNOSTIC: check_auth={:?}", crate::auth::check_auth(ev, &overlay));
-            std::eprintln!("DIAGNOSTIC: local_auth contains @cmos member: {:?}", local_auth.get(&("m.room.member".to_string(), Some("@cmos:stargazypie.xyz".to_string()))));
-        }
-        if ok {
+        ) {
             resolved.insert((*key).clone(), ev.event_id.clone());
         }
     }
