@@ -488,15 +488,30 @@ fn test_unredacted_spam_storm_v2_1_1() {
         "Resolution should produce non-empty state"
     );
 
-    let v2_pl = resolved_v2.get(&("m.room.power_levels".into(), Some(String::new())));
-    let v21_pl = resolved_v21.get(&("m.room.power_levels".into(), Some(String::new())));
-    let v211_pl = resolved_v211.get(&("m.room.power_levels".into(), Some(String::new())));
-    if v2_pl == v211_pl {
+    verify_spam_storm_results(
+        &resolved_v2,
+        &resolved_v21,
+        &resolved_v211,
+        &resolved_lattice,
+    );
+}
+
+fn verify_spam_storm_results(
+    resolved_v2: &BTreeMap<(String, Option<String>), String>,
+    resolved_v21: &BTreeMap<(String, Option<String>), String>,
+    resolved_v211: &BTreeMap<(String, Option<String>), String>,
+    resolved_lattice: &BTreeMap<(String, Option<String>), String>,
+) {
+    let power_levels_v20 = resolved_v2.get(&("m.room.power_levels".into(), Some(String::new())));
+    let power_levels_v21 = resolved_v21.get(&("m.room.power_levels".into(), Some(String::new())));
+    let power_levels_v211 = resolved_v211.get(&("m.room.power_levels".into(), Some(String::new())));
+
+    if power_levels_v20 == power_levels_v211 {
         println!("V2 and V2.1.1 produced identical power levels.");
     } else {
         println!("V2 and V2.1.1 diverged on power levels!");
     }
-    if v21_pl == v211_pl {
+    if power_levels_v21 == power_levels_v211 {
         println!("V2.1 and V2.1.1 produced identical power levels.");
     } else {
         println!("V2.1 and V2.1.1 diverged on power levels!");
@@ -506,14 +521,14 @@ fn test_unredacted_spam_storm_v2_1_1() {
         println!("SUCCESS: Lattice-coordinatized state resolution matched V2.1.1 exactly!");
     } else {
         let mut diff_count = 0;
-        for (k, v) in &resolved_v211 {
+        for (k, v) in resolved_v211 {
             if resolved_lattice.get(k) != Some(v) {
                 diff_count += 1;
                 let lat_val = resolved_lattice.get(k);
                 println!("DIVERGENCE: Key {k:?} -> V2.1.1: {v:?}, Lattice: {lat_val:?}");
             }
         }
-        for (k, v) in &resolved_lattice {
+        for (k, v) in resolved_lattice {
             if !resolved_v211.contains_key(k) {
                 diff_count += 1;
                 println!("DIVERGENCE: Key {k:?} -> V2.1.1: None, Lattice: {v:?}");
