@@ -623,5 +623,10 @@ fn verify_spam_storm_results(
             "Number of divergent state entries: {diff_count} (out of {len})",
             len = resolved_v211.len()
         );
+        assert_eq!(
+            diff_count, 0,
+            "Lattice-coordinatized resolution diverged from V2.1.1"
+        );
+    }
     }
 }
