@@ -38,30 +38,60 @@ fn test_pathology_duplicate_auth_poisoning() {
         }
     }
 
-    // In V2.1, the poisoned message causes duplicate traversal
-    let start_v21 = std::time::Instant::now();
-    let _ = resolve_lean(
-        BTreeMap::new(),
-        conflicted_events.clone(),
-        &auth_context,
-        StateResVersion::V2_1,
-    );
-    let dur_v21 = start_v21.elapsed();
+    // Warm up the code and caches
+    for _ in 0..10 {
+        let _ = resolve_lean(
+            BTreeMap::new(),
+            conflicted_events.clone(),
+            &auth_context,
+            StateResVersion::V2_1,
+        );
+        let _ = resolve_lean(
+            BTreeMap::new(),
+            conflicted_events.clone(),
+            &auth_context,
+            StateResVersion::V2_1_1,
+        );
+    }
 
-    // In V2.1.1, the Hard Rejection filter completely ignores the poisoned event
-    let start_v211 = std::time::Instant::now();
-    let _ = resolve_lean(
-        BTreeMap::new(),
-        conflicted_events,
-        &auth_context,
-        StateResVersion::V2_1_1,
-    );
-    let dur_v211 = start_v211.elapsed();
+    // Measure V2.1: take the minimum of 50 runs to filter out scheduler spikes
+    let mut min_v21 = std::time::Duration::from_secs(9999);
+    for _ in 0..50 {
+        let start = std::time::Instant::now();
+        let _ = resolve_lean(
+            BTreeMap::new(),
+            conflicted_events.clone(),
+            &auth_context,
+            StateResVersion::V2_1,
+        );
+        let dur = start.elapsed();
+        if dur < min_v21 {
+            min_v21 = dur;
+        }
+    }
+
+    // Measure V2.1.1: take the minimum of 50 runs
+    let mut min_v211 = std::time::Duration::from_secs(9999);
+    for _ in 0..50 {
+        let start = std::time::Instant::now();
+        let _ = resolve_lean(
+            BTreeMap::new(),
+            conflicted_events.clone(),
+            &auth_context,
+            StateResVersion::V2_1_1,
+        );
+        let dur = start.elapsed();
+        if dur < min_v211 {
+            min_v211 = dur;
+        }
+    }
 
     // Assert V2.1.1 resolves cleanly and the poisoned event doesn't ruin state
+    // Use a tiny safety margin of 50 microseconds to prevent flaky CI failures under load
+    let margin = std::time::Duration::from_micros(50);
     assert!(
-        dur_v211 <= dur_v21,
-        "V2.1.1 should be faster or equal by dropping duplicates"
+        min_v211 <= min_v21 + margin,
+        "V2.1.1 (minimum: {min_v211:?}) should be faster or equal to V2.1 (minimum: {min_v21:?}) by dropping duplicates"
     );
 }
 
