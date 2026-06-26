@@ -1,9 +1,9 @@
 [package]
 name = "ruma-lean"
-version = "0.1.5"
+version = "0.1.5-rc.0"
 edition = "2021"
 authors = ["Shane Jaroch <chown_tee@proton.me>"]
-description = "Formally verified, dependency-free Matrix State Resolution v2 logic."
+description = "Lightweight and formally verified: State Res v1, v2, and v2.1 reference implementations in Rust."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gamesguru/ruma-lean"
 autotests = false
