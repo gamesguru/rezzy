@@ -2110,7 +2110,7 @@ fn merge_lattice_winners<'a>(
             } else if ev.origin_server_ts < current_winner.origin_server_ts {
                 false
             } else {
-                // Lexicographical flip fixed: LARGEST string wins.
+                // Lexicographical sort: LARGEST string wins.
                 ev.event_id > current_winner.event_id
             }
         } else {
@@ -2137,21 +2137,17 @@ fn compute_lattice_coordinatized_winners<'a>(
             let events_vec: Vec<&'a LeanEvent> = non_power_events.values().collect();
             let chunk_size = events_vec.len().div_ceil(num_threads);
 
-            let results = std::thread::scope(|s| {
-                let mut handles = Vec::with_capacity(num_threads);
-                for chunk in events_vec.chunks(chunk_size) {
-                    let handle = s
-                        .spawn(move || fold_lattice_chunk(chunk, mainline_distances, mainline_len));
-                    handles.push(handle);
-                }
-
-                let mut thread_results = Vec::with_capacity(num_threads);
-                for handle in handles {
-                    if let Ok(thread_res) = handle.join() {
-                        thread_results.push(thread_res);
-                    }
-                }
-                thread_results
+            let chunks: Vec<&[&'a LeanEvent]> = events_vec.chunks(chunk_size).collect();
+            let results: Vec<_> = std::thread::scope(|s| {
+                chunks
+                    .into_iter()
+                    .map(|chunk| {
+                        s.spawn(move || fold_lattice_chunk(chunk, mainline_distances, mainline_len))
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .filter_map(|h| h.join().ok())
+                    .collect()
             });
 
             // Reduce Phase
@@ -2266,19 +2262,38 @@ pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher, S2: core::hash
     for (key, ev) in sorted_winners {
         let local_auth =
             compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache, version);
-        if iterative_auth_ok(
+        let ok = iterative_auth_ok(
             ev,
             &resolved,
             auth_context,
             sort_set,
-            local_auth,
+            local_auth.clone(),
             create_ev,
             version,
             false,
-        ) {
+        );
+        if ev.event_id == "$daUmTAEewlgLRBYaNESenODdRgxAQ6dZqkFoza1FT3c" {
+            let overlay = OverlayState {
+                resolved: &resolved,
+                auth_context,
+                conflicted: sort_set,
+                local_auth: local_auth.clone(),
+                create_ev,
+                version,
+                is_power_phase: false,
+            };
+            std::eprintln!("DIAGNOSTIC: ok={}", ok);
+            std::eprintln!("DIAGNOSTIC: check_auth={:?}", crate::auth::check_auth(ev, &overlay));
+            std::eprintln!("DIAGNOSTIC: local_auth contains @cmos member: {:?}", local_auth.get(&("m.room.member".to_string(), Some("@cmos:stargazypie.xyz".to_string()))));
+        }
+        if ok {
             resolved.insert((*key).clone(), ev.event_id.clone());
         }
     }
 
-    resolved
+    let mut final_resolved = unconflicted_state.clone();
+    for (k, v) in resolved {
+        final_resolved.insert(k, v);
+    }
+    final_resolved
 }
