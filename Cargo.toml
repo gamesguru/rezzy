@@ -25,6 +25,9 @@ exclude = [
     ".prettierignore",
     ".prettierrc",
     ".rgignore",
+    ".gitmodules",
+    ".typos.toml",
+    "rustfmt.toml",
     "tests/",
     "Makefile",
 ]
@@ -33,11 +36,6 @@ exclude = [
 name = "ruma-lean"
 path = "src/main.rs"
 required-features = ["cli"]
-
-[[bin]]
-name = "regen-oracles"
-path = "src/bin/regen_oracles.rs"
-required-features = ["regen"]
 
 [features]
 default = ["std"]
@@ -102,3 +100,9 @@ path = "tests/pathologies.rs"
 [[test]]
 name = "critique"
 path = "tests/critique.rs"
+
+[[test]]
+name = "regen_oracles"
+path = "tests/regen_oracles.rs"
+harness = false
+required-features = ["regen"]
