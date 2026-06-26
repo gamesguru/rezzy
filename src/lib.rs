@@ -585,11 +585,11 @@ impl LeanEvent {
 
 /// A wrapper to ensure `BinaryHeap` pops the "Best" event FIRST.
 #[derive(Debug, Clone, Copy)]
-pub struct SortPriority<'a> {
-    pub event: &'a LeanEvent,
-    pub power_level: i64,
-    pub auth_chain_distance: u64,
-    pub version: StateResVersion,
+struct SortPriority<'a> {
+    event: &'a LeanEvent,
+    power_level: i64,
+    auth_chain_distance: u64,
+    version: StateResVersion,
 }
 
 const MAX_POWER_LEVEL: i64 = 9_007_199_254_740_991; // 2^53 - 1
@@ -1307,9 +1307,9 @@ fn build_mainline(
 ///    (closest) mainline position.
 ///
 /// Total: O(V+E) — each vertex and edge touched at most once.
-fn precompute_mainline_positions<S: ::std::hash::BuildHasher>(
+fn precompute_mainline_positions(
     mainline: &[String],
-    auth_context: &HashMap<String, LeanEvent, S>,
+    auth_context: &HashMap<String, LeanEvent>,
 ) -> HashMap<String, usize> {
     let mainline_len = mainline.len();
 
@@ -1362,10 +1362,10 @@ fn precompute_mainline_positions<S: ::std::hash::BuildHasher>(
 /// 1. Closest mainline position (smaller index = closer to current PL = comes last)
 /// 2. `origin_server_ts` ascending (earlier first, later wins via last-write)
 /// 3. `event_id` ascending (smaller first)
-pub fn mainline_sort<S: ::std::hash::BuildHasher>(
+fn mainline_sort(
     events: &mut Vec<&LeanEvent>,
     mainline: &[String],
-    auth_context: &HashMap<String, LeanEvent, S>,
+    auth_context: &HashMap<String, LeanEvent>,
 ) {
     let mainline_len = mainline.len();
 

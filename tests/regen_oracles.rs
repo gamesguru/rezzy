@@ -3,7 +3,7 @@
 //! Overwrites `res/expected/oracle_*.json` with the current `resolve_lean` output.
 //! Run when the algorithm changes intentionally, then review the git diff and commit both.
 //!
-//!   cargo test --test regen_oracles --features regen
+//!   `cargo test --test regen_oracles --features regen`
 
 use ruma_lean::{resolve_lean, LeanEvent, StateResVersion};
 use serde_json::Value;
