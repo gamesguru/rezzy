@@ -596,7 +596,7 @@ const MAX_POWER_LEVEL: i64 = 9_007_199_254_740_991; // 2^53 - 1
 
 /// Dynamically fetches the sender's power level by inspecting the event's immediate `auth_events`.
 /// Recursive traversal of the auth chain is avoided to prevent bypassing immediate restrictions.
-fn get_power_level_from_auth_chain<S: std::hash::BuildHasher>(
+fn get_power_level_from_auth_chain<S: core::hash::BuildHasher>(
     event: &LeanEvent,
     auth_context: &HashMap<String, LeanEvent, S>,
     create_ev: Option<&LeanEvent>,
@@ -669,7 +669,7 @@ fn get_power_level_from_auth_chain<S: std::hash::BuildHasher>(
 }
 
 /// Computes the shortest distance from the event to the m.room.create event via `auth_events`.
-fn memoized_auth_distance<'a, S: std::hash::BuildHasher>(
+fn memoized_auth_distance<'a, S: core::hash::BuildHasher>(
     curr_id: &'a str,
     auth_context: &'a HashMap<String, LeanEvent, S>,
     create_id: &str,
@@ -787,7 +787,7 @@ impl PartialOrd for SortPriority<'_> {
 /// This function can panic if an internal invariant is violated, such as a
 /// missing in-degree entry during node processing.
 #[must_use]
-pub fn lean_kahn_sort_detailed<S: std::hash::BuildHasher>(
+pub fn lean_kahn_sort_detailed<S: core::hash::BuildHasher>(
     events: &HashMap<String, LeanEvent, S>,
     auth_context: &HashMap<String, LeanEvent, S>,
     create_ev: Option<&LeanEvent>,
@@ -893,7 +893,7 @@ pub fn lean_kahn_sort_detailed<S: std::hash::BuildHasher>(
 /// A simplified implementation of Kahn's Topological Sort.
 /// Backward-compatible wrapper that returns an empty Vec on cycles.
 #[must_use]
-pub fn lean_kahn_sort<S: std::hash::BuildHasher>(
+pub fn lean_kahn_sort<S: core::hash::BuildHasher>(
     events: &HashMap<String, LeanEvent, S>,
     auth_context: &HashMap<String, LeanEvent, S>,
     create_ev: Option<&LeanEvent>,
@@ -902,16 +902,18 @@ pub fn lean_kahn_sort<S: std::hash::BuildHasher>(
     match lean_kahn_sort_detailed(events, auth_context, create_ev, version) {
         KahnSortResult::Ok(sorted) => sorted,
         KahnSortResult::CycleDetected { sorted, stuck } => {
+            #[cfg(feature = "std")]
             std::eprintln!("KAHN CYCLE DETECTED! Stuck: {stuck:?}");
+            let _ = stuck;
             sorted
         }
     }
 }
 
-fn is_v2_2_duplicate_auth_key<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
+fn is_v2_2_duplicate_auth_key<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     ev: &LeanEvent,
-    auth_context: &std::collections::HashMap<String, LeanEvent, S1>,
-    conflicted_events: &std::collections::HashMap<String, LeanEvent, S2>,
+    auth_context: &HashMap<String, LeanEvent, S1>,
+    conflicted_events: &HashMap<String, LeanEvent, S2>,
 ) -> bool {
     let mut seen_keys = alloc::collections::BTreeSet::new();
     for auth_id in &ev.auth_events {
@@ -929,7 +931,7 @@ fn is_v2_2_duplicate_auth_key<S1: std::hash::BuildHasher, S2: std::hash::BuildHa
 }
 
 #[must_use]
-pub fn resolve_lean<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
+pub fn resolve_lean<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     unconflicted_state: BTreeMap<(String, Option<String>), String>,
     mut conflicted_events: HashMap<String, LeanEvent, S1>,
     auth_context: &HashMap<String, LeanEvent, S2>,
@@ -1068,7 +1070,7 @@ struct OverlayState<'a, S1, S2> {
     is_power_phase: bool,
 }
 
-impl<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher> crate::auth::StateProvider
+impl<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher> crate::auth::StateProvider
     for OverlayState<'_, S1, S2>
 {
     fn get_event(&self, event_type: &str, state_key: Option<&str>) -> Option<&LeanEvent> {
@@ -1134,7 +1136,7 @@ impl<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher> crate::auth::StateP
 /// Targeted iterative auth check. Per Matrix spec, the auth context for event 'e'
 /// consists of the events in the conflict set (E) and the currently resolved state (S).
 #[allow(clippy::too_many_arguments)]
-fn iterative_auth_ok<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
+fn iterative_auth_ok<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     event: &LeanEvent,
     resolved: &BTreeMap<(String, Option<String>), String>,
     auth_context: &HashMap<String, LeanEvent, S1>,
@@ -1161,7 +1163,7 @@ fn iterative_auth_ok<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
 /// to avoid redundant graph walks. The context is represented as a map of
 /// (type, `state_key`) -> (`LeanEvent`, depth), ensuring that for each key, the "closest"
 /// auth event in the chain is preserved (shortest path).
-fn compute_local_auth<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
+fn compute_local_auth<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     event: &LeanEvent,
     auth_context: &HashMap<String, LeanEvent, S1>,
     conflicted_events: &HashMap<String, LeanEvent, S2>,
@@ -1307,7 +1309,7 @@ fn build_mainline(
 ///    (closest) mainline position.
 ///
 /// Total: O(V+E) — each vertex and edge touched at most once.
-fn precompute_mainline_positions<S: ::std::hash::BuildHasher>(
+fn precompute_mainline_positions<S: ::core::hash::BuildHasher>(
     mainline: &[String],
     auth_context: &HashMap<String, LeanEvent, S>,
 ) -> HashMap<String, usize> {
@@ -1362,7 +1364,7 @@ fn precompute_mainline_positions<S: ::std::hash::BuildHasher>(
 /// 1. Closest mainline position (smaller index = closer to current PL = comes last)
 /// 2. `origin_server_ts` ascending (earlier first, later wins via last-write)
 /// 3. `event_id` ascending (smaller first)
-pub fn mainline_sort<S: ::std::hash::BuildHasher>(
+pub fn mainline_sort<S: ::core::hash::BuildHasher>(
     events: &mut Vec<&LeanEvent>,
     mainline: &[String],
     auth_context: &HashMap<String, LeanEvent, S>,
@@ -1401,7 +1403,7 @@ pub struct SubgraphResult {
 }
 
 #[must_use]
-pub fn compute_v2_1_conflicted_subgraph<S: std::hash::BuildHasher>(
+pub fn compute_v2_1_conflicted_subgraph<S: core::hash::BuildHasher>(
     auth_graph: &HashMap<String, LeanEvent, S>,
     conflicted_set: &[String],
 ) -> HashMap<String, LeanEvent> {
@@ -1413,7 +1415,7 @@ pub fn compute_v2_1_conflicted_subgraph<S: std::hash::BuildHasher>(
 /// history-flooding `DoS` attacks where a rogue admin generates millions of
 /// spoofed events on a dead-end fork.
 #[must_use]
-pub fn compute_v2_1_conflicted_subgraph_bounded<S: std::hash::BuildHasher>(
+pub fn compute_v2_1_conflicted_subgraph_bounded<S: core::hash::BuildHasher>(
     auth_graph: &HashMap<String, LeanEvent, S>,
     conflicted_set: &[String],
     max_auth_depth: Option<usize>,
@@ -1542,7 +1544,7 @@ impl LeanEvent {
 }
 
 #[must_use]
-pub fn is_ancestor<S: std::hash::BuildHasher>(
+pub fn is_ancestor<S: core::hash::BuildHasher>(
     child_id: &str,
     possible_ancestor_id: &str,
     context: &HashMap<String, LeanEvent, S>,
@@ -1573,7 +1575,7 @@ pub fn is_ancestor<S: std::hash::BuildHasher>(
 /// Cycle 0 Topological Filter: Vectorized Causal Domination Operator (CDO)
 /// Executes strictly on the Conflicted State Subgraph (C).
 #[must_use]
-pub fn apply_cdo_filter<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
+pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     conflicted_events: &HashMap<String, LeanEvent, S1>,
     auth_context: &HashMap<String, LeanEvent, S2>,
 ) -> HashMap<String, LeanEvent> {
@@ -1684,7 +1686,7 @@ pub fn apply_cdo_filter<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
 /// Computes the state map at (after) a given target event ID,
 /// assuming all ancestral events are present in `events_map`.
 #[must_use]
-pub fn compute_state_at<S: std::hash::BuildHasher>(
+pub fn compute_state_at<S: core::hash::BuildHasher>(
     target_event_id: &str,
     events_map: &HashMap<String, LeanEvent, S>,
 ) -> Option<BTreeMap<(String, Option<String>), String>> {
