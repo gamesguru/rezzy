@@ -2,7 +2,7 @@
 #[allow(clippy::too_many_lines, clippy::type_complexity, clippy::similar_names)]
 mod tests {
 
-    use crate::*;
+    use ruma_lean::*;
     use alloc::string::ToString;
     use alloc::vec;
 
