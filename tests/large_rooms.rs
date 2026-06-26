@@ -480,6 +480,11 @@ fn test_unredacted_spam_storm_v2_1_1() {
         start_lattice.elapsed()
     );
 
+    let dur_v2 = start_v2.elapsed();
+    let dur_v21 = start_v21.elapsed();
+    let dur_v211 = start_v211.elapsed();
+    let dur_lattice = start_lattice.elapsed();
+
     assert!(
         !resolved_v2.is_empty()
             && !resolved_v21.is_empty()
@@ -489,22 +494,33 @@ fn test_unredacted_spam_storm_v2_1_1() {
     );
 
     verify_spam_storm_results(
+        &events,
         &resolved_v2,
         &resolved_v21,
         &resolved_v211,
         &resolved_lattice,
+        (dur_v2, dur_v21, dur_v211, dur_lattice),
     );
 }
 
 fn verify_spam_storm_results(
+    events: &[LeanEvent],
     resolved_v2: &BTreeMap<(String, Option<String>), String>,
     resolved_v21: &BTreeMap<(String, Option<String>), String>,
     resolved_v211: &BTreeMap<(String, Option<String>), String>,
     resolved_lattice: &BTreeMap<(String, Option<String>), String>,
+    durs: (
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+        std::time::Duration,
+    ),
 ) {
     let power_levels_v20 = resolved_v2.get(&("m.room.power_levels".into(), Some(String::new())));
     let power_levels_v21 = resolved_v21.get(&("m.room.power_levels".into(), Some(String::new())));
     let power_levels_v211 = resolved_v211.get(&("m.room.power_levels".into(), Some(String::new())));
+    let power_levels_lattice =
+        resolved_lattice.get(&("m.room.power_levels".into(), Some(String::new())));
 
     if power_levels_v20 == power_levels_v211 {
         println!("V2 and V2.1.1 produced identical power levels.");
@@ -516,6 +532,75 @@ fn verify_spam_storm_results(
     } else {
         println!("V2.1 and V2.1.1 diverged on power levels!");
     }
+    if power_levels_lattice == power_levels_v211 {
+        println!("Lattice and V2.1.1 produced identical power levels.");
+    } else {
+        println!("Lattice and V2.1.1 diverged on power levels!");
+    }
+
+    let min_depth = events.iter().map(|e| e.depth).min().unwrap_or(0);
+    let max_depth = events.iter().map(|e| e.depth).max().unwrap_or(0);
+
+    // Compute DAG connected components (Union-Find)
+    let n_components = {
+        fn find(mut i: usize, parent: &mut [usize]) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+
+        fn union(i: usize, j: usize, parent: &mut [usize]) {
+            let root_i = find(i, parent);
+            let root_j = find(j, parent);
+            if root_i != root_j {
+                parent[root_i] = root_j;
+            }
+        }
+
+        let mut parent: Vec<usize> = (0..events.len()).collect();
+        let mut id_to_index = std::collections::HashMap::with_capacity(events.len());
+        for (i, ev) in events.iter().enumerate() {
+            id_to_index.insert(ev.event_id.as_str(), i);
+        }
+
+        for (i, ev) in events.iter().enumerate() {
+            for prev in &ev.prev_events {
+                if let Some(&j) = id_to_index.get(prev.as_str()) {
+                    union(i, j, &mut parent);
+                }
+            }
+            for auth in &ev.auth_events {
+                if let Some(&j) = id_to_index.get(auth.as_str()) {
+                    union(i, j, &mut parent);
+                }
+            }
+        }
+
+        let mut roots = std::collections::HashSet::new();
+        for i in 0..events.len() {
+            roots.insert(find(i, &mut parent));
+        }
+        roots.len()
+    };
+
+    println!("\n================================================================================");
+    println!("                    SPAM STORM STATE RESOLUTION REPORT");
+    println!("================================================================================");
+    println!(" State Event Count:  {} events", events.len());
+    println!(" Resolved Output:    {} state keys", resolved_v211.len());
+    println!(" Min DAG Depth:      {min_depth}");
+    println!(" Max DAG Depth:      {max_depth}");
+    println!(" DAG Components:     {n_components}");
+    println!();
+    println!(" Engine                        | Execution Duration (Pure State)");
+    println!(" ------------------------------+------------------------------------------------");
+    println!(" V2.0 (Legacy)                 | {:?}", durs.0);
+    println!(" V2.1 (Legacy)                 | {:?}", durs.1);
+    println!(" V2.1.1 (Sequential CDO)       | {:?}", durs.2);
+    println!(" LATTICE-COORDINATIZED (O(C))  | {:?}", durs.3);
+    println!("================================================================================");
 
     if resolved_v211 == resolved_lattice {
         println!("SUCCESS: Lattice-coordinatized state resolution matched V2.1.1 exactly!");
