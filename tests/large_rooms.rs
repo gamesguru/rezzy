@@ -458,6 +458,19 @@ fn test_unredacted_spam_storm_v2_1_1() {
         start_v211.elapsed()
     );
 
+    let start_lattice = std::time::Instant::now();
+    let resolved_lattice = ruma_lean::resolve_lattice_coordinatized(
+        BTreeMap::new(),
+        map.clone(),
+        &map,
+        StateResVersion::V2_1_1,
+    );
+    println!(
+        "LATTICE-COORDINATIZED State Resolution of {} events took: {:?}",
+        events.len(),
+        start_lattice.elapsed()
+    );
+
     assert!(
         !resolved_v2.is_empty(),
         "V2.0 Resolution should produce state for the unredacted storm"
@@ -465,6 +478,10 @@ fn test_unredacted_spam_storm_v2_1_1() {
     assert!(
         !resolved_v211.is_empty(),
         "V2.1.1 Resolution should produce state for the unredacted storm"
+    );
+    assert!(
+        !resolved_lattice.is_empty(),
+        "Lattice-coordinatized Resolution should produce state for the unredacted storm"
     );
 
     let v2_pl = resolved_v2.get(&("m.room.power_levels".into(), Some(String::new())));
@@ -475,5 +492,28 @@ fn test_unredacted_spam_storm_v2_1_1() {
         println!("V2 and V2.1.1 diverged on power levels!");
         println!("V2 PL: {v2_pl:?}");
         println!("V2.1.1 PL: {v211_pl:?}");
+    }
+
+    if resolved_v211 == resolved_lattice {
+        println!("SUCCESS: Lattice-coordinatized state resolution matched V2.1.1 exactly!");
+    } else {
+        println!("Lattice-coordinatized diverged from V2.1.1!");
+        // Let's print the count of differences
+        let mut diff_count = 0;
+        for (k, v) in &resolved_v211 {
+            if resolved_lattice.get(k) != Some(v) {
+                diff_count += 1;
+            }
+        }
+        for k in resolved_lattice.keys() {
+            if !resolved_v211.contains_key(k) {
+                diff_count += 1;
+            }
+        }
+        println!(
+            "Number of divergent state entries: {} (out of {})",
+            diff_count,
+            resolved_v211.len()
+        );
     }
 }
