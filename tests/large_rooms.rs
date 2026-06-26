@@ -501,17 +501,19 @@ fn test_unredacted_spam_storm_v2_1_1() {
         for (k, v) in &resolved_v211 {
             if resolved_lattice.get(k) != Some(v) {
                 diff_count += 1;
+                let lat_val = resolved_lattice.get(k);
+                println!("DIVERGENCE: Key {k:?} -> V2.1.1: {v:?}, Lattice: {lat_val:?}");
             }
         }
-        for k in resolved_lattice.keys() {
+        for (k, v) in &resolved_lattice {
             if !resolved_v211.contains_key(k) {
                 diff_count += 1;
+                println!("DIVERGENCE: Key {k:?} -> V2.1.1: None, Lattice: {v:?}");
             }
         }
         println!(
-            "Number of divergent state entries: {} (out of {})",
-            diff_count,
-            resolved_v211.len()
+            "Number of divergent state entries: {diff_count} (out of {len})",
+            len = resolved_v211.len()
         );
     }
 }

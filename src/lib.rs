@@ -1587,7 +1587,7 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
     false
 }
 
-#[allow(clippy::manual_div_ceil)]
+#[allow(clippy::manual_div_ceil, clippy::needless_range_loop)]
 fn compute_cdo_bit_masks_unbounded<S: core::hash::BuildHasher>(
     dag_context: &HashMap<String, LeanEvent, S>,
     admin_actions: &[&str],
@@ -2170,8 +2170,12 @@ pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher, S2: core::hash
         &mut key_winners,
     );
 
-    // Apply the winners to the resolved state (fully authenticated)
-    for (key, ev) in key_winners {
+    // Apply the winners to the resolved state (fully authenticated) in topological order
+    let mut sorted_winners: Vec<(&(String, Option<String>), &LeanEvent)> =
+        key_winners.iter().map(|(k, &v)| (k, v)).collect();
+    sorted_winners.sort_by_key(|(_, ev)| ev.depth);
+
+    for (key, ev) in sorted_winners {
         let local_auth =
             compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache, version);
         if iterative_auth_ok(
@@ -2184,7 +2188,7 @@ pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher, S2: core::hash
             version,
             false,
         ) {
-            resolved.insert(key, ev.event_id.clone());
+            resolved.insert((*key).clone(), ev.event_id.clone());
         }
     }
 
