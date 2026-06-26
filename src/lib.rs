@@ -1783,6 +1783,7 @@ fn report_highest_shared_depths(
         })
         .collect();
     shared_depths.sort_by_key(|b| std::cmp::Reverse(b.1));
+    #[cfg(feature = "cli")]
     std::eprintln!(
         "[merge] highest shared depths: {:?}",
         &shared_depths[..shared_depths.len().min(5)]
@@ -1831,6 +1832,7 @@ pub fn merge_event_sets(
             }
         }
 
+        #[cfg(feature = "cli")]
         if !quiet {
             std::eprintln!(
                 "[merge] {}: {} events ({} new, {} shared)",
@@ -1858,17 +1860,20 @@ pub fn merge_event_sets(
             shared_ids.len()
         };
 
+        #[cfg(feature = "cli")]
         if !quiet {
             std::eprintln!(
                 "[merge] merge-base: {total_shared} shared events across {num_files} inputs"
             );
         }
 
+        #[cfg(feature = "cli")]
         if debug {
             report_highest_shared_depths(&per_file_ids, &merged);
         }
     }
 
+    #[cfg(feature = "cli")]
     if !quiet {
         std::eprintln!("[merge] total: {} unique events", merged.len());
     }
