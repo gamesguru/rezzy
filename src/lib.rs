@@ -1587,87 +1587,84 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
     false
 }
 
-fn get_and_mask<'a, S: core::hash::BuildHasher>(
-    id: &'a str,
-    dag_context: &'a HashMap<String, LeanEvent, S>,
-    admin_masks: &HashMap<&str, u64>,
-    memo: &mut HashMap<&'a str, u64>,
-) -> u64 {
-    if let Some(&m) = memo.get(id) {
-        return m;
-    }
-    let mut m = admin_masks.get(id).copied().unwrap_or(0);
-    if let Some(ev) = dag_context.get(id) {
-        for p in ev.prev_events.iter().chain(ev.auth_events.iter()) {
-            m |= get_and_mask(p.as_str(), dag_context, admin_masks, memo);
-        }
-    }
-    memo.insert(id, m);
-    m
-}
-
-fn get_desc_mask<'a>(
-    id: &'a str,
-    children_map: &HashMap<&'a str, Vec<&'a str>>,
-    admin_masks: &HashMap<&str, u64>,
-    memo: &mut HashMap<&'a str, u64>,
-) -> u64 {
-    if let Some(&m) = memo.get(id) {
-        return m;
-    }
-    let mut m = admin_masks.get(id).copied().unwrap_or(0);
-    if let Some(children) = children_map.get(id) {
-        for &c in children {
-            m |= get_desc_mask(c, children_map, admin_masks, memo);
-        }
-    }
-    memo.insert(id, m);
-    m
-}
-
-fn compute_cdo_bit_masks<S: core::hash::BuildHasher>(
+#[allow(clippy::manual_div_ceil)]
+fn compute_cdo_bit_masks_unbounded<S: core::hash::BuildHasher>(
     dag_context: &HashMap<String, LeanEvent, S>,
     admin_actions: &[&str],
-    ancestor_masks: &mut HashMap<String, u64>,
-    descendant_masks: &mut HashMap<String, u64>,
-    admin_masks: &mut HashMap<String, u64>,
+    ancestor_masks: &mut HashMap<String, Vec<u64>>,
+    descendant_masks: &mut HashMap<String, Vec<u64>>,
+    admin_masks: &mut HashMap<String, Vec<u64>>,
 ) {
-    let mut admin_masks_local = HashMap::new();
-    for (i, &id) in admin_actions.iter().enumerate() {
-        admin_masks_local.insert(id, 1u64 << i);
-        admin_masks.insert(String::from(id), 1u64 << i);
-    }
+    let n = dag_context.len();
+    let num_words = (admin_actions.len() + 63) / 64;
 
-    let mut ancestor_memo = HashMap::new();
-    for id in dag_context.keys() {
-        let mask = get_and_mask(
-            id.as_str(),
-            dag_context,
-            &admin_masks_local,
-            &mut ancestor_memo,
-        );
-        ancestor_masks.insert(id.clone(), mask);
-    }
-
-    let mut children_map: HashMap<&str, Vec<&str>> = HashMap::new();
+    // 1. Assign fast integer indices and sort topologically
+    let mut id_to_idx = HashMap::with_capacity(n);
+    let mut idx_to_id = Vec::with_capacity(n);
+    let mut sorted_by_depth = Vec::with_capacity(n);
     for (id, ev) in dag_context {
-        for p in ev.prev_events.iter().chain(ev.auth_events.iter()) {
-            children_map
-                .entry(p.as_str())
-                .or_default()
-                .push(id.as_str());
+        let idx = idx_to_id.len();
+        id_to_idx.insert(id.as_str(), idx);
+        idx_to_id.push(id.as_str());
+        sorted_by_depth.push((idx, ev.depth));
+    }
+
+    // Sort strictly by depth (ensures parents are processed before children)
+    sorted_by_depth.sort_unstable_by_key(|&(_, depth)| depth);
+    let topo_order: Vec<usize> = sorted_by_depth.into_iter().map(|(i, _)| i).collect();
+
+    // 2. Build integer-based adjacency
+    let mut parents: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
+    let mut children: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
+    for (id, ev) in dag_context {
+        let u = id_to_idx[id.as_str()];
+        for p_id in ev.prev_events.iter().chain(ev.auth_events.iter()) {
+            if let Some(&v) = id_to_idx.get(p_id.as_str()) {
+                parents[u].push(v);
+                children[v].push(u);
+            }
         }
     }
 
-    let mut descendant_memo = HashMap::new();
-    for id in dag_context.keys() {
-        let mask = get_desc_mask(
-            id.as_str(),
-            &children_map,
-            &admin_masks_local,
-            &mut descendant_memo,
-        );
-        descendant_masks.insert(id.clone(), mask);
+    // 3. Initialize Array Masks
+    let mut and_masks = alloc::vec![alloc::vec![0u64; num_words]; n];
+    let mut desc_masks = alloc::vec![alloc::vec![0u64; num_words]; n];
+    for (i, &admin_id) in admin_actions.iter().enumerate() {
+        if let Some(&idx) = id_to_idx.get(admin_id) {
+            let word = i / 64;
+            let bit = 1u64 << (i % 64);
+            and_masks[idx][word] |= bit;
+            desc_masks[idx][word] |= bit;
+            let mut mask = alloc::vec![0u64; num_words];
+            mask[word] |= bit;
+            admin_masks.insert(String::from(admin_id), mask);
+        }
+    }
+
+    // 4. Forward Sweep (Compute Ancestors) - Pure array iteration
+    for &u in &topo_order {
+        for &p in &parents[u] {
+            for w in 0..num_words {
+                let bits = and_masks[p][w];
+                and_masks[u][w] |= bits;
+            }
+        }
+    }
+
+    // 5. Backward Sweep (Compute Descendants) - Pure array iteration
+    for &u in topo_order.iter().rev() {
+        for &c in &children[u] {
+            for w in 0..num_words {
+                let bits = desc_masks[c][w];
+                desc_masks[u][w] |= bits;
+            }
+        }
+    }
+
+    // 6. Write back to String Maps
+    for (i, &id) in idx_to_id.iter().enumerate() {
+        ancestor_masks.insert(String::from(id), core::mem::take(&mut and_masks[i]));
+        descendant_masks.insert(String::from(id), core::mem::take(&mut desc_masks[i]));
     }
 }
 
@@ -1721,27 +1718,22 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
         .map(|e| e.event_id.as_str())
         .collect();
 
-    let use_fast_bit_sweep = admin_actions.len() <= 64;
-
     let mut ancestor_masks = HashMap::new();
     let mut descendant_masks = HashMap::new();
     let mut admin_masks = HashMap::new();
 
-    if use_fast_bit_sweep {
-        compute_cdo_bit_masks(
-            &dag_context,
-            &admin_actions,
-            &mut ancestor_masks,
-            &mut descendant_masks,
-            &mut admin_masks,
-        );
-    }
+    compute_cdo_bit_masks_unbounded(
+        &dag_context,
+        &admin_actions,
+        &mut ancestor_masks,
+        &mut descendant_masks,
+        &mut admin_masks,
+    );
 
     let sorted_events = sort_cdo_events(&conflicted_events.values().collect::<Vec<_>>());
 
     let mut dropped_ids = BTreeSet::new();
     let mut active_admin_actions: Vec<&LeanEvent> = Vec::new();
-    let mut ancestor_cache = HashMap::new();
 
     // Pass 2: Direct Domination (Sender / Type Restriction) in priority order
     for event in &sorted_events {
@@ -1749,33 +1741,25 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
 
         for admin_ev in &active_admin_actions {
             if admin_ev.restricts_event(event) {
-                // Check Concurrency (e_a || e_x): Ensure neither is an ancestor of the other
                 let admin_id = admin_ev.event_id.as_str();
                 let event_id = event.event_id.as_str();
 
-                let (is_ancestor_admin, is_descendant_admin) = if use_fast_bit_sweep {
-                    let admin_bit = admin_masks.get(admin_id).copied().unwrap_or(0);
-                    let ev_and = ancestor_masks.get(event_id).copied().unwrap_or(0);
-                    let ev_desc = descendant_masks.get(event_id).copied().unwrap_or(0);
-                    ((ev_and & admin_bit) != 0, (ev_desc & admin_bit) != 0)
-                } else {
-                    let is_and = if let Some(&res) = ancestor_cache.get(&(admin_id, event_id)) {
-                        res
-                    } else {
-                        let res = is_ancestor(admin_id, event_id, &dag_context);
-                        ancestor_cache.insert((admin_id, event_id), res);
-                        res
-                    };
-
-                    let is_desc = if let Some(&res) = ancestor_cache.get(&(event_id, admin_id)) {
-                        res
-                    } else {
-                        let res = is_ancestor(event_id, admin_id, &dag_context);
-                        ancestor_cache.insert((event_id, admin_id), res);
-                        res
-                    };
-                    (is_and, is_desc)
-                };
+                let mut is_ancestor_admin = false;
+                let mut is_descendant_admin = false;
+                if let Some(admin_mask) = admin_masks.get(admin_id) {
+                    if let Some(ev_and) = ancestor_masks.get(event_id) {
+                        is_ancestor_admin = ev_and
+                            .iter()
+                            .zip(admin_mask.iter())
+                            .any(|(a, b)| (a & b) != 0);
+                    }
+                    if let Some(ev_desc) = descendant_masks.get(event_id) {
+                        is_descendant_admin = ev_desc
+                            .iter()
+                            .zip(admin_mask.iter())
+                            .any(|(a, b)| (a & b) != 0);
+                    }
+                }
 
                 if !is_ancestor_admin && !is_descendant_admin {
                     is_dominated = true;
@@ -2054,44 +2038,40 @@ fn route_lattice_power_events<S1: core::hash::BuildHasher, S2: core::hash::Build
 
 fn compute_lattice_coordinatized_winners<'a>(
     non_power_events: &'a HashMap<String, LeanEvent>,
-    mainline_indices: &HashMap<&str, usize>,
+    mainline_distances: &HashMap<String, usize>,
     mainline_len: usize,
     key_winners: &mut HashMap<(String, Option<String>), &'a LeanEvent>,
 ) {
     for ev in non_power_events.values() {
         let key = (ev.event_type.clone(), ev.state_key.clone());
 
-        // O(1) Causal Coordinatization Projection: lookup mainline position directly
-        let mut ev_pos = mainline_len;
-        for auth_id in &ev.auth_events {
-            if let Some(&index) = mainline_indices.get(auth_id.as_str()) {
-                ev_pos = ev_pos.min(index);
-                break;
-            }
-        }
+        // O(1) Geodesic coordinate mapped from the precomputed distances
+        let ev_pos = mainline_distances
+            .get(&ev.event_id)
+            .copied()
+            .unwrap_or(mainline_len);
 
         let is_better = if let Some(current_winner) = key_winners.get(&key) {
-            let mut winner_pos = mainline_len;
-            for auth_id in &current_winner.auth_events {
-                if let Some(&index) = mainline_indices.get(auth_id.as_str()) {
-                    winner_pos = winner_pos.min(index);
-                    break;
-                }
-            }
+            let winner_pos = mainline_distances
+                .get(&current_winner.event_id)
+                .copied()
+                .unwrap_or(mainline_len);
 
+            // The Commutative Join Operator (Least Upper Bound):
             if ev_pos < winner_pos {
-                true
+                true // Closer to mainline wins
             } else if ev_pos > winner_pos {
                 false
             } else if ev.origin_server_ts > current_winner.origin_server_ts {
-                true
+                true // Later timestamp wins
             } else if ev.origin_server_ts < current_winner.origin_server_ts {
                 false
             } else {
-                ev.event_id < current_winner.event_id
+                // Lexicographical flip fixed: LARGEST string wins.
+                ev.event_id > current_winner.event_id
             }
         } else {
-            true
+            true // First event for this state key inherently wins
         };
 
         if is_better {
@@ -2179,16 +2159,13 @@ pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher, S2: core::hash
 
     // Step 3: Build the power-level mainline for coordinatization
     let mainline = build_mainline(&resolved, &sort_context);
-    let mut mainline_indices: HashMap<&str, usize> = HashMap::with_capacity(mainline.len());
-    for (i, id) in mainline.iter().enumerate() {
-        mainline_indices.insert(id.as_str(), i);
-    }
+    let mainline_distances = precompute_mainline_positions(&mainline, &sort_context);
 
     // Step 4: Commutative Join-Semilattice reduction over all non-power events in a single O(C) pass!
     let mut key_winners = HashMap::new();
     compute_lattice_coordinatized_winners(
         &non_power_events,
-        &mainline_indices,
+        &mainline_distances,
         mainline.len(),
         &mut key_winners,
     );
