@@ -288,13 +288,15 @@ fn parse_and_extract_heads(
                 }
             }
             (evs, hds)
-        } else {
+        } else if obj.contains_key("event_id") || obj.contains_key("type") {
             (vec![input_val.clone()], Vec::new())
+        } else {
+            anyhow::bail!("Unrecognized JSON object structure. Top-level object must either contain 'events' or represent a single event with 'event_id' or 'type'.");
         }
     } else if let Some(arr) = input_val.as_array() {
         (arr.clone(), Vec::new())
     } else {
-        anyhow::bail!("Unexpected JSON format");
+        anyhow::bail!("Unexpected JSON format: expected object or array");
     };
     Ok((raw_events, heads))
 }

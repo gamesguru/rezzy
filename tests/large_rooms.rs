@@ -395,17 +395,22 @@ fn test_real_dag_nheko_room_106_heads() {
     assert!(!resolved.is_empty(), "Resolution should produce state");
 }
 
-fn parse_jsonl_line(line: &str) -> Option<LeanEvent> {
+fn parse_jsonl_line(line: &str) -> LeanEvent {
     if let Ok(ev) = serde_json::from_str::<LeanEvent>(line) {
-        return Some(ev);
+        return ev;
     }
-    let val: serde_json::Value = serde_json::from_str(line).ok()?;
+    let val: serde_json::Value = serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("Failed to parse line as JSON: {e}. Line: {line}"));
     if let Some(source) = val.get("_source") {
-        serde_json::from_value::<LeanEvent>(source.clone()).ok()
+        serde_json::from_value::<LeanEvent>(source.clone()).unwrap_or_else(|e| {
+            panic!("Failed to parse '_source' field as LeanEvent: {e}. Line: {line}")
+        })
     } else if let Some(event) = val.get("event") {
-        serde_json::from_value::<LeanEvent>(event.clone()).ok()
+        serde_json::from_value::<LeanEvent>(event.clone()).unwrap_or_else(|e| {
+            panic!("Failed to parse 'event' field as LeanEvent: {e}. Line: {line}")
+        })
     } else {
-        None
+        panic!("JSON line does not contain expected '_source' or 'event' wrappers, and is not a direct LeanEvent. Line: {line}");
     }
 }
 
@@ -427,10 +432,9 @@ fn test_unredacted_spam_storm_v2_1_1() {
     for line in reader.lines() {
         let line = line.unwrap();
         if !line.trim().is_empty() {
-            if let Some(ev) = parse_jsonl_line(&line) {
-                if ev.state_key.is_some() {
-                    events.push(ev);
-                }
+            let ev = parse_jsonl_line(&line);
+            if ev.state_key.is_some() {
+                events.push(ev);
             }
         }
     }
@@ -445,26 +449,29 @@ fn test_unredacted_spam_storm_v2_1_1() {
 
     let start_v2 = std::time::Instant::now();
     let resolved_v2 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2);
+    let dur_v2 = start_v2.elapsed();
     println!(
         "V2.0 State Resolution of {} events took: {:?}",
         events.len(),
-        start_v2.elapsed()
+        dur_v2
     );
 
     let start_v21 = std::time::Instant::now();
     let resolved_v21 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1);
+    let dur_v21 = start_v21.elapsed();
     println!(
         "V2.1 State Resolution of {} events took: {:?}",
         events.len(),
-        start_v21.elapsed()
+        dur_v21
     );
 
     let start_v211 = std::time::Instant::now();
     let resolved_v211 = resolve_lean(BTreeMap::new(), map.clone(), &map, StateResVersion::V2_1_1);
+    let dur_v211 = start_v211.elapsed();
     println!(
         "V2.1.1 State Resolution of {} events took: {:?}",
         events.len(),
-        start_v211.elapsed()
+        dur_v211
     );
 
     let start_lattice = std::time::Instant::now();
@@ -474,16 +481,12 @@ fn test_unredacted_spam_storm_v2_1_1() {
         &map,
         StateResVersion::V2_1_1,
     );
+    let dur_lattice = start_lattice.elapsed();
     println!(
         "LATTICE-COORDINATIZED State Resolution of {} events took: {:?}",
         events.len(),
-        start_lattice.elapsed()
+        dur_lattice
     );
-
-    let dur_v2 = start_v2.elapsed();
-    let dur_v21 = start_v21.elapsed();
-    let dur_v211 = start_v211.elapsed();
-    let dur_lattice = start_lattice.elapsed();
 
     assert!(
         !resolved_v2.is_empty()
@@ -627,6 +630,5 @@ fn verify_spam_storm_results(
             diff_count, 0,
             "Lattice-coordinatized resolution diverged from V2.1.1"
         );
-    }
     }
 }

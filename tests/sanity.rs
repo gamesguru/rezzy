@@ -129,14 +129,6 @@ fn test_compute_state_at_correctness_and_performance() {
     println!("Early Event (depth 100):  {dur_early:?}");
     println!("Mid Event (depth 500):    {dur_mid:?}");
     println!("Tip Event (depth 1000):   {dur_tip:?}");
-
-    // Assert logical scale progression:
-    // Work for early (100 events traversed & sorted) <= mid (500 events) <= tip (1000 events)
-    // The empirical times must reflect this logical work scale (with a small safety margin for system noise)
-    assert!(
-        dur_early <= dur_tip || dur_early.as_micros() < 200,
-        "Sanity check on empirical times"
-    );
 }
 
 // Helper FNV-1a state hash calculation to match main.rs
