@@ -1,0 +1,433 @@
+// Copyright 2026 Shane Jaroch
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::cmp::Ordering;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use crate::HashMap;
+
+pub const MAX_POWER_LEVEL: i64 = 9_007_199_254_740_991; // 2^53 - 1
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[allow(non_camel_case_types)]
+pub enum StateResVersion {
+    V1,
+    V2,
+    V2_1,
+    V2_1_1, // The V3 / Ban Evasion Fix
+    V2_2,   // Reserved for State DAGs (MSC4242)
+}
+
+pub type LocalAuthCache = HashMap<String, BTreeMap<(String, Option<String>), (LeanEvent, usize)>>;
+
+/// Result of Kahn's topological sort with diagnostic information.
+#[derive(Debug, Clone)]
+pub enum KahnSortResult {
+    /// All events were successfully sorted.
+    Ok(Vec<String>),
+    /// A cycle was detected. `sorted` contains the partial ordering of events
+    /// that could be processed, `stuck` contains events that could not reach
+    /// in-degree 0 (involved in cycles).
+    CycleDetected {
+        sorted: Vec<String>,
+        stuck: Vec<String>,
+    },
+}
+
+impl KahnSortResult {
+    /// Returns the sorted event IDs, or an empty vec if a cycle was detected.
+    /// This preserves backward compatibility with the old API.
+    #[must_use]
+    pub fn into_sorted(self) -> Vec<String> {
+        match self {
+            KahnSortResult::Ok(v) => v,
+            KahnSortResult::CycleDetected { .. } => Vec::new(),
+        }
+    }
+
+    /// Returns true if sorting completed without cycles.
+    #[must_use]
+    pub fn is_ok(&self) -> bool {
+        matches!(self, KahnSortResult::Ok(_))
+    }
+}
+
+/// Synapse-compatible power level deserialization.
+/// Handles integer (100), string ("100"), and float (100.0) representations.
+fn deserialize_power_level<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct PowerLevelVisitor;
+
+    impl de::Visitor<'_> for PowerLevelVisitor {
+        type Value = i64;
+
+        fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+            formatter.write_str("an integer, float, or string representation of a power level")
+        }
+
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<i64, E> {
+            Ok(v)
+        }
+
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> {
+            Ok(i64::try_from(v).unwrap_or(i64::MAX))
+        }
+
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<i64, E> {
+            let s = format!("{v:.0}");
+            s.parse::<i64>().map_err(E::custom)
+        }
+
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<i64, E> {
+            if let Ok(i) = v.parse::<i64>() {
+                return Ok(i);
+            }
+            if let Ok(f) = v.parse::<f64>() {
+                if let Ok(i) = format!("{f:.0}").parse::<i64>() {
+                    return Ok(i);
+                }
+            }
+            Ok(0)
+        }
+    }
+
+    deserializer.deserialize_any(PowerLevelVisitor)
+}
+
+/// A lightweight Matrix Event representation for Lean-equivalent resolution.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct LeanEvent {
+    pub event_id: String,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    #[serde(default)]
+    pub state_key: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_power_level")]
+    pub power_level: i64,
+    pub origin_server_ts: u64,
+    #[serde(default)]
+    pub sender: String,
+    #[serde(default)]
+    pub content: Value,
+    #[serde(default)]
+    pub prev_events: Vec<String>,
+    #[serde(default)]
+    pub auth_events: Vec<String>,
+    #[serde(default)]
+    pub depth: u64, // Required for V1
+}
+
+impl LeanEvent {
+    /// Validates basic syntactic limits and strict event whitelists as defined by the custom subset.
+    ///
+    /// # Errors
+    ///
+    /// Returns static string error if syntactic checks fail.
+    pub fn validate_syntactic(&self) -> Result<(), &'static str> {
+        const ALLOWED_EVENT_TYPES: &[&str] = &[
+            "m.room.create",
+            "m.room.join_rules",
+            "m.room.power_levels",
+            "m.room.member",
+            "m.room.name",
+            "m.room.topic",
+            "m.room.avatar",
+            "m.room.canonical_alias",
+            "m.room.history_visibility",
+            "m.room.guest_access",
+            "m.room.server_acl",
+            "m.room.tombstone",
+            "m.room.encryption",
+            "m.room.pinned_events",
+            "m.room.message",
+            "m.room.redaction",
+            "m.space.child",
+            "m.space.parent",
+        ];
+
+        if self.prev_events.len() > 20 {
+            return Err("prev_events exceeds maximum allowed length of 20");
+        }
+        if self.auth_events.len() > 10 {
+            return Err("auth_events exceeds maximum allowed length of 10");
+        }
+
+        if !ALLOWED_EVENT_TYPES.contains(&self.event_type.as_str()) {
+            return Err("event_type is not a recognized Matrix specification event");
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct LeanEventInner {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default)]
+    state_key: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_power_level")]
+    power_level: i64,
+    origin_server_ts: u64,
+    #[serde(default)]
+    sender: String,
+    #[serde(default)]
+    content: Value,
+    #[serde(default)]
+    prev_events: Vec<String>,
+    #[serde(default)]
+    auth_events: Vec<String>,
+    #[serde(default)]
+    depth: u64,
+}
+
+impl<'de> Deserialize<'de> for LeanEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+
+        let event_id = if let Some(id) = value.get("event_id").and_then(|v| v.as_str()) {
+            String::from(id)
+        } else {
+            #[cfg(feature = "hashing")]
+            {
+                use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+                use sha2::{Digest, Sha256};
+
+                let mut hash_value = value.clone();
+                if let Some(obj) = hash_value.as_object_mut() {
+                    obj.remove("unsigned");
+                    obj.remove("signatures");
+                }
+
+                let canonical_json =
+                    serde_json::to_string(&hash_value).map_err(serde::de::Error::custom)?;
+                let mut hasher = Sha256::new();
+                hasher.update(canonical_json.as_bytes());
+                let hash = hasher.finalize();
+
+                format!("${}", URL_SAFE_NO_PAD.encode(hash))
+            }
+            #[cfg(not(feature = "hashing"))]
+            {
+                return Err(serde::de::Error::custom(
+                    "event_id is missing and 'hashing' feature is disabled",
+                ));
+            }
+        };
+
+        let inner: LeanEventInner =
+            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+
+        Ok(LeanEvent {
+            event_id,
+            event_type: inner.event_type,
+            state_key: inner.state_key,
+            power_level: inner.power_level,
+            origin_server_ts: inner.origin_server_ts,
+            sender: inner.sender,
+            content: inner.content,
+            prev_events: inner.prev_events,
+            auth_events: inner.auth_events,
+            depth: inner.depth,
+        })
+    }
+}
+
+impl PartialEq for LeanEvent {
+    fn eq(&self, other: &Self) -> bool {
+        self.event_id == other.event_id
+    }
+}
+
+impl Eq for LeanEvent {}
+
+impl Ord for LeanEvent {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.event_id.cmp(&other.event_id)
+    }
+}
+
+impl PartialOrd for LeanEvent {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl LeanEvent {
+    /// Deterministic ordering: depth ascending, then `event_id` ascending.
+    /// Use this instead of `sort_by_key(|ev| ev.depth)` to avoid
+    /// non-determinism from `HashMap` iteration order on equal depths.
+    #[must_use]
+    pub fn cmp_by_depth(&self, other: &Self) -> Ordering {
+        self.depth
+            .cmp(&other.depth)
+            .then(self.event_id.cmp(&other.event_id))
+    }
+
+    #[must_use]
+    pub fn is_ban_or_kick(&self) -> bool {
+        if self.event_type == "m.room.member" {
+            if let Some(membership) = self.content.get("membership").and_then(|v| v.as_str()) {
+                return membership == "ban" || membership == "leave";
+            }
+        }
+        false
+    }
+
+    #[must_use]
+    pub fn is_demotion(&self) -> bool {
+        self.event_type == "m.room.power_levels"
+    }
+
+    #[must_use]
+    pub fn is_lockdown(&self) -> bool {
+        if self.event_type == "m.room.join_rules" {
+            if let Some(rule) = self.content.get("join_rule").and_then(|v| v.as_str()) {
+                return rule == "invite";
+            }
+        }
+        false
+    }
+
+    #[must_use]
+    pub fn restricts_sender(&self, sender: &str) -> bool {
+        if self.is_ban_or_kick() {
+            if let Some(ref state_key) = self.state_key {
+                return state_key == sender;
+            }
+        }
+        if self.is_demotion() {
+            if let Some(users) = self.content.get("users").and_then(|u| u.as_object()) {
+                if let Some(pl) = users.get(sender) {
+                    if let Some(pl_int) = pl.as_i64() {
+                        return pl_int == 0;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[must_use]
+    pub fn restricts_event(&self, other: &LeanEvent) -> bool {
+        if self.is_ban_or_kick() || self.is_demotion() {
+            return self.restricts_sender(&other.sender);
+        }
+        if self.is_lockdown() && other.event_type == "m.room.member" {
+            if let Some(membership) = other.content.get("membership").and_then(|v| v.as_str()) {
+                return membership == "join";
+            }
+        }
+        false
+    }
+}
+
+/// A wrapper to ensure `BinaryHeap` pops the "Best" event FIRST.
+#[derive(Debug, Clone, Copy)]
+pub struct SortPriority<'a> {
+    pub event: &'a LeanEvent,
+    pub power_level: i64,
+    pub auth_chain_distance: u64,
+    pub version: StateResVersion,
+}
+
+impl PartialEq for SortPriority<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.power_level == other.power_level
+            && self.event.origin_server_ts == other.event.origin_server_ts
+            && self.event.event_id == other.event.event_id
+    }
+}
+
+impl Eq for SortPriority<'_> {}
+
+impl Ord for SortPriority<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.version {
+            StateResVersion::V1 => {
+                // V1 tie-breaking: depth (asc) -> event_id (asc)
+                // In Rust's Max-Heap BinaryHeap, "greater" elements are popped first.
+                // We want deeper events to pop FIRST, so they must be "greater".
+                match self.event.depth.cmp(&other.event.depth) {
+                    Ordering::Equal => self.event.event_id.cmp(&other.event.event_id),
+                    ord => ord,
+                }
+            }
+            StateResVersion::V2
+            | StateResVersion::V2_1
+            | StateResVersion::V2_1_1
+            | StateResVersion::V2_2 => {
+                // V2 reverse topological power ordering: worst events pop FIRST.
+                //
+                // Ruma uses Reverse(TieBreaker) on a BinaryHeap where TieBreaker.cmp is:
+                //   other.pl.cmp(&self.pl)  → higher PL = smaller TieBreaker → larger Reverse → pops first
+                //   self.ts.cmp(&other.ts)  → earlier ts = smaller TieBreaker → larger Reverse → pops first
+                //   self.id.cmp(&other.id)  → smaller id = smaller TieBreaker → larger Reverse → pops first
+                //
+                // In our direct max-heap (no Reverse) we invert each: Greater = pops first.
+                //   higher PL → Greater  → use self.pl.cmp(&other.pl)
+                //   earlier ts → Greater → use other.ts.cmp(&self.ts)
+                //   smaller id → Greater → use other.id.cmp(&self.id)
+                //
+                // Net result: high-PL events pop first (losing for same-key conflicts but
+                // setting auth context before lower-PL events are checked — this is what
+                // makes Alice's ban appear before Bob's concurrent PL change).
+                match self.power_level.cmp(&other.power_level) {
+                    Ordering::Equal => {
+                        // V2.2 Invite-Lock Fix: prioritize topological depth over origin_server_ts.
+                        // Smaller Depth -> Greater TieBreaker -> Pops First -> Loses.
+                        // Larger Depth -> Smaller TieBreaker -> Pops Last -> Wins.
+                        if self.version == StateResVersion::V2_2
+                            || self.version == StateResVersion::V2_1_1
+                        {
+                            match other.auth_chain_distance.cmp(&self.auth_chain_distance) {
+                                Ordering::Equal => {}
+                                ord => return ord,
+                            }
+                        }
+
+                        match other
+                            .event
+                            .origin_server_ts
+                            .cmp(&self.event.origin_server_ts)
+                        {
+                            Ordering::Equal => other.event.event_id.cmp(&self.event.event_id),
+                            ord => ord,
+                        }
+                    }
+                    ord => ord,
+                }
+            }
+        }
+    }
+}
+
+impl PartialOrd for SortPriority<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
