@@ -910,25 +910,7 @@ pub fn lean_kahn_sort<S: core::hash::BuildHasher>(
     }
 }
 
-fn is_v2_2_duplicate_auth_key<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
-    ev: &LeanEvent,
-    auth_context: &HashMap<String, LeanEvent, S1>,
-    conflicted_events: &HashMap<String, LeanEvent, S2>,
-) -> bool {
-    let mut seen_keys = alloc::collections::BTreeSet::new();
-    for auth_id in &ev.auth_events {
-        if let Some(auth_ev) = auth_context
-            .get(auth_id)
-            .or_else(|| conflicted_events.get(auth_id))
-        {
-            let key = (auth_ev.event_type.clone(), auth_ev.state_key.clone());
-            if !seen_keys.insert(key) {
-                return true;
-            }
-        }
-    }
-    false
-}
+
 
 #[must_use]
 pub fn resolve_lean<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
@@ -970,13 +952,6 @@ pub fn resolve_lean<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     let mut non_power_events = HashMap::new();
 
     for (id, ev) in sort_set {
-        // V2.2: Hard Rejection of Duplicate Auth Keys
-        if version == StateResVersion::V2_2
-            && is_v2_2_duplicate_auth_key(ev, auth_context, &conflicted_events)
-        {
-            continue;
-        }
-
         if ev.event_type == "m.room.member"
             || ev.event_type == "m.room.create"
             || ev.event_type == "m.room.power_levels"
@@ -1993,18 +1968,12 @@ pub fn merge_event_sets(
 
 fn route_lattice_power_events<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     sort_set: &HashMap<String, LeanEvent, S1>,
-    auth_context: &HashMap<String, LeanEvent, S2>,
-    version: StateResVersion,
+    _auth_context: &HashMap<String, LeanEvent, S2>,
+    _version: StateResVersion,
     power_events: &mut HashMap<String, LeanEvent>,
     non_power_events: &mut HashMap<String, LeanEvent>,
 ) {
     for (id, ev) in sort_set {
-        if version == StateResVersion::V2_2
-            && is_v2_2_duplicate_auth_key(ev, auth_context, sort_set)
-        {
-            continue;
-        }
-
         if ev.event_type == "m.room.member"
             || ev.event_type == "m.room.create"
             || ev.event_type == "m.room.power_levels"
