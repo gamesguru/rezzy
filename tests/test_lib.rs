@@ -1770,7 +1770,7 @@ mod tests {
             AuthError::InvalidSyntax("invalid JSON".into()),
         ];
         for err in errs {
-            let formatted = format!("{}", err);
+            let formatted = format!("{err}");
             assert!(!formatted.is_empty());
         }
 
@@ -2022,11 +2022,11 @@ mod tests {
 
         // We create 65 admin actions (e.g. bans/demotions/lockdowns)
         for i in 0..65 {
-            let admin_id = format!("$admin_{}", i);
+            let admin_id = format!("$admin_{i}");
             let admin_ev = LeanEvent {
                 event_id: admin_id.clone(),
                 event_type: "m.room.member".into(),
-                state_key: Some(format!("@spammer_{}:example.com", i)),
+                state_key: Some(format!("@spammer_{i}:example.com")),
                 sender: "@alice:example.com".into(),
                 content: json!({ "membership": "ban" }),
                 ..Default::default()

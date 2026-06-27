@@ -1007,7 +1007,7 @@ fn partition_and_resolve_state(
     events_map: &HashMap<String, LeanEvent>,
     state_maps: &[HashMap<(String, Option<String>), String>],
     version: StateResVersion,
-    auth_graph: &ruma_lean::roaring_auth::AuthGraph,
+    auth_graph: &ruma_lean::auth::roaring::AuthGraph,
 ) -> (
     std::collections::BTreeMap<(String, Option<String>), String>,
     std::time::Duration,
@@ -1161,7 +1161,7 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
         apply_global_power_levels(&mut events_map, &creator_user_id, version);
     }
 
-    let auth_graph = ruma_lean::roaring_auth::AuthGraph::build(&events_map);
+    let auth_graph = ruma_lean::auth::roaring::AuthGraph::build(&events_map);
 
     let (final_state_map, duration) =
         partition_and_resolve_state(&heads, &events_map, &state_maps, version, &auth_graph);

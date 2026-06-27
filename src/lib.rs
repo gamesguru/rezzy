@@ -17,7 +17,6 @@
 extern crate alloc;
 
 pub mod auth;
-pub mod roaring_auth;
 
 use alloc::collections::BTreeSet;
 use alloc::collections::{BTreeMap, BinaryHeap};
