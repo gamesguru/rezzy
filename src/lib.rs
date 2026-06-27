@@ -2017,9 +2017,9 @@ fn route_lattice_power_events<S1: core::hash::BuildHasher, S2: core::hash::Build
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fold_lattice_chunk<
     'a,
-    S1: core::hash::BuildHasher,
     S2: core::hash::BuildHasher,
     S3: core::hash::BuildHasher,
 >(
@@ -2133,6 +2133,7 @@ fn merge_lattice_winners<'a>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_lattice_coordinatized_winners<
     'a,
     S1: core::hash::BuildHasher + Sync + Send,
@@ -2163,7 +2164,7 @@ fn compute_lattice_coordinatized_winners<
                     .into_iter()
                     .map(|chunk| {
                         s.spawn(move || {
-                            fold_lattice_chunk::<S1, S2, S3>(
+                            fold_lattice_chunk::<S2, S3>(
                                 chunk,
                                 mainline_distances,
                                 mainline_len,
@@ -2191,7 +2192,7 @@ fn compute_lattice_coordinatized_winners<
 
     // Fallback/Sequential
     let events_vec: Vec<&'a LeanEvent> = non_power_events.values().collect();
-    let thread_res = fold_lattice_chunk::<S1, S2, S3>(
+    let thread_res = fold_lattice_chunk::<S2, S3>(
         &events_vec,
         mainline_distances,
         mainline_len,
