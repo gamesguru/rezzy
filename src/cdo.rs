@@ -19,6 +19,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+const WORDS_PER_CHUNK: usize = 4; // 256 admin actions per pass/chunk
+
 #[must_use]
 pub fn is_ancestor<S: core::hash::BuildHasher>(
     child_id: &str,
@@ -65,9 +67,6 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
     false
 }
 
-const WORDS_PER_CHUNK: usize = 4; // 256 admin actions per pass/chunk
-
-#[allow(clippy::needless_range_loop)]
 fn compute_cdo_bit_masks_chunk<'a, S: core::hash::BuildHasher>(
     admin_chunk: &[&'a str],
     id_to_idx: &HashMap<&'a str, usize, S>,
@@ -187,9 +186,13 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
         .filter(|e| e.is_ban_or_kick() || e.is_demotion() || e.is_lockdown())
         .collect();
     let sorted_admin_events = sort_cdo_events(&admin_events_to_sort);
-    let admin_actions: Vec<&str> = sorted_admin_events.iter().map(|e| e.event_id.as_str()).collect();
+    let admin_actions: Vec<&str> = sorted_admin_events
+        .iter()
+        .map(|e| e.event_id.as_str())
+        .collect();
 
-    let sorted_events_by_priority = sort_cdo_events(&conflicted_events.values().collect::<Vec<_>>());
+    let sorted_events_by_priority =
+        sort_cdo_events(&conflicted_events.values().collect::<Vec<_>>());
 
     // Build a map of event_id to its position in the priority-sorted list
     let mut priority_pos = HashMap::new();
@@ -247,7 +250,8 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
                             let word = orig_idx / 64;
                             let bit = 1u64 << (orig_idx % 64);
 
-                            let is_ancestor_admin = (and_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
+                            let is_ancestor_admin =
+                                (and_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
                             let is_descendant_admin =
                                 (desc_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
 

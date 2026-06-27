@@ -210,7 +210,7 @@ fn test_moderator_cannot_override_admin_ban() {
 
     // 1. Create event
     state.insert(
-        ("m.room.create".into(), Some("".into())),
+        ("m.room.create".into(), Some(String::new())),
         make_event(
             "$create",
             "m.room.create",
@@ -222,7 +222,7 @@ fn test_moderator_cannot_override_admin_ban() {
 
     // 2. Power levels event (admin = 100, mod = 50)
     state.insert(
-        ("m.room.power_levels".into(), Some("".into())),
+        ("m.room.power_levels".into(), Some(String::new())),
         make_event(
             "$pl",
             "m.room.power_levels",
@@ -293,7 +293,6 @@ fn test_moderator_cannot_override_admin_ban() {
                 ref event_type,
             }) if event_type == "member_pl_greater_than_current_sender"
         ),
-        "Expected InsufficientPowerLevel (101 required, 50 actual) for member_pl_greater_than_current_sender, got {:?}",
-        result
+        "Expected InsufficientPowerLevel (101 required, 50 actual) for member_pl_greater_than_current_sender, got {result:?}"
     );
 }
