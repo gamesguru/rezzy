@@ -1290,6 +1290,51 @@ mod tests {
     }
 
     #[test]
+    fn test_lean_kahn_sort_empty_vec_on_cycles() {
+        let mut events = HashMap::new();
+        events.insert(
+            "C".into(),
+            LeanEvent {
+                event_id: "C".into(),
+                event_type: "m.room.member".into(),
+                state_key: Some("@alice:example.com".into()),
+                auth_events: vec![],
+                ..Default::default()
+            },
+        );
+        events.insert(
+            "A".into(),
+            LeanEvent {
+                event_id: "A".into(),
+                event_type: "m.room.member".into(),
+                state_key: Some("@alice:example.com".into()),
+                auth_events: vec!["B".into(), "C".into()],
+                ..Default::default()
+            },
+        );
+        events.insert(
+            "B".into(),
+            LeanEvent {
+                event_id: "B".into(),
+                event_type: "m.room.member".into(),
+                state_key: Some("@alice:example.com".into()),
+                auth_events: vec!["A".into()],
+                ..Default::default()
+            },
+        );
+        let sorted = lean_kahn_sort(
+            &events,
+            &events,
+            events.values().find(|ev| ev.event_type == "m.room.create"),
+            StateResVersion::V2,
+        );
+        assert!(
+            sorted.is_empty(),
+            "lean_kahn_sort must return empty Vec on cycles"
+        );
+    }
+
+    #[test]
     fn test_power_level_coercion_integer() {
         let json = r#"{"event_id": "$1", "type": "m.room.member", "origin_server_ts": 1, "power_level": 100}"#;
         let ev: LeanEvent = serde_json::from_str(json).unwrap();

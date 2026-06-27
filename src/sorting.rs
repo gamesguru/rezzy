@@ -251,11 +251,11 @@ pub fn lean_kahn_sort<S: core::hash::BuildHasher>(
 ) -> Vec<String> {
     match lean_kahn_sort_detailed(events, auth_context, create_ev, version) {
         KahnSortResult::Ok(sorted) => sorted,
-        KahnSortResult::CycleDetected { sorted, stuck } => {
+        KahnSortResult::CycleDetected { sorted: _, stuck } => {
             #[cfg(feature = "std")]
             std::eprintln!("KAHN CYCLE DETECTED! Stuck: {stuck:?}");
             let _ = stuck;
-            sorted
+            Vec::new()
         }
     }
 }
