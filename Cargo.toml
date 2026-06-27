@@ -34,7 +34,7 @@ exclude = [
 
 [[bin]]
 name = "ruma-lean"
-path = "src/main.rs"
+path = "src/bin/ruma_lean/main.rs"
 required-features = ["cli"]
 
 [features]
