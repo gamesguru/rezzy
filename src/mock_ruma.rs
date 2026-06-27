@@ -11,26 +11,10 @@ fn ruma_to_lean_event<E: Event>(ev: &E) -> LeanEvent {
     use alloc::string::ToString;
     let content_val: serde_json::Value =
         serde_json::from_str(ev.content().get()).unwrap_or(serde_json::Value::Null);
-    let power_level = if let Some(pl) = content_val.get("power_level") {
-        pl.as_i64()
-            .or_else(|| pl.as_u64().and_then(|u| i64::try_from(u).ok()))
-            .or_else(|| {
-                pl.as_f64()
-                    .and_then(|f| f.trunc().to_string().parse::<i64>().ok())
-            })
-            .or_else(|| {
-                pl.as_str().and_then(|s| {
-                    s.parse::<i64>().ok().or_else(|| {
-                        s.parse::<f64>()
-                            .ok()
-                            .and_then(|f| f.trunc().to_string().parse::<i64>().ok())
-                    })
-                })
-            })
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    let power_level = content_val
+        .get("power_level")
+        .and_then(crate::types::coerce_json_to_i64)
+        .unwrap_or(0);
     LeanEvent {
         event_id: ev.event_id().to_string(),
         event_type: ev.event_type().to_string(),
@@ -68,7 +52,8 @@ where
         HashMap::new();
     for map in state_sets {
         for (key, id) in map {
-            *counts.entry((key, id)).or_insert(0) += 1;
+            let val = counts.entry((key, id)).or_insert(0);
+            *val = val.wrapping_add(1);
         }
     }
 
@@ -207,6 +192,13 @@ where
         id_map.insert(id.to_string(), id.clone());
     }
 
+    for chain in &auth_chains {
+        for id in chain {
+            to_fetch.push(id.clone());
+            id_map.insert(id.to_string(), id.clone());
+        }
+    }
+
     // Compute auth difference
     let mut union_auth = std::collections::HashSet::new();
     let mut intersect_auth = auth_chains
@@ -214,7 +206,7 @@ where
         .map_or_else(std::collections::HashSet::new, |first| {
             first.iter().map(ToString::to_string).collect()
         });
-    for chain in &auth_chains {
+    for chain in auth_chains {
         let set: std::collections::HashSet<_> = chain
             .iter()
             .map(alloc::string::ToString::to_string)
@@ -232,12 +224,6 @@ where
                     conflicted_events.insert(id_str.clone(), ruma_to_lean_event(&ev));
                 }
             }
-        }
-    }
-    for chain in auth_chains {
-        for id in &chain {
-            to_fetch.push(id.clone());
-            id_map.insert(id.to_string(), id.clone());
         }
     }
 

@@ -165,7 +165,7 @@ pub(crate) fn compute_local_auth<S1: core::hash::BuildHasher, S2: core::hash::Bu
             }
 
             for (key, (ev, cached_depth)) in cached_ancestor {
-                let total_depth = current_depth + cached_depth;
+                let total_depth = current_depth.wrapping_add(*cached_depth);
                 match local_auth.entry(key.clone()) {
                     alloc::collections::btree_map::Entry::Vacant(e) => {
                         e.insert((ev.clone(), total_depth));
@@ -190,7 +190,7 @@ pub(crate) fn compute_local_auth<S1: core::hash::BuildHasher, S2: core::hash::Bu
             // For V2.1 and below, we only check the immediate auth_events.
             if version == StateResVersion::V2_2 {
                 for parent_id in &aev.auth_events {
-                    queue.push_back((parent_id.clone(), current_depth + 1));
+                    queue.push_back((parent_id.clone(), current_depth.wrapping_add(1)));
                 }
             }
         }
@@ -284,7 +284,8 @@ fn topological_sort_ancestors<S: core::hash::BuildHasher>(
         if let Some(ev) = events_map.get(id) {
             for parent in &ev.prev_events {
                 if visited.contains(parent) {
-                    *in_degree.entry(id.clone()).or_insert(0) += 1;
+                    let val = in_degree.entry(id.clone()).or_insert(0);
+                    *val = val.wrapping_add(1);
                     adjacency
                         .entry(parent.clone())
                         .or_default()
@@ -307,7 +308,7 @@ fn topological_sort_ancestors<S: core::hash::BuildHasher>(
         if let Some(children) = adjacency.get(&id) {
             for child in children {
                 if let Some(deg) = in_degree.get_mut(child) {
-                    *deg -= 1;
+                    *deg = deg.wrapping_sub(1);
                     if *deg == 0 {
                         queue.push_back(child.clone());
                     }
@@ -327,11 +328,12 @@ fn resolve_multiple_prev_states<S: core::hash::BuildHasher>(
     let num_sets = prev_states.len();
     for map in prev_states {
         for (key, val) in map {
-            *occurrences
+            let val_entry = occurrences
                 .entry(key.clone())
                 .or_default()
                 .entry(val.clone())
-                .or_insert(0) += 1;
+                .or_insert(0);
+            *val_entry = val_entry.wrapping_add(1);
         }
     }
 

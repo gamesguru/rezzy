@@ -26,6 +26,7 @@ pub(crate) fn get_power_level_from_auth_chain<S: core::hash::BuildHasher>(
     event: &LeanEvent,
     auth_context: &HashMap<String, LeanEvent, S>,
     create_ev: Option<&LeanEvent>,
+    version: StateResVersion,
 ) -> i64 {
     let mut pl_event = None;
 
@@ -71,7 +72,12 @@ pub(crate) fn get_power_level_from_auth_chain<S: core::hash::BuildHasher>(
     }
 
     if is_creator {
-        return MAX_POWER_LEVEL;
+        match version {
+            StateResVersion::V2_1 | StateResVersion::V2_1_1 | StateResVersion::V2_2 => {
+                return MAX_POWER_LEVEL
+            }
+            _ => return 100,
+        }
     }
 
     if let Some(pl_ev) = pl_event {
@@ -91,7 +97,10 @@ pub(crate) fn get_power_level_from_auth_chain<S: core::hash::BuildHasher>(
         return 0; // Default if PL event exists but no users_default
     }
 
-    event.power_level // Fallback to explicitly specified PL (e.g. for dump_jsonl compatibility)
+    if event.auth_events.is_empty() {
+        return event.power_level; // Fallback for simple unit-test/mock events that don't have an auth chain
+    }
+    0
 }
 
 /// Computes the shortest distance from the event to the m.room.create event via `auth_events`.
@@ -162,7 +171,8 @@ pub fn lean_kahn_sort_detailed<S: core::hash::BuildHasher>(
                 // But we want a REVERSE topological sort: descendants BEFORE ancestors.
                 // So we add edges from ancestors to descendants.
                 adjacency.entry(auth.clone()).or_default().push(id.clone());
-                *in_degree.entry(id.clone()).or_insert(0) += 1;
+                let val = in_degree.entry(id.clone()).or_insert(0);
+                *val = val.wrapping_add(1);
             }
         }
     }
@@ -174,7 +184,7 @@ pub fn lean_kahn_sort_detailed<S: core::hash::BuildHasher>(
         .map(|(id, ev)| {
             (
                 id.clone(),
-                get_power_level_from_auth_chain(ev, auth_context, create_ev),
+                get_power_level_from_auth_chain(ev, auth_context, create_ev, version),
             )
         })
         .collect();
@@ -224,7 +234,7 @@ pub fn lean_kahn_sort_detailed<S: core::hash::BuildHasher>(
         if let Some(neighbors) = adjacency.get(&event.event_id) {
             for next_id in neighbors {
                 let degree = in_degree.get_mut(next_id).unwrap();
-                *degree -= 1;
+                *degree = degree.wrapping_sub(1);
                 if *degree == 0 {
                     let next_ev = events.get(next_id).unwrap();
                     queue.push(SortPriority {

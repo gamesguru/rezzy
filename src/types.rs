@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alloc::string::{String, ToString};
+use crate::HashMap;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use serde::{Deserialize, Serialize};
@@ -77,11 +78,11 @@ where
         type Value = i64;
 
         fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-            formatter.write_str("an integer, float, or string representation of a power level")
+            formatter.write_str("an exact integer power level")
         }
 
         fn visit_i64<E: de::Error>(self, v: i64) -> Result<i64, E> {
-            Ok(v)
+            Ok(v.min(MAX_POWER_LEVEL))
         }
 
         fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> {
@@ -89,34 +90,9 @@ where
             Ok(i.min(MAX_POWER_LEVEL))
         }
 
-        fn visit_f64<E: de::Error>(self, v: f64) -> Result<i64, E> {
-            if v.is_nan() {
-                return Ok(0);
-            }
-            let truncated_str = v.trunc().to_string();
-            if let Ok(parsed) = truncated_str.parse::<i64>() {
-                Ok(parsed.min(MAX_POWER_LEVEL))
-            } else if v > 0.0 {
-                Ok(MAX_POWER_LEVEL)
-            } else {
-                Ok(i64::MIN)
-            }
-        }
-
         fn visit_str<E: de::Error>(self, v: &str) -> Result<i64, E> {
             if let Ok(i) = v.parse::<i64>() {
                 return Ok(i.min(MAX_POWER_LEVEL));
-            }
-            if let Ok(f) = v.parse::<f64>() {
-                if !f.is_nan() {
-                    let truncated_str = f.trunc().to_string();
-                    if let Ok(parsed) = truncated_str.parse::<i64>() {
-                        return Ok(parsed.min(MAX_POWER_LEVEL));
-                    } else if f > 0.0 {
-                        return Ok(MAX_POWER_LEVEL);
-                    }
-                    return Ok(i64::MIN);
-                }
             }
             Ok(0)
         }
@@ -302,7 +278,14 @@ impl LeanEvent {
     pub fn is_ban_or_kick(&self) -> bool {
         if self.event_type == "m.room.member" {
             if let Some(membership) = self.content.get("membership").and_then(|v| v.as_str()) {
-                return membership == "ban" || membership == "leave";
+                if membership == "ban" {
+                    return true;
+                }
+                if membership == "leave" {
+                    if let Some(ref state_key) = self.state_key {
+                        return state_key != &self.sender;
+                    }
+                }
             }
         }
         false
@@ -447,26 +430,29 @@ pub(crate) fn coerce_json_to_i64(pl: &Value) -> Option<i64> {
         return Some(i);
     }
     if let Some(u) = pl.as_u64() {
-        return i64::try_from(u).ok();
-    }
-    if let Some(f) = pl.as_f64() {
-        if !f.is_nan() {
-            if let Ok(parsed) = f.trunc().to_string().parse::<i64>() {
-                return Some(parsed);
-            }
-        }
+        return Some(i64::try_from(u).unwrap_or(i64::MAX));
     }
     if let Some(s) = pl.as_str() {
         if let Ok(i) = s.parse::<i64>() {
             return Some(i);
         }
-        if let Ok(f) = s.parse::<f64>() {
-            if !f.is_nan() {
-                if let Ok(parsed) = f.trunc().to_string().parse::<i64>() {
-                    return Some(parsed);
-                }
-            }
-        }
     }
     None
+}
+
+pub(crate) fn find_deterministic_create_event<
+    'a,
+    S1: core::hash::BuildHasher,
+    S2: core::hash::BuildHasher,
+>(
+    auth_context: &'a HashMap<String, LeanEvent, S1>,
+    sort_set: &'a HashMap<String, LeanEvent, S2>,
+) -> Option<&'a LeanEvent> {
+    let mut create_events: Vec<&LeanEvent> = auth_context
+        .values()
+        .chain(sort_set.values())
+        .filter(|ev| ev.event_type == "m.room.create")
+        .collect();
+    create_events.sort_by(|a, b| a.event_id.cmp(&b.event_id));
+    create_events.first().copied()
 }

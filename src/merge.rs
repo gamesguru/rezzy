@@ -8,25 +8,40 @@ fn perform_connectivity_check(
 ) -> Result<(), anyhow::Error> {
     extern crate anyhow;
     let num_files = per_file_ids.len();
-    let mut any_shared = false;
-    for i in 0..num_files {
-        for j in (i + 1)..num_files {
-            let pair_shared = per_file_ids[i].intersection(&per_file_ids[j]).count();
-            if pair_shared > 0 {
-                any_shared = true;
-                break;
+    if num_files < 2 {
+        return Ok(());
+    }
+
+    // Treat files as nodes in a graph. An edge exists if they share at least one event.
+    // We check if the entire graph is connected starting from node 0.
+    let mut visited = alloc::vec![false; num_files];
+    let mut queue = Vec::new();
+    queue.push(0);
+    visited[0] = true;
+
+    while let Some(current) = queue.pop() {
+        for next in 0..num_files {
+            if !visited[next] {
+                let shared = per_file_ids[current]
+                    .intersection(&per_file_ids[next])
+                    .next()
+                    .is_some();
+                if shared {
+                    visited[next] = true;
+                    queue.push(next);
+                }
             }
-        }
-        if any_shared {
-            break;
         }
     }
 
-    if !any_shared {
-        anyhow::bail!(
-            "Disjoint DAGs: no shared events found across inputs. \
-             Cannot compute meaningful merge — the DAGs share no history."
-        );
+    // If any file node is not visited, then the inputs are disjoint (not connected as a single component!)
+    for (idx, &is_visited) in visited.iter().enumerate() {
+        if !is_visited {
+            anyhow::bail!(
+                "Disjoint DAGs: input file at index {idx} shares no history with the connected component. \
+                 Cannot compute meaningful merge — all inputs must share history."
+            );
+        }
     }
     Ok(())
 }
@@ -40,7 +55,7 @@ fn report_highest_shared_depths(
     let shared_all: HashSet<&String> = {
         let mut s: HashSet<&String> = HashSet::new();
         for i in 0..num_files {
-            for j in (i + 1)..num_files {
+            for j in (i.wrapping_add(1))..num_files {
                 s.extend(per_file_ids[i].intersection(&per_file_ids[j]));
             }
         }
@@ -105,9 +120,9 @@ pub fn merge_event_sets(
             file_ids.insert(event_id.clone());
             if seen_ids.insert(event_id) {
                 merged.push(val.clone());
-                added += 1;
+                added = added.wrapping_add(1);
             } else {
-                dupes += 1;
+                dupes = dupes.wrapping_add(1);
             }
         }
 
@@ -131,7 +146,7 @@ pub fn merge_event_sets(
         let total_shared: usize = {
             let mut shared_ids: HashSet<&String> = HashSet::new();
             for i in 0..num_files {
-                for j in (i + 1)..num_files {
+                for j in (i.wrapping_add(1))..num_files {
                     shared_ids.extend(per_file_ids[i].intersection(&per_file_ids[j]));
                 }
             }

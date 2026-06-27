@@ -87,29 +87,34 @@ fn compute_cdo_bit_masks_chunk<'a, S: core::hash::BuildHasher>(
         if let Some(&idx) = id_to_idx.get(admin_id) {
             let word = i / 64;
             let bit = 1u64 << (i % 64);
-            and_masks[idx * WORDS_PER_CHUNK + word] |= bit;
-            desc_masks[idx * WORDS_PER_CHUNK + word] |= bit;
+            let pos = idx.wrapping_mul(WORDS_PER_CHUNK).wrapping_add(word);
+            and_masks[pos] |= bit;
+            desc_masks[pos] |= bit;
         }
     }
 
     // Forward Sweep (Ancestors) - Pure array iteration
     for &(u, _) in sorted_events {
-        let u_base = u * WORDS_PER_CHUNK;
+        let u_base = u.wrapping_mul(WORDS_PER_CHUNK);
         for &p in &parents[u] {
-            let p_base = p * WORDS_PER_CHUNK;
+            let p_base = p.wrapping_mul(WORDS_PER_CHUNK);
             for w in 0..WORDS_PER_CHUNK {
-                and_masks[u_base + w] |= and_masks[p_base + w];
+                let u_pos = u_base.wrapping_add(w);
+                let p_pos = p_base.wrapping_add(w);
+                and_masks[u_pos] |= and_masks[p_pos];
             }
         }
     }
 
     // Backward Sweep (Descendants) - Pure array iteration
     for &(u, _) in sorted_events.iter().rev() {
-        let u_base = u * WORDS_PER_CHUNK;
+        let u_base = u.wrapping_mul(WORDS_PER_CHUNK);
         for &c in &children[u] {
-            let c_base = c * WORDS_PER_CHUNK;
+            let c_base = c.wrapping_mul(WORDS_PER_CHUNK);
             for w in 0..WORDS_PER_CHUNK {
-                desc_masks[u_base + w] |= desc_masks[c_base + w];
+                let u_pos = u_base.wrapping_add(w);
+                let c_pos = c_base.wrapping_add(w);
+                desc_masks[u_pos] |= desc_masks[c_pos];
             }
         }
     }
@@ -240,8 +245,8 @@ fn process_direct_domination_chunks<S1: core::hash::BuildHasher>(
     let mut dropped_ids = BTreeSet::new();
 
     // Allocate a strict O(N * WORDS_PER_CHUNK) matrix once, reused forever across passes
-    let mut and_masks = alloc::vec![0u64; n * WORDS_PER_CHUNK];
-    let mut desc_masks = alloc::vec![0u64; n * WORDS_PER_CHUNK];
+    let mut and_masks = alloc::vec![0u64; n.wrapping_mul(WORDS_PER_CHUNK)];
+    let mut desc_masks = alloc::vec![0u64; n.wrapping_mul(WORDS_PER_CHUNK)];
 
     let chunk_size = WORDS_PER_CHUNK * 64; // 256 actions per pass
 
@@ -289,6 +294,9 @@ fn process_direct_domination_chunks<S1: core::hash::BuildHasher>(
 
             if let Some(&ev_idx) = adj.id_to_idx.get(event_id) {
                 for (&admin_id, &orig_idx) in &chunk_admin_to_pos {
+                    if dropped_ids.contains(admin_id) {
+                        continue;
+                    }
                     // Only higher-priority admin actions (occurring earlier in the sorted list) can dominate
                     if let Some(&admin_pos) = prioritized.priority_pos.get(admin_id) {
                         if let Some(&event_pos) = prioritized.priority_pos.get(event_id) {
@@ -301,9 +309,9 @@ fn process_direct_domination_chunks<S1: core::hash::BuildHasher>(
                     let word = orig_idx / 64;
                     let bit = 1u64 << (orig_idx % 64);
 
-                    let is_ancestor_admin = (and_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
-                    let is_descendant_admin =
-                        (desc_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
+                    let pos = ev_idx.wrapping_mul(WORDS_PER_CHUNK).wrapping_add(word);
+                    let is_ancestor_admin = (and_masks[pos] & bit) != 0;
+                    let is_descendant_admin = (desc_masks[pos] & bit) != 0;
 
                     // Fast-path bitwise check first!
                     if !is_ancestor_admin && !is_descendant_admin {
