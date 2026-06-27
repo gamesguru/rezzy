@@ -1593,7 +1593,7 @@ fn compute_cdo_bit_masks_unbounded<'a, S: core::hash::BuildHasher>(
     admin_actions: &[&'a str],
 ) -> (Vec<u64>, Vec<u64>, HashMap<&'a str, usize>) {
     let n = dag_context.len();
-    let num_words = (admin_actions.len() + 63) / 64;
+    let num_words = admin_actions.len().div_ceil(64);
 
     // 1. Assign O(1) integer indices and sort topologically by depth
     let mut id_to_idx = HashMap::with_capacity(n);
@@ -1707,7 +1707,7 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
         .map(|e| e.event_id.as_str())
         .collect();
 
-    let num_words = (admin_actions.len() + 63) / 64;
+    let num_words = admin_actions.len().div_ceil(64);
 
     let (and_masks, desc_masks, id_to_idx) =
         compute_cdo_bit_masks_unbounded(&dag_context, &admin_actions);
@@ -2017,13 +2017,18 @@ fn route_lattice_power_events<S1: core::hash::BuildHasher, S2: core::hash::Build
     }
 }
 
-fn fold_lattice_chunk<'a, S: core::hash::BuildHasher>(
+fn fold_lattice_chunk<
+    'a,
+    S1: core::hash::BuildHasher,
+    S2: core::hash::BuildHasher,
+    S3: core::hash::BuildHasher,
+>(
     chunk: &[&'a LeanEvent],
     mainline_distances: &HashMap<String, usize>,
     mainline_len: usize,
     terminal_power_state: &BTreeMap<(String, Option<String>), String>,
-    auth_context: &HashMap<String, LeanEvent, S>,
-    sort_set: &HashMap<String, LeanEvent, S>,
+    auth_context: &HashMap<String, LeanEvent, S2>,
+    sort_set: &HashMap<String, LeanEvent, S3>,
     version: StateResVersion,
     create_ev: Option<&LeanEvent>,
 ) -> HashMap<(String, Option<String>), &'a LeanEvent> {
@@ -2032,7 +2037,8 @@ fn fold_lattice_chunk<'a, S: core::hash::BuildHasher>(
 
     for &ev in chunk {
         // 1. VALIDATE FIRST (Filters out Byzantine garbage/Supremum Deletion attacks)
-        let local_auth = compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache, version);
+        let local_auth =
+            compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache, version);
         if !iterative_auth_ok(
             ev,
             terminal_power_state,
@@ -2127,13 +2133,18 @@ fn merge_lattice_winners<'a>(
     }
 }
 
-fn compute_lattice_coordinatized_winners<'a, S: core::hash::BuildHasher + Sync + Send>(
-    non_power_events: &'a HashMap<String, LeanEvent, S>,
+fn compute_lattice_coordinatized_winners<
+    'a,
+    S1: core::hash::BuildHasher + Sync + Send,
+    S2: core::hash::BuildHasher + Sync + Send,
+    S3: core::hash::BuildHasher + Sync + Send,
+>(
+    non_power_events: &'a HashMap<String, LeanEvent, S1>,
     mainline_distances: &HashMap<String, usize>,
     mainline_len: usize,
     terminal_power_state: &BTreeMap<(String, Option<String>), String>,
-    auth_context: &HashMap<String, LeanEvent, S>,
-    sort_set: &HashMap<String, LeanEvent, S>,
+    auth_context: &HashMap<String, LeanEvent, S2>,
+    sort_set: &HashMap<String, LeanEvent, S3>,
     version: StateResVersion,
     create_ev: Option<&LeanEvent>,
     key_winners: &mut HashMap<(String, Option<String>), &'a LeanEvent>,
@@ -2152,7 +2163,7 @@ fn compute_lattice_coordinatized_winners<'a, S: core::hash::BuildHasher + Sync +
                     .into_iter()
                     .map(|chunk| {
                         s.spawn(move || {
-                            fold_lattice_chunk(
+                            fold_lattice_chunk::<S1, S2, S3>(
                                 chunk,
                                 mainline_distances,
                                 mainline_len,
@@ -2180,7 +2191,7 @@ fn compute_lattice_coordinatized_winners<'a, S: core::hash::BuildHasher + Sync +
 
     // Fallback/Sequential
     let events_vec: Vec<&'a LeanEvent> = non_power_events.values().collect();
-    let thread_res = fold_lattice_chunk(
+    let thread_res = fold_lattice_chunk::<S1, S2, S3>(
         &events_vec,
         mainline_distances,
         mainline_len,
@@ -2197,7 +2208,10 @@ fn compute_lattice_coordinatized_winners<'a, S: core::hash::BuildHasher + Sync +
 /// Employs O(1) Causal Coordinatization Projection and Commutative Join-Semilattice folding
 /// to completely eliminate sequential sorting and backward graph traversals.
 #[must_use]
-pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher + Sync + Send, S2: core::hash::BuildHasher + Sync + Send>(
+pub fn resolve_lattice_coordinatized<
+    S1: core::hash::BuildHasher + Sync + Send,
+    S2: core::hash::BuildHasher + Sync + Send,
+>(
     unconflicted_state: &BTreeMap<(String, Option<String>), String>,
     mut conflicted_events: HashMap<String, LeanEvent, S1>,
     auth_context: &HashMap<String, LeanEvent, S2>,
