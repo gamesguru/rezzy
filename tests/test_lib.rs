@@ -1743,15 +1743,28 @@ mod tests {
 
     #[test]
     fn test_coverage_booster_auth_cases() {
-        use ruma_lean::auth::{AuthError, RoomState, check_auth, check_auth_chain};
+        use ruma_lean::auth::{check_auth, check_auth_chain, AuthError, RoomState};
         use serde_json::json;
 
         // 1. Format every single variant of AuthError to ensure 100% Display coverage
         let errs = vec![
-            AuthError::NotMember { sender: "alice".into(), event_id: "1".into() },
-            AuthError::InsufficientPowerLevel { required: 100, actual: 50, event_type: "m.room.name".into() },
-            AuthError::BannedUser { sender: "bob".into(), event_id: "2".into() },
-            AuthError::InvalidStateKey { expected: "x".into(), actual: "y".into() },
+            AuthError::NotMember {
+                sender: "alice".into(),
+                event_id: "1".into(),
+            },
+            AuthError::InsufficientPowerLevel {
+                required: 100,
+                actual: 50,
+                event_type: "m.room.name".into(),
+            },
+            AuthError::BannedUser {
+                sender: "bob".into(),
+                event_id: "2".into(),
+            },
+            AuthError::InvalidStateKey {
+                expected: "x".into(),
+                actual: "y".into(),
+            },
             AuthError::CreateWithPrevEvents,
             AuthError::MissingAuthEvent("3".into()),
             AuthError::InvalidSyntax("invalid JSON".into()),
@@ -1762,8 +1775,14 @@ mod tests {
         }
 
         // 2. StateKeyDyn comparisons, EQ, and Ord coverage
-        let sk1 = (String::from("m.room.member"), Some(String::from("@alice:example.com")));
-        let sk2 = (String::from("m.room.member"), Some(String::from("@bob:example.com")));
+        let sk1 = (
+            String::from("m.room.member"),
+            Some(String::from("@alice:example.com")),
+        );
+        let sk2 = (
+            String::from("m.room.member"),
+            Some(String::from("@bob:example.com")),
+        );
         assert_ne!(sk1, sk2);
         #[allow(clippy::double_comparisons)]
         {
@@ -1783,7 +1802,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        state.insert(("m.room.create".into(), Some(String::new())), create_ev.clone());
+        state.insert(
+            ("m.room.create".into(), Some(String::new())),
+            create_ev.clone(),
+        );
 
         // Test check_auth for m.room.create with prev_events (should fail with CreateWithPrevEvents)
         let bad_create = LeanEvent {
@@ -1792,7 +1814,10 @@ mod tests {
             prev_events: vec!["$create".into()],
             ..Default::default()
         };
-        assert_eq!(check_auth(&bad_create, &state), Err(AuthError::CreateWithPrevEvents));
+        assert_eq!(
+            check_auth(&bad_create, &state),
+            Err(AuthError::CreateWithPrevEvents)
+        );
 
         // Test non-member rejection with RoomState containing no membership
         let name_change = LeanEvent {
@@ -1801,7 +1826,13 @@ mod tests {
             sender: "@bob:example.com".into(),
             ..Default::default()
         };
-        assert_eq!(check_auth(&name_change, &state), Err(AuthError::NotMember { sender: "@bob:example.com".into(), event_id: "$name".into() }));
+        assert_eq!(
+            check_auth(&name_change, &state),
+            Err(AuthError::NotMember {
+                sender: "@bob:example.com".into(),
+                event_id: "$name".into()
+            })
+        );
 
         // Creator should be allowed implied join if no member event is present
         let creator_name_change = LeanEvent {
@@ -1814,7 +1845,10 @@ mod tests {
 
         // Banned user membership transition
         let mut state2 = RoomState::new();
-        state2.insert(("m.room.create".into(), Some(String::new())), create_ev.clone());
+        state2.insert(
+            ("m.room.create".into(), Some(String::new())),
+            create_ev.clone(),
+        );
         let banned_member = LeanEvent {
             event_id: "$ban_member".into(),
             event_type: "m.room.member".into(),
@@ -1823,7 +1857,10 @@ mod tests {
             content: json!({ "membership": "ban" }),
             ..Default::default()
         };
-        state2.insert(("m.room.member".into(), Some("@bob:example.com".into())), banned_member.clone());
+        state2.insert(
+            ("m.room.member".into(), Some("@bob:example.com".into())),
+            banned_member.clone(),
+        );
 
         // A banned user cannot join or send events
         let join_ev = LeanEvent {
@@ -1834,7 +1871,13 @@ mod tests {
             content: json!({ "membership": "join" }),
             ..Default::default()
         };
-        assert_eq!(check_auth(&join_ev, &state2), Err(AuthError::BannedUser { sender: "@bob:example.com".into(), event_id: "$join".into() }));
+        assert_eq!(
+            check_auth(&join_ev, &state2),
+            Err(AuthError::BannedUser {
+                sender: "@bob:example.com".into(),
+                event_id: "$join".into()
+            })
+        );
 
         // Invalid state key self-invite
         let self_invite = LeanEvent {
@@ -1856,7 +1899,13 @@ mod tests {
             content: json!({ "membership": "join" }),
             ..Default::default()
         };
-        assert_eq!(check_auth(&bad_join, &state2), Err(AuthError::InvalidStateKey { expected: "@alice:example.com".into(), actual: "@bob:example.com".into() }));
+        assert_eq!(
+            check_auth(&bad_join, &state2),
+            Err(AuthError::InvalidStateKey {
+                expected: "@alice:example.com".into(),
+                actual: "@bob:example.com".into()
+            })
+        );
 
         // Missing PL event defaults testing
         let low_power_state_change = LeanEvent {
@@ -1868,7 +1917,10 @@ mod tests {
         };
         // Should require PL 50 by default for state events if no PL event is present
         let mut state3 = RoomState::new();
-        state3.insert(("m.room.create".into(), Some(String::new())), create_ev.clone());
+        state3.insert(
+            ("m.room.create".into(), Some(String::new())),
+            create_ev.clone(),
+        );
         let bob_joined = LeanEvent {
             event_id: "$bob_joined".into(),
             event_type: "m.room.member".into(),
@@ -1877,8 +1929,18 @@ mod tests {
             content: json!({ "membership": "join" }),
             ..Default::default()
         };
-        state3.insert(("m.room.member".into(), Some("@bob:example.com".into())), bob_joined.clone());
-        assert_eq!(check_auth(&low_power_state_change, &state3), Err(AuthError::InsufficientPowerLevel { required: 50, actual: 0, event_type: "m.room.name".into() }));
+        state3.insert(
+            ("m.room.member".into(), Some("@bob:example.com".into())),
+            bob_joined.clone(),
+        );
+        assert_eq!(
+            check_auth(&low_power_state_change, &state3),
+            Err(AuthError::InsufficientPowerLevel {
+                required: 50,
+                actual: 0,
+                event_type: "m.room.name".into()
+            })
+        );
 
         // Invite a banned user check
         let invite_banned = LeanEvent {
@@ -1889,7 +1951,13 @@ mod tests {
             content: json!({ "membership": "invite" }),
             ..Default::default()
         };
-        assert_eq!(check_auth(&invite_banned, &state2), Err(AuthError::BannedUser { sender: "@bob:example.com".into(), event_id: "$invite_banned".into() }));
+        assert_eq!(
+            check_auth(&invite_banned, &state2),
+            Err(AuthError::BannedUser {
+                sender: "@bob:example.com".into(),
+                event_id: "$invite_banned".into()
+            })
+        );
 
         // 4. Test check_auth_chain with m.room.create lacking state_key fallback
         let create_no_key = LeanEvent {
@@ -1937,8 +2005,8 @@ mod tests {
 
     #[test]
     fn test_cdo_unbounded_stride_overflow() {
-        use std::collections::HashMap;
         use serde_json::json;
+        use std::collections::HashMap;
 
         let mut conflicted = HashMap::new();
         let mut auth = HashMap::new();

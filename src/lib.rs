@@ -910,8 +910,6 @@ pub fn lean_kahn_sort<S: core::hash::BuildHasher>(
     }
 }
 
-
-
 #[must_use]
 pub fn resolve_lean<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     unconflicted_state: BTreeMap<(String, Option<String>), String>,
@@ -1987,11 +1985,7 @@ fn route_lattice_power_events<S1: core::hash::BuildHasher, S2: core::hash::Build
 }
 
 #[allow(clippy::too_many_arguments)]
-fn fold_lattice_chunk<
-    'a,
-    S2: core::hash::BuildHasher,
-    S3: core::hash::BuildHasher,
->(
+fn fold_lattice_chunk<'a, S2: core::hash::BuildHasher, S3: core::hash::BuildHasher>(
     chunk: &[&'a LeanEvent],
     mainline_distances: &HashMap<String, usize>,
     mainline_len: usize,
