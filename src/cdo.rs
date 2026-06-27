@@ -19,8 +19,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-const WORDS_PER_CHUNK: usize = 4; // 256 admin actions per pass/chunk
-
 #[must_use]
 pub fn is_ancestor<S: core::hash::BuildHasher>(
     child_id: &str,
@@ -67,6 +65,9 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
     false
 }
 
+const WORDS_PER_CHUNK: usize = 4; // 256 admin actions per pass/chunk
+
+#[allow(clippy::needless_range_loop)]
 fn compute_cdo_bit_masks_chunk<'a, S: core::hash::BuildHasher>(
     admin_chunk: &[&'a str],
     id_to_idx: &HashMap<&'a str, usize, S>,
@@ -140,14 +141,18 @@ fn sort_cdo_events(events: &[&LeanEvent]) -> Vec<LeanEvent> {
     sorted
 }
 
-/// Cycle 0 Topological Filter: Vectorized Causal Domination Operator (CDO)
-/// Executes strictly on the Conflicted State Subgraph (C).
-#[must_use]
-pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
+struct AdjacencyStructures {
+    dag_context: HashMap<String, LeanEvent>,
+    id_to_idx: HashMap<String, usize>,
+    sorted_events: Vec<(usize, LeanEvent)>,
+    parents: Vec<Vec<usize>>,
+    children: Vec<Vec<usize>>,
+}
+
+fn build_adjacency_structures<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     conflicted_events: &HashMap<String, LeanEvent, S1>,
     auth_context: &HashMap<String, LeanEvent, S2>,
-) -> HashMap<String, LeanEvent> {
-    // Build sort/DAG context to determine ancestries
+) -> AdjacencyStructures {
     let dag_context: HashMap<String, LeanEvent> = auth_context
         .iter()
         .chain(conflicted_events.iter())
@@ -155,51 +160,76 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
         .collect();
 
     let n = dag_context.len();
-
-    // 1. Assign O(1) integer indices and sort topologically by depth
     let mut id_to_idx = HashMap::with_capacity(n);
     let mut sorted_events = Vec::with_capacity(n);
 
     for (id, ev) in &dag_context {
         let idx = id_to_idx.len();
-        id_to_idx.insert(id.as_str(), idx);
-        sorted_events.push((idx, ev));
+        id_to_idx.insert(id.clone(), idx);
+        sorted_events.push((idx, ev.clone()));
     }
-    // Depth-ascending gives us a free topological sort!
-    sorted_events.sort_unstable_by_key(|&(_, ev)| ev.depth);
+    sorted_events.sort_unstable_by_key(|(_, ev)| ev.depth);
 
-    // 2. Build integer-based adjacency lists
-    let mut parents: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
-    let mut children: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
-    for &(u, ev) in &sorted_events {
+    let mut parents = alloc::vec![Vec::new(); n];
+    let mut children = alloc::vec![Vec::new(); n];
+    for &(u, ref ev) in &sorted_events {
         for p_id in ev.prev_events.iter().chain(ev.auth_events.iter()) {
-            if let Some(&v) = id_to_idx.get(p_id.as_str()) {
+            if let Some(&v) = id_to_idx.get(p_id) {
                 parents[u].push(v);
                 children[v].push(u);
             }
         }
     }
 
-    // Identify and sort all admin actions in conflicted events by priority descending
+    AdjacencyStructures {
+        dag_context,
+        id_to_idx,
+        sorted_events,
+        parents,
+        children,
+    }
+}
+
+struct PrioritizedEvents {
+    admin_actions: Vec<String>,
+    sorted_events_by_priority: Vec<LeanEvent>,
+    priority_pos: HashMap<String, usize>,
+}
+
+fn prioritize_events<S1: core::hash::BuildHasher>(
+    conflicted_events: &HashMap<String, LeanEvent, S1>,
+) -> PrioritizedEvents {
     let admin_events_to_sort: Vec<&LeanEvent> = conflicted_events
         .values()
         .filter(|e| e.is_ban_or_kick() || e.is_demotion() || e.is_lockdown())
         .collect();
     let sorted_admin_events = sort_cdo_events(&admin_events_to_sort);
-    let admin_actions: Vec<&str> = sorted_admin_events
+    let admin_actions: Vec<String> = sorted_admin_events
         .iter()
-        .map(|e| e.event_id.as_str())
+        .map(|e| e.event_id.clone())
         .collect();
 
     let sorted_events_by_priority =
         sort_cdo_events(&conflicted_events.values().collect::<Vec<_>>());
 
-    // Build a map of event_id to its position in the priority-sorted list
-    let mut priority_pos = HashMap::new();
+    let mut priority_pos = HashMap::with_capacity(sorted_events_by_priority.len());
     for (pos, ev) in sorted_events_by_priority.iter().enumerate() {
-        priority_pos.insert(ev.event_id.as_str(), pos);
+        priority_pos.insert(ev.event_id.clone(), pos);
     }
 
+    PrioritizedEvents {
+        admin_actions,
+        sorted_events_by_priority,
+        priority_pos,
+    }
+}
+
+fn process_direct_domination_chunks<S1: core::hash::BuildHasher>(
+    adj: &AdjacencyStructures,
+    prioritized: &PrioritizedEvents,
+    conflicted_events: &HashMap<String, LeanEvent, S1>,
+) -> BTreeSet<String> {
+    let n = adj.dag_context.len();
     let mut dropped_ids = BTreeSet::new();
 
     // Allocate a strict O(N * WORDS_PER_CHUNK) matrix once, reused forever across passes
@@ -208,37 +238,52 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
 
     let chunk_size = WORDS_PER_CHUNK * 64; // 256 actions per pass
 
-    for chunk in admin_actions.chunks(chunk_size) {
+    // Helper references to map inputs to compute_cdo_bit_masks_chunk
+    let sorted_events_refs: Vec<(usize, &LeanEvent)> = adj
+        .sorted_events
+        .iter()
+        .map(|&(idx, ref ev)| (idx, ev))
+        .collect();
+
+    for chunk in prioritized.admin_actions.chunks(chunk_size) {
+        let chunk_refs: Vec<&str> = chunk.iter().map(alloc::string::String::as_str).collect();
+
+        // Convert id_to_idx keys to match the &str representation expected by helper
+        let mut id_to_idx_refs = HashMap::with_capacity(adj.id_to_idx.len());
+        for (k, &v) in &adj.id_to_idx {
+            id_to_idx_refs.insert(k.as_str(), v);
+        }
+
         compute_cdo_bit_masks_chunk(
-            chunk,
-            &id_to_idx,
-            &sorted_events,
-            &parents,
-            &children,
+            &chunk_refs,
+            &id_to_idx_refs,
+            &sorted_events_refs,
+            &adj.parents,
+            &adj.children,
             &mut and_masks,
             &mut desc_masks,
         );
 
         // Build a map of active admin actions in this chunk to their relative index within the chunk
         let mut chunk_admin_to_pos = HashMap::new();
-        for (i, &admin_id) in chunk.iter().enumerate() {
+        for (i, admin_id) in chunk.iter().enumerate() {
             if !dropped_ids.contains(admin_id) {
-                chunk_admin_to_pos.insert(admin_id, i);
+                chunk_admin_to_pos.insert(admin_id.as_str(), i);
             }
         }
 
         // Check for direct domination against all non-dropped events
-        for event in &sorted_events_by_priority {
+        for event in &prioritized.sorted_events_by_priority {
             let event_id = event.event_id.as_str();
             if dropped_ids.contains(event_id) {
                 continue;
             }
 
-            if let Some(&ev_idx) = id_to_idx.get(event_id) {
+            if let Some(&ev_idx) = adj.id_to_idx.get(event_id) {
                 for (&admin_id, &orig_idx) in &chunk_admin_to_pos {
                     // Only higher-priority admin actions (occurring earlier in the sorted list) can dominate
-                    if let Some(&admin_pos) = priority_pos.get(admin_id) {
-                        if let Some(&event_pos) = priority_pos.get(event_id) {
+                    if let Some(&admin_pos) = prioritized.priority_pos.get(admin_id) {
+                        if let Some(&event_pos) = prioritized.priority_pos.get(event_id) {
                             if admin_pos >= event_pos {
                                 continue;
                             }
@@ -266,7 +311,13 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
         }
     }
 
-    // Pass 3: Auth-Dependency Domination (Transitive Closure / Linear-Time propagation)
+    dropped_ids
+}
+
+fn propagate_transitive_dependencies<S1: core::hash::BuildHasher>(
+    conflicted_events: &HashMap<String, LeanEvent, S1>,
+    mut dropped_ids: BTreeSet<String>,
+) -> BTreeSet<String> {
     let mut dependents: HashMap<String, Vec<String>> = HashMap::new();
     for (id, event) in conflicted_events {
         for auth_id in &event.auth_events {
@@ -288,11 +339,25 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
             }
         }
     }
+    dropped_ids
+}
+
+/// Cycle 0 Topological Filter: Vectorized Causal Domination Operator (CDO)
+/// Executes strictly on the Conflicted State Subgraph (C).
+#[must_use]
+pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
+    conflicted_events: &HashMap<String, LeanEvent, S1>,
+    auth_context: &HashMap<String, LeanEvent, S2>,
+) -> HashMap<String, LeanEvent> {
+    let adj = build_adjacency_structures(conflicted_events, auth_context);
+    let prioritized = prioritize_events(conflicted_events);
+    let dropped_ids = process_direct_domination_chunks(&adj, &prioritized, conflicted_events);
+    let final_dropped_ids = propagate_transitive_dependencies(conflicted_events, dropped_ids);
 
     // Return strictly the transitively safe set
     let mut safe_set = HashMap::new();
     for (id, event) in conflicted_events {
-        if !dropped_ids.contains(id) {
+        if !final_dropped_ids.contains(id) {
             safe_set.insert(id.clone(), event.clone());
         }
     }
