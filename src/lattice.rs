@@ -224,6 +224,8 @@ pub fn resolve_lattice_coordinatized<
     auth_context: &HashMap<String, LeanEvent, S2>,
     version: StateResVersion,
 ) -> BTreeMap<(String, Option<String>), String> {
+    let original_conflicted_keys: alloc::collections::BTreeSet<String> = conflicted_events.keys().cloned().collect();
+
     // 1. CDO Filter Pre-Filtering: distilling the conflicted set into a safe, orthogonal set C_safe
     if version == StateResVersion::V2_1_1 {
         let filtered = apply_cdo_filter(&conflicted_events, auth_context);
@@ -251,6 +253,44 @@ pub fn resolve_lattice_coordinatized<
     let mut non_power_events = HashMap::new();
     route_power_events(sort_set, &mut power_events, &mut non_power_events);
 
+    // MSC4297 (v2.1+): The power events to be Kahn-sorted are the subset of the conflicted state subgraph
+    // of administrative types. To ensure non-conflicted ancestral power events (such as intermediate
+    // power levels events) are present in the empty initial resolved state map during iterative validation,
+    // we also route these types from the auth_context, restricted strictly to those that are part of the
+    // auth chain ancestry of actually conflicted power events.
+    if matches!(
+        version,
+        StateResVersion::V2_1 | StateResVersion::V2_1_1 | StateResVersion::V2_2
+    ) {
+        let mut conflicted_power_ancestry = alloc::collections::BTreeSet::new();
+        let mut queue = alloc::collections::VecDeque::new();
+        for ev in power_events.values() {
+            for aid in &ev.auth_events {
+                queue.push_back(aid.clone());
+            }
+        }
+        while let Some(aid) = queue.pop_front() {
+            if conflicted_power_ancestry.insert(aid.clone()) {
+                if let Some(aev) = auth_context.get(&aid) {
+                    for parent_id in &aev.auth_events {
+                        queue.push_back(parent_id.clone());
+                    }
+                }
+            }
+        }
+
+        for (id, ev) in auth_context {
+            if !original_conflicted_keys.contains(id) && conflicted_power_ancestry.contains(id) {
+                if ev.event_type == "m.room.power_levels"
+                    || ev.event_type == "m.room.create"
+                    || ev.event_type == "m.room.join_rules"
+                {
+                    power_events.insert(id.clone(), ev.clone());
+                }
+            }
+        }
+    }
+
     let create_ev = find_deterministic_create_event(auth_context, sort_set);
 
     let mut local_auth_cache: LocalAuthCache = HashMap::new();
@@ -258,7 +298,7 @@ pub fn resolve_lattice_coordinatized<
     // Power Phase remains sequential to establish the authoritative administrative framework
     let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, create_ev, version);
     for id in &sorted_power_ids {
-        if let Some(event) = sort_set.get(id) {
+        if let Some(event) = sort_set.get(id).or_else(|| auth_context.get(id)) {
             let local_auth = compute_local_auth(
                 event,
                 auth_context,
