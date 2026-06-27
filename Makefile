@@ -97,7 +97,7 @@ rust/e2e: ##H Run e2e integration test on real JSON
 	for f in res/*.json res/*jsonl; do \
 		ARGS=""; \
 		if [ "$$f" = "res/real_dag_52k_room.json" -o "$$f" = "res/real_dag_nheko.json" ]; then ARGS="--state-res v2"; fi; \
-		if [ "$$f" = "res/real_dag_52k_room.json" -o "$$f" = "res/remote-dag-sM2LwqNHGQOgLf35gqxPMy9D7oYde2q9ADg8HPBM3kE-v12-unredacted.org-PARTIAL.jsonl" ]; then ARGS="--state-res v2-1"; fi; \
+		if [ "$$f" = "res/remote-dag-sM2LwqNHGQOgLf35gqxPMy9D7oYde2q9ADg8HPBM3kE-v12-unredacted.org-PARTIAL.jsonl" ]; then ARGS="--state-res v2-1"; fi; \
 		$(CARGO) run --release --features cli,hashing -- $$ARGS -i "$$f" || exit 1; \
 	done
 
