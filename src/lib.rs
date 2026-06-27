@@ -1588,36 +1588,29 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
 }
 
 #[allow(clippy::manual_div_ceil, clippy::needless_range_loop)]
-fn compute_cdo_bit_masks_unbounded<S: core::hash::BuildHasher>(
-    dag_context: &HashMap<String, LeanEvent, S>,
-    admin_actions: &[&str],
-    ancestor_masks: &mut HashMap<String, Vec<u64>>,
-    descendant_masks: &mut HashMap<String, Vec<u64>>,
-    admin_masks: &mut HashMap<String, Vec<u64>>,
-) {
+fn compute_cdo_bit_masks_unbounded<'a, S: core::hash::BuildHasher>(
+    dag_context: &'a HashMap<String, LeanEvent, S>,
+    admin_actions: &[&'a str],
+) -> (Vec<u64>, Vec<u64>, HashMap<&'a str, usize>) {
     let n = dag_context.len();
     let num_words = (admin_actions.len() + 63) / 64;
 
-    // 1. Assign fast integer indices and sort topologically
+    // 1. Assign O(1) integer indices and sort topologically by depth
     let mut id_to_idx = HashMap::with_capacity(n);
-    let mut idx_to_id = Vec::with_capacity(n);
-    let mut sorted_by_depth = Vec::with_capacity(n);
+    let mut sorted_events = Vec::with_capacity(n);
+
     for (id, ev) in dag_context {
-        let idx = idx_to_id.len();
+        let idx = id_to_idx.len();
         id_to_idx.insert(id.as_str(), idx);
-        idx_to_id.push(id.as_str());
-        sorted_by_depth.push((idx, ev.depth));
+        sorted_events.push((idx, ev));
     }
+    // Depth-ascending gives us a free topological sort!
+    sorted_events.sort_unstable_by_key(|&(_, ev)| ev.depth);
 
-    // Sort strictly by depth (ensures parents are processed before children)
-    sorted_by_depth.sort_unstable_by_key(|&(_, depth)| depth);
-    let topo_order: Vec<usize> = sorted_by_depth.into_iter().map(|(i, _)| i).collect();
-
-    // 2. Build integer-based adjacency
+    // 2. Build integer-based adjacency lists
     let mut parents: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
     let mut children: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
-    for (id, ev) in dag_context {
-        let u = id_to_idx[id.as_str()];
+    for &(u, ev) in &sorted_events {
         for p_id in ev.prev_events.iter().chain(ev.auth_events.iter()) {
             if let Some(&v) = id_to_idx.get(p_id.as_str()) {
                 parents[u].push(v);
@@ -1626,46 +1619,42 @@ fn compute_cdo_bit_masks_unbounded<S: core::hash::BuildHasher>(
         }
     }
 
-    // 3. Initialize Array Masks
-    let mut and_masks = alloc::vec![alloc::vec![0u64; num_words]; n];
-    let mut desc_masks = alloc::vec![alloc::vec![0u64; num_words]; n];
+    // 3. Flat 1D Arrays (Zero inner heap allocations)
+    let mut and_masks = alloc::vec![0u64; n * num_words];
+    let mut desc_masks = alloc::vec![0u64; n * num_words];
+
     for (i, &admin_id) in admin_actions.iter().enumerate() {
         if let Some(&idx) = id_to_idx.get(admin_id) {
             let word = i / 64;
             let bit = 1u64 << (i % 64);
-            and_masks[idx][word] |= bit;
-            desc_masks[idx][word] |= bit;
-            let mut mask = alloc::vec![0u64; num_words];
-            mask[word] |= bit;
-            admin_masks.insert(String::from(admin_id), mask);
+            and_masks[idx * num_words + word] |= bit;
+            desc_masks[idx * num_words + word] |= bit;
         }
     }
 
-    // 4. Forward Sweep (Compute Ancestors) - Pure array iteration
-    for &u in &topo_order {
+    // 4. Forward Sweep (Ancestors) - Pure array iteration
+    for &(u, _) in &sorted_events {
+        let u_base = u * num_words;
         for &p in &parents[u] {
+            let p_base = p * num_words;
             for w in 0..num_words {
-                let bits = and_masks[p][w];
-                and_masks[u][w] |= bits;
+                and_masks[u_base + w] |= and_masks[p_base + w];
             }
         }
     }
 
-    // 5. Backward Sweep (Compute Descendants) - Pure array iteration
-    for &u in topo_order.iter().rev() {
+    // 5. Backward Sweep (Descendants) - Pure array iteration
+    for &(u, _) in sorted_events.iter().rev() {
+        let u_base = u * num_words;
         for &c in &children[u] {
+            let c_base = c * num_words;
             for w in 0..num_words {
-                let bits = desc_masks[c][w];
-                desc_masks[u][w] |= bits;
+                desc_masks[u_base + w] |= desc_masks[c_base + w];
             }
         }
     }
 
-    // 6. Write back to String Maps
-    for (i, &id) in idx_to_id.iter().enumerate() {
-        ancestor_masks.insert(String::from(id), core::mem::take(&mut and_masks[i]));
-        descendant_masks.insert(String::from(id), core::mem::take(&mut desc_masks[i]));
-    }
+    (and_masks, desc_masks, id_to_idx)
 }
 
 fn sort_cdo_events(events: &[&LeanEvent]) -> Vec<LeanEvent> {
@@ -1718,52 +1707,44 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
         .map(|e| e.event_id.as_str())
         .collect();
 
-    let mut ancestor_masks = HashMap::new();
-    let mut descendant_masks = HashMap::new();
-    let mut admin_masks = HashMap::new();
+    let num_words = (admin_actions.len() + 63) / 64;
 
-    compute_cdo_bit_masks_unbounded(
-        &dag_context,
-        &admin_actions,
-        &mut ancestor_masks,
-        &mut descendant_masks,
-        &mut admin_masks,
-    );
+    let (and_masks, desc_masks, id_to_idx) =
+        compute_cdo_bit_masks_unbounded(&dag_context, &admin_actions);
 
     let sorted_events = sort_cdo_events(&conflicted_events.values().collect::<Vec<_>>());
 
     let mut dropped_ids = BTreeSet::new();
     let mut active_admin_actions: Vec<&LeanEvent> = Vec::new();
 
+    // Build map from admin_id to its index in admin_actions
+    let mut admin_to_pos = HashMap::new();
+    for (i, &admin_id) in admin_actions.iter().enumerate() {
+        admin_to_pos.insert(admin_id, i);
+    }
+
     // Pass 2: Direct Domination (Sender / Type Restriction) in priority order
     for event in &sorted_events {
         let mut is_dominated = false;
+        let event_id = event.event_id.as_str();
 
-        for admin_ev in &active_admin_actions {
-            if admin_ev.restricts_event(event) {
-                let admin_id = admin_ev.event_id.as_str();
-                let event_id = event.event_id.as_str();
+        if let Some(&ev_idx) = id_to_idx.get(event_id) {
+            for admin_ev in &active_admin_actions {
+                if admin_ev.restricts_event(event) {
+                    let admin_id = admin_ev.event_id.as_str();
+                    if let Some(&orig_idx) = admin_to_pos.get(admin_id) {
+                        let word = orig_idx / 64;
+                        let bit = 1u64 << (orig_idx % 64);
 
-                let mut is_ancestor_admin = false;
-                let mut is_descendant_admin = false;
-                if let Some(admin_mask) = admin_masks.get(admin_id) {
-                    if let Some(ev_and) = ancestor_masks.get(event_id) {
-                        is_ancestor_admin = ev_and
-                            .iter()
-                            .zip(admin_mask.iter())
-                            .any(|(a, b)| (a & b) != 0);
+                        let is_ancestor_admin = (and_masks[ev_idx * num_words + word] & bit) != 0;
+                        let is_descendant_admin =
+                            (desc_masks[ev_idx * num_words + word] & bit) != 0;
+
+                        if !is_ancestor_admin && !is_descendant_admin {
+                            is_dominated = true;
+                            break;
+                        }
                     }
-                    if let Some(ev_desc) = descendant_masks.get(event_id) {
-                        is_descendant_admin = ev_desc
-                            .iter()
-                            .zip(admin_mask.iter())
-                            .any(|(a, b)| (a & b) != 0);
-                    }
-                }
-
-                if !is_ancestor_admin && !is_descendant_admin {
-                    is_dominated = true;
-                    break;
                 }
             }
         }
@@ -2036,13 +2017,36 @@ fn route_lattice_power_events<S1: core::hash::BuildHasher, S2: core::hash::Build
     }
 }
 
-fn fold_lattice_chunk<'a>(
+fn fold_lattice_chunk<'a, S: core::hash::BuildHasher>(
     chunk: &[&'a LeanEvent],
     mainline_distances: &HashMap<String, usize>,
     mainline_len: usize,
+    terminal_power_state: &BTreeMap<(String, Option<String>), String>,
+    auth_context: &HashMap<String, LeanEvent, S>,
+    sort_set: &HashMap<String, LeanEvent, S>,
+    version: StateResVersion,
+    create_ev: Option<&LeanEvent>,
 ) -> HashMap<(String, Option<String>), &'a LeanEvent> {
     let mut thread_res: HashMap<(String, Option<String>), &'a LeanEvent> = HashMap::new();
+    let mut local_auth_cache = HashMap::new();
+
     for &ev in chunk {
+        // 1. VALIDATE FIRST (Filters out Byzantine garbage/Supremum Deletion attacks)
+        let local_auth = compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache, version);
+        if !iterative_auth_ok(
+            ev,
+            terminal_power_state,
+            auth_context,
+            sort_set,
+            local_auth,
+            create_ev,
+            version,
+            false,
+        ) {
+            continue; // Drop unauthorized events before they can compete for the LUB!
+        }
+
+        // 2. NOW COMPETE FOR LUB
         let key = (ev.event_type.clone(), ev.state_key.clone());
 
         // O(1) Geodesic coordinate mapped from the precomputed distances
@@ -2067,7 +2071,7 @@ fn fold_lattice_chunk<'a>(
             } else if ev.origin_server_ts < current_winner.origin_server_ts {
                 false
             } else {
-                // Lexicographical flip fixed: LARGEST string wins.
+                // Lexicographical sort: LARGEST string wins.
                 ev.event_id > current_winner.event_id
             }
         } else {
@@ -2123,10 +2127,15 @@ fn merge_lattice_winners<'a>(
     }
 }
 
-fn compute_lattice_coordinatized_winners<'a>(
-    non_power_events: &'a HashMap<String, LeanEvent>,
+fn compute_lattice_coordinatized_winners<'a, S: core::hash::BuildHasher + Sync + Send>(
+    non_power_events: &'a HashMap<String, LeanEvent, S>,
     mainline_distances: &HashMap<String, usize>,
     mainline_len: usize,
+    terminal_power_state: &BTreeMap<(String, Option<String>), String>,
+    auth_context: &HashMap<String, LeanEvent, S>,
+    sort_set: &HashMap<String, LeanEvent, S>,
+    version: StateResVersion,
+    create_ev: Option<&LeanEvent>,
     key_winners: &mut HashMap<(String, Option<String>), &'a LeanEvent>,
 ) {
     #[cfg(feature = "std")]
@@ -2142,7 +2151,18 @@ fn compute_lattice_coordinatized_winners<'a>(
                 chunks
                     .into_iter()
                     .map(|chunk| {
-                        s.spawn(move || fold_lattice_chunk(chunk, mainline_distances, mainline_len))
+                        s.spawn(move || {
+                            fold_lattice_chunk(
+                                chunk,
+                                mainline_distances,
+                                mainline_len,
+                                terminal_power_state,
+                                auth_context,
+                                sort_set,
+                                version,
+                                create_ev,
+                            )
+                        })
                     })
                     .collect::<Vec<_>>()
                     .into_iter()
@@ -2160,7 +2180,16 @@ fn compute_lattice_coordinatized_winners<'a>(
 
     // Fallback/Sequential
     let events_vec: Vec<&'a LeanEvent> = non_power_events.values().collect();
-    let thread_res = fold_lattice_chunk(&events_vec, mainline_distances, mainline_len);
+    let thread_res = fold_lattice_chunk(
+        &events_vec,
+        mainline_distances,
+        mainline_len,
+        terminal_power_state,
+        auth_context,
+        sort_set,
+        version,
+        create_ev,
+    );
     merge_lattice_winners(key_winners, thread_res, mainline_distances, mainline_len);
 }
 
@@ -2168,7 +2197,7 @@ fn compute_lattice_coordinatized_winners<'a>(
 /// Employs O(1) Causal Coordinatization Projection and Commutative Join-Semilattice folding
 /// to completely eliminate sequential sorting and backward graph traversals.
 #[must_use]
-pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
+pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher + Sync + Send, S2: core::hash::BuildHasher + Sync + Send>(
     unconflicted_state: &BTreeMap<(String, Option<String>), String>,
     mut conflicted_events: HashMap<String, LeanEvent, S1>,
     auth_context: &HashMap<String, LeanEvent, S2>,
@@ -2251,29 +2280,17 @@ pub fn resolve_lattice_coordinatized<S1: core::hash::BuildHasher, S2: core::hash
         &non_power_events,
         &mainline_distances,
         mainline.len(),
+        &resolved,
+        auth_context,
+        sort_set,
+        version,
+        create_ev,
         &mut key_winners,
     );
 
-    // Apply the winners to the resolved state (fully authenticated) in topological order
-    let mut sorted_winners: Vec<(&(String, Option<String>), &LeanEvent)> =
-        key_winners.iter().map(|(k, &v)| (k, v)).collect();
-    sorted_winners.sort_by_key(|(_, ev)| ev.depth);
-
-    for (key, ev) in sorted_winners {
-        let local_auth =
-            compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache, version);
-        if iterative_auth_ok(
-            ev,
-            &resolved,
-            auth_context,
-            sort_set,
-            local_auth,
-            create_ev,
-            version,
-            false,
-        ) {
-            resolved.insert((*key).clone(), ev.event_id.clone());
-        }
+    // Apply the winners directly to the resolved state (guaranteed fully authenticated)
+    for (key, ev) in key_winners {
+        resolved.insert(key, ev.event_id.clone());
     }
 
     let mut final_resolved = unconflicted_state.clone();
