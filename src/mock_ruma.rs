@@ -66,11 +66,7 @@ where
     for map in state_sets {
         for (key, id) in map {
             if counts.get(&(key, id)).copied().unwrap_or(0) == num_maps {
-                let state_key_opt = if key.1.is_empty() {
-                    None
-                } else {
-                    Some(key.1.clone())
-                };
+                let state_key_opt = Some(key.1.clone());
                 unconflicted_state.insert((key.0.to_string(), state_key_opt), id.to_string());
             } else {
                 conflicted_keys.insert(key.clone());
