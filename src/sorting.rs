@@ -76,17 +76,17 @@ pub(crate) fn get_power_level_from_auth_chain<S: core::hash::BuildHasher>(
 
     if let Some(pl_ev) = pl_event {
         if let Some(users) = pl_ev.content.get("users").and_then(|u| u.as_object()) {
-            if let Some(pl) = users.get(&event.sender).and_then(serde_json::Value::as_i64) {
-                return pl;
+            if let Some(pl_val) = users.get(&event.sender) {
+                if let Some(pl) = crate::types::coerce_json_to_i64(pl_val) {
+                    return pl;
+                }
             }
         }
 
-        if let Some(default_pl) = pl_ev
-            .content
-            .get("users_default")
-            .and_then(serde_json::Value::as_i64)
-        {
-            return default_pl;
+        if let Some(default_pl_val) = pl_ev.content.get("users_default") {
+            if let Some(default_pl) = crate::types::coerce_json_to_i64(default_pl_val) {
+                return default_pl;
+            }
         }
         return 0; // Default if PL event exists but no users_default
     }

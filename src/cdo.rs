@@ -252,14 +252,15 @@ fn process_direct_domination_chunks<S1: core::hash::BuildHasher>(
         .map(|&(idx, ref ev)| (idx, ev))
         .collect();
 
+    // Convert id_to_idx keys to match the &str representation expected by helper (stable across chunks)
+    let id_to_idx_refs: HashMap<&str, usize> = adj
+        .id_to_idx
+        .iter()
+        .map(|(k, &v)| (k.as_str(), v))
+        .collect();
+
     for chunk in prioritized.admin_actions.chunks(chunk_size) {
         let chunk_refs: Vec<&str> = chunk.iter().map(alloc::string::String::as_str).collect();
-
-        // Convert id_to_idx keys to match the &str representation expected by helper
-        let mut id_to_idx_refs = HashMap::with_capacity(adj.id_to_idx.len());
-        for (k, &v) in &adj.id_to_idx {
-            id_to_idx_refs.insert(k.as_str(), v);
-        }
 
         compute_cdo_bit_masks_chunk(
             &chunk_refs,
