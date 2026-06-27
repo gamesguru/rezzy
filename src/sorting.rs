@@ -154,9 +154,9 @@ pub(crate) fn memoized_auth_distance<'a, S: core::hash::BuildHasher>(
 ///
 /// Will panic if graph invariants are violated during topological sorting (specifically, if
 /// the in-degree map lacks an entry for a child event during the queue processing phase).
-pub fn lean_kahn_sort_detailed<S: core::hash::BuildHasher>(
-    events: &HashMap<String, LeanEvent, S>,
-    auth_context: &HashMap<String, LeanEvent, S>,
+pub fn lean_kahn_sort_detailed<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
+    events: &HashMap<String, LeanEvent, S1>,
+    auth_context: &HashMap<String, LeanEvent, S2>,
     create_ev: Option<&LeanEvent>,
     version: StateResVersion,
 ) -> KahnSortResult {
@@ -273,9 +273,9 @@ pub fn lean_kahn_sort_detailed<S: core::hash::BuildHasher>(
 /// Will panic if graph invariants are violated (specifically, if an event returned
 /// in the cycle-breaking list of stuck nodes is missing from the input `events` map).
 #[must_use]
-pub fn lean_kahn_sort<S: core::hash::BuildHasher>(
-    events: &HashMap<String, LeanEvent, S>,
-    auth_context: &HashMap<String, LeanEvent, S>,
+pub fn lean_kahn_sort<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
+    events: &HashMap<String, LeanEvent, S1>,
+    auth_context: &HashMap<String, LeanEvent, S2>,
     create_ev: Option<&LeanEvent>,
     version: StateResVersion,
 ) -> Vec<String> {

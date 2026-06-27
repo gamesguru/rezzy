@@ -2329,4 +2329,175 @@ mod tests {
             "A"
         );
     }
+
+    #[test]
+    fn test_msc4297_problem_b_regression() {
+        let mut conflicted_events = HashMap::new();
+        let mut auth_context = HashMap::new();
+
+        // 1. Create room
+        let create_ev = LeanEvent {
+            event_id: "$create".into(),
+            event_type: "m.room.create".into(),
+            state_key: Some(String::new()),
+            sender: "@alice:example.com".into(),
+            ..Default::default()
+        };
+        auth_context.insert("$create".into(), create_ev.clone());
+
+        // 2. Alice joins
+        let join_alice = LeanEvent {
+            event_id: "$join_alice".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@alice:example.com".into()),
+            sender: "@alice:example.com".into(),
+            auth_events: vec!["$create".into()],
+            ..Default::default()
+        };
+        auth_context.insert("$join_alice".into(), join_alice.clone());
+
+        // 3. Alice sets Bob to PL 50 (Unconflicted Ancestral PL Event)
+        let pl_alice = LeanEvent {
+            event_id: "$pl_alice".into(),
+            event_type: "m.room.power_levels".into(),
+            state_key: Some(String::new()),
+            sender: "@alice:example.com".into(),
+            content: serde_json::json!({
+                "users": { "@bob:example.com": 50 }
+            }),
+            auth_events: vec!["$create".into(), "$join_alice".into()],
+            ..Default::default()
+        };
+        auth_context.insert("$pl_alice".into(), pl_alice.clone());
+
+        // 4. Bob joins
+        let join_bob = LeanEvent {
+            event_id: "$join_bob".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@bob:example.com".into()),
+            sender: "@bob:example.com".into(),
+            auth_events: vec!["$create".into(), "$pl_alice".into()],
+            ..Default::default()
+        };
+        auth_context.insert("$join_bob".into(), join_bob.clone());
+
+        // 5. Conflicted Power Level events sent by Bob
+        let pl_bob_1 = LeanEvent {
+            event_id: "$pl_bob_1".into(),
+            event_type: "m.room.power_levels".into(),
+            state_key: Some(String::new()),
+            sender: "@bob:example.com".into(),
+            content: serde_json::json!({
+                "users": { "@bob:example.com": 50, "@charlie:example.com": 50 }
+            }),
+            auth_events: vec!["$pl_alice".into(), "$join_bob".into()],
+            ..Default::default()
+        };
+
+        let pl_bob_2 = LeanEvent {
+            event_id: "$pl_bob_2".into(),
+            event_type: "m.room.power_levels".into(),
+            state_key: Some(String::new()),
+            sender: "@bob:example.com".into(),
+            content: serde_json::json!({
+                "users": { "@bob:example.com": 50, "@charlie:example.com": 100 }
+            }),
+            auth_events: vec!["$pl_alice".into(), "$join_bob".into()],
+            ..Default::default()
+        };
+
+        conflicted_events.insert("$pl_bob_1".into(), pl_bob_1);
+        conflicted_events.insert("$pl_bob_2".into(), pl_bob_2);
+
+        // Resolve using V2_1 (MSC4297). This starts with an empty state.
+        // It must successfully route and validate `$pl_alice` in order to authorize Bob's PL events.
+        let resolved = resolve_lean(
+            BTreeMap::new(),
+            conflicted_events,
+            &auth_context,
+            StateResVersion::V2_1,
+        );
+
+        // Assert that a power levels event is resolved, showing the ancestral PL event was correctly processed
+        assert!(resolved.contains_key(&("m.room.power_levels".into(), Some(String::new()))));
+    }
+
+    #[test]
+    fn test_self_leave_vs_kick_classification() {
+        // Self-leave (sender == state_key): not a kick/ban
+        let self_leave = LeanEvent {
+            event_id: "1".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@alice:example.com".into()),
+            sender: "@alice:example.com".into(),
+            content: serde_json::json!({ "membership": "leave" }),
+            ..Default::default()
+        };
+        assert!(!self_leave.is_ban_or_kick());
+
+        // Kick (sender != state_key): is a kick/ban
+        let kick = LeanEvent {
+            event_id: "2".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@bob:example.com".into()),
+            sender: "@alice:example.com".into(),
+            content: serde_json::json!({ "membership": "leave" }),
+            ..Default::default()
+        };
+        assert!(kick.is_ban_or_kick());
+
+        // Ban (sender != state_key): is a kick/ban
+        let ban = LeanEvent {
+            event_id: "3".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@bob:example.com".into()),
+            sender: "@alice:example.com".into(),
+            content: serde_json::json!({ "membership": "ban" }),
+            ..Default::default()
+        };
+        assert!(ban.is_ban_or_kick());
+    }
+
+    #[test]
+    fn test_create_event_determinism() {
+        use rezzy::types::find_deterministic_create_event;
+        let mut conflicted = HashMap::new();
+        let auth = HashMap::new();
+
+        let c1 = LeanEvent {
+            event_id: "$create_1".into(),
+            event_type: "m.room.create".into(),
+            state_key: Some(String::new()),
+            ..Default::default()
+        };
+        let c2 = LeanEvent {
+            event_id: "$create_2".into(),
+            event_type: "m.room.create".into(),
+            state_key: Some(String::new()),
+            ..Default::default()
+        };
+
+        conflicted.insert("$create_1".into(), c1);
+        conflicted.insert("$create_2".into(), c2);
+
+        let chosen = find_deterministic_create_event(&auth, &conflicted);
+        assert!(chosen.is_some());
+        // Should choose lexicographically smaller id deterministically
+        assert_eq!(chosen.unwrap().event_id, "$create_1");
+    }
+
+    #[test]
+    fn test_overflowing_power_level_coercion_values_clamping() {
+        use rezzy::types::coerce_json_to_i64;
+
+        // Value beyond standard i64 should return None securely so it defaults/clamps to 0 (minimum power/most secure fallback)
+        let large_positive = serde_json::Value::String("99999999999999999999999999999".to_string());
+        let clamped_pos = coerce_json_to_i64(&large_positive);
+        assert_eq!(clamped_pos, None);
+
+        let large_negative =
+            serde_json::Value::String("-99999999999999999999999999999".to_string());
+        let clamped_neg = coerce_json_to_i64(&large_negative);
+        assert_eq!(clamped_neg, None);
+    }
 }

@@ -1,5 +1,18 @@
-use crate::cdo::apply_cdo_filter;
-use crate::sorting::{build_mainline, lean_kahn_sort, precompute_mainline_positions};
+// Copyright 2026 Shane Jaroch
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use crate::sorting::{build_mainline, precompute_mainline_positions};
 use crate::state_at::{compute_local_auth, iterative_auth_ok, LocalAuthCache};
 use crate::types::{find_deterministic_create_event, LeanEvent, StateResVersion};
 use crate::HashMap;
@@ -7,35 +20,17 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub(crate) fn route_power_events<S: core::hash::BuildHasher>(
-    sort_set: &HashMap<String, LeanEvent, S>,
-    power_events: &mut HashMap<String, LeanEvent>,
-    non_power_events: &mut HashMap<String, LeanEvent>,
-) {
-    for (id, ev) in sort_set {
-        if ev.event_type == "m.room.member"
-            || ev.event_type == "m.room.create"
-            || ev.event_type == "m.room.power_levels"
-            || ev.event_type == "m.room.join_rules"
-        {
-            power_events.insert(id.clone(), ev.clone());
-        } else {
-            non_power_events.insert(id.clone(), ev.clone());
-        }
-    }
-}
-
-fn is_lattice_winner_better(
+#[must_use]
+pub fn is_lattice_winner_better<S: core::hash::BuildHasher>(
     ev: &LeanEvent,
     current_winner: &LeanEvent,
-    mainline_distances: &HashMap<String, usize>,
+    mainline_distances: &HashMap<String, usize, S>,
     mainline_len: usize,
 ) -> bool {
     let ev_pos = mainline_distances
         .get(&ev.event_id)
         .copied()
         .unwrap_or(mainline_len);
-
     let winner_pos = mainline_distances
         .get(&current_winner.event_id)
         .copied()
@@ -53,6 +48,24 @@ fn is_lattice_winner_better(
     } else {
         // Lexicographical sort: LARGEST string wins.
         ev.event_id > current_winner.event_id
+    }
+}
+
+fn update_winner_if_better<'a>(
+    winners: &mut HashMap<(String, Option<String>), &'a LeanEvent>,
+    key: (String, Option<String>),
+    ev: &'a LeanEvent,
+    mainline_distances: &HashMap<String, usize>,
+    mainline_len: usize,
+) {
+    let is_better = if let Some(current_winner) = winners.get(&key) {
+        is_lattice_winner_better(ev, current_winner, mainline_distances, mainline_len)
+    } else {
+        true // First event for this state key inherently wins
+    };
+
+    if is_better {
+        winners.insert(key, ev);
     }
 }
 
@@ -89,16 +102,7 @@ fn fold_lattice_chunk<'a, S2: core::hash::BuildHasher, S3: core::hash::BuildHash
 
         // 2. NOW COMPETE FOR LUB
         let key = (ev.event_type.clone(), ev.state_key.clone());
-
-        let is_better = if let Some(current_winner) = thread_res.get(&key) {
-            is_lattice_winner_better(ev, current_winner, mainline_distances, mainline_len)
-        } else {
-            true // First event for this state key inherently wins
-        };
-
-        if is_better {
-            thread_res.insert(key, ev);
-        }
+        update_winner_if_better(&mut thread_res, key, ev, mainline_distances, mainline_len);
     }
     thread_res
 }
@@ -110,19 +114,11 @@ fn merge_lattice_winners<'a>(
     mainline_len: usize,
 ) {
     for (key, ev) in thread_res {
-        let is_better = if let Some(current_winner) = key_winners.get(&key) {
-            is_lattice_winner_better(ev, current_winner, mainline_distances, mainline_len)
-        } else {
-            true // First event for this state key inherently wins
-        };
-
-        if is_better {
-            key_winners.insert(key, ev);
-        }
+        update_winner_if_better(key_winners, key, ev, mainline_distances, mainline_len);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::arithmetic_side_effects)]
 fn compute_lattice_coordinatized_winners<
     'a,
     S1: core::hash::BuildHasher + Sync + Send,
@@ -142,76 +138,75 @@ fn compute_lattice_coordinatized_winners<
     #[cfg(feature = "std")]
     {
         let num_threads = std::thread::available_parallelism().map_or(4, core::num::NonZero::get);
+        let v: Vec<&'a LeanEvent> = non_power_events.values().collect();
+        let chunks: Vec<&[&'a LeanEvent]> = v
+            .chunks((non_power_events.len() + num_threads - 1).max(1))
+            .collect();
 
-        let min_depth = non_power_events
-            .values()
-            .map(|e| e.depth)
-            .min()
-            .unwrap_or(0);
-        let max_depth = non_power_events
-            .values()
-            .map(|e| e.depth)
-            .max()
-            .unwrap_or(1);
-        let width_heuristic = (non_power_events.len() as u64)
-            .checked_div((max_depth.saturating_sub(min_depth)).max(1))
-            .unwrap_or(0);
-
-        if num_threads > 1
-            && non_power_events.len() > 10_000
-            && width_heuristic >= num_threads as u64
-        {
-            let events_vec: Vec<&'a LeanEvent> = non_power_events.values().collect();
-            let chunk_size = events_vec.len().div_ceil(num_threads);
-
-            let chunks: Vec<&[&'a LeanEvent]> = events_vec.chunks(chunk_size).collect();
-            let results: Vec<_> = std::thread::scope(|s| {
-                chunks
-                    .into_iter()
-                    .map(|chunk| {
-                        s.spawn(move || {
-                            fold_lattice_chunk::<S2, S3>(
-                                chunk,
-                                mainline_distances,
-                                mainline_len,
-                                terminal_power_state,
-                                auth_context,
-                                sort_set,
-                                version,
-                                create_ev,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|h| h.join().unwrap())
-                    .collect()
-            });
-
-            // Reduce Phase
-            for thread_res in results {
-                merge_lattice_winners(key_winners, thread_res, mainline_distances, mainline_len);
+        let winners = std::sync::Mutex::new(HashMap::new());
+        std::thread::scope(|s| {
+            let mut handles = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+                let handle = s.spawn(|| {
+                    fold_lattice_chunk(
+                        chunk,
+                        mainline_distances,
+                        mainline_len,
+                        terminal_power_state,
+                        auth_context,
+                        sort_set,
+                        version,
+                        create_ev,
+                    )
+                });
+                handles.push(handle);
             }
-            return;
-        }
+            for handle in handles {
+                let thread_res = handle.join().unwrap();
+                let mut guard = winners.lock().unwrap();
+                merge_lattice_winners(&mut guard, thread_res, mainline_distances, mainline_len);
+            }
+        });
+        *key_winners = winners.into_inner().unwrap();
     }
-
-    // Fallback/Sequential
-    let events_vec: Vec<&'a LeanEvent> = non_power_events.values().collect();
-    let thread_res = fold_lattice_chunk::<S2, S3>(
-        &events_vec,
-        mainline_distances,
-        mainline_len,
-        terminal_power_state,
-        auth_context,
-        sort_set,
-        version,
-        create_ev,
-    );
-    merge_lattice_winners(key_winners, thread_res, mainline_distances, mainline_len);
+    #[cfg(not(feature = "std"))]
+    {
+        let chunk: Vec<&'a LeanEvent> = non_power_events.values().collect();
+        *key_winners = fold_lattice_chunk(
+            &chunk,
+            mainline_distances,
+            mainline_len,
+            terminal_power_state,
+            auth_context,
+            sort_set,
+            version,
+            create_ev,
+        );
+    }
 }
 
-/// A revolutionary, mathematically optimal O(C) Lattice-based State Resolution implementation.
+pub fn route_power_events<
+    S1: core::hash::BuildHasher,
+    S2: core::hash::BuildHasher,
+    S3: core::hash::BuildHasher,
+>(
+    sort_set: &HashMap<String, LeanEvent, S1>,
+    power_events: &mut HashMap<String, LeanEvent, S2>,
+    non_power_events: &mut HashMap<String, LeanEvent, S3>,
+) {
+    for (id, ev) in sort_set {
+        if ev.event_type == "m.room.member"
+            || ev.event_type == "m.room.create"
+            || ev.event_type == "m.room.power_levels"
+            || ev.event_type == "m.room.join_rules"
+        {
+            power_events.insert(id.clone(), ev.clone());
+        } else {
+            non_power_events.insert(id.clone(), ev.clone());
+        }
+    }
+}
+
 /// Employs O(1) Causal Coordinatization Projection and Commutative Join-Semilattice folding
 /// to completely eliminate sequential sorting and backward graph traversals.
 #[must_use]
@@ -219,27 +214,14 @@ pub fn resolve_lattice_coordinatized<
     S1: core::hash::BuildHasher + Sync + Send,
     S2: core::hash::BuildHasher + Sync + Send,
 >(
-    mut unconflicted_state: BTreeMap<(String, Option<String>), String>,
+    unconflicted_state: BTreeMap<(String, Option<String>), String>,
     mut conflicted_events: HashMap<String, LeanEvent, S1>,
     auth_context: &HashMap<String, LeanEvent, S2>,
     version: StateResVersion,
 ) -> BTreeMap<(String, Option<String>), String> {
-    let original_conflicted_keys: alloc::collections::BTreeSet<String> = conflicted_events.keys().cloned().collect();
-
-    // 1. CDO Filter Pre-Filtering: distilling the conflicted set into a safe, orthogonal set C_safe
-    if version == StateResVersion::V2_1_1 {
-        let filtered = apply_cdo_filter(&conflicted_events, auth_context);
-        conflicted_events.clear();
-        for (k, v) in filtered {
-            conflicted_events.insert(k, v);
-        }
-    }
-
-    let sort_context: HashMap<String, LeanEvent> = auth_context
-        .iter()
-        .chain(conflicted_events.iter())
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    let original_conflicted_keys =
+        crate::resolve::prepare_conflicted_and_keys(&mut conflicted_events, auth_context, version);
+    let sort_context = crate::resolve::build_sort_context(&conflicted_events, auth_context);
 
     let mut resolved = match version {
         StateResVersion::V2_1 | StateResVersion::V2_1_1 | StateResVersion::V2_2 => BTreeMap::new(),
@@ -253,76 +235,28 @@ pub fn resolve_lattice_coordinatized<
     let mut non_power_events = HashMap::new();
     route_power_events(sort_set, &mut power_events, &mut non_power_events);
 
-    // MSC4297 (v2.1+): The power events to be Kahn-sorted are the subset of the conflicted state subgraph
-    // of administrative types. To ensure non-conflicted ancestral power events (such as intermediate
-    // power levels events) are present in the empty initial resolved state map during iterative validation,
-    // we also route these types from the auth_context, restricted strictly to those that are part of the
-    // auth chain ancestry of actually conflicted power events.
-    if matches!(
+    crate::resolve::route_msc4297_ancestral_power_events(
+        &mut power_events,
+        auth_context,
+        &original_conflicted_keys,
         version,
-        StateResVersion::V2_1 | StateResVersion::V2_1_1 | StateResVersion::V2_2
-    ) {
-        let mut conflicted_power_ancestry = alloc::collections::BTreeSet::new();
-        let mut queue = alloc::collections::VecDeque::new();
-        for ev in power_events.values() {
-            for aid in &ev.auth_events {
-                queue.push_back(aid.clone());
-            }
-        }
-        while let Some(aid) = queue.pop_front() {
-            if conflicted_power_ancestry.insert(aid.clone()) {
-                if let Some(aev) = auth_context.get(&aid) {
-                    for parent_id in &aev.auth_events {
-                        queue.push_back(parent_id.clone());
-                    }
-                }
-            }
-        }
-
-        for (id, ev) in auth_context {
-            if !original_conflicted_keys.contains(id) && conflicted_power_ancestry.contains(id) {
-                if ev.event_type == "m.room.power_levels"
-                    || ev.event_type == "m.room.create"
-                    || ev.event_type == "m.room.join_rules"
-                {
-                    power_events.insert(id.clone(), ev.clone());
-                }
-            }
-        }
-    }
+    );
 
     let create_ev = find_deterministic_create_event(auth_context, sort_set);
 
     let mut local_auth_cache: LocalAuthCache = HashMap::new();
 
     // Power Phase remains sequential to establish the authoritative administrative framework
-    let sorted_power_ids = lean_kahn_sort(&power_events, &sort_context, create_ev, version);
-    for id in &sorted_power_ids {
-        if let Some(event) = sort_set.get(id).or_else(|| auth_context.get(id)) {
-            let local_auth = compute_local_auth(
-                event,
-                auth_context,
-                sort_set,
-                &mut local_auth_cache,
-                version,
-            );
-            if iterative_auth_ok(
-                event,
-                &resolved,
-                auth_context,
-                sort_set,
-                local_auth,
-                create_ev,
-                version,
-                true,
-            ) {
-                resolved.insert(
-                    (event.event_type.clone(), event.state_key.clone()),
-                    event.event_id.clone(),
-                );
-            }
-        }
-    }
+    crate::resolve::run_power_phase_iterative_checks(
+        &mut resolved,
+        &power_events,
+        &sort_context,
+        auth_context,
+        sort_set,
+        create_ev,
+        &mut local_auth_cache,
+        version,
+    );
 
     // Step 3: Build the power-level mainline for coordinatization
     let mainline = build_mainline(&resolved, &sort_context);
@@ -342,13 +276,13 @@ pub fn resolve_lattice_coordinatized<
         &mut key_winners,
     );
 
-    // Apply the winners directly to the resolved state (guaranteed fully authenticated)
-    for (key, ev) in key_winners {
-        resolved.insert(key, ev.event_id.clone());
+    let mut final_resolved = unconflicted_state;
+    for (k, ev) in key_winners {
+        final_resolved.insert(k, ev.event_id.clone());
     }
-
     for (k, v) in resolved {
-        unconflicted_state.insert(k, v);
+        final_resolved.insert(k, v);
     }
-    unconflicted_state
+    drop(conflicted_events);
+    final_resolved
 }

@@ -57,7 +57,7 @@ fn test_missing_event_id_fails_without_hashing() {
     let json_payload = json!({
         "type": "m.room.message",
         "sender": "@alice:example.com",
-        "origin_server_ts": 123456789,
+        "origin_server_ts": 123_456_789,
         "content": {
             "body": "Hello, world!"
         }

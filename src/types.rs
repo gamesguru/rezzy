@@ -425,7 +425,8 @@ impl PartialOrd for SortPriority<'_> {
     }
 }
 
-pub(crate) fn coerce_json_to_i64(pl: &Value) -> Option<i64> {
+#[must_use]
+pub fn coerce_json_to_i64(pl: &Value) -> Option<i64> {
     if let Some(i) = pl.as_i64() {
         return Some(i);
     }
@@ -440,7 +441,7 @@ pub(crate) fn coerce_json_to_i64(pl: &Value) -> Option<i64> {
     None
 }
 
-pub(crate) fn find_deterministic_create_event<
+pub fn find_deterministic_create_event<
     'a,
     S1: core::hash::BuildHasher,
     S2: core::hash::BuildHasher,

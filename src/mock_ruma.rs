@@ -100,15 +100,19 @@ where
     let mut conflicted_events = HashMap::new();
     let mut conflicted_state_set: StateMap<Vec<E::Id>> = StateMap::new();
 
+    let mut insert_if_missing = |id: &E::Id| {
+        let id_str = id.to_string();
+        if !conflicted_events.contains_key(&id_str) {
+            if let Some(ev) = fetch_event(id.borrow()) {
+                conflicted_events.insert(id_str.clone(), ruma_to_lean_event(&ev));
+            }
+        }
+    };
+
     for map in state_sets {
         for (key, id) in map {
             if conflicted_keys.contains(key) {
-                let id_str = id.to_string();
-                if !conflicted_events.contains_key(&id_str) {
-                    if let Some(ev) = fetch_event(id.borrow()) {
-                        conflicted_events.insert(id_str.clone(), ruma_to_lean_event(&ev));
-                    }
-                }
+                insert_if_missing(id);
                 let list = conflicted_state_set
                     .entry(key.clone())
                     .or_insert_with(Vec::new);
@@ -122,12 +126,7 @@ where
     if state_res_rules.begin_iterative_auth_checks_with_empty_state_map {
         if let Some(subgraph) = fetch_conflicted_state_subgraph(&conflicted_state_set) {
             for id in subgraph {
-                let id_str = id.to_string();
-                if !conflicted_events.contains_key(&id_str) {
-                    if let Some(ev) = fetch_event(id.borrow()) {
-                        conflicted_events.insert(id_str.clone(), ruma_to_lean_event(&ev));
-                    }
-                }
+                insert_if_missing(&id);
             }
         }
     }
