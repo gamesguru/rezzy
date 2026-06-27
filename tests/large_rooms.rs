@@ -240,8 +240,12 @@ fn test_large_room_10k_auth_chain() {
 
 #[test]
 fn test_real_room_42k_state_deserialization() {
-    let content =
-        std::fs::read_to_string("res/real_matrix_state.json").expect("real_matrix_state.json");
+    let path = "res/real_matrix_state.json";
+    if !std::path::Path::new(path).exists() {
+        println!("Skipping test: {path} not found");
+        return;
+    }
+    let content = std::fs::read_to_string(path).unwrap();
     let events: Vec<LeanEvent> = serde_json::from_str(&content).unwrap();
     assert!(
         events.len() > 40000,
@@ -256,9 +260,13 @@ fn test_real_room_42k_state_deserialization() {
 
 #[test]
 fn test_real_room_42k_power_level_coercion() {
+    let path = "res/real_matrix_state.json";
+    if !std::path::Path::new(path).exists() {
+        println!("Skipping test: {path} not found");
+        return;
+    }
     // The real room dump likely has string/float power levels from old Synapse versions.
-    let content =
-        std::fs::read_to_string("res/real_matrix_state.json").expect("real_matrix_state.json");
+    let content = std::fs::read_to_string(path).unwrap();
     let events: Vec<LeanEvent> = serde_json::from_str(&content).unwrap();
     // Find PL events and verify they deserialize without panicking
     let pl_events: Vec<_> = events
@@ -280,8 +288,12 @@ fn test_real_room_42k_power_level_coercion() {
 
 #[test]
 fn test_real_room_v2_1_deserialization() {
-    let content = std::fs::read_to_string("res/real_matrix_state_v2_1.json")
-        .expect("real_matrix_state_v2_1.json");
+    let path = "res/real_matrix_state_v2_1.json";
+    if !std::path::Path::new(path).exists() {
+        println!("Skipping test: {path} not found");
+        return;
+    }
+    let content = std::fs::read_to_string(path).unwrap();
     let val: serde_json::Value = serde_json::from_str(&content).unwrap();
     let events: Vec<LeanEvent> = if val.is_array() {
         serde_json::from_value(val).unwrap()

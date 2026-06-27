@@ -149,6 +149,10 @@ fn oracle_nheko_room_strict() {
 fn oracle_v2_1_room_strict() {
     // v12 room — uses state resolution v2.1
     let fixture_path = "res/real_matrix_state_v2_1.json";
+    if !std::path::Path::new(fixture_path).exists() {
+        println!("Skipping test: {fixture_path} not found");
+        return;
+    }
     let oracle_path = "res/expected/oracle_v2_1_room.json";
 
     let fixture_events = load_fixture(fixture_path);

@@ -82,10 +82,15 @@ fn main() {
         "res/expected/oracle_nheko_room.json",
         StateResVersion::V2,
     );
-    write_oracle(
-        "res/real_matrix_state_v2_1.json",
-        "res/expected/oracle_v2_1_room.json",
-        StateResVersion::V2_1,
-    );
+    let v21_path = "res/real_matrix_state_v2_1.json";
+    if std::path::Path::new(v21_path).exists() {
+        write_oracle(
+            v21_path,
+            "res/expected/oracle_v2_1_room.json",
+            StateResVersion::V2_1,
+        );
+    } else {
+        eprintln!("Skipping {v21_path} oracle regeneration (file not found).");
+    }
     eprintln!("Done. Review `git diff res/expected/` before committing.");
 }
