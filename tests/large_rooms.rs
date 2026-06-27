@@ -488,7 +488,7 @@ fn test_unredacted_spam_storm_v2_1_1() {
 
     let start_lattice = std::time::Instant::now();
     let resolved_lattice = ruma_lean::resolve_lattice_coordinatized(
-        &BTreeMap::new(),
+        BTreeMap::new(),
         map.clone(),
         &map,
         StateResVersion::V2_1_1,

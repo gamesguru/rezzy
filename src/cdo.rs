@@ -1,3 +1,17 @@
+// Copyright 2026 Shane Jaroch
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use crate::types::LeanEvent;
 use crate::HashMap;
 use alloc::collections::BTreeSet;
@@ -51,74 +65,51 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
     false
 }
 
-#[allow(clippy::manual_div_ceil, clippy::needless_range_loop)]
-fn compute_cdo_bit_masks_unbounded<'a, S: core::hash::BuildHasher>(
-    dag_context: &'a HashMap<String, LeanEvent, S>,
-    admin_actions: &[&'a str],
-) -> (Vec<u64>, Vec<u64>, HashMap<&'a str, usize>) {
-    let n = dag_context.len();
-    let num_words = admin_actions.len().div_ceil(64);
+const WORDS_PER_CHUNK: usize = 4; // 256 admin actions per pass/chunk
 
-    // 1. Assign O(1) integer indices and sort topologically by depth
-    let mut id_to_idx = HashMap::with_capacity(n);
-    let mut sorted_events = Vec::with_capacity(n);
+#[allow(clippy::needless_range_loop)]
+fn compute_cdo_bit_masks_chunk<'a, S: core::hash::BuildHasher>(
+    admin_chunk: &[&'a str],
+    id_to_idx: &HashMap<&'a str, usize, S>,
+    sorted_events: &[(usize, &LeanEvent)],
+    parents: &[Vec<usize>],
+    children: &[Vec<usize>],
+    and_masks: &mut [u64],
+    desc_masks: &mut [u64],
+) {
+    and_masks.fill(0);
+    desc_masks.fill(0);
 
-    for (id, ev) in dag_context {
-        let idx = id_to_idx.len();
-        id_to_idx.insert(id.as_str(), idx);
-        sorted_events.push((idx, ev));
-    }
-    // Depth-ascending gives us a free topological sort!
-    sorted_events.sort_unstable_by_key(|&(_, ev)| ev.depth);
-
-    // 2. Build integer-based adjacency lists
-    let mut parents: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
-    let mut children: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
-    for &(u, ev) in &sorted_events {
-        for p_id in ev.prev_events.iter().chain(ev.auth_events.iter()) {
-            if let Some(&v) = id_to_idx.get(p_id.as_str()) {
-                parents[u].push(v);
-                children[v].push(u);
-            }
-        }
-    }
-
-    // 3. Flat 1D Arrays (Zero inner heap allocations)
-    let mut and_masks = alloc::vec![0u64; n * num_words];
-    let mut desc_masks = alloc::vec![0u64; n * num_words];
-
-    for (i, &admin_id) in admin_actions.iter().enumerate() {
+    for (i, &admin_id) in admin_chunk.iter().enumerate() {
         if let Some(&idx) = id_to_idx.get(admin_id) {
             let word = i / 64;
             let bit = 1u64 << (i % 64);
-            and_masks[idx * num_words + word] |= bit;
-            desc_masks[idx * num_words + word] |= bit;
+            and_masks[idx * WORDS_PER_CHUNK + word] |= bit;
+            desc_masks[idx * WORDS_PER_CHUNK + word] |= bit;
         }
     }
 
-    // 4. Forward Sweep (Ancestors) - Pure array iteration
-    for &(u, _) in &sorted_events {
-        let u_base = u * num_words;
+    // Forward Sweep (Ancestors) - Pure array iteration
+    for &(u, _) in sorted_events {
+        let u_base = u * WORDS_PER_CHUNK;
         for &p in &parents[u] {
-            let p_base = p * num_words;
-            for w in 0..num_words {
+            let p_base = p * WORDS_PER_CHUNK;
+            for w in 0..WORDS_PER_CHUNK {
                 and_masks[u_base + w] |= and_masks[p_base + w];
             }
         }
     }
 
-    // 5. Backward Sweep (Descendants) - Pure array iteration
+    // Backward Sweep (Descendants) - Pure array iteration
     for &(u, _) in sorted_events.iter().rev() {
-        let u_base = u * num_words;
+        let u_base = u * WORDS_PER_CHUNK;
         for &c in &children[u] {
-            let c_base = c * num_words;
-            for w in 0..num_words {
+            let c_base = c * WORDS_PER_CHUNK;
+            for w in 0..WORDS_PER_CHUNK {
                 desc_masks[u_base + w] |= desc_masks[c_base + w];
             }
         }
     }
-
-    (and_masks, desc_masks, id_to_idx)
 }
 
 fn sort_cdo_events(events: &[&LeanEvent]) -> Vec<LeanEvent> {
@@ -164,60 +155,110 @@ pub fn apply_cdo_filter<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    // Identify all admin actions in conflicted events
-    let admin_actions: Vec<&str> = conflicted_events
-        .values()
-        .filter(|e| e.is_ban_or_kick() || e.is_demotion() || e.is_lockdown())
-        .map(|e| e.event_id.as_str())
-        .collect();
+    let n = dag_context.len();
 
-    let num_words = admin_actions.len().div_ceil(64);
+    // 1. Assign O(1) integer indices and sort topologically by depth
+    let mut id_to_idx = HashMap::with_capacity(n);
+    let mut sorted_events = Vec::with_capacity(n);
 
-    let (and_masks, desc_masks, id_to_idx) =
-        compute_cdo_bit_masks_unbounded(&dag_context, &admin_actions);
+    for (id, ev) in &dag_context {
+        let idx = id_to_idx.len();
+        id_to_idx.insert(id.as_str(), idx);
+        sorted_events.push((idx, ev));
+    }
+    // Depth-ascending gives us a free topological sort!
+    sorted_events.sort_unstable_by_key(|&(_, ev)| ev.depth);
 
-    let sorted_events = sort_cdo_events(&conflicted_events.values().collect::<Vec<_>>());
-
-    let mut dropped_ids = BTreeSet::new();
-    let mut active_admin_actions: Vec<&LeanEvent> = Vec::new();
-
-    // Build map from admin_id to its index in admin_actions
-    let mut admin_to_pos = HashMap::new();
-    for (i, &admin_id) in admin_actions.iter().enumerate() {
-        admin_to_pos.insert(admin_id, i);
+    // 2. Build integer-based adjacency lists
+    let mut parents: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
+    let mut children: Vec<Vec<usize>> = alloc::vec![Vec::new(); n];
+    for &(u, ev) in &sorted_events {
+        for p_id in ev.prev_events.iter().chain(ev.auth_events.iter()) {
+            if let Some(&v) = id_to_idx.get(p_id.as_str()) {
+                parents[u].push(v);
+                children[v].push(u);
+            }
+        }
     }
 
-    // Pass 2: Direct Domination (Sender / Type Restriction) in priority order
-    for event in &sorted_events {
-        let mut is_dominated = false;
-        let event_id = event.event_id.as_str();
+    // Identify and sort all admin actions in conflicted events by priority descending
+    let admin_events_to_sort: Vec<&LeanEvent> = conflicted_events
+        .values()
+        .filter(|e| e.is_ban_or_kick() || e.is_demotion() || e.is_lockdown())
+        .collect();
+    let sorted_admin_events = sort_cdo_events(&admin_events_to_sort);
+    let admin_actions: Vec<&str> = sorted_admin_events.iter().map(|e| e.event_id.as_str()).collect();
 
-        if let Some(&ev_idx) = id_to_idx.get(event_id) {
-            for admin_ev in &active_admin_actions {
-                if admin_ev.restricts_event(event) {
-                    let admin_id = admin_ev.event_id.as_str();
-                    if let Some(&orig_idx) = admin_to_pos.get(admin_id) {
-                        let word = orig_idx / 64;
-                        let bit = 1u64 << (orig_idx % 64);
+    let sorted_events_by_priority = sort_cdo_events(&conflicted_events.values().collect::<Vec<_>>());
 
-                        let is_ancestor_admin = (and_masks[ev_idx * num_words + word] & bit) != 0;
-                        let is_descendant_admin =
-                            (desc_masks[ev_idx * num_words + word] & bit) != 0;
+    // Build a map of event_id to its position in the priority-sorted list
+    let mut priority_pos = HashMap::new();
+    for (pos, ev) in sorted_events_by_priority.iter().enumerate() {
+        priority_pos.insert(ev.event_id.as_str(), pos);
+    }
 
-                        if !is_ancestor_admin && !is_descendant_admin {
-                            is_dominated = true;
-                            break;
+    let mut dropped_ids = BTreeSet::new();
+
+    // Allocate a strict O(N * WORDS_PER_CHUNK) matrix once, reused forever across passes
+    let mut and_masks = alloc::vec![0u64; n * WORDS_PER_CHUNK];
+    let mut desc_masks = alloc::vec![0u64; n * WORDS_PER_CHUNK];
+
+    let chunk_size = WORDS_PER_CHUNK * 64; // 256 actions per pass
+
+    for chunk in admin_actions.chunks(chunk_size) {
+        compute_cdo_bit_masks_chunk(
+            chunk,
+            &id_to_idx,
+            &sorted_events,
+            &parents,
+            &children,
+            &mut and_masks,
+            &mut desc_masks,
+        );
+
+        // Build a map of active admin actions in this chunk to their relative index within the chunk
+        let mut chunk_admin_to_pos = HashMap::new();
+        for (i, &admin_id) in chunk.iter().enumerate() {
+            if !dropped_ids.contains(admin_id) {
+                chunk_admin_to_pos.insert(admin_id, i);
+            }
+        }
+
+        // Check for direct domination against all non-dropped events
+        for event in &sorted_events_by_priority {
+            let event_id = event.event_id.as_str();
+            if dropped_ids.contains(event_id) {
+                continue;
+            }
+
+            if let Some(&ev_idx) = id_to_idx.get(event_id) {
+                for (&admin_id, &orig_idx) in &chunk_admin_to_pos {
+                    // Only higher-priority admin actions (occurring earlier in the sorted list) can dominate
+                    if let Some(&admin_pos) = priority_pos.get(admin_id) {
+                        if let Some(&event_pos) = priority_pos.get(event_id) {
+                            if admin_pos >= event_pos {
+                                continue;
+                            }
+                        }
+                    }
+
+                    if let Some(admin_ev) = conflicted_events.get(admin_id) {
+                        if admin_ev.restricts_event(event) {
+                            let word = orig_idx / 64;
+                            let bit = 1u64 << (orig_idx % 64);
+
+                            let is_ancestor_admin = (and_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
+                            let is_descendant_admin =
+                                (desc_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
+
+                            if !is_ancestor_admin && !is_descendant_admin {
+                                dropped_ids.insert(event.event_id.clone());
+                                break;
+                            }
                         }
                     }
                 }
             }
-        }
-
-        if is_dominated {
-            dropped_ids.insert(event.event_id.clone());
-        } else if event.is_ban_or_kick() || event.is_demotion() || event.is_lockdown() {
-            // Event survived and is an admin action, so it is active for subsequent events
-            active_admin_actions.push(event);
         }
     }
 

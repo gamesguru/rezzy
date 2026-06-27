@@ -219,7 +219,7 @@ pub fn resolve_lattice_coordinatized<
     S1: core::hash::BuildHasher + Sync + Send,
     S2: core::hash::BuildHasher + Sync + Send,
 >(
-    unconflicted_state: &BTreeMap<(String, Option<String>), String>,
+    mut unconflicted_state: BTreeMap<(String, Option<String>), String>,
     mut conflicted_events: HashMap<String, LeanEvent, S1>,
     auth_context: &HashMap<String, LeanEvent, S2>,
     version: StateResVersion,
@@ -314,9 +314,8 @@ pub fn resolve_lattice_coordinatized<
         resolved.insert(key, ev.event_id.clone());
     }
 
-    let mut final_resolved = unconflicted_state.clone();
     for (k, v) in resolved {
-        final_resolved.insert(k, v);
+        unconflicted_state.insert(k, v);
     }
-    final_resolved
+    unconflicted_state
 }
