@@ -127,6 +127,16 @@ pub(crate) fn memoized_auth_distance<'a, S: core::hash::BuildHasher>(
     min_dist
 }
 
+/// Detailed Kahn's Topological Sort algorithm for event power resolution.
+///
+/// This function performs a reverse topological sort on a set of events, placing
+/// descendants before their ancestors. It returns diagnostic details about any cycles
+/// if they are detected.
+///
+/// # Panics
+///
+/// Will panic if graph invariants are violated during topological sorting (specifically, if
+/// the in-degree map lacks an entry for a child event during the queue processing phase).
 pub fn lean_kahn_sort_detailed<S: core::hash::BuildHasher>(
     events: &HashMap<String, LeanEvent, S>,
     auth_context: &HashMap<String, LeanEvent, S>,
