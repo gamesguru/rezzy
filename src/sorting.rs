@@ -100,6 +100,7 @@ pub(crate) fn memoized_auth_distance<'a, S: core::hash::BuildHasher>(
     auth_context: &'a HashMap<String, LeanEvent, S>,
     create_id: &str,
     memo: &mut HashMap<&'a str, u64>,
+    in_progress: &mut alloc::collections::BTreeSet<&'a str>,
 ) -> u64 {
     if curr_id == create_id {
         return 0;
@@ -109,20 +110,27 @@ pub(crate) fn memoized_auth_distance<'a, S: core::hash::BuildHasher>(
         return dist;
     }
 
+    if !in_progress.insert(curr_id) {
+        return u64::MAX;
+    }
+
     let Some(ev) = auth_context.get(curr_id) else {
-        return 0;
+        in_progress.remove(curr_id);
+        return u64::MAX;
     };
 
     if ev.auth_events.is_empty() {
-        return 0;
+        in_progress.remove(curr_id);
+        return u64::MAX;
     }
 
     let mut min_dist = u64::MAX;
     for parent in &ev.auth_events {
-        let p_dist = memoized_auth_distance(parent, auth_context, create_id, memo);
+        let p_dist = memoized_auth_distance(parent, auth_context, create_id, memo, in_progress);
         min_dist = min_dist.min(p_dist.saturating_add(1));
     }
 
+    in_progress.remove(curr_id);
     memo.insert(curr_id, min_dist);
     min_dist
 }
@@ -177,9 +185,16 @@ pub fn lean_kahn_sort_detailed<S: core::hash::BuildHasher>(
         events
             .keys()
             .map(|id| {
+                let mut in_progress = alloc::collections::BTreeSet::new();
                 (
                     id.clone(),
-                    memoized_auth_distance(id, auth_context, create_id, &mut memo),
+                    memoized_auth_distance(
+                        id,
+                        auth_context,
+                        create_id,
+                        &mut memo,
+                        &mut in_progress,
+                    ),
                 )
             })
             .collect()
@@ -345,12 +360,18 @@ pub(crate) fn precompute_mainline_positions<S: ::core::hash::BuildHasher>(
     }
 
     // Flood-fill outward through reverse auth-edges.
-    // First assignment wins (minimum position) because we process in BFS order
-    // starting from position 0.
+    // Since positions can be updated if a smaller/closer mainline index is found,
+    // we allow re-queuing children when a better position propagates.
     while let Some((id, pos)) = queue.pop_front() {
+        if let Some(&current_best) = dist.get(id) {
+            if pos > current_best {
+                continue;
+            }
+        }
         if let Some(children) = reverse_adj.get(id) {
             for &child_id in children {
-                if !dist.contains_key(child_id) {
+                let current_child_best = dist.get(child_id).copied();
+                if current_child_best.is_none() || pos < current_child_best.unwrap() {
                     dist.insert(child_id.into(), pos);
                     queue.push_back((child_id, pos));
                 }

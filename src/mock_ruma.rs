@@ -13,7 +13,20 @@ fn ruma_to_lean_event<E: Event>(ev: &E) -> LeanEvent {
         serde_json::from_str(ev.content().get()).unwrap_or(serde_json::Value::Null);
     let power_level = if let Some(pl) = content_val.get("power_level") {
         pl.as_i64()
-            .or_else(|| pl.as_str().and_then(|s| s.parse().ok()))
+            .or_else(|| pl.as_u64().and_then(|u| i64::try_from(u).ok()))
+            .or_else(|| {
+                pl.as_f64()
+                    .and_then(|f| f.trunc().to_string().parse::<i64>().ok())
+            })
+            .or_else(|| {
+                pl.as_str().and_then(|s| {
+                    s.parse::<i64>().ok().or_else(|| {
+                        s.parse::<f64>()
+                            .ok()
+                            .and_then(|f| f.trunc().to_string().parse::<i64>().ok())
+                    })
+                })
+            })
             .unwrap_or(0)
     } else {
         0

@@ -98,6 +98,10 @@ pub fn merge_event_sets(
                 .unwrap_or("")
                 .to_owned();
 
+            if event_id.is_empty() {
+                continue;
+            }
+
             file_ids.insert(event_id.clone());
             if seen_ids.insert(event_id) {
                 merged.push(val.clone());

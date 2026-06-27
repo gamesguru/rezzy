@@ -286,14 +286,29 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
         ..Default::default()
     };
 
-    let pl_ev = LeanEvent {
-        event_id: "$pl".to_string(),
+    let pl_alice = LeanEvent {
+        event_id: "$pl_alice".to_string(),
         event_type: "m.room.power_levels".to_string(),
         state_key: Some(String::new()),
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
             "users": { "@alice:example.com": 60, "@bob:example.com": 50 },
+            "events_default": 0,
+            "state_default": 50
+        }),
+        auth_events: vec!["$create".to_string()],
+        ..Default::default()
+    };
+
+    let pl_bob = LeanEvent {
+        event_id: "$pl_bob".to_string(),
+        event_type: "m.room.power_levels".to_string(),
+        state_key: Some(String::new()),
+        sender: "@admin:example.com".to_string(),
+        origin_server_ts: 200,
+        content: serde_json::json!({
+            "users": { "@alice:example.com": 50, "@bob:example.com": 60 },
             "events_default": 0,
             "state_default": 50
         }),
@@ -308,7 +323,7 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
         sender: "@alice:example.com".to_string(),
         origin_server_ts: 300,
         content: serde_json::json!({ "membership": "ban" }),
-        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        auth_events: vec!["$create".to_string(), "$pl_alice".to_string()],
         ..Default::default()
     };
 
@@ -319,13 +334,14 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
         sender: "@bob:example.com".to_string(),
         origin_server_ts: 300,
         content: serde_json::json!({ "membership": "ban" }),
-        auth_events: vec!["$create".to_string(), "$pl".to_string()],
+        auth_events: vec!["$create".to_string(), "$pl_bob".to_string()],
         ..Default::default()
     };
 
     let mut auth_context = std::collections::HashMap::new();
     auth_context.insert(create_ev.event_id.clone(), create_ev);
-    auth_context.insert(pl_ev.event_id.clone(), pl_ev);
+    auth_context.insert(pl_alice.event_id.clone(), pl_alice);
+    auth_context.insert(pl_bob.event_id.clone(), pl_bob);
 
     let mut conflicted_events = std::collections::HashMap::new();
     conflicted_events.insert(alice_ban.event_id.clone(), alice_ban);

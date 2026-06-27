@@ -67,7 +67,6 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
 
 const WORDS_PER_CHUNK: usize = 4; // 256 admin actions per pass/chunk
 
-#[allow(clippy::needless_range_loop)]
 fn compute_cdo_bit_masks_chunk<'a, S: core::hash::BuildHasher>(
     admin_chunk: &[&'a str],
     id_to_idx: &HashMap<&'a str, usize, S>,
@@ -168,7 +167,11 @@ fn build_adjacency_structures<S1: core::hash::BuildHasher, S2: core::hash::Build
         id_to_idx.insert(id.clone(), idx);
         sorted_events.push((idx, ev.clone()));
     }
-    sorted_events.sort_unstable_by_key(|(_, ev)| ev.depth);
+    sorted_events.sort_unstable_by(|(_, a), (_, b)| {
+        a.depth
+            .cmp(&b.depth)
+            .then_with(|| a.event_id.cmp(&b.event_id))
+    });
 
     let mut parents = alloc::vec![Vec::new(); n];
     let mut children = alloc::vec![Vec::new(); n];

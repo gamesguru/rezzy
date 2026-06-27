@@ -184,7 +184,7 @@ fn compute_lattice_coordinatized_winners<
                     })
                     .collect::<Vec<_>>()
                     .into_iter()
-                    .filter_map(|h| h.join().ok())
+                    .map(|h| h.join().unwrap())
                     .collect()
             });
 
@@ -225,10 +225,12 @@ pub fn resolve_lattice_coordinatized<
     version: StateResVersion,
 ) -> BTreeMap<(String, Option<String>), String> {
     // 1. CDO Filter Pre-Filtering: distilling the conflicted set into a safe, orthogonal set C_safe
-    let filtered = apply_cdo_filter(&conflicted_events, auth_context);
-    conflicted_events.clear();
-    for (k, v) in filtered {
-        conflicted_events.insert(k, v);
+    if version == StateResVersion::V2_1_1 {
+        let filtered = apply_cdo_filter(&conflicted_events, auth_context);
+        conflicted_events.clear();
+        for (k, v) in filtered {
+            conflicted_events.insert(k, v);
+        }
     }
 
     let sort_context: HashMap<String, LeanEvent> = auth_context

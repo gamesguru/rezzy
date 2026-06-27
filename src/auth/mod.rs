@@ -427,9 +427,9 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
                 {
                     let current_sender_pl =
                         get_sender_power_level(&current_member_event.sender, state);
-                    if sender_pl <= current_sender_pl {
+                    if sender_pl < current_sender_pl {
                         return Err(AuthError::InsufficientPowerLevel {
-                            required: current_sender_pl + 1,
+                            required: current_sender_pl,
                             actual: sender_pl,
                             event_type: "member_pl_greater_than_current_sender".into(),
                         });

@@ -36,7 +36,7 @@ pub fn resolve_lean<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
 
     // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
     let mut resolved = match version {
-        StateResVersion::V2_1 | StateResVersion::V2_2 => BTreeMap::new(),
+        StateResVersion::V2_1 | StateResVersion::V2_1_1 | StateResVersion::V2_2 => BTreeMap::new(),
         _ => unconflicted_state.clone(),
     };
 

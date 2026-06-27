@@ -18,7 +18,7 @@ pub fn compute_v2_1_conflicted_subgraph<S: core::hash::BuildHasher>(
     auth_graph: &HashMap<String, LeanEvent, S>,
     conflicted_set: &[String],
 ) -> HashMap<String, LeanEvent> {
-    compute_v2_1_conflicted_subgraph_bounded(auth_graph, conflicted_set, Some(2000)).subgraph
+    compute_v2_1_conflicted_subgraph_bounded(auth_graph, conflicted_set, None).subgraph
 }
 
 /// Bounded version of conflicted subgraph computation.
@@ -41,7 +41,7 @@ pub fn compute_v2_1_conflicted_subgraph_bounded<S: core::hash::BuildHasher>(
     while let Some((node, depth)) = b_stack.pop() {
         // Anti-DoS: stop expanding beyond max depth
         if let Some(max_depth) = max_auth_depth {
-            if depth > max_depth {
+            if depth >= max_depth {
                 continue;
             }
         }

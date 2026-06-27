@@ -12,8 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use serde::{Deserialize, Serialize};
@@ -86,21 +85,37 @@ where
         }
 
         fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> {
-            Ok(i64::try_from(v).unwrap_or(i64::MAX))
+            let i = i64::try_from(v).unwrap_or(MAX_POWER_LEVEL);
+            Ok(i.min(MAX_POWER_LEVEL))
         }
 
         fn visit_f64<E: de::Error>(self, v: f64) -> Result<i64, E> {
-            let s = format!("{v:.0}");
-            s.parse::<i64>().map_err(E::custom)
+            if v.is_nan() {
+                return Ok(0);
+            }
+            let truncated_str = v.trunc().to_string();
+            if let Ok(parsed) = truncated_str.parse::<i64>() {
+                Ok(parsed.min(MAX_POWER_LEVEL))
+            } else if v > 0.0 {
+                Ok(MAX_POWER_LEVEL)
+            } else {
+                Ok(i64::MIN)
+            }
         }
 
         fn visit_str<E: de::Error>(self, v: &str) -> Result<i64, E> {
             if let Ok(i) = v.parse::<i64>() {
-                return Ok(i);
+                return Ok(i.min(MAX_POWER_LEVEL));
             }
             if let Ok(f) = v.parse::<f64>() {
-                if let Ok(i) = format!("{f:.0}").parse::<i64>() {
-                    return Ok(i);
+                if !f.is_nan() {
+                    let truncated_str = f.trunc().to_string();
+                    if let Ok(parsed) = truncated_str.parse::<i64>() {
+                        return Ok(parsed.min(MAX_POWER_LEVEL));
+                    } else if f > 0.0 {
+                        return Ok(MAX_POWER_LEVEL);
+                    }
+                    return Ok(i64::MIN);
                 }
             }
             Ok(0)
@@ -224,7 +239,7 @@ impl<'de> Deserialize<'de> for LeanEvent {
                 hasher.update(canonical_json.as_bytes());
                 let hash = hasher.finalize();
 
-                format!("${}", URL_SAFE_NO_PAD.encode(hash))
+                alloc::format!("${}", URL_SAFE_NO_PAD.encode(hash))
             }
             #[cfg(not(feature = "hashing"))]
             {
@@ -318,7 +333,7 @@ impl LeanEvent {
         if self.is_demotion() {
             if let Some(users) = self.content.get("users").and_then(|u| u.as_object()) {
                 if let Some(pl) = users.get(sender) {
-                    if let Some(pl_int) = pl.as_i64() {
+                    if let Some(pl_int) = coerce_json_to_i64(pl) {
                         return pl_int == 0;
                     }
                 }
@@ -425,4 +440,33 @@ impl PartialOrd for SortPriority<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+pub(crate) fn coerce_json_to_i64(pl: &Value) -> Option<i64> {
+    if let Some(i) = pl.as_i64() {
+        return Some(i);
+    }
+    if let Some(u) = pl.as_u64() {
+        return i64::try_from(u).ok();
+    }
+    if let Some(f) = pl.as_f64() {
+        if !f.is_nan() {
+            if let Ok(parsed) = f.trunc().to_string().parse::<i64>() {
+                return Some(parsed);
+            }
+        }
+    }
+    if let Some(s) = pl.as_str() {
+        if let Ok(i) = s.parse::<i64>() {
+            return Some(i);
+        }
+        if let Ok(f) = s.parse::<f64>() {
+            if !f.is_nan() {
+                if let Ok(parsed) = f.trunc().to_string().parse::<i64>() {
+                    return Some(parsed);
+                }
+            }
+        }
+    }
+    None
 }
