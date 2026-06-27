@@ -293,7 +293,7 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
         sender: "@admin:example.com".to_string(),
         origin_server_ts: 200,
         content: serde_json::json!({
-            "users": { "@alice:example.com": 50, "@bob:example.com": 50 },
+            "users": { "@alice:example.com": 60, "@bob:example.com": 50 },
             "events_default": 0,
             "state_default": 50
         }),

@@ -398,6 +398,47 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
         _ => {}
     }
 
+    // If target_user != event.sender and the transition is a kick, ban, or unban (membership is leave or ban),
+    // check sender power level against target user and existing membership sender.
+    if target_user != event.sender && (new_membership == "leave" || new_membership == "ban") {
+        let sender_pl = get_sender_power_level(&event.sender, state);
+
+        // 1. Sender power level must be strictly greater than target power level.
+        let target_pl = get_sender_power_level(target_user, state);
+        if sender_pl <= target_pl {
+            return Err(AuthError::InsufficientPowerLevel {
+                required: target_pl + 1,
+                actual: sender_pl,
+                event_type: "member_pl_greater_than_target".into(),
+            });
+        }
+
+        // 2. If the target has a current active membership (joined, invited, or banned),
+        // sender power level must be strictly greater than the power level of the user who set the current membership.
+        if let Some(current_member_event) = state.get_event("m.room.member", Some(target_user)) {
+            if let Some(current_membership) = current_member_event
+                .content
+                .get("membership")
+                .and_then(|m| m.as_str())
+            {
+                if current_membership == "join"
+                    || current_membership == "invite"
+                    || current_membership == "ban"
+                {
+                    let current_sender_pl =
+                        get_sender_power_level(&current_member_event.sender, state);
+                    if sender_pl <= current_sender_pl {
+                        return Err(AuthError::InsufficientPowerLevel {
+                            required: current_sender_pl + 1,
+                            actual: sender_pl,
+                            event_type: "member_pl_greater_than_current_sender".into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
