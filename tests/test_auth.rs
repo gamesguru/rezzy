@@ -1,5 +1,5 @@
-use ruma_lean::auth::*;
-use ruma_lean::*;
+use rezzy::auth::*;
+use rezzy::*;
 use serde_json::json;
 
 fn make_event(

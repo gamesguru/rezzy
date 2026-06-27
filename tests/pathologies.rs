@@ -1,4 +1,4 @@
-use ruma_lean::{resolve_lean, LeanEvent, StateResVersion};
+use rezzy::{resolve_lean, LeanEvent, StateResVersion};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
@@ -153,7 +153,7 @@ fn simulate_federation_lag(
     }
 
     loop {
-        let result = ruma_lean::compute_v2_1_conflicted_subgraph_bounded(
+        let result = rezzy::compute_v2_1_conflicted_subgraph_bounded(
             &known_graph,
             conflicted_event_ids,
             max_depth,

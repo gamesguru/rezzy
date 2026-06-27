@@ -14,7 +14,7 @@
 
 use crate::network::fetch_room_state;
 use crate::Args;
-use ruma_lean::{LeanEvent, StateResVersion};
+use rezzy::{LeanEvent, StateResVersion};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read};
@@ -179,7 +179,7 @@ pub fn load_or_fetch_input_value(args: &Args) -> anyhow::Result<serde_json::Valu
                 let events = load_file(path)?;
                 file_sets.push((label, events));
             }
-            let merged = ruma_lean::merge_event_sets(&file_sets, args.debug, args.quiet)?;
+            let merged = rezzy::merge_event_sets(&file_sets, args.debug, args.quiet)?;
             Ok(serde_json::Value::Array(merged))
         }
     } else {
@@ -349,9 +349,9 @@ pub fn resolve_parent_states(
         }
 
         let auth_context =
-            ruma_lean::compute_v2_1_conflicted_subgraph(events_map, &conflicted_state_set);
+            rezzy::compute_v2_1_conflicted_subgraph(events_map, &conflicted_state_set);
 
-        let resolved = ruma_lean::resolve_lean(
+        let resolved = rezzy::resolve_lean(
             unconflicted_state,
             conflicted_events,
             &auth_context,
@@ -366,7 +366,7 @@ pub fn partition_and_resolve_state(
     events_map: &HashMap<String, LeanEvent>,
     state_maps: &[HashMap<(String, Option<String>), String>],
     version: StateResVersion,
-    auth_graph: &ruma_lean::auth::roaring::AuthGraph,
+    auth_graph: &rezzy::auth::roaring::AuthGraph,
 ) -> (
     BTreeMap<(String, Option<String>), String>,
     std::time::Duration,
@@ -438,15 +438,14 @@ pub fn partition_and_resolve_state(
     }
 
     if version == StateResVersion::V2_1 || version == StateResVersion::V2_1_1 {
-        let subgraph =
-            ruma_lean::compute_v2_1_conflicted_subgraph(events_map, &conflicted_state_set);
+        let subgraph = rezzy::compute_v2_1_conflicted_subgraph(events_map, &conflicted_state_set);
         for (id, ev) in subgraph {
             conflicted_events.insert(id, ev);
         }
     }
 
     let final_state_map =
-        ruma_lean::resolve_lean(unconflicted_state, conflicted_events, events_map, version);
+        rezzy::resolve_lean(unconflicted_state, conflicted_events, events_map, version);
 
     let duration = start.elapsed();
     (final_state_map, duration)
@@ -481,7 +480,7 @@ pub fn apply_global_power_levels(
     let create_ev = events_map
         .values()
         .find(|ev| ev.event_type == "m.room.create");
-    let sorted_power_ids = ruma_lean::lean_kahn_sort(&power_events, events_map, create_ev, version);
+    let sorted_power_ids = rezzy::lean_kahn_sort(&power_events, events_map, create_ev, version);
     let mut resolved_power_state = std::collections::BTreeMap::new();
     for id in sorted_power_ids {
         if let Some(ev) = power_events.get(&id) {

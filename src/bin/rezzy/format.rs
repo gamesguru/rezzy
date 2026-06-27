@@ -14,7 +14,7 @@
 
 use crate::utils::{compute_state_hash, epoch_days_to_ymd, resolve_parent_states, SharedStateMap};
 use crate::{Args, OutputFormat};
-use ruma_lean::{LeanEvent, StateResVersion};
+use rezzy::{LeanEvent, StateResVersion};
 use std::collections::{BTreeMap, HashMap};
 
 pub struct FormattingContext<'a> {

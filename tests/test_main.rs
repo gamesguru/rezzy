@@ -1,4 +1,4 @@
-use ruma_lean::merge_event_sets;
+use rezzy::merge_event_sets;
 use serde_json::json;
 
 fn ev(id: &str, depth: u64) -> serde_json::Value {

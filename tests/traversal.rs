@@ -1,5 +1,5 @@
 #![allow(clippy::too_many_lines, clippy::type_complexity, clippy::similar_names)]
-use ruma_lean::{resolve_lean, LeanEvent, StateResVersion};
+use rezzy::{resolve_lean, LeanEvent, StateResVersion};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 
@@ -347,11 +347,11 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
     conflicted_events.insert(alice_ban.event_id.clone(), alice_ban);
     conflicted_events.insert(bob_ban.event_id.clone(), bob_ban);
 
-    let resolved = ruma_lean::resolve_lean(
+    let resolved = rezzy::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        ruma_lean::StateResVersion::V2_1_1,
+        rezzy::StateResVersion::V2_1_1,
     );
 
     let bob_member_key = (
@@ -459,11 +459,11 @@ fn test_v2_1_1_fixes_invite_lock() {
     // V2.0 supplemented ALL state events, meaning the `admin_lock` (invite-only) event
     // is pulled into the auth overlay. The historical user's join is then evaluated against
     // the "invite" rules and rightfully REJECTED, permanently locking them out!
-    let resolved_v2 = ruma_lean::resolve_lean(
+    let resolved_v2 = rezzy::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events.clone(),
         &auth_context,
-        ruma_lean::StateResVersion::V2,
+        rezzy::StateResVersion::V2,
     );
     let member_key = (
         "m.room.member".to_string(),
@@ -478,11 +478,11 @@ fn test_v2_1_1_fixes_invite_lock() {
     // Resolution under V2.1 (The Scalpel)
     // V2.1 only supplemented PLs. It successfully ignored `join_rules`, so the historical
     // user's join survived!
-    let resolved_v21 = ruma_lean::resolve_lean(
+    let resolved_v21 = rezzy::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events.clone(),
         &auth_context,
-        ruma_lean::StateResVersion::V2_1,
+        rezzy::StateResVersion::V2_1,
     );
     assert_eq!(
         resolved_v21.get(&member_key).unwrap(),
@@ -494,11 +494,11 @@ fn test_v2_1_1_fixes_invite_lock() {
     // V2.1.1 supplements PLs and Bans, but NEVER `join_rules`.
     // Therefore, `$hist_join` is evaluated against its local auth chain (`$public`),
     // and is rightfully ACCEPTED into the resolved state!
-    let resolved_v211 = ruma_lean::resolve_lean(
+    let resolved_v211 = rezzy::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        ruma_lean::StateResVersion::V2_1_1,
+        rezzy::StateResVersion::V2_1_1,
     );
 
     assert_eq!(
@@ -590,11 +590,11 @@ fn test_v2_1_1_cve_demotion_evasion() {
     // --- V2.1 SECURELY BLOCKS THE ATTACK ---
     // V2.1 resolves PLs first (picking the demotion). When validating Eve's attack,
     // V2.1 overlays the consensus PL (demotion). Eve is PL 0. Name change requires 50. REJECTED.
-    let resolved_v21 = ruma_lean::resolve_lean(
+    let resolved_v21 = rezzy::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events.clone(),
         &auth_context,
-        ruma_lean::StateResVersion::V2_1,
+        rezzy::StateResVersion::V2_1,
     );
     let name_key = ("m.room.name".to_string(), Some(String::new()));
     assert!(
@@ -605,11 +605,11 @@ fn test_v2_1_1_cve_demotion_evasion() {
     // --- V2.1.1 DEFEATS THE ATTACK ---
     // V2.1.1 strictly enforces 1-hop security and supplements the demotion.
     // Therefore, Eve is caught and her attack is rightfully rejected!
-    let resolved_v211 = ruma_lean::resolve_lean(
+    let resolved_v211 = rezzy::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        ruma_lean::StateResVersion::V2_1_1,
+        rezzy::StateResVersion::V2_1_1,
     );
     assert!(
         !resolved_v211.contains_key(&name_key),
@@ -702,11 +702,11 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
     conflicted_events.insert("$bob_name_change".to_string(), bob_name_change);
 
     // Run V2.1 Resolution (Stock)
-    let resolved_v21 = ruma_lean::resolve_lean(
+    let resolved_v21 = rezzy::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events.clone(),
         &auth_context,
-        ruma_lean::StateResVersion::V2_1,
+        rezzy::StateResVersion::V2_1,
     );
 
     // Alice's ban has PL 100, so Kahn sort evaluates it FIRST. It is added to the resolved state.
@@ -728,11 +728,11 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
     );
 
     // Run V2.1.1 Resolution (The V3 Fix)
-    let resolved_v211 = ruma_lean::resolve_lean(
+    let resolved_v211 = rezzy::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        ruma_lean::StateResVersion::V2_1_1,
+        rezzy::StateResVersion::V2_1_1,
     );
 
     // V2.1.1 REJECTS Bob's concurrent name change!
@@ -786,11 +786,11 @@ fn test_v2_1_strictness_future_v3_should_pass() {
     let mut conflicted_events = std::collections::HashMap::new();
     conflicted_events.insert("$bob_join".to_string(), bob_join);
 
-    let resolved_v21 = ruma_lean::resolve_lean(
+    let resolved_v21 = rezzy::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events.clone(),
         &auth_context,
-        ruma_lean::StateResVersion::V2_1,
+        rezzy::StateResVersion::V2_1,
     );
 
     // V2.1 Rightfully Fails: It enforces the 1-hop strictness. Without "$jr" in the auth chain,
@@ -966,11 +966,11 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
     let (auth_context, conflicted_events, unconflicted_state) = make_ghost_moderator_events();
 
     // Run V2.2 (CDO Enabled / State Res v2.2)
-    let resolved_v211 = ruma_lean::resolve_lean(
+    let resolved_v211 = rezzy::resolve_lean(
         unconflicted_state,
         conflicted_events,
         &auth_context,
-        ruma_lean::StateResVersion::V2_1_1,
+        rezzy::StateResVersion::V2_1_1,
     );
 
     let nexy_member_key = (
@@ -1095,11 +1095,11 @@ fn test_v2_1_1_anomaly_02_admin_lockout() {
     );
 
     // Run V2.1.1 Resolution (CDO Enabled)
-    let resolved_v211 = ruma_lean::resolve_lean(
+    let resolved_v211 = rezzy::resolve_lean(
         unconflicted_state,
         conflicted_events,
         &auth_context,
-        ruma_lean::StateResVersion::V2_1_1,
+        rezzy::StateResVersion::V2_1_1,
     );
 
     let spammer_key = (
@@ -1197,11 +1197,11 @@ fn test_v2_1_spec_compliant_step_4_supplementation() {
     conflicted_events.insert("$bob_topic_change".to_string(), bob_topic_change);
 
     // Run V2.1 Resolution (Fixed & Spec-Compliant)
-    let resolved_v21 = ruma_lean::resolve_lean(
+    let resolved_v21 = rezzy::resolve_lean(
         std::collections::BTreeMap::new(),
         conflicted_events,
         &auth_context,
-        ruma_lean::StateResVersion::V2_1,
+        rezzy::StateResVersion::V2_1,
     );
 
     // Bob's ban must be resolved first in Step 2.

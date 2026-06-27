@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! ruma-lean: A high-performance, Spec-compliant Matrix State Resolution Engine.
+//! rezzy: A high-performance, Spec-compliant Matrix State Resolution Engine.
 
 #![no_std]
 

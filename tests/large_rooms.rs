@@ -13,7 +13,7 @@ extern crate std;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use ruma_lean::{resolve_lean, LeanEvent, StateResVersion};
+use rezzy::{resolve_lean, LeanEvent, StateResVersion};
 use std::collections::HashMap;
 
 /// Load a JSON fixture file into a Vec<LeanEvent>.
@@ -45,7 +45,7 @@ const FIXTURE_DIR: &str = "res/ruma_upstream";
 fn sort_and_verify(events: &[LeanEvent], version: StateResVersion) -> Vec<String> {
     let map = to_event_map(events);
     let create_ev = events.iter().find(|ev| ev.event_type == "m.room.create");
-    let result = ruma_lean::lean_kahn_sort_detailed(&map, &map, create_ev, version);
+    let result = rezzy::lean_kahn_sort_detailed(&map, &map, create_ev, version);
     assert!(result.is_ok(), "Cycle detected during sort");
     result.into_sorted()
 }
@@ -100,7 +100,7 @@ fn test_benchmark_1k_resolution_determinism() {
 
 #[test]
 fn test_ruma_bootstrap_auth_chain() {
-    use ruma_lean::auth::{check_auth_chain, RoomState};
+    use rezzy::auth::{check_auth_chain, RoomState};
 
     let events = load_fixture(&format!("{FIXTURE_DIR}/bootstrap-public-chat.json"));
     let (accepted, rejected) = check_auth_chain(&events, &RoomState::new());
@@ -200,13 +200,13 @@ fn test_large_room_10k_subgraph_bounded() {
     assert!(!pl_events.is_empty(), "Should have PL events");
     // Test bounded subgraph on the first 10 PL events
     pl_events.truncate(10);
-    let bounded = ruma_lean::compute_v2_1_conflicted_subgraph_bounded(&map, &pl_events, Some(5));
+    let bounded = rezzy::compute_v2_1_conflicted_subgraph_bounded(&map, &pl_events, Some(5));
     assert!(
         !bounded.subgraph.is_empty(),
         "Bounded subgraph should contain events"
     );
     // Unbounded should be >= bounded
-    let full = ruma_lean::compute_v2_1_conflicted_subgraph_bounded(&map, &pl_events, None);
+    let full = rezzy::compute_v2_1_conflicted_subgraph_bounded(&map, &pl_events, None);
     assert!(
         full.subgraph.len() >= bounded.subgraph.len(),
         "Unbounded subgraph ({}) should be >= bounded ({})",
@@ -217,7 +217,7 @@ fn test_large_room_10k_subgraph_bounded() {
 
 #[test]
 fn test_large_room_10k_auth_chain() {
-    use ruma_lean::auth::{check_auth_chain, RoomState};
+    use rezzy::auth::{check_auth_chain, RoomState};
 
     let events = load_large_room();
     let (accepted, _rejected) = check_auth_chain(&events, &RoomState::new());
@@ -487,7 +487,7 @@ fn test_unredacted_spam_storm_v2_1_1() {
     );
 
     let start_lattice = std::time::Instant::now();
-    let resolved_lattice = ruma_lean::resolve_lattice_coordinatized(
+    let resolved_lattice = rezzy::resolve_lattice_coordinatized(
         BTreeMap::new(),
         map.clone(),
         &map,

@@ -18,7 +18,7 @@ mod utils;
 
 use clap::{Parser, ValueEnum};
 use format::{format_cli_output, FormattingContext};
-use ruma_lean::{LeanEvent, StateResVersion};
+use rezzy::{LeanEvent, StateResVersion};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -130,12 +130,11 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
 
     let state_maps = compute_state_maps(&heads, &events_map, &raw_map);
 
-    if version != ruma_lean::StateResVersion::V2_1 && version != ruma_lean::StateResVersion::V2_1_1
-    {
+    if version != rezzy::StateResVersion::V2_1 && version != rezzy::StateResVersion::V2_1_1 {
         apply_global_power_levels(&mut events_map, &creator_user_id, version);
     }
 
-    let auth_graph = ruma_lean::auth::roaring::AuthGraph::build(&events_map);
+    let auth_graph = rezzy::auth::roaring::AuthGraph::build(&events_map);
 
     let (final_state_map, duration) =
         partition_and_resolve_state(&heads, &events_map, &state_maps, version, &auth_graph);

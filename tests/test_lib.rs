@@ -8,7 +8,7 @@ mod tests {
     use alloc::string::ToString;
     use alloc::vec;
     use core::cmp::Ordering;
-    use ruma_lean::*;
+    use rezzy::*;
 
     #[cfg(not(feature = "std"))]
     use hashbrown::HashMap;
@@ -1790,7 +1790,7 @@ mod tests {
 
     #[test]
     fn test_coverage_booster_auth_cases() {
-        use ruma_lean::auth::{check_auth, check_auth_chain, AuthError, RoomState};
+        use rezzy::auth::{check_auth, check_auth_chain, AuthError, RoomState};
         use serde_json::json;
 
         // 1. Format every single variant of AuthError to ensure 100% Display coverage

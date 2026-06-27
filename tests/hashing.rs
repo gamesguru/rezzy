@@ -1,4 +1,4 @@
-use ruma_lean::LeanEvent;
+use rezzy::LeanEvent;
 use serde_json::json;
 
 #[cfg(feature = "hashing")]
