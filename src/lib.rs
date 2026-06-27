@@ -21,6 +21,7 @@ extern crate alloc;
 pub mod auth;
 pub mod cdo;
 pub mod lattice;
+#[cfg(feature = "cli")]
 pub mod merge;
 pub mod resolve;
 pub mod sorting;
@@ -33,6 +34,7 @@ pub mod mock_ruma;
 
 pub use cdo::*;
 pub use lattice::*;
+#[cfg(feature = "cli")]
 pub use merge::*;
 pub use resolve::*;
 pub use sorting::*;
