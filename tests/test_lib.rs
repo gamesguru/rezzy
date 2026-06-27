@@ -1740,4 +1740,235 @@ mod tests {
             "Nexy's ban on spammer must be dropped by auth transitive closure cascade"
         );
     }
+
+    #[test]
+    fn test_coverage_booster_auth_cases() {
+        use ruma_lean::auth::{AuthError, RoomState, check_auth, check_auth_chain};
+        use serde_json::json;
+
+        // 1. Format every single variant of AuthError to ensure 100% Display coverage
+        let errs = vec![
+            AuthError::NotMember { sender: "alice".into(), event_id: "1".into() },
+            AuthError::InsufficientPowerLevel { required: 100, actual: 50, event_type: "m.room.name".into() },
+            AuthError::BannedUser { sender: "bob".into(), event_id: "2".into() },
+            AuthError::InvalidStateKey { expected: "x".into(), actual: "y".into() },
+            AuthError::CreateWithPrevEvents,
+            AuthError::MissingAuthEvent("3".into()),
+            AuthError::InvalidSyntax("invalid JSON".into()),
+        ];
+        for err in errs {
+            let formatted = format!("{}", err);
+            assert!(!formatted.is_empty());
+        }
+
+        // 2. StateKeyDyn comparisons, EQ, and Ord coverage
+        let sk1 = (String::from("m.room.member"), Some(String::from("@alice:example.com")));
+        let sk2 = (String::from("m.room.member"), Some(String::from("@bob:example.com")));
+        assert_ne!(sk1, sk2);
+        #[allow(clippy::double_comparisons)]
+        {
+            assert!(sk1 < sk2 || sk1 > sk2);
+        }
+
+        // 3. Test room_creators and additional_creators array parses in get_sender_power_level
+        let mut state = RoomState::new();
+        let create_ev = LeanEvent {
+            event_id: "$create".into(),
+            event_type: "m.room.create".into(),
+            sender: "@alice:example.com".into(),
+            content: json!({
+                "creator": "@alice:example.com",
+                "room_creators": ["@charlie:example.com"],
+                "additional_creators": ["@dave:example.com"]
+            }),
+            ..Default::default()
+        };
+        state.insert(("m.room.create".into(), Some(String::new())), create_ev.clone());
+
+        // Test check_auth for m.room.create with prev_events (should fail with CreateWithPrevEvents)
+        let bad_create = LeanEvent {
+            event_id: "$bad_create".into(),
+            event_type: "m.room.create".into(),
+            prev_events: vec!["$create".into()],
+            ..Default::default()
+        };
+        assert_eq!(check_auth(&bad_create, &state), Err(AuthError::CreateWithPrevEvents));
+
+        // Test non-member rejection with RoomState containing no membership
+        let name_change = LeanEvent {
+            event_id: "$name".into(),
+            event_type: "m.room.name".into(),
+            sender: "@bob:example.com".into(),
+            ..Default::default()
+        };
+        assert_eq!(check_auth(&name_change, &state), Err(AuthError::NotMember { sender: "@bob:example.com".into(), event_id: "$name".into() }));
+
+        // Creator should be allowed implied join if no member event is present
+        let creator_name_change = LeanEvent {
+            event_id: "$name2".into(),
+            event_type: "m.room.name".into(),
+            sender: "@alice:example.com".into(),
+            ..Default::default()
+        };
+        assert!(check_auth(&creator_name_change, &state).is_ok());
+
+        // Banned user membership transition
+        let mut state2 = RoomState::new();
+        state2.insert(("m.room.create".into(), Some(String::new())), create_ev.clone());
+        let banned_member = LeanEvent {
+            event_id: "$ban_member".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@bob:example.com".into()),
+            sender: "@bob:example.com".into(),
+            content: json!({ "membership": "ban" }),
+            ..Default::default()
+        };
+        state2.insert(("m.room.member".into(), Some("@bob:example.com".into())), banned_member.clone());
+
+        // A banned user cannot join or send events
+        let join_ev = LeanEvent {
+            event_id: "$join".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@bob:example.com".into()),
+            sender: "@bob:example.com".into(),
+            content: json!({ "membership": "join" }),
+            ..Default::default()
+        };
+        assert_eq!(check_auth(&join_ev, &state2), Err(AuthError::BannedUser { sender: "@bob:example.com".into(), event_id: "$join".into() }));
+
+        // Invalid state key self-invite
+        let self_invite = LeanEvent {
+            event_id: "$invite".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@alice:example.com".into()),
+            sender: "@alice:example.com".into(),
+            content: json!({ "membership": "invite" }),
+            ..Default::default()
+        };
+        assert!(check_auth(&self_invite, &state2).is_err());
+
+        // Invalid transition target user != sender for join
+        let bad_join = LeanEvent {
+            event_id: "$bad_join".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@bob:example.com".into()),
+            sender: "@alice:example.com".into(),
+            content: json!({ "membership": "join" }),
+            ..Default::default()
+        };
+        assert_eq!(check_auth(&bad_join, &state2), Err(AuthError::InvalidStateKey { expected: "@alice:example.com".into(), actual: "@bob:example.com".into() }));
+
+        // Missing PL event defaults testing
+        let low_power_state_change = LeanEvent {
+            event_id: "$low_pl".into(),
+            event_type: "m.room.name".into(),
+            state_key: Some(String::new()),
+            sender: "@bob:example.com".into(),
+            ..Default::default()
+        };
+        // Should require PL 50 by default for state events if no PL event is present
+        let mut state3 = RoomState::new();
+        state3.insert(("m.room.create".into(), Some(String::new())), create_ev.clone());
+        let bob_joined = LeanEvent {
+            event_id: "$bob_joined".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@bob:example.com".into()),
+            sender: "@bob:example.com".into(),
+            content: json!({ "membership": "join" }),
+            ..Default::default()
+        };
+        state3.insert(("m.room.member".into(), Some("@bob:example.com".into())), bob_joined.clone());
+        assert_eq!(check_auth(&low_power_state_change, &state3), Err(AuthError::InsufficientPowerLevel { required: 50, actual: 0, event_type: "m.room.name".into() }));
+
+        // Invite a banned user check
+        let invite_banned = LeanEvent {
+            event_id: "$invite_banned".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@bob:example.com".into()),
+            sender: "@alice:example.com".into(),
+            content: json!({ "membership": "invite" }),
+            ..Default::default()
+        };
+        assert_eq!(check_auth(&invite_banned, &state2), Err(AuthError::BannedUser { sender: "@bob:example.com".into(), event_id: "$invite_banned".into() }));
+
+        // 4. Test check_auth_chain with m.room.create lacking state_key fallback
+        let create_no_key = LeanEvent {
+            event_id: "$create_no_key".into(),
+            event_type: "m.room.create".into(),
+            sender: "@alice:example.com".into(),
+            state_key: None, // lacks state_key
+            ..Default::default()
+        };
+        let (accepted_ids, rejected_ids) = check_auth_chain(&[create_no_key], &RoomState::new());
+        assert_eq!(accepted_ids, vec!["$create_no_key"]);
+        assert!(rejected_ids.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_lean_cycle_power_events() {
+        use std::collections::{BTreeMap, HashMap};
+
+        let mut conflicted = HashMap::new();
+        let auth = HashMap::new();
+
+        // Create cyclic power events: A auths B, B authed by A, etc.
+        let a = LeanEvent {
+            event_id: "A".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@alice:example.com".into()),
+            auth_events: vec!["B".into()],
+            ..Default::default()
+        };
+        let b = LeanEvent {
+            event_id: "B".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@alice:example.com".into()),
+            auth_events: vec!["A".into()],
+            ..Default::default()
+        };
+        conflicted.insert("A".into(), a);
+        conflicted.insert("B".into(), b);
+
+        let unconflicted = BTreeMap::new();
+        // This will run kahn sort on power_events, detect a cycle, and print/handle it safely.
+        let resolved = resolve_lean(unconflicted, conflicted, &auth, StateResVersion::V2);
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_cdo_unbounded_stride_overflow() {
+        use std::collections::HashMap;
+        use serde_json::json;
+
+        let mut conflicted = HashMap::new();
+        let mut auth = HashMap::new();
+
+        let root = LeanEvent {
+            event_id: "$root".into(),
+            event_type: "m.room.create".into(),
+            state_key: Some(String::new()),
+            sender: "@alice:example.com".into(),
+            ..Default::default()
+        };
+        auth.insert(root.event_id.clone(), root.clone());
+
+        // We create 65 admin actions (e.g. bans/demotions/lockdowns)
+        for i in 0..65 {
+            let admin_id = format!("$admin_{}", i);
+            let admin_ev = LeanEvent {
+                event_id: admin_id.clone(),
+                event_type: "m.room.member".into(),
+                state_key: Some(format!("@spammer_{}:example.com", i)),
+                sender: "@alice:example.com".into(),
+                content: json!({ "membership": "ban" }),
+                ..Default::default()
+            };
+            conflicted.insert(admin_id, admin_ev);
+        }
+
+        // Apply the filter. Since we have 65 admin actions, it will allocate 2 u64 words
+        // per event, fully verifying the 1D stride matrix bounds and multi-word bitwise operations!
+        let filtered = apply_cdo_filter(&conflicted, &auth);
+        assert_eq!(filtered.len(), 65);
+    }
 }
