@@ -2,7 +2,7 @@ use crate::types::{LeanEvent, StateResVersion};
 use crate::HashMap;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub type LocalAuthCache = HashMap<String, BTreeMap<(String, Option<String>), (LeanEvent, usize)>>;
@@ -211,34 +211,104 @@ pub fn compute_state_at<S: core::hash::BuildHasher>(
         return None;
     }
 
-    // 1. Backward walk to find causal history (prev_events)
-    let mut visited = BTreeSet::new();
-    let mut stack = alloc::vec![String::from(target_event_id)];
-    while let Some(ev_id) = stack.pop() {
-        if visited.insert(ev_id.clone()) {
-            if let Some(ev) = events_map.get(&ev_id) {
-                for pe in &ev.prev_events {
-                    stack.push(pe.clone());
-                }
+    let mut memo = HashMap::new();
+    compute_state_at_recursive(target_event_id, events_map, &mut memo)
+}
+
+fn compute_state_at_recursive<S: core::hash::BuildHasher>(
+    target_id: &str,
+    events_map: &HashMap<String, LeanEvent, S>,
+    memo: &mut HashMap<String, BTreeMap<(String, Option<String>), String>>,
+) -> Option<BTreeMap<(String, Option<String>), String>> {
+    if let Some(cached) = memo.get(target_id) {
+        return Some(cached.clone());
+    }
+
+    let ev = events_map.get(target_id)?;
+
+    // 1. Compute state *before* the event
+    let mut state_before = BTreeMap::new();
+    if !ev.prev_events.is_empty() {
+        let mut prev_states = Vec::new();
+        for pe in &ev.prev_events {
+            if let Some(pe_state) = compute_state_at_recursive(pe, events_map, memo) {
+                prev_states.push(pe_state);
             }
         }
-    }
 
-    // 2. Filter and sort by depth ascending, then event_id ascending
-    let mut sorted_events: Vec<&LeanEvent> = events_map
-        .values()
-        .filter(|ev| visited.contains(&ev.event_id))
-        .collect();
-    sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
+        if prev_states.len() == 1 {
+            state_before = prev_states[0].clone();
+        } else if prev_states.len() > 1 {
+            // Multiple prev_events -> Resolve state!
+            let mut occurrences: HashMap<(String, Option<String>), HashMap<String, usize>> = HashMap::new();
+            let num_sets = prev_states.len();
+            for map in &prev_states {
+                for (key, id) in map {
+                    *occurrences
+                        .entry(key.clone())
+                        .or_default()
+                        .entry(id.clone())
+                        .or_insert(0) += 1;
+                }
+            }
 
-    // 3. Build state map (latest-wins)
-    let mut state_map = BTreeMap::new();
-    for ev in sorted_events {
-        if ev.state_key.is_some() {
-            let key = (ev.event_type.clone(), ev.state_key.clone());
-            state_map.insert(key, ev.event_id.clone());
+            let mut unconflicted_state = BTreeMap::new();
+            let mut conflicted_state_set = std::collections::HashSet::new();
+
+            for (key, ids) in occurrences {
+                if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
+                    let id = ids.keys().next().unwrap();
+                    unconflicted_state.insert(key, id.clone());
+                } else {
+                    for id in ids.keys() {
+                        conflicted_state_set.insert(id.clone());
+                    }
+                }
+            }
+
+            let mut conflicted_events = HashMap::new();
+            for id in &conflicted_state_set {
+                if let Some(event) = events_map.get(id) {
+                    conflicted_events.insert(id.clone(), event.clone());
+                }
+            }
+
+            let mut auth_chain_ids = std::collections::HashSet::new();
+            let mut b_stack: Vec<String> = conflicted_state_set.into_iter().collect();
+            while let Some(node) = b_stack.pop() {
+                if auth_chain_ids.insert(node.clone()) {
+                    if let Some(event) = events_map.get(&node) {
+                        for auth_id in &event.auth_events {
+                            b_stack.push(auth_id.clone());
+                        }
+                    }
+                }
+            }
+
+            for id in auth_chain_ids {
+                if let Some(event) = events_map.get(&id) {
+                    conflicted_events.insert(id, event.clone());
+                }
+            }
+
+            state_before = crate::resolve::resolve_lean(
+                unconflicted_state,
+                conflicted_events,
+                events_map,
+                StateResVersion::V2,
+            );
         }
     }
 
-    Some(state_map)
+    // 2. Compute state *after* the event
+    let mut state_after = state_before;
+    if ev.state_key.is_some() {
+        state_after.insert(
+            (ev.event_type.clone(), ev.state_key.clone()),
+            ev.event_id.clone(),
+        );
+    }
+
+    memo.insert(target_id.to_string(), state_after.clone());
+    Some(state_after)
 }
