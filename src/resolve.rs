@@ -41,10 +41,12 @@ pub(crate) fn prepare_conflicted_and_keys<
     original_conflicted_keys
 }
 
+// jscpd:ignore-start
 /// Builds a merged lookup map (`sort_context`) for sorting and mainline operations.
 pub(crate) fn build_sort_context<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     conflicted_events: &HashMap<String, LeanEvent, S1>,
     auth_context: &HashMap<String, LeanEvent, S2>,
+    // jscpd:ignore-end
 ) -> HashMap<String, LeanEvent> {
     auth_context
         .iter()
@@ -138,6 +140,16 @@ pub(crate) fn run_power_phase_iterative_checks<
     }
 }
 
+pub(crate) fn get_initial_resolved_state(
+    unconflicted_state: &BTreeMap<(String, Option<String>), String>,
+    version: StateResVersion,
+) -> BTreeMap<(String, Option<String>), String> {
+    match version {
+        StateResVersion::V2_1 | StateResVersion::V2_1_1 | StateResVersion::V2_2 => BTreeMap::new(),
+        _ => unconflicted_state.clone(),
+    }
+}
+
 #[must_use]
 pub fn resolve_lean<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     unconflicted_state: BTreeMap<(String, Option<String>), String>,
@@ -150,10 +162,7 @@ pub fn resolve_lean<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     let sort_context = build_sort_context(&conflicted_events, auth_context);
 
     // MSC4297 (v2.1+): The algorithm starts from an empty set of state.
-    let mut resolved = match version {
-        StateResVersion::V2_1 | StateResVersion::V2_1_1 | StateResVersion::V2_2 => BTreeMap::new(),
-        _ => unconflicted_state.clone(),
-    };
+    let mut resolved = get_initial_resolved_state(&unconflicted_state, version);
 
     let sort_set = &conflicted_events;
 

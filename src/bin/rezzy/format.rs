@@ -147,43 +147,34 @@ pub fn compute_component_roots(
             id_to_index.insert(ev.event_id.as_str(), i);
             index_to_ev.push(ev);
         }
+        let find_root = |mut node: usize, parent: &mut Vec<usize>| -> usize {
+            while parent[node] != node {
+                parent[node] = parent[parent[node]];
+                node = parent[node];
+            }
+            node
+        };
+        let union_nodes = |u: usize, v: usize, parent: &mut Vec<usize>| {
+            let root_u = find_root(u, parent);
+            let root_v = find_root(v, parent);
+            if root_u != root_v {
+                parent[root_u] = root_v;
+            }
+        };
+
         for ev in events_map.values() {
             if let Some(&u) = id_to_index.get(ev.event_id.as_str()) {
                 if include_prev {
                     for prev in &ev.prev_events {
                         if let Some(&v) = id_to_index.get(prev.as_str()) {
-                            let mut root_u = u;
-                            while parent[root_u] != root_u {
-                                parent[root_u] = parent[parent[root_u]];
-                                root_u = parent[root_u];
-                            }
-                            let mut root_v = v;
-                            while parent[root_v] != root_v {
-                                parent[root_v] = parent[parent[root_v]];
-                                root_v = parent[root_v];
-                            }
-                            if root_u != root_v {
-                                parent[root_u] = root_v;
-                            }
+                            union_nodes(u, v, &mut parent);
                         }
                     }
                 }
                 if include_auth {
                     for auth in &ev.auth_events {
                         if let Some(&v) = id_to_index.get(auth.as_str()) {
-                            let mut root_u = u;
-                            while parent[root_u] != root_u {
-                                parent[root_u] = parent[parent[root_u]];
-                                root_u = parent[root_u];
-                            }
-                            let mut root_v = v;
-                            while parent[root_v] != root_v {
-                                parent[root_v] = parent[parent[root_v]];
-                                root_v = parent[root_v];
-                            }
-                            if root_u != root_v {
-                                parent[root_u] = root_v;
-                            }
+                            union_nodes(u, v, &mut parent);
                         }
                     }
                 }
@@ -191,11 +182,7 @@ pub fn compute_component_roots(
         }
         let mut comp_roots_map: HashMap<usize, &LeanEvent> = HashMap::new();
         for (i, &ev) in index_to_ev.iter().enumerate() {
-            let mut u = i;
-            while parent[u] != u {
-                parent[u] = parent[parent[u]];
-                u = parent[u];
-            }
+            let u = find_root(i, &mut parent);
             comp_roots_map
                 .entry(u)
                 .and_modify(|e| {

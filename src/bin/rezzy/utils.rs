@@ -21,7 +21,7 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::time::Instant;
 
-pub type SharedStateMap = std::sync::Arc<BTreeMap<(String, Option<String>), String>>;
+pub type SharedStateMap = std::sync::Arc<ResolvedState>;
 
 pub fn parse_room_version(ver: &str) -> anyhow::Result<StateResVersion> {
     match ver {
@@ -222,79 +222,113 @@ pub fn parse_and_extract_heads(
     Ok((raw_events, heads))
 }
 
+fn collect_reachable_events<'a>(
+    start_id: &str,
+    events_map: &'a HashMap<String, LeanEvent>,
+) -> Vec<&'a LeanEvent> {
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![start_id.to_string()];
+    let mut reachable = Vec::new();
+    while let Some(ev_id) = stack.pop() {
+        if visited.insert(ev_id.clone()) {
+            if let Some(ev) = events_map.get(&ev_id) {
+                reachable.push(ev);
+                for pe in &ev.prev_events {
+                    stack.push(pe.clone());
+                }
+            }
+        }
+    }
+    reachable
+}
+
+fn build_state_map(
+    sorted_events: Vec<&LeanEvent>,
+    raw_map: &HashMap<String, serde_json::Value>,
+) -> HashMap<(String, Option<String>), String> {
+    let mut state_map = std::collections::HashMap::new();
+    for ev in sorted_events {
+        if raw_map
+            .get(&ev.event_id)
+            .is_some_and(|r| r.get("state_key").is_some())
+        {
+            let key = (ev.event_type.clone(), ev.state_key.clone());
+            state_map.insert(key, ev.event_id.clone());
+        }
+    }
+    state_map
+}
+
 pub fn compute_state_maps(
     heads: &[String],
     events_map: &HashMap<String, LeanEvent>,
     raw_map: &HashMap<String, serde_json::Value>,
 ) -> Vec<HashMap<(String, Option<String>), String>> {
     if heads.len() <= 1 {
-        let reachable: std::collections::HashSet<String> = if heads.len() == 1 {
-            let mut visited = std::collections::HashSet::new();
-            let mut stack = vec![heads[0].clone()];
-            while let Some(ev_id) = stack.pop() {
-                if visited.insert(ev_id.clone()) {
-                    if let Some(ev) = events_map.get(&ev_id) {
-                        for pe in &ev.prev_events {
-                            stack.push(pe.clone());
-                        }
-                    }
-                }
-            }
-            visited
+        let reachable_set: std::collections::HashSet<String> = if heads.len() == 1 {
+            collect_reachable_events(&heads[0], events_map)
+                .into_iter()
+                .map(|ev| ev.event_id.clone())
+                .collect()
         } else {
             events_map.keys().cloned().collect()
         };
 
         let mut sorted_events: Vec<&LeanEvent> = events_map
             .values()
-            .filter(|ev| reachable.contains(&ev.event_id))
+            .filter(|ev| reachable_set.contains(&ev.event_id))
             .collect();
         sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
 
-        let mut state_map = std::collections::HashMap::new();
-        for ev in sorted_events {
-            if raw_map
-                .get(&ev.event_id)
-                .is_some_and(|r| r.get("state_key").is_some())
-            {
-                let key = (ev.event_type.clone(), ev.state_key.clone());
-                state_map.insert(key, ev.event_id.clone());
-            }
-        }
-        vec![state_map]
+        vec![build_state_map(sorted_events, raw_map)]
     } else {
         let mut maps = Vec::new();
         for head_id in heads {
-            let mut reachable: Vec<&LeanEvent> = Vec::new();
-            let mut visited = std::collections::HashSet::new();
-            let mut stack = vec![head_id.clone()];
-
-            while let Some(ev_id) = stack.pop() {
-                if visited.insert(ev_id.clone()) {
-                    if let Some(ev) = events_map.get(&ev_id) {
-                        reachable.push(ev);
-                        for prev_ev_id in &ev.prev_events {
-                            stack.push(prev_ev_id.clone());
-                        }
-                    }
-                }
-            }
-
+            let mut reachable = collect_reachable_events(head_id, events_map);
             reachable.sort_by(|a, b| a.cmp_by_depth(b));
-            let mut state_map = std::collections::HashMap::new();
-            for ev in reachable {
-                if raw_map
-                    .get(&ev.event_id)
-                    .is_some_and(|r| r.get("state_key").is_some())
-                {
-                    let key = (ev.event_type.clone(), ev.state_key.clone());
-                    state_map.insert(key, ev.event_id.clone());
-                }
-            }
-            maps.push(state_map);
+            maps.push(build_state_map(reachable, raw_map));
         }
         maps
     }
+}
+
+pub type ResolvedState = BTreeMap<(String, Option<String>), String>;
+
+fn partition_state_occurrences<'a, I, Iter>(
+    state_maps: I,
+    num_sets: usize,
+) -> (ResolvedState, Vec<String>)
+where
+    I: IntoIterator<Item = Iter>,
+    Iter: IntoIterator<Item = (&'a (String, Option<String>), &'a String)>,
+{
+    let mut occurrences: HashMap<(String, Option<String>), HashMap<String, usize>> = HashMap::new();
+    for map in state_maps {
+        for (key, id) in map {
+            let val = occurrences
+                .entry(key.clone())
+                .or_default()
+                .entry(id.clone())
+                .or_insert(0);
+            *val = val.wrapping_add(1);
+        }
+    }
+
+    let mut unconflicted_state = std::collections::BTreeMap::new();
+    let mut conflicted_state_set = Vec::new();
+
+    for (key, ids) in occurrences {
+        if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
+            let id = ids.keys().next().unwrap();
+            unconflicted_state.insert(key, id.clone());
+        } else {
+            for id in ids.keys() {
+                conflicted_state_set.push(id.clone());
+            }
+        }
+    }
+
+    (unconflicted_state, conflicted_state_set)
 }
 
 pub fn resolve_parent_states(
@@ -314,33 +348,10 @@ pub fn resolve_parent_states(
     if all_identical {
         first_state.clone()
     } else {
-        let num_sets = parent_states.len();
-        let mut occurrences: HashMap<(String, Option<String>), HashMap<String, usize>> =
-            HashMap::new();
-        for map in parent_states {
-            for (key, id) in map.as_ref() {
-                let val = occurrences
-                    .entry(key.clone())
-                    .or_default()
-                    .entry(id.clone())
-                    .or_insert(0);
-                *val = val.wrapping_add(1);
-            }
-        }
-
-        let mut unconflicted_state = std::collections::BTreeMap::new();
-        let mut conflicted_state_set = Vec::new();
-
-        for (key, ids) in occurrences {
-            if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
-                let id = ids.keys().next().unwrap();
-                unconflicted_state.insert(key, id.clone());
-            } else {
-                for id in ids.keys() {
-                    conflicted_state_set.push(id.clone());
-                }
-            }
-        }
+        let (unconflicted_state, conflicted_state_set) = partition_state_occurrences(
+            parent_states.iter().map(std::convert::AsRef::as_ref),
+            parent_states.len(),
+        );
 
         let mut conflicted_events = HashMap::new();
         for id in &conflicted_state_set {
@@ -368,37 +379,10 @@ pub fn partition_and_resolve_state(
     state_maps: &[HashMap<(String, Option<String>), String>],
     version: StateResVersion,
     auth_graph: &rezzy::auth::roaring::AuthGraph,
-) -> (
-    BTreeMap<(String, Option<String>), String>,
-    std::time::Duration,
-) {
+) -> (ResolvedState, std::time::Duration) {
     let start = Instant::now();
-    let mut occurrences: HashMap<(String, Option<String>), HashMap<String, usize>> = HashMap::new();
-    let num_sets = state_maps.len();
-    for map in state_maps {
-        for (key, id) in map {
-            let val = occurrences
-                .entry(key.clone())
-                .or_default()
-                .entry(id.clone())
-                .or_insert(0);
-            *val = val.wrapping_add(1);
-        }
-    }
-
-    let mut unconflicted_state = std::collections::BTreeMap::new();
-    let mut conflicted_state_set = Vec::new();
-
-    for (key, ids) in occurrences {
-        if ids.len() == 1 && ids.values().next().unwrap() == &num_sets {
-            let id = ids.keys().next().unwrap();
-            unconflicted_state.insert(key, id.clone());
-        } else {
-            for id in ids.keys() {
-                conflicted_state_set.push(id.clone());
-            }
-        }
-    }
+    let (unconflicted_state, conflicted_state_set) =
+        partition_state_occurrences(state_maps, state_maps.len());
 
     let mut auth_difference = std::collections::HashSet::new();
     if !heads.is_empty() {

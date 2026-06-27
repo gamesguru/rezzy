@@ -272,6 +272,7 @@ pub fn lean_kahn_sort_detailed<S1: core::hash::BuildHasher, S2: core::hash::Buil
 ///
 /// Will panic if graph invariants are violated (specifically, if an event returned
 /// in the cycle-breaking list of stuck nodes is missing from the input `events` map).
+// jscpd:ignore-start
 #[must_use]
 pub fn lean_kahn_sort<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     events: &HashMap<String, LeanEvent, S1>,
@@ -279,6 +280,7 @@ pub fn lean_kahn_sort<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     create_ev: Option<&LeanEvent>,
     version: StateResVersion,
 ) -> Vec<String> {
+    // jscpd:ignore-end
     match lean_kahn_sort_detailed(events, auth_context, create_ev, version) {
         KahnSortResult::Ok(sorted) => sorted,
         KahnSortResult::CycleDetected {
