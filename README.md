@@ -23,6 +23,15 @@ make test         # Run unit and integration tests
 make rust/e2e     # Run E2E parity tests
 ```
 
+### Test Coverage
+
+To install and run test coverage via `cargo-tarpaulin`:
+
+```bash
+cargo install cargo-tarpaulin --features vendored-openssl
+cargo tarpaulin
+```
+
 ### Format & Lint
 
 ```bash
