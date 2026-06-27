@@ -268,7 +268,7 @@ fn test_kahn_tiebreak_power_level_overwrites_via_auth() {
         Some("@bob:example.com".to_string()),
     );
     assert_eq!(
-        resolved.get(&member_key).unwrap(),
+        &resolved[&member_key],
         "$alice_ban",
         "Alice's ban should win against Bob's concurrent join because her higher PL forces it to pop first, setting the auth rules."
     );
@@ -367,7 +367,7 @@ fn test_kahn_tiebreak_mods_banning_each_other_v2_1_1() {
     // BUT under V2.1 Fixed (V3), Alice's ban pops first and is supplemented!
     // So Bob's ban of Alice is evaluated while Bob is ALREADY banned, and is thus REJECTED.
     // "Who shoots first wins" mathematically holds.
-    assert_eq!(resolved.get(&bob_member_key).unwrap(), "$A_alice_ban");
+    assert_eq!(&resolved[&bob_member_key], "$A_alice_ban");
     assert!(
         !resolved.contains_key(&alice_member_key),
         "Bob's ban of Alice should be rightfully rejected because Alice shot first!"
@@ -485,8 +485,7 @@ fn test_v2_1_1_fixes_invite_lock() {
         rezzy::StateResVersion::V2_1,
     );
     assert_eq!(
-        resolved_v21.get(&member_key).unwrap(),
-        "$hist_join",
+        &resolved_v21[&member_key], "$hist_join",
         "V2.1 PASSES: The Invite Lock was fixed in V2.1."
     );
 
@@ -502,7 +501,7 @@ fn test_v2_1_1_fixes_invite_lock() {
     );
 
     assert_eq!(
-        resolved_v211.get(&member_key).unwrap(),
+        &resolved_v211[&member_key],
         "$hist_join",
         "SUCCESS: V2.1.1 completely bypassed the Invite Lock! The historical user's join survived the resolution!"
     );
@@ -711,12 +710,10 @@ fn test_v2_1_flaw_concurrent_ban_evasion() {
 
     // Alice's ban has PL 100, so Kahn sort evaluates it FIRST. It is added to the resolved state.
     assert_eq!(
-        resolved_v21
-            .get(&(
-                "m.room.member".to_string(),
-                Some("@bob:example.com".to_string())
-            ))
-            .unwrap(),
+        &resolved_v21[&(
+            "m.room.member".to_string(),
+            Some("@bob:example.com".to_string())
+        )],
         "$alice_bans_bob",
         "Bob should be banned in the final state"
     );
@@ -994,7 +991,7 @@ fn test_v2_1_1_anomaly_06b_ghost_moderator() {
     );
 
     // The resolved PL should revert to the original admin-only state
-    let final_pl_id = resolved_v211.get(&pl_key).unwrap();
+    let final_pl_id = &resolved_v211[&pl_key];
     assert_ne!(
         final_pl_id, "$nexy_promo",
         "CDO: Nexy\'s promotion must be dropped, resolving to the safe baseline"
@@ -1206,12 +1203,10 @@ fn test_v2_1_spec_compliant_step_4_supplementation() {
 
     // Bob's ban must be resolved first in Step 2.
     assert_eq!(
-        resolved_v21
-            .get(&(
-                "m.room.member".to_string(),
-                Some("@bob:example.com".to_string())
-            ))
-            .unwrap(),
+        &resolved_v21[&(
+            "m.room.member".to_string(),
+            Some("@bob:example.com".to_string())
+        )],
         "$alice_bans_bob",
         "Bob should be banned in the final resolved state"
     );

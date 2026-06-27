@@ -1,16 +1,14 @@
 use crate::cdo::apply_cdo_filter;
 use crate::sorting::{build_mainline, lean_kahn_sort, precompute_mainline_positions};
 use crate::state_at::{compute_local_auth, iterative_auth_ok, LocalAuthCache};
-use crate::types::{LeanEvent, StateResVersion};
+use crate::types::{find_deterministic_create_event, LeanEvent, StateResVersion};
 use crate::HashMap;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-fn route_lattice_power_events<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
-    sort_set: &HashMap<String, LeanEvent, S1>,
-    _auth_context: &HashMap<String, LeanEvent, S2>,
-    _version: StateResVersion,
+pub(crate) fn route_power_events<S: core::hash::BuildHasher>(
+    sort_set: &HashMap<String, LeanEvent, S>,
     power_events: &mut HashMap<String, LeanEvent>,
     non_power_events: &mut HashMap<String, LeanEvent>,
 ) {
@@ -24,6 +22,37 @@ fn route_lattice_power_events<S1: core::hash::BuildHasher, S2: core::hash::Build
         } else {
             non_power_events.insert(id.clone(), ev.clone());
         }
+    }
+}
+
+fn is_lattice_winner_better(
+    ev: &LeanEvent,
+    current_winner: &LeanEvent,
+    mainline_distances: &HashMap<String, usize>,
+    mainline_len: usize,
+) -> bool {
+    let ev_pos = mainline_distances
+        .get(&ev.event_id)
+        .copied()
+        .unwrap_or(mainline_len);
+
+    let winner_pos = mainline_distances
+        .get(&current_winner.event_id)
+        .copied()
+        .unwrap_or(mainline_len);
+
+    // The Commutative Join Operator (Least Upper Bound):
+    if ev_pos < winner_pos {
+        true // Closer to mainline wins
+    } else if ev_pos > winner_pos {
+        false
+    } else if ev.origin_server_ts > current_winner.origin_server_ts {
+        true // Later timestamp wins
+    } else if ev.origin_server_ts < current_winner.origin_server_ts {
+        false
+    } else {
+        // Lexicographical sort: LARGEST string wins.
+        ev.event_id > current_winner.event_id
     }
 }
 
@@ -61,31 +90,8 @@ fn fold_lattice_chunk<'a, S2: core::hash::BuildHasher, S3: core::hash::BuildHash
         // 2. NOW COMPETE FOR LUB
         let key = (ev.event_type.clone(), ev.state_key.clone());
 
-        // O(1) Geodesic coordinate mapped from the precomputed distances
-        let ev_pos = mainline_distances
-            .get(&ev.event_id)
-            .copied()
-            .unwrap_or(mainline_len);
-
         let is_better = if let Some(current_winner) = thread_res.get(&key) {
-            let winner_pos = mainline_distances
-                .get(&current_winner.event_id)
-                .copied()
-                .unwrap_or(mainline_len);
-
-            // The Commutative Join Operator (Least Upper Bound):
-            if ev_pos < winner_pos {
-                true // Closer to mainline wins
-            } else if ev_pos > winner_pos {
-                false
-            } else if ev.origin_server_ts > current_winner.origin_server_ts {
-                true // Later timestamp wins
-            } else if ev.origin_server_ts < current_winner.origin_server_ts {
-                false
-            } else {
-                // Lexicographical sort: LARGEST string wins.
-                ev.event_id > current_winner.event_id
-            }
+            is_lattice_winner_better(ev, current_winner, mainline_distances, mainline_len)
         } else {
             true // First event for this state key inherently wins
         };
@@ -104,31 +110,8 @@ fn merge_lattice_winners<'a>(
     mainline_len: usize,
 ) {
     for (key, ev) in thread_res {
-        // O(1) Geodesic coordinate mapped from the precomputed distances
-        let ev_pos = mainline_distances
-            .get(&ev.event_id)
-            .copied()
-            .unwrap_or(mainline_len);
-
         let is_better = if let Some(current_winner) = key_winners.get(&key) {
-            let winner_pos = mainline_distances
-                .get(&current_winner.event_id)
-                .copied()
-                .unwrap_or(mainline_len);
-
-            // The Commutative Join Operator (Least Upper Bound):
-            if ev_pos < winner_pos {
-                true // Closer to mainline wins
-            } else if ev_pos > winner_pos {
-                false
-            } else if ev.origin_server_ts > current_winner.origin_server_ts {
-                true // Later timestamp wins
-            } else if ev.origin_server_ts < current_winner.origin_server_ts {
-                false
-            } else {
-                // Lexicographical sort: LARGEST string wins.
-                ev.event_id > current_winner.event_id
-            }
+            is_lattice_winner_better(ev, current_winner, mainline_distances, mainline_len)
         } else {
             true // First event for this state key inherently wins
         };
@@ -170,7 +153,9 @@ fn compute_lattice_coordinatized_winners<
             .map(|e| e.depth)
             .max()
             .unwrap_or(1);
-        let width_heuristic = non_power_events.len() as u64 / (max_depth - min_depth).max(1);
+        let width_heuristic = (non_power_events.len() as u64)
+            .checked_div((max_depth.saturating_sub(min_depth)).max(1))
+            .unwrap_or(0);
 
         if num_threads > 1
             && non_power_events.len() > 10_000
@@ -264,18 +249,9 @@ pub fn resolve_lattice_coordinatized<
     // Route power and non-power events
     let mut power_events = HashMap::new();
     let mut non_power_events = HashMap::new();
-    route_lattice_power_events(
-        sort_set,
-        auth_context,
-        version,
-        &mut power_events,
-        &mut non_power_events,
-    );
+    route_power_events(sort_set, &mut power_events, &mut non_power_events);
 
-    let create_ev = auth_context
-        .values()
-        .chain(sort_set.values())
-        .find(|ev| ev.event_type == "m.room.create");
+    let create_ev = find_deterministic_create_event(auth_context, sort_set);
 
     let mut local_auth_cache: LocalAuthCache = HashMap::new();
 

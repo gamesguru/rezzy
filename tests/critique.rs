@@ -112,11 +112,12 @@ fn resolve_full(events: &[LeanEvent], version: StateResVersion) -> ResolvedState
     let mut occurrences: HashMap<(String, Option<String>), HashMap<String, usize>> = HashMap::new();
     for map in &state_maps {
         for (key, id) in map {
-            *occurrences
+            let val = occurrences
                 .entry(key.clone())
                 .or_default()
                 .entry(id.clone())
-                .or_insert(0) += 1;
+                .or_insert(0);
+            *val = val.wrapping_add(1);
         }
     }
 

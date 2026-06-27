@@ -144,7 +144,7 @@ fn simulate_federation_lag(
     max_depth: Option<usize>,
 ) -> std::time::Duration {
     let mut known_graph = HashMap::new();
-    let mut simulated_latency_secs = 0;
+    let mut simulated_latency_secs: u64 = 0;
 
     for id in conflicted_event_ids {
         if let Some(ev) = full_graph.get(id) {
@@ -165,7 +165,7 @@ fn simulate_federation_lag(
 
         // Simulate network lag: 1 second per batch of 3 events fetched over federation
         let batches = u64::try_from(result.missing_auth_events.len().div_ceil(3)).unwrap();
-        simulated_latency_secs += batches;
+        simulated_latency_secs = simulated_latency_secs.wrapping_add(batches);
 
         for missing_id in result.missing_auth_events {
             if let Some(ev) = full_graph.get(&missing_id) {

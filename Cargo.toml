@@ -38,6 +38,11 @@ name = "rezzy"
 path = "src/bin/rezzy/main.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "regen_oracles"
+path = "tests/regen_oracles.rs"
+required-features = ["regen"]
+
 [features]
 default = ["std"]
 std = ["alloc", "serde_json/std", "serde/std"]
@@ -103,12 +108,6 @@ name = "critique"
 path = "tests/critique.rs"
 
 [[test]]
-name = "regen_oracles"
-path = "tests/regen_oracles.rs"
-harness = false
-required-features = ["regen"]
-
-[[test]]
 name = "test_auth"
 path = "tests/test_auth.rs"
 
@@ -120,3 +119,20 @@ path = "tests/test_lib.rs"
 name = "test_main"
 path = "tests/test_main.rs"
 required-features = ["cli"]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = "warn"
+perf = "warn"
+complexity = "warn"
+style = "warn"
+correctness = "warn"
+suspicious = "warn"
+
+# High-Value Security & Robustness restrictions
+arithmetic_side_effects = "warn"
+undocumented_unsafe_blocks = "warn"
+dbg_macro = "warn"
+get_unwrap = "warn"

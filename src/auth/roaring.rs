@@ -31,7 +31,8 @@ impl AuthGraph {
                         .entry(auth_id.as_str())
                         .or_default()
                         .push(id.as_str());
-                    *in_degree.entry(id.as_str()).or_insert(0) += 1;
+                    let val = in_degree.entry(id.as_str()).or_insert(0);
+                    *val = val.wrapping_add(1);
                 }
             }
         }
@@ -49,7 +50,7 @@ impl AuthGraph {
             if let Some(children) = adjacency.get(id) {
                 for child in children {
                     let deg = in_degree.get_mut(child).unwrap();
-                    *deg -= 1;
+                    *deg = deg.wrapping_sub(1);
                     if *deg == 0 {
                         queue.push_back(*child);
                     }
@@ -126,9 +127,9 @@ mod tests {
         assert_eq!(graph.id_to_index.len(), 3);
         assert_eq!(graph.index_to_id.len(), 3);
 
-        let idx_a = *graph.id_to_index.get("A").unwrap();
-        let idx_b = *graph.id_to_index.get("B").unwrap();
-        let idx_c = *graph.id_to_index.get("C").unwrap();
+        let idx_a = graph.id_to_index["A"];
+        let idx_b = graph.id_to_index["B"];
+        let idx_c = graph.id_to_index["C"];
 
         // Verify topological sorting holds (A is parent, so it should be processed before B, B before C)
         assert!(idx_a < idx_b);

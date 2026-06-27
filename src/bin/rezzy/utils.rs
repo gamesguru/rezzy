@@ -319,11 +319,12 @@ pub fn resolve_parent_states(
             HashMap::new();
         for map in parent_states {
             for (key, id) in map.as_ref() {
-                *occurrences
+                let val = occurrences
                     .entry(key.clone())
                     .or_default()
                     .entry(id.clone())
-                    .or_insert(0) += 1;
+                    .or_insert(0);
+                *val = val.wrapping_add(1);
             }
         }
 
@@ -376,11 +377,12 @@ pub fn partition_and_resolve_state(
     let num_sets = state_maps.len();
     for map in state_maps {
         for (key, id) in map {
-            *occurrences
+            let val = occurrences
                 .entry(key.clone())
                 .or_default()
                 .entry(id.clone())
-                .or_insert(0) += 1;
+                .or_insert(0);
+            *val = val.wrapping_add(1);
         }
     }
 
@@ -418,7 +420,10 @@ pub fn partition_and_resolve_state(
             }
         }
 
-        let diff = union - intersection;
+        let diff = <roaring::RoaringBitmap as std::ops::Sub<&roaring::RoaringBitmap>>::sub(
+            union,
+            &intersection,
+        );
         for idx in diff {
             auth_difference.insert(auth_graph.index_to_id[idx as usize].clone());
         }
@@ -519,15 +524,35 @@ pub fn apply_global_power_levels(
 }
 
 pub fn epoch_days_to_ymd(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = u64::try_from(z - era * 146_097).unwrap();
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = i64::try_from(yoe).unwrap() + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = u32::try_from(doy - (153 * mp + 2) / 5 + 1).unwrap();
-    let m = u32::try_from(if mp < 10 { mp + 3 } else { mp - 9 }).unwrap();
-    let y = if m <= 2 { y + 1 } else { y };
+    let z = days.wrapping_add(719_468);
+    let era = (if z >= 0 { z } else { z.wrapping_sub(146_096) }).wrapping_div(146_097);
+    let doe = u64::try_from(z.wrapping_sub(era.wrapping_mul(146_097))).unwrap();
+    let yoe = (doe
+        .wrapping_sub(doe.wrapping_div(1460))
+        .wrapping_add(doe.wrapping_div(36524))
+        .wrapping_sub(doe.wrapping_div(146_096)))
+    .wrapping_div(365);
+    let y = i64::try_from(yoe)
+        .unwrap()
+        .wrapping_add(era.wrapping_mul(400));
+    let doy = doe.wrapping_sub(
+        (365_u64)
+            .wrapping_mul(yoe)
+            .wrapping_add(yoe.wrapping_div(4))
+            .wrapping_sub(yoe.wrapping_div(100)),
+    );
+    let mp = (5_u64.wrapping_mul(doy).wrapping_add(2)).wrapping_div(153);
+    let d = u32::try_from(
+        doy.wrapping_sub((153_u64.wrapping_mul(mp).wrapping_add(2)).wrapping_div(5))
+            .wrapping_add(1),
+    )
+    .unwrap();
+    let m = u32::try_from(if mp < 10 {
+        mp.wrapping_add(3)
+    } else {
+        mp.wrapping_sub(9)
+    })
+    .unwrap();
+    let y = if m <= 2 { y.wrapping_add(1) } else { y };
     (y, m, d)
 }

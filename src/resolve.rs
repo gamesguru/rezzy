@@ -45,23 +45,9 @@ pub fn resolve_lean<S1: core::hash::BuildHasher, S2: core::hash::BuildHasher>(
     // Route all events through Kahn sort (reverse topological power ordering).
     let mut power_events = HashMap::new();
     let mut non_power_events = HashMap::new();
+    crate::lattice::route_power_events(sort_set, &mut power_events, &mut non_power_events);
 
-    for (id, ev) in sort_set {
-        if ev.event_type == "m.room.member"
-            || ev.event_type == "m.room.create"
-            || ev.event_type == "m.room.power_levels"
-            || ev.event_type == "m.room.join_rules"
-        {
-            power_events.insert(id.clone(), ev.clone());
-        } else {
-            non_power_events.insert(id.clone(), ev.clone());
-        }
-    }
-
-    let create_ev = auth_context
-        .values()
-        .chain(sort_set.values())
-        .find(|ev| ev.event_type == "m.room.create");
+    let create_ev = crate::types::find_deterministic_create_event(auth_context, sort_set);
 
     // Step 1: Sort power events by reverse topological power ordering (Kahn sort)
     // Step 2: Apply iterative auth checks (per spec & Ruma implementation)

@@ -621,17 +621,17 @@ fn verify_spam_storm_results(
     if resolved_v211 == resolved_lattice {
         println!("SUCCESS: Lattice-coordinatized state resolution matched V2.1.1 exactly!");
     } else {
-        let mut diff_count = 0;
+        let mut diff_count: u64 = 0;
         for (k, v) in resolved_v211 {
             if resolved_lattice.get(k) != Some(v) {
-                diff_count += 1;
+                diff_count = diff_count.wrapping_add(1);
                 let lat_val = resolved_lattice.get(k);
                 println!("DIVERGENCE: Key {k:?} -> V2.1.1: {v:?}, Lattice: {lat_val:?}");
             }
         }
         for (k, v) in resolved_lattice {
             if !resolved_v211.contains_key(k) {
-                diff_count += 1;
+                diff_count = diff_count.wrapping_add(1);
                 println!("DIVERGENCE: Key {k:?} -> V2.1.1: None, Lattice: {v:?}");
             }
         }

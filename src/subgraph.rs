@@ -31,6 +31,13 @@ pub fn compute_v2_1_conflicted_subgraph_bounded<S: core::hash::BuildHasher>(
     conflicted_set: &[String],
     max_auth_depth: Option<usize>,
 ) -> SubgraphResult {
+    if conflicted_set.is_empty() {
+        return SubgraphResult {
+            subgraph: HashMap::new(),
+            missing_auth_events: Vec::new(),
+        };
+    }
+
     let mut backwards_reachable = BTreeSet::new();
     let mut forwards_reachable = BTreeSet::new();
     let mut missing_auth_events = BTreeSet::new();
@@ -39,19 +46,18 @@ pub fn compute_v2_1_conflicted_subgraph_bounded<S: core::hash::BuildHasher>(
     // Each entry is (event_id, depth_from_conflicted_set)
     let mut b_stack: Vec<(String, usize)> = conflicted_set.iter().map(|s| (s.clone(), 0)).collect();
     while let Some((node, depth)) = b_stack.pop() {
-        // Anti-DoS: stop expanding beyond max depth
-        if let Some(max_depth) = max_auth_depth {
-            if depth >= max_depth {
-                continue;
-            }
-        }
         if backwards_reachable.insert(node.clone()) {
+            if let Some(max_depth) = max_auth_depth {
+                if depth >= max_depth {
+                    continue;
+                }
+            }
             if let Some(event) = auth_graph.get(&node) {
                 for auth_id in &event.auth_events {
                     if !auth_graph.contains_key(auth_id) {
                         missing_auth_events.insert(auth_id.clone());
                     }
-                    b_stack.push((auth_id.clone(), depth + 1));
+                    b_stack.push((auth_id.clone(), depth.wrapping_add(1)));
                 }
             }
         }
@@ -73,7 +79,9 @@ pub fn compute_v2_1_conflicted_subgraph_bounded<S: core::hash::BuildHasher>(
     while let Some(node) = f_stack.pop() {
         if forwards_reachable.insert(node.clone()) {
             if let Some(children) = children_map.get(&node) {
-                f_stack.extend(children.clone());
+                for child in children {
+                    f_stack.push(child.clone());
+                }
             }
         }
     }
