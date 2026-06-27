@@ -291,8 +291,8 @@ fn test_moderator_cannot_override_admin_ban() {
                 required: 101,
                 actual: 50,
                 ref event_type,
-            }) if event_type == "member_pl_greater_than_current_sender"
+            }) if event_type == "m.rezzy.member_pl_greater_than_current_sender"
         ),
-        "Expected InsufficientPowerLevel (101 required, 50 actual) for member_pl_greater_than_current_sender, got {result:?}"
+        "Expected InsufficientPowerLevel (101 required, 50 actual) for m.rezzy.member_pl_greater_than_current_sender, got {result:?}"
     );
 }

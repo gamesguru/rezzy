@@ -409,7 +409,7 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
             return Err(AuthError::InsufficientPowerLevel {
                 required: target_pl + 1,
                 actual: sender_pl,
-                event_type: "member_pl_greater_than_target".into(),
+                event_type: "m.rezzy.member_pl_greater_than_target".into(),
             });
         }
 
@@ -431,7 +431,7 @@ fn check_membership_rules(event: &LeanEvent, state: &impl StateProvider) -> Resu
                         return Err(AuthError::InsufficientPowerLevel {
                             required: current_sender_pl + 1,
                             actual: sender_pl,
-                            event_type: "member_pl_greater_than_current_sender".into(),
+                            event_type: "m.rezzy.member_pl_greater_than_current_sender".into(),
                         });
                     }
                 }
