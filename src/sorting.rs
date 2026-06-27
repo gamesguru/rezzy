@@ -256,7 +256,12 @@ pub fn lean_kahn_sort_detailed<S: core::hash::BuildHasher>(
 }
 
 /// A simplified implementation of Kahn's Topological Sort.
-/// Backward-compatible wrapper that returns an empty Vec on cycles.
+/// Backward-compatible wrapper that falls back to standard tie-breaking on cycles.
+///
+/// # Panics
+///
+/// Will panic if graph invariants are violated (specifically, if an event returned
+/// in the cycle-breaking list of stuck nodes is missing from the input `events` map).
 #[must_use]
 pub fn lean_kahn_sort<S: core::hash::BuildHasher>(
     events: &HashMap<String, LeanEvent, S>,
@@ -266,11 +271,22 @@ pub fn lean_kahn_sort<S: core::hash::BuildHasher>(
 ) -> Vec<String> {
     match lean_kahn_sort_detailed(events, auth_context, create_ev, version) {
         KahnSortResult::Ok(sorted) => sorted,
-        KahnSortResult::CycleDetected { sorted: _, stuck } => {
+        KahnSortResult::CycleDetected {
+            mut sorted,
+            mut stuck,
+        } => {
             #[cfg(feature = "std")]
             std::eprintln!("KAHN CYCLE DETECTED! Stuck: {stuck:?}");
-            let _ = stuck;
-            Vec::new()
+            stuck.sort_by(|a, b| {
+                let ev_a = events.get(a).unwrap();
+                let ev_b = events.get(b).unwrap();
+                // Standard tie-breaking fallback (origin_server_ts ascending, then event_id ascending)
+                ev_a.origin_server_ts
+                    .cmp(&ev_b.origin_server_ts)
+                    .then_with(|| a.cmp(b))
+            });
+            sorted.append(&mut stuck);
+            sorted
         }
     }
 }

@@ -65,7 +65,11 @@ pub fn is_ancestor<S: core::hash::BuildHasher>(
     false
 }
 
-const WORDS_PER_CHUNK: usize = 4; // 256 admin actions per pass/chunk
+#[cfg(target_feature = "avx512f")]
+const WORDS_PER_CHUNK: usize = 8; // 512 bits (Matches 64-byte cache line)
+
+#[cfg(not(target_feature = "avx512f"))]
+const WORDS_PER_CHUNK: usize = 4; // 256 bits (AVX2 / unrolled NEON baseline)
 
 fn compute_cdo_bit_masks_chunk<'a, S: core::hash::BuildHasher>(
     admin_chunk: &[&'a str],
@@ -293,17 +297,17 @@ fn process_direct_domination_chunks<S1: core::hash::BuildHasher>(
                         }
                     }
 
-                    if let Some(admin_ev) = conflicted_events.get(admin_id) {
-                        if admin_ev.restricts_event(event) {
-                            let word = orig_idx / 64;
-                            let bit = 1u64 << (orig_idx % 64);
+                    let word = orig_idx / 64;
+                    let bit = 1u64 << (orig_idx % 64);
 
-                            let is_ancestor_admin =
-                                (and_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
-                            let is_descendant_admin =
-                                (desc_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
+                    let is_ancestor_admin = (and_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
+                    let is_descendant_admin =
+                        (desc_masks[ev_idx * WORDS_PER_CHUNK + word] & bit) != 0;
 
-                            if !is_ancestor_admin && !is_descendant_admin {
+                    // Fast-path bitwise check first!
+                    if !is_ancestor_admin && !is_descendant_admin {
+                        if let Some(admin_ev) = conflicted_events.get(admin_id) {
+                            if admin_ev.restricts_event(event) {
                                 dropped_ids.insert(event.event_id.clone());
                                 break;
                             }

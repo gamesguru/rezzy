@@ -220,7 +220,7 @@ pub fn compute_state_at<S: core::hash::BuildHasher>(
     let mut visited = BTreeSet::new();
     let mut stack = alloc::vec![String::from(target_event_id)];
     while let Some(ev_id) = stack.pop() {
-        if visited.insert(ev_id.clone()) {
+        if events_map.contains_key(&ev_id) && visited.insert(ev_id.clone()) {
             if let Some(ev) = events_map.get(&ev_id) {
                 for pe in &ev.prev_events {
                     stack.push(pe.clone());

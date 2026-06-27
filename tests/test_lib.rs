@@ -403,7 +403,8 @@ mod tests {
             events.values().find(|ev| ev.event_type == "m.room.create"),
             StateResVersion::V2,
         );
-        assert!(sorted.is_empty());
+        assert!(!sorted.is_empty());
+        assert_eq!(sorted, vec!["A", "B"]);
     }
 
     #[test]
@@ -1329,9 +1330,10 @@ mod tests {
             StateResVersion::V2,
         );
         assert!(
-            sorted.is_empty(),
-            "lean_kahn_sort must return empty Vec on cycles"
+            !sorted.is_empty(),
+            "lean_kahn_sort must fall back and resolve stuck events on cycles instead of returning an empty Vec"
         );
+        assert_eq!(sorted, vec!["C", "A", "B"]);
     }
 
     #[test]
@@ -2045,7 +2047,13 @@ mod tests {
         let unconflicted = BTreeMap::new();
         // This will run kahn sort on power_events, detect a cycle, and print/handle it safely.
         let resolved = resolve_lean(unconflicted, conflicted, &auth, StateResVersion::V2);
-        assert!(resolved.is_empty());
+        assert!(!resolved.is_empty());
+        assert_eq!(
+            resolved
+                .get(&("m.room.member".into(), Some("@alice:example.com".into())))
+                .unwrap(),
+            "B"
+        );
     }
 
     #[test]
@@ -2083,5 +2091,45 @@ mod tests {
         // per event, fully verifying the 1D stride matrix bounds and multi-word bitwise operations!
         let filtered = apply_cdo_filter(&conflicted, &auth);
         assert_eq!(filtered.len(), 65);
+    }
+
+    #[test]
+    fn test_compute_state_at_with_missing_and_foreign_prev_events() {
+        use std::collections::HashMap;
+
+        let mut events = HashMap::new();
+
+        // C is a valid create event
+        let c = LeanEvent {
+            event_id: "C".into(),
+            event_type: "m.room.create".into(),
+            state_key: Some(String::new()),
+            ..Default::default()
+        };
+        // A has prev_events: B (missing) and C (existing)
+        let a = LeanEvent {
+            event_id: "A".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some("@alice:example.com".into()),
+            prev_events: vec!["B".into(), "C".into()],
+            ..Default::default()
+        };
+
+        events.insert("C".into(), c);
+        events.insert("A".into(), a);
+
+        // compute_state_at A must run cleanly and return A's state without panicking on missing event B!
+        let state = compute_state_at("A", &events);
+        assert!(state.is_some());
+        let state_map = state.unwrap();
+
+        // State should contain C (create) and A itself
+        assert!(state_map.contains_key(&("m.room.create".into(), Some(String::new()))));
+        assert_eq!(
+            state_map
+                .get(&("m.room.member".into(), Some("@alice:example.com".into())))
+                .unwrap(),
+            "A"
+        );
     }
 }

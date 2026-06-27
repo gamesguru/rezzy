@@ -160,7 +160,22 @@ fn compute_lattice_coordinatized_winners<
     {
         let num_threads = std::thread::available_parallelism().map_or(4, core::num::NonZero::get);
 
-        if num_threads > 1 && non_power_events.len() > 1000 {
+        let min_depth = non_power_events
+            .values()
+            .map(|e| e.depth)
+            .min()
+            .unwrap_or(0);
+        let max_depth = non_power_events
+            .values()
+            .map(|e| e.depth)
+            .max()
+            .unwrap_or(1);
+        let width_heuristic = non_power_events.len() as u64 / (max_depth - min_depth).max(1);
+
+        if num_threads > 1
+            && non_power_events.len() > 10_000
+            && width_heuristic >= num_threads as u64
+        {
             let events_vec: Vec<&'a LeanEvent> = non_power_events.values().collect();
             let chunk_size = events_vec.len().div_ceil(num_threads);
 
