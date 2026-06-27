@@ -1,8 +1,8 @@
-use crate::types::{StateResVersion, LeanEvent};
-use crate::HashMap;
 use crate::cdo::apply_cdo_filter;
-use crate::sorting::{lean_kahn_sort, build_mainline, mainline_sort};
+use crate::sorting::{build_mainline, lean_kahn_sort, mainline_sort};
 use crate::state_at::{compute_local_auth, iterative_auth_ok, LocalAuthCache};
+use crate::types::{LeanEvent, StateResVersion};
+use crate::HashMap;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;

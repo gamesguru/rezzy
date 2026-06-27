@@ -12,15 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::HashMap;
 
 pub const MAX_POWER_LEVEL: i64 = 9_007_199_254_740_991; // 2^53 - 1
 

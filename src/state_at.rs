@@ -1,4 +1,4 @@
-use crate::types::{StateResVersion, LeanEvent};
+use crate::types::{LeanEvent, StateResVersion};
 use crate::HashMap;
 use alloc::collections::BTreeMap;
 use alloc::collections::BTreeSet;

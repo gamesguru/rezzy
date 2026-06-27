@@ -17,8 +17,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+use crate::types::{KahnSortResult, LeanEvent, SortPriority, StateResVersion, MAX_POWER_LEVEL};
 use crate::HashMap;
-use crate::types::{LeanEvent, StateResVersion, SortPriority, KahnSortResult, MAX_POWER_LEVEL};
 
 /// Dynamically fetches the sender's power level by inspecting the event's immediate `auth_events`.
 /// Recursive traversal of the auth chain is avoided to prevent bypassing immediate restrictions.

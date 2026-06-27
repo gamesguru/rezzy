@@ -1,7 +1,7 @@
 #![cfg(feature = "cli")]
 
-use alloc::vec::Vec;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 fn perform_connectivity_check(
     per_file_ids: &[std::collections::HashSet<String>],

@@ -1,12 +1,11 @@
 #![cfg(feature = "mock-ruma")]
 
-use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 pub use ruma_state_res::{events, test_utils, utils, Error as RumaError, Event, StateMap};
 
-use crate::types::{StateResVersion, LeanEvent};
+use crate::types::LeanEvent;
 
 fn ruma_to_lean_event<E: Event>(ev: &E) -> LeanEvent {
     use alloc::string::ToString;

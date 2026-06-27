@@ -19,26 +19,26 @@
 extern crate alloc;
 
 pub mod auth;
-pub mod types;
-pub mod sorting;
 pub mod cdo;
 pub mod lattice;
-pub mod subgraph;
-pub mod state_at;
 pub mod merge;
 pub mod resolve;
+pub mod sorting;
+pub mod state_at;
+pub mod subgraph;
+pub mod types;
 
 #[cfg(feature = "mock-ruma")]
 pub mod mock_ruma;
 
-pub use types::*;
-pub use sorting::*;
 pub use cdo::*;
 pub use lattice::*;
-pub use subgraph::*;
-pub use state_at::*;
 pub use merge::*;
 pub use resolve::*;
+pub use sorting::*;
+pub use state_at::*;
+pub use subgraph::*;
+pub use types::*;
 
 #[cfg(feature = "mock-ruma")]
 pub use mock_ruma::*;
