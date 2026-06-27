@@ -35,8 +35,6 @@ pub enum StateResVersion {
     V2_2,   // Reserved for State DAGs (MSC4242)
 }
 
-pub type LocalAuthCache = HashMap<String, BTreeMap<(String, Option<String>), (LeanEvent, usize)>>;
-
 /// Result of Kahn's topological sort with diagnostic information.
 #[derive(Debug, Clone)]
 pub enum KahnSortResult {

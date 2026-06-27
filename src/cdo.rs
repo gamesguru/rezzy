@@ -1,6 +1,7 @@
 use crate::types::LeanEvent;
 use crate::HashMap;
 use alloc::collections::BTreeSet;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
