@@ -8,8 +8,8 @@ use ruma_common::{
     room_version_rules::{AuthorizationRules, StateResolutionV2Rules},
 };
 use ruma_events::{StateEventType, TimelineEventType};
-#[path = "../mock_ruma/mod.rs"]
-mod mock_ruma;
+//
+use crate::mock_ruma;
 use mock_ruma::{
     Event, StateMap,
     RoomCreateEvent,

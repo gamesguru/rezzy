@@ -1,9 +1,12 @@
-extern crate alloc;
 #![cfg(feature = "mock-ruma")]
+extern crate alloc;
+extern crate ruma_state_res as original_ruma;
 use alloc::string::String;
 use alloc::vec::Vec;
-
-extern crate ruma_state_res as original_ruma; pub use original_ruma::{events, test_utils, utils, Error as RumaError, Event, StateMap};
+pub use original_ruma::events::RoomCreateEvent;
+pub use original_ruma::utils::event_id_map::EventIdMap;
+pub use original_ruma::utils::event_id_set::EventIdSet;
+pub use original_ruma::{Error as RumaError, Event, StateMap};
 
 use rezzy::LeanEvent;
 
