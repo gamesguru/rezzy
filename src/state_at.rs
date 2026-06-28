@@ -165,7 +165,7 @@ pub(crate) fn compute_local_auth<S1: core::hash::BuildHasher, S2: core::hash::Bu
             }
 
             for (key, (ev, cached_depth)) in cached_ancestor {
-                let total_depth = current_depth.wrapping_add(*cached_depth);
+                let total_depth = current_depth.saturating_add(*cached_depth);
                 match local_auth.entry(key.clone()) {
                     alloc::collections::btree_map::Entry::Vacant(e) => {
                         e.insert((ev.clone(), total_depth));
@@ -190,7 +190,7 @@ pub(crate) fn compute_local_auth<S1: core::hash::BuildHasher, S2: core::hash::Bu
             // For V2.1 and below, we only check the immediate auth_events.
             if version == StateResVersion::V2_2 {
                 for parent_id in &aev.auth_events {
-                    queue.push_back((parent_id.clone(), current_depth.wrapping_add(1)));
+                    queue.push_back((parent_id.clone(), current_depth.saturating_add(1)));
                 }
             }
         }
@@ -276,7 +276,7 @@ fn collect_ancestor_short_ids<'a, S: core::hash::BuildHasher>(
 
     while head < queue.len() {
         let current_id = queue[head];
-        head = head.wrapping_add(1);
+        head += 1;
 
         if let Some(ev) = events_map.get(current_id) {
             for pe in &ev.prev_events {
@@ -307,7 +307,7 @@ fn topological_sort_short_ids<S: core::hash::BuildHasher>(
         if let Some(ev) = events_map.get(*id) {
             for parent in &ev.prev_events {
                 if let Some(&parent_idx) = id_to_index.get(parent.as_str()) {
-                    in_degree[i] = in_degree[i].wrapping_add(1);
+                    in_degree[i] += 1;
                     adjacency[parent_idx].push(i);
                 }
             }
@@ -325,7 +325,7 @@ fn topological_sort_short_ids<S: core::hash::BuildHasher>(
     while let Some(idx) = topo_queue.pop_front() {
         sorted_ancestors.push(idx);
         for &child_idx in &adjacency[idx] {
-            in_degree[child_idx] = in_degree[child_idx].wrapping_sub(1);
+            in_degree[child_idx] = in_degree[child_idx].saturating_sub(1);
             if in_degree[child_idx] == 0 {
                 topo_queue.push_back(child_idx);
             }
@@ -373,7 +373,7 @@ fn resolve_multiple_prev_states<S: core::hash::BuildHasher>(
                 .or_default()
                 .entry(val.clone())
                 .or_insert(0);
-            *val_entry = val_entry.wrapping_add(1);
+            *val_entry += 1;
         }
     }
 

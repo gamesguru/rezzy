@@ -55,7 +55,7 @@ fn report_highest_shared_depths(
     let shared_all: HashSet<&String> = {
         let mut s: HashSet<&String> = HashSet::new();
         for i in 0..num_files {
-            for j in (i.wrapping_add(1))..num_files {
+            for j in (i + 1)..num_files {
                 s.extend(per_file_ids[i].intersection(&per_file_ids[j]));
             }
         }
@@ -120,9 +120,9 @@ pub fn merge_event_sets(
             file_ids.insert(event_id.clone());
             if seen_ids.insert(event_id) {
                 merged.push(val.clone());
-                added = added.wrapping_add(1);
+                added += 1;
             } else {
-                dupes = dupes.wrapping_add(1);
+                dupes += 1;
             }
         }
 
@@ -146,7 +146,7 @@ pub fn merge_event_sets(
         let total_shared: usize = {
             let mut shared_ids: HashSet<&String> = HashSet::new();
             for i in 0..num_files {
-                for j in (i.wrapping_add(1))..num_files {
+                for j in (i + 1)..num_files {
                     shared_ids.extend(per_file_ids[i].intersection(&per_file_ids[j]));
                 }
             }

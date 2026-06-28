@@ -57,7 +57,7 @@ pub fn compute_v2_1_conflicted_subgraph_bounded<S: core::hash::BuildHasher>(
                     if !auth_graph.contains_key(auth_id) {
                         missing_auth_events.insert(auth_id.clone());
                     }
-                    b_stack.push((auth_id.clone(), depth.wrapping_add(1)));
+                    b_stack.push((auth_id.clone(), depth.saturating_add(1)));
                 }
             }
         }

@@ -172,7 +172,7 @@ pub fn lean_kahn_sort_detailed<S1: core::hash::BuildHasher, S2: core::hash::Buil
                 // So we add edges from ancestors to descendants.
                 adjacency.entry(auth.clone()).or_default().push(id.clone());
                 let val = in_degree.entry(id.clone()).or_insert(0);
-                *val = val.wrapping_add(1);
+                *val += 1;
             }
         }
     }
@@ -234,7 +234,7 @@ pub fn lean_kahn_sort_detailed<S1: core::hash::BuildHasher, S2: core::hash::Buil
         if let Some(neighbors) = adjacency.get(&event.event_id) {
             for next_id in neighbors {
                 let degree = in_degree.get_mut(next_id).unwrap();
-                *degree = degree.wrapping_sub(1);
+                *degree = degree.saturating_sub(1);
                 if *degree == 0 {
                     let next_ev = events.get(next_id).unwrap();
                     queue.push(SortPriority {

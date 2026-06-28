@@ -310,7 +310,7 @@ where
                 .or_default()
                 .entry(id.clone())
                 .or_insert(0);
-            *val = val.wrapping_add(1);
+            *val += 1;
         }
     }
 

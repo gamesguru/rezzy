@@ -32,7 +32,7 @@ impl AuthGraph {
                         .or_default()
                         .push(id.as_str());
                     let val = in_degree.entry(id.as_str()).or_insert(0);
-                    *val = val.wrapping_add(1);
+                    *val += 1;
                 }
             }
         }
@@ -50,7 +50,7 @@ impl AuthGraph {
             if let Some(children) = adjacency.get(id) {
                 for child in children {
                     let deg = in_degree.get_mut(child).unwrap();
-                    *deg = deg.wrapping_sub(1);
+                    *deg = deg.saturating_sub(1);
                     if *deg == 0 {
                         queue.push_back(*child);
                     }

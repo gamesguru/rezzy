@@ -296,7 +296,7 @@ pub fn format_summary_output(ctx: &FormattingContext) -> serde_json::Value {
         "version": ctx.version,
         "duration_ms": ctx.duration.as_millis(),
         "total_events": ctx.event_count,
-        "resolved_state_size": state_entries.len().wrapping_add(members.values().map(std::vec::Vec::len).sum::<usize>()),
+        "resolved_state_size": state_entries.len() + members.values().map(std::vec::Vec::len).sum::<usize>(),
         "auth_chain_size": ctx.auth_chain_ids.len(),
         "min_depth": min_depth,
         "max_depth": max_depth,
@@ -457,7 +457,7 @@ pub fn format_timeline_output(ctx: &FormattingContext) -> serde_json::Value {
             "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ];
         let month_str = month_names
-            .get(m.wrapping_sub(1) as usize)
+            .get(m.saturating_sub(1) as usize)
             .unwrap_or(&"???");
         let ampm = if hours < 12 { "AM" } else { "PM" };
         let h12 = if hours == 0 {
