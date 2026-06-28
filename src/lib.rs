@@ -1,3 +1,5 @@
+#![no_std]
+extern crate std;
 // Copyright 2026 Shane Jaroch
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,10 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! rezzy: A high-performance, Spec-compliant Matrix State Resolution Engine.
-
-#![no_std]
-
+/// rezzy: A high-performance, Spec-compliant Matrix State Resolution Engine.
 extern crate alloc;
 
 pub mod auth;
@@ -29,9 +28,6 @@ pub mod state_at;
 pub mod subgraph;
 pub mod types;
 
-#[cfg(feature = "mock-ruma")]
-pub mod mock_ruma;
-
 pub use cdo::*;
 pub use lattice::*;
 #[cfg(feature = "cli")]
@@ -41,12 +37,6 @@ pub use sorting::*;
 pub use state_at::*;
 pub use subgraph::*;
 pub use types::*;
-
-#[cfg(feature = "mock-ruma")]
-pub use mock_ruma::*;
-
-#[cfg(feature = "std")]
-extern crate std;
 
 #[cfg(feature = "std")]
 pub use std::collections::HashMap;

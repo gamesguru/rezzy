@@ -1,11 +1,11 @@
+extern crate alloc;
 #![cfg(feature = "mock-ruma")]
-
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub use ruma_state_res::{events, test_utils, utils, Error as RumaError, Event, StateMap};
+extern crate ruma_state_res as original_ruma; pub use original_ruma::{events, test_utils, utils, Error as RumaError, Event, StateMap};
 
-use crate::types::LeanEvent;
+use rezzy::LeanEvent;
 
 fn ruma_to_lean_event<E: Event>(ev: &E) -> LeanEvent {
     use alloc::string::ToString;
@@ -13,7 +13,7 @@ fn ruma_to_lean_event<E: Event>(ev: &E) -> LeanEvent {
         serde_json::from_str(ev.content().get()).unwrap_or(serde_json::Value::Null);
     let power_level = content_val
         .get("power_level")
-        .and_then(crate::types::coerce_json_to_i64)
+        .and_then(rezzy::types::coerce_json_to_i64)
         .unwrap_or(0);
     LeanEvent {
         event_id: ev.event_id().to_string(),
@@ -83,7 +83,7 @@ fn build_conflicted_events<'a, E>(
     fetch_conflicted_state_subgraph: &impl Fn(
         &StateMap<Vec<E::Id>>,
     ) -> Option<
-        ruma_state_res::utils::event_id_set::EventIdSet<E::Id>,
+        original_ruma::utils::event_id_set::EventIdSet<E::Id>,
     >,
 ) -> (
     std::collections::HashMap<String, LeanEvent>,
@@ -143,12 +143,12 @@ pub fn resolve<'a, E, MapsIter>(
     _auth_rules: &ruma_common::room_version_rules::AuthorizationRules,
     state_res_rules: &ruma_common::room_version_rules::StateResolutionV2Rules,
     state_maps: impl IntoIterator<IntoIter = MapsIter>,
-    auth_chains: Vec<ruma_state_res::utils::event_id_set::EventIdSet<E::Id>>,
+    auth_chains: Vec<original_ruma::utils::event_id_set::EventIdSet<E::Id>>,
     fetch_event: impl Fn(&ruma_common::EventId) -> Option<E>,
     fetch_conflicted_state_subgraph: impl Fn(
         &StateMap<Vec<E::Id>>,
     ) -> Option<
-        ruma_state_res::utils::event_id_set::EventIdSet<E::Id>,
+        original_ruma::utils::event_id_set::EventIdSet<E::Id>,
     >,
 ) -> core::result::Result<StateMap<E::Id>, RumaError>
 where
@@ -246,14 +246,14 @@ where
     }
 
     // Attempt to dynamically select V2 vs V2.1 if the inputs match the MSC4297 test scenario.
-    let resolved = crate::resolve_lean(
+    let resolved = rezzy::resolve_lean(
         unconflicted_state,
         conflicted_events,
         &auth_context,
         if state_res_rules.begin_iterative_auth_checks_with_empty_state_map {
-            crate::StateResVersion::V2_1
+            rezzy::StateResVersion::V2_1
         } else {
-            crate::StateResVersion::V2
+            rezzy::StateResVersion::V2
         },
     );
 
