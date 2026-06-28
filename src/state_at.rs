@@ -200,6 +200,8 @@ pub(crate) fn compute_local_auth<S1: core::hash::BuildHasher, S2: core::hash::Bu
     local_auth.into_iter().map(|(k, (v, _))| (k, v)).collect()
 }
 
+type SharedState = alloc::sync::Arc<BTreeMap<(String, Option<String>), String>>;
+
 /// Computes the state map at (after) a given target event ID,
 /// assuming all ancestral events are present in `events_map`.
 ///
@@ -216,108 +218,146 @@ pub fn compute_state_at<S: core::hash::BuildHasher>(
         return None;
     }
 
-    // 1. Backward walk to find causal history (prev_events)
-    let mut visited = BTreeSet::new();
-    let mut stack = alloc::vec![String::from(target_event_id)];
-    while let Some(ev_id) = stack.pop() {
-        if events_map.contains_key(&ev_id) && visited.insert(ev_id.clone()) {
-            if let Some(ev) = events_map.get(&ev_id) {
-                for pe in &ev.prev_events {
-                    stack.push(pe.clone());
+    let (id_to_index, index_to_id) = collect_ancestor_short_ids(target_event_id, events_map);
+    let sorted_ancestors = topological_sort_short_ids(&index_to_id, &id_to_index, events_map);
+
+    let mut state_after_map: Vec<Option<SharedState>> = alloc::vec![None; index_to_id.len()];
+
+    for idx in sorted_ancestors {
+        let id_str = index_to_id[idx];
+        let ev = events_map.get(id_str).unwrap();
+
+        let mut prev_states: Vec<&SharedState> = Vec::with_capacity(ev.prev_events.len());
+        for pe in &ev.prev_events {
+            if let Some(&pe_idx) = id_to_index.get(pe.as_str()) {
+                if let Some(ref pe_state) = state_after_map[pe_idx] {
+                    prev_states.push(pe_state);
                 }
             }
         }
-    }
 
-    // 2. Topological sort of the reachable ancestor subgraph
-    let sorted_ancestors = topological_sort_ancestors(&visited, events_map);
+        let mut state_before: SharedState = if prev_states.is_empty() {
+            alloc::sync::Arc::new(BTreeMap::new())
+        } else if prev_states.len() == 1 {
+            alloc::sync::Arc::clone(prev_states[0])
+        } else {
+            resolve_merge_fast_path(&prev_states, events_map)
+        };
 
-    // 3. Iteratively compute state after each ancestor event
-    let mut state_after_map: HashMap<String, BTreeMap<(String, Option<String>), String>> =
-        HashMap::new();
-
-    for id in sorted_ancestors {
-        let ev = events_map.get(&id).unwrap();
-
-        // Compute state *before* the event by resolving the state after its immediate prev_events
-        let mut state_before = BTreeMap::new();
-        let mut prev_states = Vec::new();
-        for pe in &ev.prev_events {
-            if let Some(pe_state) = state_after_map.get(pe) {
-                prev_states.push(pe_state.clone());
-            }
-        }
-
-        if prev_states.len() == 1 {
-            state_before = prev_states[0].clone();
-        } else if prev_states.len() > 1 {
-            state_before = resolve_multiple_prev_states(&prev_states, events_map);
-        }
-
-        // State *after* the event is state *before* plus the event itself if it is a state event
-        let mut state_after = state_before;
         if ev.state_key.is_some() {
-            state_after.insert(
+            let mut_state = alloc::sync::Arc::make_mut(&mut state_before);
+            mut_state.insert(
                 (ev.event_type.clone(), ev.state_key.clone()),
                 ev.event_id.clone(),
             );
         }
 
-        state_after_map.insert(id, state_after);
+        state_after_map[idx] = Some(state_before);
     }
 
-    state_after_map.remove(target_event_id)
+    let target_idx = id_to_index[target_event_id];
+    state_after_map[target_idx].take().map(|arc| {
+        let cloned_arc = arc.clone();
+        alloc::sync::Arc::into_inner(arc).unwrap_or_else(|| (*cloned_arc).clone())
+    })
 }
 
-fn topological_sort_ancestors<S: core::hash::BuildHasher>(
-    visited: &BTreeSet<String>,
-    events_map: &HashMap<String, LeanEvent, S>,
-) -> Vec<String> {
-    let mut in_degree: HashMap<String, usize> = HashMap::new();
-    let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
+fn collect_ancestor_short_ids<'a, S: core::hash::BuildHasher>(
+    target_event_id: &'a str,
+    events_map: &'a HashMap<String, LeanEvent, S>,
+) -> (HashMap<&'a str, usize>, Vec<&'a str>) {
+    let mut id_to_index: HashMap<&str, usize> = HashMap::new();
+    let mut index_to_id: Vec<&str> = Vec::new();
+    let mut queue = alloc::vec![target_event_id];
+    let mut head = 0;
 
-    for id in visited {
-        in_degree.insert(id.clone(), 0);
-    }
+    id_to_index.insert(target_event_id, 0);
+    index_to_id.push(target_event_id);
 
-    for id in visited {
-        if let Some(ev) = events_map.get(id) {
-            for parent in &ev.prev_events {
-                if visited.contains(parent) {
-                    let val = in_degree.entry(id.clone()).or_insert(0);
-                    *val = val.wrapping_add(1);
-                    adjacency
-                        .entry(parent.clone())
-                        .or_default()
-                        .push(id.clone());
+    while head < queue.len() {
+        let current_id = queue[head];
+        head = head.wrapping_add(1);
+
+        if let Some(ev) = events_map.get(current_id) {
+            for pe in &ev.prev_events {
+                let pe_str = pe.as_str();
+                if events_map.contains_key(pe_str) && !id_to_index.contains_key(pe_str) {
+                    let next_idx = index_to_id.len();
+                    id_to_index.insert(pe_str, next_idx);
+                    index_to_id.push(pe_str);
+                    queue.push(pe_str);
                 }
             }
         }
     }
 
-    let mut queue = alloc::collections::VecDeque::new();
-    for (id, &deg) in &in_degree {
-        if deg == 0 {
-            queue.push_back(id.clone());
+    (id_to_index, index_to_id)
+}
+
+fn topological_sort_short_ids<S: core::hash::BuildHasher>(
+    index_to_id: &[&str],
+    id_to_index: &HashMap<&str, usize>,
+    events_map: &HashMap<String, LeanEvent, S>,
+) -> Vec<usize> {
+    let num_reachable = index_to_id.len();
+    let mut in_degree = alloc::vec![0usize; num_reachable];
+    let mut adjacency = alloc::vec![Vec::new(); num_reachable];
+
+    for (i, id) in index_to_id.iter().enumerate() {
+        if let Some(ev) = events_map.get(*id) {
+            for parent in &ev.prev_events {
+                if let Some(&parent_idx) = id_to_index.get(parent.as_str()) {
+                    in_degree[i] = in_degree[i].wrapping_add(1);
+                    adjacency[parent_idx].push(i);
+                }
+            }
         }
     }
 
-    let mut sorted_ancestors = Vec::new();
-    while let Some(id) = queue.pop_front() {
-        sorted_ancestors.push(id.clone());
-        if let Some(children) = adjacency.get(&id) {
-            for child in children {
-                if let Some(deg) = in_degree.get_mut(child) {
-                    *deg = deg.wrapping_sub(1);
-                    if *deg == 0 {
-                        queue.push_back(child.clone());
-                    }
-                }
+    let mut topo_queue = alloc::collections::VecDeque::new();
+    for (i, &deg) in in_degree.iter().enumerate() {
+        if deg == 0 {
+            topo_queue.push_back(i);
+        }
+    }
+
+    let mut sorted_ancestors = Vec::with_capacity(num_reachable);
+    while let Some(idx) = topo_queue.pop_front() {
+        sorted_ancestors.push(idx);
+        for &child_idx in &adjacency[idx] {
+            in_degree[child_idx] = in_degree[child_idx].wrapping_sub(1);
+            if in_degree[child_idx] == 0 {
+                topo_queue.push_back(child_idx);
             }
         }
     }
 
     sorted_ancestors
+}
+
+fn resolve_merge_fast_path<S: core::hash::BuildHasher>(
+    prev_states: &[&SharedState],
+    events_map: &HashMap<String, LeanEvent, S>,
+) -> SharedState {
+    let mut all_match = true;
+    let first = prev_states[0];
+    for state in &prev_states[1..] {
+        if !alloc::sync::Arc::ptr_eq(first, state) && **first != ***state {
+            all_match = false;
+            break;
+        }
+    }
+
+    if all_match {
+        alloc::sync::Arc::clone(first)
+    } else {
+        let unwrapped_prev_states: Vec<BTreeMap<_, _>> =
+            prev_states.iter().map(|&arc| (**arc).clone()).collect();
+        alloc::sync::Arc::new(resolve_multiple_prev_states(
+            &unwrapped_prev_states,
+            events_map,
+        ))
+    }
 }
 
 fn resolve_multiple_prev_states<S: core::hash::BuildHasher>(
