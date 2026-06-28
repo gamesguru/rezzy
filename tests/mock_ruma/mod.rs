@@ -142,6 +142,7 @@ where
 /// # Errors
 ///
 /// Returns a `RumaError` if state resolution fails.
+#[allow(clippy::trivially_copy_pass_by_ref, clippy::unnecessary_wraps)]
 pub fn resolve<'a, E, MapsIter>(
     _auth_rules: &ruma_common::room_version_rules::AuthorizationRules,
     state_res_rules: &ruma_common::room_version_rules::StateResolutionV2Rules,
