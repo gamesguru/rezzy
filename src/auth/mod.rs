@@ -577,3 +577,55 @@ pub fn check_auth_chain(
 
     (accepted, rejected)
 }
+
+/// Returns the state event types required to authorize an event.
+/// Equivalent to Ruma's `state_res::auth_types_for_event`.
+#[must_use]
+pub fn auth_types_for_event(
+    event_type: &str,
+    sender: &str,
+    state_key: Option<&str>,
+    content: &serde_json::Value,
+) -> Vec<(String, String)> {
+    let mut auth_types = Vec::new();
+
+    if event_type == "m.room.create" {
+        return auth_types;
+    }
+
+    auth_types.push((String::from("m.room.create"), String::new()));
+    auth_types.push((String::from("m.room.member"), String::from(sender)));
+    auth_types.push((String::from("m.room.power_levels"), String::new()));
+
+    if event_type == "m.room.member" {
+        if let Some(sk) = state_key {
+            if sender != sk {
+                auth_types.push((String::from("m.room.member"), String::from(sk)));
+            }
+        }
+
+        let membership = content.get("membership").and_then(|v| v.as_str());
+        if membership == Some("join") || membership == Some("invite") {
+            auth_types.push((String::from("m.room.join_rules"), String::new()));
+        }
+
+        let third_party_invite = content
+            .get("third_party_invite")
+            .and_then(|v| v.as_object());
+        if let Some(tpi) = third_party_invite {
+            if let Some(token) = tpi
+                .get("signed")
+                .and_then(|s| s.as_object())
+                .and_then(|s| s.get("token"))
+                .and_then(|t| t.as_str())
+            {
+                auth_types.push((
+                    String::from("m.room.third_party_invite"),
+                    String::from(token),
+                ));
+            }
+        }
+    }
+
+    auth_types
+}
