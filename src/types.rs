@@ -55,7 +55,7 @@ impl<'de> serde::Deserialize<'de> for StateResVersion {
     {
         struct StateResVersionVisitor;
 
-        impl<'de> serde::de::Visitor<'de> for StateResVersionVisitor {
+        impl serde::de::Visitor<'_> for StateResVersionVisitor {
             type Value = StateResVersion;
 
             fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
@@ -69,7 +69,7 @@ impl<'de> serde::Deserialize<'de> for StateResVersion {
                     "V2_1" => Ok(StateResVersion::V2_1),
                     "V2_1_1" => Ok(StateResVersion::V2_1_1),
                     "V2_2" => Ok(StateResVersion::V2_2),
-                    _ => Err(E::custom(alloc::format!("unknown variant `{}`", value))),
+                    _ => Err(E::custom(alloc::format!("unknown variant `{value}`"))),
                 }
             }
         }
