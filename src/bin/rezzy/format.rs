@@ -296,7 +296,7 @@ pub fn format_summary_output(ctx: &FormattingContext) -> serde_json::Value {
         "version": ctx.version,
         "duration_ms": ctx.duration.as_millis(),
         "total_events": ctx.event_count,
-        "resolved_state_size": state_entries.len() + members.values().map(std::vec::Vec::len).sum::<usize>(),
+        "resolved_state_size": state_entries.len().saturating_add(members.values().map(std::vec::Vec::len).sum::<usize>()),
         "auth_chain_size": ctx.auth_chain_ids.len(),
         "min_depth": min_depth,
         "max_depth": max_depth,

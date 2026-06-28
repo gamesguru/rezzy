@@ -276,7 +276,7 @@ fn collect_ancestor_short_ids<'a, S: core::hash::BuildHasher>(
 
     while head < queue.len() {
         let current_id = queue[head];
-        head += 1;
+        head = head.saturating_add(1);
 
         if let Some(ev) = events_map.get(current_id) {
             for pe in &ev.prev_events {
@@ -307,7 +307,7 @@ fn topological_sort_short_ids<S: core::hash::BuildHasher>(
         if let Some(ev) = events_map.get(*id) {
             for parent in &ev.prev_events {
                 if let Some(&parent_idx) = id_to_index.get(parent.as_str()) {
-                    in_degree[i] += 1;
+                    in_degree[i] = in_degree[i].saturating_add(1);
                     adjacency[parent_idx].push(i);
                 }
             }
@@ -373,7 +373,7 @@ fn resolve_multiple_prev_states<S: core::hash::BuildHasher>(
                 .or_default()
                 .entry(val.clone())
                 .or_insert(0);
-            *val_entry += 1;
+            *val_entry = val_entry.saturating_add(1);
         }
     }
 

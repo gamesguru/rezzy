@@ -172,7 +172,7 @@ pub fn lean_kahn_sort_detailed<S1: core::hash::BuildHasher, S2: core::hash::Buil
                 // So we add edges from ancestors to descendants.
                 adjacency.entry(auth.clone()).or_default().push(id.clone());
                 let val = in_degree.entry(id.clone()).or_insert(0);
-                *val += 1;
+                *val = val.saturating_add(1);
             }
         }
     }

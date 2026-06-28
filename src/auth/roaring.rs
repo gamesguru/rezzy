@@ -32,7 +32,7 @@ impl AuthGraph {
                         .or_default()
                         .push(id.as_str());
                     let val = in_degree.entry(id.as_str()).or_insert(0);
-                    *val += 1;
+                    *val = val.saturating_add(1);
                 }
             }
         }
