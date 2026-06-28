@@ -120,7 +120,7 @@ fn merge_lattice_winners<'a>(
     }
 }
 
-#[allow(clippy::too_many_arguments, clippy::arithmetic_side_effects)]
+#[allow(clippy::too_many_arguments)]
 fn compute_lattice_coordinatized_winners<
     'a,
     S1: core::hash::BuildHasher + Sync + Send,
@@ -145,7 +145,13 @@ fn compute_lattice_coordinatized_winners<
     {
         let num_threads = std::thread::available_parallelism().map_or(4, core::num::NonZero::get);
         let chunks: Vec<&[&'a LeanEvent]> = v
-            .chunks((non_power_events.len() + num_threads - 1).max(1))
+            .chunks(
+                (non_power_events
+                    .len()
+                    .saturating_add(num_threads)
+                    .saturating_sub(1))
+                .max(1),
+            )
             .collect();
 
         let winners = std::sync::Mutex::new(HashMap::new());
