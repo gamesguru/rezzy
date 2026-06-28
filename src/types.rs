@@ -16,12 +16,12 @@ use crate::HashMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::Ordering;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 pub const MAX_POWER_LEVEL: i64 = 9_007_199_254_740_991; // 2^53 - 1
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[allow(non_camel_case_types)]
 pub enum StateResVersion {
@@ -30,6 +30,52 @@ pub enum StateResVersion {
     V2_1,
     V2_1_1, // The V3 / Ban Evasion Fix
     V2_2,   // Reserved for State DAGs (MSC4242)
+}
+
+impl serde::Serialize for StateResVersion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let s = match self {
+            StateResVersion::V1 => "V1",
+            StateResVersion::V2 => "V2",
+            StateResVersion::V2_1 => "V2_1",
+            StateResVersion::V2_1_1 => "V2_1_1",
+            StateResVersion::V2_2 => "V2_2",
+        };
+        serializer.serialize_str(s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for StateResVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct StateResVersionVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for StateResVersionVisitor {
+            type Value = StateResVersion;
+
+            fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
+                formatter.write_str("a StateResVersion string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                match value {
+                    "V1" => Ok(StateResVersion::V1),
+                    "V2" => Ok(StateResVersion::V2),
+                    "V2_1" => Ok(StateResVersion::V2_1),
+                    "V2_1_1" => Ok(StateResVersion::V2_1_1),
+                    "V2_2" => Ok(StateResVersion::V2_2),
+                    _ => Err(E::custom(alloc::format!("unknown variant `{}`", value))),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(StateResVersionVisitor)
+    }
 }
 
 /// Result of Kahn's topological sort with diagnostic information.
@@ -64,64 +110,42 @@ impl KahnSortResult {
     }
 }
 
-/// Synapse-compatible power level deserialization.
-/// Handles integer (100), string ("100"), and float (100.0) representations.
-fn deserialize_power_level<'de, D>(deserializer: D) -> Result<i64, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::de;
-
-    struct PowerLevelVisitor;
-
-    impl de::Visitor<'_> for PowerLevelVisitor {
-        type Value = i64;
-
-        fn expecting(&self, formatter: &mut core::fmt::Formatter) -> core::fmt::Result {
-            formatter.write_str("an exact integer power level")
-        }
-
-        fn visit_i64<E: de::Error>(self, v: i64) -> Result<i64, E> {
-            Ok(v.min(MAX_POWER_LEVEL))
-        }
-
-        fn visit_u64<E: de::Error>(self, v: u64) -> Result<i64, E> {
-            let i = i64::try_from(v).unwrap_or(MAX_POWER_LEVEL);
-            Ok(i.min(MAX_POWER_LEVEL))
-        }
-
-        fn visit_str<E: de::Error>(self, v: &str) -> Result<i64, E> {
-            if let Ok(i) = v.parse::<i64>() {
-                return Ok(i.min(MAX_POWER_LEVEL));
-            }
-            Ok(0)
-        }
-    }
-
-    deserializer.deserialize_any(PowerLevelVisitor)
-}
-
 /// A lightweight Matrix Event representation for Lean-equivalent resolution.
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct LeanEvent {
     pub event_id: String,
-    #[serde(rename = "type")]
     pub event_type: String,
-    #[serde(default)]
     pub state_key: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_power_level")]
     pub power_level: i64,
     pub origin_server_ts: u64,
-    #[serde(default)]
     pub sender: String,
-    #[serde(default)]
     pub content: Value,
-    #[serde(default)]
     pub prev_events: Vec<String>,
-    #[serde(default)]
     pub auth_events: Vec<String>,
-    #[serde(default)]
     pub depth: u64, // Required for V1
+}
+
+impl serde::Serialize for LeanEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("LeanEvent", 10)?;
+        state.serialize_field("event_id", &self.event_id)?;
+        state.serialize_field("type", &self.event_type)?;
+        if let Some(ref sk) = self.state_key {
+            state.serialize_field("state_key", sk)?;
+        }
+        state.serialize_field("power_level", &self.power_level)?;
+        state.serialize_field("origin_server_ts", &self.origin_server_ts)?;
+        state.serialize_field("sender", &self.sender)?;
+        state.serialize_field("content", &self.content)?;
+        state.serialize_field("prev_events", &self.prev_events)?;
+        state.serialize_field("auth_events", &self.auth_events)?;
+        state.serialize_field("depth", &self.depth)?;
+        state.end()
+    }
 }
 
 impl LeanEvent {
@@ -167,27 +191,6 @@ impl LeanEvent {
     }
 }
 
-#[derive(Deserialize)]
-struct LeanEventInner {
-    #[serde(rename = "type")]
-    event_type: String,
-    #[serde(default)]
-    state_key: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_power_level")]
-    power_level: i64,
-    origin_server_ts: u64,
-    #[serde(default)]
-    sender: String,
-    #[serde(default)]
-    content: Value,
-    #[serde(default)]
-    prev_events: Vec<String>,
-    #[serde(default)]
-    auth_events: Vec<String>,
-    #[serde(default)]
-    depth: u64,
-}
-
 impl<'de> Deserialize<'de> for LeanEvent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -225,20 +228,78 @@ impl<'de> Deserialize<'de> for LeanEvent {
             }
         };
 
-        let inner: LeanEventInner =
-            serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+        let event_type = value
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into();
+        let state_key = value
+            .get("state_key")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let power_level = match value.get("power_level") {
+            Some(pl) => {
+                if let Some(i) = pl.as_i64() {
+                    i.min(MAX_POWER_LEVEL)
+                } else if let Some(u) = pl.as_u64() {
+                    let i = i64::try_from(u).unwrap_or(MAX_POWER_LEVEL);
+                    i.min(MAX_POWER_LEVEL)
+                } else if let Some(s) = pl.as_str() {
+                    if let Ok(i) = s.parse::<i64>() {
+                        i.min(MAX_POWER_LEVEL)
+                    } else {
+                        0
+                    }
+                } else {
+                    return Err(serde::de::Error::custom("invalid power_level type"));
+                }
+            }
+            None => 0,
+        };
+
+        let origin_server_ts = match value.get("origin_server_ts") {
+            Some(ts) => ts.as_u64().unwrap_or(0),
+            None => 0,
+        };
+
+        let sender = value
+            .get("sender")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .into();
+        let content = value.get("content").cloned().unwrap_or(Value::Null);
+
+        let parse_string_array = |key: &str| -> Vec<String> {
+            value
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let prev_events = parse_string_array("prev_events");
+        let auth_events = parse_string_array("auth_events");
+        let depth = value
+            .get("depth")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
 
         Ok(LeanEvent {
             event_id,
-            event_type: inner.event_type,
-            state_key: inner.state_key,
-            power_level: inner.power_level,
-            origin_server_ts: inner.origin_server_ts,
-            sender: inner.sender,
-            content: inner.content,
-            prev_events: inner.prev_events,
-            auth_events: inner.auth_events,
-            depth: inner.depth,
+            event_type,
+            state_key,
+            power_level,
+            origin_server_ts,
+            sender,
+            content,
+            prev_events,
+            auth_events,
+            depth,
         })
     }
 }
