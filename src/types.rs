@@ -66,6 +66,23 @@ pub enum StateResVersion {
     V2_2,
 }
 
+impl StateResVersion {
+    /// Map a Matrix room version string (e.g. `"10"`, `"12"`) to the corresponding
+    /// state resolution algorithm version.
+    ///
+    /// Returns `None` for unrecognized room versions.
+    #[must_use]
+    pub fn from_room_version(ver: &str) -> Option<Self> {
+        match ver {
+            "1" => Some(Self::V1),
+            "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10" | "11" => Some(Self::V2),
+            "12" => Some(Self::V2_1),
+            "12.1" => Some(Self::V2_1_1),
+            _ => None,
+        }
+    }
+}
+
 impl serde::Serialize for StateResVersion {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -180,6 +197,16 @@ impl<Id, C> DagNode<Id> for LeanEvent<Id, C> {
 ///   integers, clamped to [`MAX_POWER_LEVEL`].
 /// - `typed_content`: Populated from `content` for auth-relevant events.
 /// - All other fields default to empty/zero if absent.
+///
+/// # Note on Room ID
+///
+/// `LeanEvent` omits `room_id`. `ruma-lean` is a specialized algorithmic engine
+/// that expects the host homeserver (e.g., Synapse, Conduit) to perform initial
+/// database-level filtering. The host is responsible for verifying cryptographic
+/// signatures and filtering events by `room_id` *before* passing them to `resolve_lean`.
+///
+/// TODO: Consider adding optional `room_id` validation or a dedicated `ForeignEvent`
+/// error check, in case rogue "foreign room" events leak into the `auth_context`.
 #[derive(Debug, Clone, Default)]
 pub struct LeanEvent<Id = String, C = Value> {
     /// Unique event identifier (e.g. `$abc123:example.com`).
@@ -248,75 +275,76 @@ pub trait EventContent: Clone + core::fmt::Debug + Default {
     fn get_invite(&self) -> Option<i64>;
     fn get_redact(&self) -> Option<i64>;
     fn get_creator(&self) -> Option<&str>;
-    fn has_room_creator(&self, sender: &str) -> bool;
     fn has_additional_creator(&self, sender: &str) -> bool;
 }
 
 impl EventContent for Value {
     fn get_membership(&self) -> Option<&str> {
-        self.get(crate::event_types::FIELD_MEMBERSHIP)?.as_str()
+        self.get(crate::basespec::event_types::FIELD_MEMBERSHIP)?
+            .as_str()
     }
 
     fn get_join_rule(&self) -> Option<&str> {
-        self.get(crate::event_types::FIELD_JOIN_RULE)?.as_str()
+        self.get(crate::basespec::event_types::FIELD_JOIN_RULE)?
+            .as_str()
     }
 
     fn get_user_power_level(&self, user: &str) -> Option<i64> {
-        let users = self.get(crate::event_types::FIELD_USERS)?.as_object()?;
-        coerce_json_to_i64(users.get(user)?).map(|i| i.min(crate::types::MAX_POWER_LEVEL))
+        let users = self
+            .get(crate::basespec::event_types::FIELD_USERS)?
+            .as_object()?;
+        coerce_json_to_i64(users.get(user)?).map(|i| i.min(crate::basespec::rezzy_types::MAX_POWER_LEVEL))
     }
 
     fn get_event_power_level(&self, event_type: &str) -> Option<i64> {
-        let events = self.get(crate::event_types::FIELD_EVENTS)?.as_object()?;
-        coerce_json_to_i64(events.get(event_type)?).map(|i| i.min(crate::types::MAX_POWER_LEVEL))
+        let events = self
+            .get(crate::basespec::event_types::FIELD_EVENTS)?
+            .as_object()?;
+        coerce_json_to_i64(events.get(event_type)?)
+            .map(|i| i.min(crate::basespec::rezzy_types::MAX_POWER_LEVEL))
     }
 
     fn get_users_default(&self) -> Option<i64> {
-        coerce_json_to_i64(self.get(crate::event_types::FIELD_USERS_DEFAULT)?)
-            .map(|i| i.min(crate::types::MAX_POWER_LEVEL))
+        coerce_json_to_i64(self.get(crate::basespec::event_types::FIELD_USERS_DEFAULT)?)
+            .map(|i| i.min(crate::basespec::rezzy_types::MAX_POWER_LEVEL))
     }
 
     fn get_events_default(&self) -> Option<i64> {
-        coerce_json_to_i64(self.get(crate::event_types::FIELD_EVENTS_DEFAULT)?)
-            .map(|i| i.min(crate::types::MAX_POWER_LEVEL))
+        coerce_json_to_i64(self.get(crate::basespec::event_types::FIELD_EVENTS_DEFAULT)?)
+            .map(|i| i.min(crate::basespec::rezzy_types::MAX_POWER_LEVEL))
     }
 
     fn get_state_default(&self) -> Option<i64> {
-        coerce_json_to_i64(self.get(crate::event_types::FIELD_STATE_DEFAULT)?)
-            .map(|i| i.min(crate::types::MAX_POWER_LEVEL))
+        coerce_json_to_i64(self.get(crate::basespec::event_types::FIELD_STATE_DEFAULT)?)
+            .map(|i| i.min(crate::basespec::rezzy_types::MAX_POWER_LEVEL))
     }
 
     fn get_ban(&self) -> Option<i64> {
-        coerce_json_to_i64(self.get(crate::event_types::FIELD_BAN)?)
-            .map(|i| i.min(crate::types::MAX_POWER_LEVEL))
+        coerce_json_to_i64(self.get(crate::basespec::event_types::FIELD_BAN)?)
+            .map(|i| i.min(crate::basespec::rezzy_types::MAX_POWER_LEVEL))
     }
 
     fn get_kick(&self) -> Option<i64> {
-        coerce_json_to_i64(self.get(crate::event_types::FIELD_KICK)?)
-            .map(|i| i.min(crate::types::MAX_POWER_LEVEL))
+        coerce_json_to_i64(self.get(crate::basespec::event_types::FIELD_KICK)?)
+            .map(|i| i.min(crate::basespec::rezzy_types::MAX_POWER_LEVEL))
     }
 
     fn get_invite(&self) -> Option<i64> {
-        coerce_json_to_i64(self.get(crate::event_types::FIELD_INVITE)?)
-            .map(|i| i.min(crate::types::MAX_POWER_LEVEL))
+        coerce_json_to_i64(self.get(crate::basespec::event_types::FIELD_INVITE)?)
+            .map(|i| i.min(crate::basespec::rezzy_types::MAX_POWER_LEVEL))
     }
 
     fn get_redact(&self) -> Option<i64> {
-        coerce_json_to_i64(self.get(crate::event_types::FIELD_REDACT)?)
+        coerce_json_to_i64(self.get(crate::basespec::event_types::FIELD_REDACT)?)
     }
 
     fn get_creator(&self) -> Option<&str> {
-        self.get(crate::event_types::FIELD_CREATOR)?.as_str()
-    }
-
-    fn has_room_creator(&self, sender: &str) -> bool {
-        self.get(crate::event_types::FIELD_ROOM_CREATORS)
-            .and_then(|v| v.as_array())
-            .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(sender)))
+        self.get(crate::basespec::event_types::FIELD_CREATOR)?
+            .as_str()
     }
 
     fn has_additional_creator(&self, sender: &str) -> bool {
-        self.get(crate::event_types::FIELD_ADDITIONAL_CREATORS)
+        self.get(crate::basespec::event_types::FIELD_ADDITIONAL_CREATORS)
             .and_then(|v| v.as_array())
             .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(sender)))
     }
@@ -331,6 +359,16 @@ impl<Id, C> LeanEvent<Id, C> {
     /// # Errors
     ///
     /// Returns static string error if structural limits are exceeded.
+    ///
+    /// # TODO(compliance): PDU structural invariants not yet enforced
+    /// - `content` is required (must be present, even if `{}`)
+    /// - `hashes` is required (sha256 content hash)
+    /// - `signatures` is required
+    /// - `room_id` is version-dependent (present in v1-v11, omitted from create in v12+)
+    /// - `sender` must be a valid MXID
+    /// - `depth` must be < 2^53 - 1
+    ///
+    /// These should be validated and tested per room version.
     pub fn validate_syntactic(&self) -> Result<(), &'static str> {
         if self.prev_events.len() > 20 {
             return Err("prev_events exceeds maximum allowed length of 20");
@@ -429,13 +467,6 @@ impl<Id, C> LeanEvent<Id, C> {
         C: EventContent,
     {
         self.content.get_creator()
-    }
-
-    pub fn has_room_creator(&self, sender: &str) -> bool
-    where
-        C: EventContent,
-    {
-        self.content.has_room_creator(sender)
     }
 
     pub fn has_additional_creator(&self, sender: &str) -> bool
@@ -616,10 +647,10 @@ impl<Id, C: EventContent> LeanEvent<Id, C> {
     /// Self-leaves (where the user removes themselves) return `false`.
     #[must_use]
     pub fn is_ban_or_kick(&self) -> bool {
-        if self.event_type == crate::event_types::M_ROOM_MEMBER {
+        if self.event_type == crate::basespec::event_types::M_ROOM_MEMBER {
             if let Some(membership) = self.get_membership() {
-                if membership == crate::event_types::MEM_BAN
-                    || membership == crate::event_types::MEM_LEAVE
+                if membership == crate::basespec::event_types::MEM_BAN
+                    || membership == crate::basespec::event_types::MEM_LEAVE
                 {
                     if let Some(ref state_key) = self.state_key {
                         return state_key != &self.sender;
@@ -633,15 +664,15 @@ impl<Id, C: EventContent> LeanEvent<Id, C> {
     /// Returns `true` if this is a `m.room.power_levels` event (a potential demotion).
     #[must_use]
     pub fn is_demotion(&self) -> bool {
-        self.event_type == crate::event_types::M_ROOM_POWER_LEVELS
+        self.event_type == crate::basespec::event_types::M_ROOM_POWER_LEVELS
     }
 
     /// Returns `true` if this is a `m.room.join_rules` event setting the room to invite-only.
     #[must_use]
     pub fn is_lockdown(&self) -> bool {
-        if self.event_type == crate::event_types::M_ROOM_JOIN_RULES {
+        if self.event_type == crate::basespec::event_types::M_ROOM_JOIN_RULES {
             if let Some(rule) = self.get_join_rule() {
-                return rule == crate::event_types::RULE_INVITE;
+                return rule == crate::basespec::event_types::RULE_INVITE;
             }
         }
         false
@@ -673,9 +704,9 @@ impl<Id, C: EventContent> LeanEvent<Id, C> {
         if self.is_ban_or_kick() || self.is_demotion() {
             return self.restricts_sender(&other.sender);
         }
-        if self.is_lockdown() && other.event_type == crate::event_types::M_ROOM_MEMBER {
+        if self.is_lockdown() && other.event_type == crate::basespec::event_types::M_ROOM_MEMBER {
             if let Some(membership) = other.get_membership() {
-                return membership == crate::event_types::MEM_JOIN;
+                return membership == crate::basespec::event_types::MEM_JOIN;
             }
         }
         false
@@ -748,6 +779,7 @@ impl<Id: Ord, C> Ord for SortPriority<'_, Id, C> {
                 //
                 // In Rust's Max-Heap BinaryHeap, "greater" elements are popped first.
                 // We want deeper events to pop FIRST, so they must be "greater".
+                // NOTE: This is a defense-in-depth vulnerability, which V2 fixes.
                 match self.event.depth.cmp(&other.event.depth) {
                     Ordering::Equal => self.event.event_id.cmp(&other.event.event_id),
                     ord => ord,
@@ -836,29 +868,6 @@ pub fn coerce_json_to_i64(pl: &Value) -> Option<i64> {
     // Matrix Spec (Client-Server API) — m.room.power_levels:
     // "The power level ... must be an integer between -2^53 + 1 and 2^53 - 1."
     val.map(|v| v.clamp(-MAX_POWER_LEVEL, MAX_POWER_LEVEL))
-}
-
-/// Finds the `m.room.create` event deterministically across the auth context and sort set.
-///
-/// If multiple create events exist (which would be a protocol violation), the
-/// one with the lexicographically smallest `event_id` is chosen to ensure
-/// deterministic behavior across all implementations.
-pub fn find_deterministic_create_event<
-    'a,
-    Id: Ord + Eq + core::hash::Hash,
-    S1: core::hash::BuildHasher,
-    S2: core::hash::BuildHasher,
-    C: EventContent,
->(
-    auth_context: &'a crate::HashMap<Id, LeanEvent<Id, C>, S1>,
-    sort_set: &'a crate::HashMap<Id, LeanEvent<Id, C>, S2>,
-) -> Option<&'a LeanEvent<Id, C>> {
-    // Quick filter by M_ROOM_CREATE
-    auth_context
-        .values()
-        .chain(sort_set.values())
-        .filter(|ev| ev.event_type == crate::event_types::M_ROOM_CREATE)
-        .min_by(|a, b| a.event_id.cmp(&b.event_id))
 }
 
 pub trait EventProvider<Id, C> {
