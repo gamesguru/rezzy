@@ -13,6 +13,7 @@ exclude = [
     "res/",
     "scripts/",
     "docs/",
+    "benches/",
     "RumaLean/",
     "RumaLean.lean",
     "lake*",
@@ -137,6 +138,11 @@ path = "tests/test_integer_keys.rs"
 [[test]]
 name = "test_restricted_joins"
 path = "tests/test_restricted_joins.rs"
+
+[[bench]]
+name = "bench_cmp_iter_lattice"
+path = "benches/bench_cmp_iter_lattice.rs"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"

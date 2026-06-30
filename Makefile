@@ -78,6 +78,14 @@ else
 	$(CARGO) test --all-targets --all-features $(if $(a),-- $(a))
 endif
 
+.PHONY: rust/bench
+rust/bench: ##H Run Rust benchmarks (s=base_sizes, f=fork_counts, d=fork_depth, i=iters)
+	BASE_SIZES=$(if $(s),$(s),10,500,5000,20000,50000) \
+	FORK_COUNTS=$(if $(f),$(f),2,10,50,200) \
+	FORK_DEPTH=$(if $(d),$(d),50) \
+	ITERATIONS=$(if $(i),$(i),5) \
+	$(CARGO) bench --profile release-max-perf --benches
+
 .PHONY: rust/coverage
 rust/coverage: fixtures ##H Run code coverage and generate HTML report
 	# TODO: include `src/bin/` in coverage
@@ -122,9 +130,10 @@ rust/publish: ##H Preview package and simulate dry-run publish
 	$(CARGO) publish --dry-run
 
 # Convenience aliases
-.PHONY: build test install clean uninstall
+.PHONY: build test bench cov install clean uninstall
 build:   rust/build   ##H Alias for rust/build
 test:    rust/test    ##H Alias for rust/test
+bench:   rust/bench   ##H Alias for rust/bench
 cov:     rust/coverage ##H Alias for rust/coverage
 install: rust/install ##H Alias for rust/install
 uninstall: rust/uninstall ##H Alias for rust/uninstall
