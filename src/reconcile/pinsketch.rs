@@ -169,8 +169,8 @@ fn poly_square(poly: &mut Polynomial) -> Option<()> {
     let new_len = poly.len().checked_mul(2)?.checked_sub(1)?;
     let old = core::mem::take(poly);
     poly.resize(new_len, 0);
-    for (index, coefficient) in old.into_iter().enumerate() {
-        poly[index.checked_mul(2)?] = gf64_mul(coefficient, coefficient);
+    for (target, coefficient) in (0..new_len).step_by(2).zip(old) {
+        poly[target] = gf64_mul(coefficient, coefficient);
     }
     Some(())
 }
