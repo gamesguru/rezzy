@@ -43,6 +43,35 @@ fn legacy_ids_are_sha256_derived_and_stable() {
 }
 
 #[test]
+fn short_id_uses_the_first_nonzero_sha256_chunk() {
+    let mut second_chunk = [0_u8; 32];
+    second_chunk[8..16].copy_from_slice(&42_u64.to_be_bytes());
+    assert_eq!(
+        EventHash::from_event_id(&event_id(second_chunk), true)
+            .unwrap()
+            .h64,
+        42
+    );
+    assert_eq!(
+        EventHash::from_event_id(&event_id([0; 32]), true)
+            .unwrap()
+            .h64,
+        1
+    );
+}
+
+#[test]
+fn sketch_wire_format_matches_libminisketch_64_bit_serialization() {
+    let mut sketch = SyndromeSketch::new(2).unwrap();
+    sketch.toggle(1).unwrap();
+    sketch.toggle(2).unwrap();
+
+    let wire = URL_SAFE_NO_PAD.decode(sketch.encode()).unwrap();
+    assert_eq!(wire, [3, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(SyndromeSketch::decode(2, &sketch.encode()).unwrap(), sketch);
+}
+
+#[test]
 fn pinsketch_decodes_a_symmetric_difference() {
     let mut local = SyndromeSketch::new(8).unwrap();
     let mut remote = SyndromeSketch::new(8).unwrap();

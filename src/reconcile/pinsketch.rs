@@ -377,6 +377,7 @@ mod tests {
         find_roots(vec![1], &mut roots).unwrap();
         assert!(roots.is_empty());
         assert_eq!(find_roots(vec![1, 0, 1], &mut roots), None);
+        assert_eq!(find_roots(vec![1, 1, 0, 1], &mut roots), None);
     }
 
     #[test]

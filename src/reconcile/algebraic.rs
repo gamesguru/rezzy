@@ -20,8 +20,8 @@ use sha2::{Digest as _, Sha256};
 
 /// The number of localization buckets in the `algebraic_v1` profile.
 pub const BUCKET_COUNT: usize = 256;
-/// Maximum extraction capacity accepted by the profile.
-pub const MAX_SKETCH_CAPACITY: usize = 50_000;
+/// Maximum extraction capacity for an unbucketed `algebraic_v1` sketch.
+pub const MAX_SKETCH_CAPACITY: usize = 1_000;
 
 /// An invalid event identifier, wire digest, or sketch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,16 +67,24 @@ impl EventHash {
         } else {
             Sha256::digest(event_id.as_bytes()).to_vec()
         };
-        if bytes.len() < 16 {
+        if bytes.len() < 32 {
             return Err(AlgebraicError::InvalidEventId);
         }
         let mut wide = [0; 16];
         wide.copy_from_slice(&bytes[..16]);
         let mut short = [0; 8];
-        short.copy_from_slice(&bytes[..8]);
+        let h64 = bytes
+            .chunks_exact(8)
+            .take(4)
+            .map(|chunk| {
+                short.copy_from_slice(chunk);
+                u64::from_be_bytes(short)
+            })
+            .find(|value| *value != 0)
+            .unwrap_or(1);
         Ok(Self {
             h128: u128::from_be_bytes(wide),
-            h64: u64::from_be_bytes(short),
+            h64,
         })
     }
 }
@@ -290,7 +298,7 @@ impl SyndromeSketch {
         let byte_len = self.coordinates.len().checked_mul(8).unwrap_or(0);
         let mut bytes = Vec::with_capacity(byte_len);
         for coordinate in &self.coordinates {
-            bytes.extend_from_slice(&coordinate.to_be_bytes());
+            bytes.extend_from_slice(&coordinate.to_le_bytes());
         }
         URL_SAFE_NO_PAD.encode(bytes)
     }
@@ -317,7 +325,7 @@ impl SyndromeSketch {
             .map(|chunk| {
                 let mut value = [0; 8];
                 value.copy_from_slice(chunk);
-                u64::from_be_bytes(value)
+                u64::from_le_bytes(value)
             })
             .collect();
         Ok(Self { coordinates })
