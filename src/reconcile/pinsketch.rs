@@ -192,49 +192,55 @@ fn trace_mod(modulus: &[u64], parameter: u64) -> Option<Polynomial> {
 
 fn solve_quadratic_form(target: u64) -> Option<u64> {
     // Solve the GF(2)-linear map z -> z^2 + z using a reduced 64x65 matrix.
-    let mut rows = [0_u128; 64];
+    #[derive(Clone, Copy)]
+    struct Row {
+        coefficients: u64,
+        rhs: bool,
+    }
+
+    let mut rows = [Row {
+        coefficients: 0,
+        rhs: false,
+    }; 64];
     for column in 0..64 {
         let basis = 1_u64 << column;
         let image = gf64_mul(basis, basis) ^ basis;
         for (row, equation) in rows.iter_mut().enumerate() {
             if image & (1_u64 << row) != 0 {
-                *equation |= 1_u128 << column;
+                equation.coefficients |= 1_u64 << column;
             }
         }
     }
     for (row, equation) in rows.iter_mut().enumerate() {
         if target & (1_u64 << row) != 0 {
-            *equation |= 1_u128 << 64;
+            equation.rhs = true;
         }
     }
 
     let mut rank = 0;
     for column in 0..64 {
-        let pivot = (rank..64).find(|row| rows[*row] & (1_u128 << column) != 0);
+        let pivot = (rank..64).find(|row| rows[*row].coefficients & (1_u64 << column) != 0);
         let Some(pivot) = pivot else { continue };
         rows.swap(rank, pivot);
-        for row in 0..64 {
-            if row != rank && rows[row] & (1_u128 << column) != 0 {
-                rows[row] ^= rows[rank];
+        let pivot_row = rows[rank];
+        for (row, equation) in rows.iter_mut().enumerate() {
+            if row != rank && equation.coefficients & (1_u64 << column) != 0 {
+                equation.coefficients ^= pivot_row.coefficients;
+                equation.rhs ^= pivot_row.rhs;
             }
         }
         rank = rank.checked_add(1)?;
     }
-    let coefficient_mask = u128::from(u64::MAX);
-    if rows
-        .iter()
-        .any(|row| row & coefficient_mask == 0 && row >> 64 != 0)
-    {
+    if rows.iter().any(|row| row.coefficients == 0 && row.rhs) {
         return None;
     }
     let mut solution = 0_u64;
     for row in rows.iter().take(rank) {
-        let coefficients = u64::try_from(*row & coefficient_mask).ok()?;
-        if coefficients == 0 {
+        if row.coefficients == 0 {
             continue;
         }
-        let pivot = coefficients.trailing_zeros();
-        if row >> 64 != 0 {
+        let pivot = row.coefficients.trailing_zeros();
+        if row.rhs {
             solution |= 1_u64 << pivot;
         }
     }
