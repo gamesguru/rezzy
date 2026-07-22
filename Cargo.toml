@@ -102,10 +102,6 @@ ureq = { version = "2.9", optional = true, default-features = false, features = 
     "json",
     "native-tls",
 ] }
-xxhash-rust = { version = "0.8.15", default-features = false, features = [
-    "const_xxh3",
-    "xxh3",
-] }
 
 [dev-dependencies]
 similar = "3.1.0"
@@ -126,10 +122,6 @@ path = "tests/test_hashing.rs"
 [[test]]
 name = "test_merkle"
 path = "tests/test_merkle.rs"
-
-[[test]]
-name = "test_recon_xxh3"
-path = "tests/test_recon_xxh3.rs"
 
 [[test]]
 name = "test_reconcile_algebraic"

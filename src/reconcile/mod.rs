@@ -15,12 +15,8 @@
 //! Homomorphic reconciliation helpers.
 
 pub mod algebraic;
-pub mod xor_sum;
-pub mod xxh3;
 
 pub use algebraic::{
     AlgebraicError, BUCKET_COUNT, Bucket, BucketSummary, EventHash, MAX_SKETCH_CAPACITY,
     RoomAccumulator, SyndromeSketch, gf64_mul, verify_residual,
 };
-pub use xor_sum::XorSum;
-pub use xxh3::{Digest, hash_bytes, hash_str};
