@@ -21,9 +21,7 @@ pub(crate) fn decode(odd_syndromes: &[u64], max_elements: usize) -> Option<Vec<u
     let expected = locator.len().checked_sub(1)?;
     let mut roots = Vec::with_capacity(expected);
     find_roots(locator, &mut roots)?;
-    if roots.len() != expected || roots.contains(&0) {
-        return None;
-    }
+    debug_assert_eq!(roots.len(), expected);
     roots.sort_unstable();
     Some(roots)
 }
@@ -236,9 +234,7 @@ fn solve_quadratic_form(target: u64) -> Option<u64> {
     }
     let mut solution = 0_u64;
     for row in rows.iter().take(rank) {
-        if row.coefficients == 0 {
-            continue;
-        }
+        debug_assert_ne!(row.coefficients, 0);
         let pivot = row.coefficients.trailing_zeros();
         if row.rhs {
             solution |= 1_u64 << pivot;
@@ -344,5 +340,59 @@ mod tests {
             }
             assert_eq!(decode(&odd, size), Some(expected));
         }
+    }
+
+    #[test]
+    fn empty_sketch_decodes_to_empty_set() {
+        assert_eq!(decode(&[0; 4], 4), Some(Vec::new()));
+    }
+
+    #[test]
+    fn polynomial_helpers_reject_invalid_inputs() {
+        assert_eq!(gf64_inv(0), None);
+
+        let mut value = vec![1, 2, 3];
+        assert_eq!(poly_mod(&[1, 2], &mut value), None);
+        assert_eq!(poly_div(vec![1], &[1, 1]), None);
+        assert_eq!(poly_div(vec![1, 2], &[1, 2]), None);
+
+        let mut empty = Vec::new();
+        poly_square(&mut empty).unwrap();
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn gcd_swaps_lower_degree_left_operand() {
+        assert_eq!(poly_gcd(vec![1, 1], vec![1, 0, 1]), Some(vec![1, 1]));
+    }
+
+    #[test]
+    fn trace_handles_constant_modulus() {
+        assert_eq!(trace_mod(&[1], 1), Some(Vec::new()));
+    }
+
+    #[test]
+    fn root_finding_handles_constant_and_inseparable_polynomials() {
+        let mut roots = Vec::new();
+        find_roots(vec![1], &mut roots).unwrap();
+        assert!(roots.is_empty());
+        assert_eq!(find_roots(vec![1, 0, 1], &mut roots), None);
+    }
+
+    #[test]
+    fn quadratic_solver_rejects_an_inconsistent_target() {
+        let target = (0..64)
+            .map(|bit| 1_u64 << bit)
+            .find(|target| {
+                let mut trace = *target;
+                let mut power = *target;
+                for _ in 1..64 {
+                    power = gf64_mul(power, power);
+                    trace ^= power;
+                }
+                trace == 1
+            })
+            .expect("the absolute trace is a nonzero linear map");
+        assert_eq!(solve_quadratic_form(target), None);
     }
 }
