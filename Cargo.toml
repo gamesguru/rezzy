@@ -128,8 +128,12 @@ name = "test_merkle"
 path = "tests/test_merkle.rs"
 
 [[test]]
-name = "test_xxh3"
-path = "tests/test_xxh3.rs"
+name = "test_recon_xxh3"
+path = "tests/test_recon_xxh3.rs"
+
+[[test]]
+name = "test_reconcile_algebraic"
+path = "tests/test_reconcile_algebraic.rs"
 
 [[test]]
 name = "test_traversal"
