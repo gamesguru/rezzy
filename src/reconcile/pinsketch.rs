@@ -15,6 +15,8 @@ const FIELD_BITS: usize = 64;
 const MIXED_FACTOR_TRIALS: usize = 8;
 const FACTOR_TRIALS: usize = MIXED_FACTOR_TRIALS + FIELD_BITS;
 const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+const TRACE_SQUARES: usize = 63;
+const MAX_FACTOR_WORK: usize = 1_000_000;
 
 pub(crate) fn decode(odd_syndromes: &[u64], max_elements: usize) -> Option<Vec<u64>> {
     let all = reconstruct_syndromes(odd_syndromes);
@@ -263,12 +265,12 @@ fn solve_quadratic_form(target: u64) -> Option<u64> {
 }
 
 fn find_roots(poly: Polynomial, roots: &mut Vec<u64>) -> Option<()> {
-    let degree = poly.len().checked_sub(1)?;
-    let squared_degrees = (3..=degree).try_fold(0_usize, |sum, factor_degree| {
-        sum.checked_add(factor_degree.checked_mul(factor_degree)?)
-    })?;
-    let mut work = squared_degrees.checked_mul(FACTOR_TRIALS)?;
+    let mut work = MAX_FACTOR_WORK;
     find_roots_with_budget(poly, roots, &mut work)
+}
+
+fn factor_trial_cost(degree: usize) -> Option<usize> {
+    degree.checked_mul(degree)?.checked_mul(TRACE_SQUARES)
 }
 
 fn find_roots_with_budget(poly: Polynomial, roots: &mut Vec<u64>, work: &mut usize) -> Option<()> {
@@ -302,7 +304,7 @@ fn find_roots_with_budget(poly: Polynomial, roots: &mut Vec<u64>, work: &mut usi
                 let basis_bit = trial.checked_sub(MIXED_FACTOR_TRIALS)?;
                 parameter = 1_u64.checked_shl(u32::try_from(basis_bit).ok()?)?;
             }
-            let cost = degree.checked_mul(degree)?;
+            let cost = factor_trial_cost(degree)?;
             *work = work.checked_sub(cost)?;
             let trace = trace_mod(&poly, parameter)?;
             let factor = poly_gcd(poly.clone(), trace)?;
@@ -446,6 +448,11 @@ mod tests {
         let mut roots = Vec::new();
         assert_eq!(find_roots_with_budget(polynomial, &mut roots, &mut 0), None);
         assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn maximum_degree_trace_exceeds_the_absolute_work_budget() {
+        assert!(factor_trial_cost(1_000).unwrap() > MAX_FACTOR_WORK);
     }
 
     #[test]
