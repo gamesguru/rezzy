@@ -182,11 +182,15 @@ fn algebraic_wire_and_capacity_errors_are_rejected() {
         Err(AlgebraicError::InvalidSketchLength)
     );
     assert_eq!(
-        SyndromeSketch::decode(2, "not base64"),
+        SyndromeSketch::decode(2, "!!!!!!!!!!!!!!!!!!!!!!"),
         Err(AlgebraicError::InvalidBase64)
     );
     assert_eq!(
         SyndromeSketch::decode(2, &URL_SAFE_NO_PAD.encode([0_u8; 8])),
+        Err(AlgebraicError::InvalidSketchLength)
+    );
+    assert_eq!(
+        SyndromeSketch::decode(2, &"A".repeat(23)),
         Err(AlgebraicError::InvalidSketchLength)
     );
 }

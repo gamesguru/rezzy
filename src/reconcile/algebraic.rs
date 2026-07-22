@@ -332,12 +332,17 @@ impl SyndromeSketch {
         if capacity == 0 || capacity > MAX_SKETCH_CAPACITY {
             return Err(AlgebraicError::InvalidSketchCapacity);
         }
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded)
-            .map_err(|_| AlgebraicError::InvalidBase64)?;
         let expected_len = capacity
             .checked_mul(8)
             .ok_or(AlgebraicError::InvalidSketchLength)?;
+        let expected_encoded_len =
+            base64::encoded_len(expected_len, false).ok_or(AlgebraicError::InvalidSketchLength)?;
+        if encoded.len() != expected_encoded_len {
+            return Err(AlgebraicError::InvalidSketchLength);
+        }
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| AlgebraicError::InvalidBase64)?;
         if bytes.len() != expected_len {
             return Err(AlgebraicError::InvalidSketchLength);
         }
