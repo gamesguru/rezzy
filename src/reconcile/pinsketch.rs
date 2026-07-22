@@ -24,7 +24,9 @@ pub(crate) fn decode(odd_syndromes: &[u64], max_elements: usize) -> Option<Vec<u
     let expected = locator.len().checked_sub(1)?;
     let mut roots = Vec::with_capacity(expected);
     find_roots(locator, &mut roots)?;
-    debug_assert_eq!(roots.len(), expected);
+    if roots.len() != expected || roots.contains(&0) {
+        return None;
+    }
     roots.sort_unstable();
     Some(roots)
 }
@@ -33,6 +35,7 @@ fn reconstruct_syndromes(odd: &[u64]) -> Vec<u64> {
     let mut all = vec![0; odd.len().saturating_mul(2)];
     for (index, value) in odd.iter().copied().enumerate() {
         all[index.saturating_mul(2)] = value;
+        // Earlier iterations have already reconstructed the source at `index`.
         all[index.saturating_mul(2).saturating_add(1)] = gf64_mul(all[index], all[index]);
     }
     all
@@ -46,7 +49,10 @@ fn berlekamp_massey(syndromes: &[u64], max_degree: usize) -> Option<Polynomial> 
     for (n, syndrome) in syndromes.iter().copied().enumerate() {
         let mut discrepancy = syndrome;
         for (i, coefficient) in current.iter().copied().enumerate().skip(1) {
-            discrepancy ^= gf64_mul(syndromes[n.checked_sub(i)?], coefficient);
+            let Some(syndrome_index) = n.checked_sub(i) else {
+                continue;
+            };
+            discrepancy ^= gf64_mul(syndromes[syndrome_index], coefficient);
         }
         if discrepancy == 0 {
             continue;
@@ -243,7 +249,9 @@ fn solve_quadratic_form(target: u64) -> Option<u64> {
     }
     let mut solution = 0_u64;
     for row in rows.iter().take(rank) {
-        debug_assert_ne!(row.coefficients, 0);
+        if row.coefficients == 0 {
+            return None;
+        }
         let pivot = row.coefficients.trailing_zeros();
         if row.rhs {
             solution |= 1_u64 << pivot;

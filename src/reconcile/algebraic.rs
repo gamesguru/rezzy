@@ -15,7 +15,10 @@
 //! The `algebraic_v1` primitives from MSC0501.
 
 use alloc::{string::String, vec, vec::Vec};
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+};
 use sha2::{Digest as _, Sha256};
 
 /// The number of localization buckets in the `algebraic_v1` profile.
@@ -37,6 +40,17 @@ pub enum AlgebraicError {
     CountUnderflow,
 }
 
+/// Encoding used to derive a Matrix event ID's SHA-256 reference hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventIdFormat {
+    /// Room versions 1 and 2 hash the complete event ID.
+    Legacy,
+    /// Room version 3 uses unpadded standard Base64.
+    V3,
+    /// Room versions 4 and later use unpadded URL-safe Base64.
+    V4Plus,
+}
+
 /// The two truncations of an event's SHA-256 identifier used by MSC0501.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EventHash {
@@ -50,23 +64,23 @@ pub struct EventHash {
 impl EventHash {
     /// Derives hashes from a Matrix event ID.
     ///
-    /// For hash-derived room versions, the part after `$` is decoded directly.
-    /// Legacy event IDs are SHA-256 hashed as required by the MSC.
+    /// The reference hash is derived using the room version's event-ID format.
     ///
     /// # Errors
     /// Returns an error when the ID has no `$` sigil, contains invalid base64,
     /// or its decoded hash is not exactly 32 bytes (256 bits).
-    pub fn from_event_id(event_id: &str, hash_derived: bool) -> Result<Self, AlgebraicError> {
+    pub fn from_event_id(event_id: &str, format: EventIdFormat) -> Result<Self, AlgebraicError> {
         let encoded = event_id
             .strip_prefix('$')
             .ok_or(AlgebraicError::InvalidEventId)?;
-        let bytes = if hash_derived {
-            let encoded = encoded.split_once(':').map_or(encoded, |(hash, _)| hash);
-            URL_SAFE_NO_PAD
+        let bytes = match format {
+            EventIdFormat::Legacy => Sha256::digest(event_id.as_bytes()).to_vec(),
+            EventIdFormat::V3 => STANDARD_NO_PAD
                 .decode(encoded)
-                .map_err(|_| AlgebraicError::InvalidBase64)?
-        } else {
-            Sha256::digest(event_id.as_bytes()).to_vec()
+                .map_err(|_| AlgebraicError::InvalidBase64)?,
+            EventIdFormat::V4Plus => URL_SAFE_NO_PAD
+                .decode(encoded)
+                .map_err(|_| AlgebraicError::InvalidBase64)?,
         };
         if bytes.len() != 32 {
             return Err(AlgebraicError::InvalidEventId);
@@ -270,6 +284,9 @@ impl SyndromeSketch {
         }
         let decoded = super::pinsketch::decode(&self.coordinates, max_elements)
             .ok_or(AlgebraicError::DecodeFailure)?;
+        if decoded.contains(&0) {
+            return Err(AlgebraicError::DecodeFailure);
+        }
         let mut check = Self::new(self.capacity())?;
         for element in &decoded {
             check.toggle(*element)?;

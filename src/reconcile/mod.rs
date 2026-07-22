@@ -18,6 +18,6 @@ pub mod algebraic;
 mod pinsketch;
 
 pub use algebraic::{
-    AlgebraicError, BUCKET_COUNT, Bucket, BucketSummary, EventHash, MAX_SKETCH_CAPACITY,
-    RoomAccumulator, SyndromeSketch, gf64_mul, verify_residual,
+    AlgebraicError, BUCKET_COUNT, Bucket, BucketSummary, EventHash, EventIdFormat,
+    MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch, gf64_mul, verify_residual,
 };
