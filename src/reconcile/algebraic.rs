@@ -329,13 +329,13 @@ impl SyndromeSketch {
     /// # Errors
     /// Returns an error for invalid capacity, base64, or encoded byte length.
     pub fn decode(capacity: usize, encoded: &str) -> Result<Self, AlgebraicError> {
-        let sketch = Self::new(capacity)?;
+        if capacity == 0 || capacity > MAX_SKETCH_CAPACITY {
+            return Err(AlgebraicError::InvalidSketchCapacity);
+        }
         let bytes = URL_SAFE_NO_PAD
             .decode(encoded)
             .map_err(|_| AlgebraicError::InvalidBase64)?;
-        let expected_len = sketch
-            .coordinates
-            .len()
+        let expected_len = capacity
             .checked_mul(8)
             .ok_or(AlgebraicError::InvalidSketchLength)?;
         if bytes.len() != expected_len {
