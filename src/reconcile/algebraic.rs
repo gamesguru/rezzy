@@ -31,6 +31,8 @@ pub enum AlgebraicError {
     InvalidDigestLength,
     InvalidSketchCapacity,
     InvalidSketchLength,
+    DecodeFailure,
+    ZeroShortIdentifier,
     CountOverflow,
     CountUnderflow,
 }
@@ -230,13 +232,39 @@ impl SyndromeSketch {
     }
 
     /// Inserts or removes a short identifier. Both operations are XOR in characteristic two.
-    pub fn toggle(&mut self, value: u64) {
+    /// # Errors
+    /// Returns an error because zero is not representable by a `PinSketch`.
+    pub fn toggle(&mut self, value: u64) -> Result<(), AlgebraicError> {
+        if value == 0 {
+            return Err(AlgebraicError::ZeroShortIdentifier);
+        }
         let squared = gf64_mul(value, value);
         let mut odd_power = value;
         for coordinate in &mut self.coordinates {
             *coordinate ^= odd_power;
             odd_power = gf64_mul(odd_power, squared);
         }
+        Ok(())
+    }
+
+    /// Decodes up to `max_elements` from this residual sketch.
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::DecodeFailure`] when the residual exceeds the
+    /// bound, is malformed, or does not factor into distinct field elements.
+    pub fn decode_elements(&self, max_elements: usize) -> Result<Vec<u64>, AlgebraicError> {
+        if max_elements > self.capacity() {
+            return Err(AlgebraicError::InvalidSketchCapacity);
+        }
+        let decoded = super::pinsketch::decode(&self.coordinates, max_elements)
+            .ok_or(AlgebraicError::DecodeFailure)?;
+        let mut check = Self::new(self.capacity())?;
+        for element in &decoded {
+            check.toggle(*element)?;
+        }
+        (check == *self)
+            .then_some(decoded)
+            .ok_or(AlgebraicError::DecodeFailure)
     }
 
     /// XOR-subtracts another sketch.
@@ -394,12 +422,12 @@ mod tests {
     fn sketch_subtraction_recovers_toggled_syndromes() {
         let mut left = SyndromeSketch::new(4).unwrap();
         let mut right = SyndromeSketch::new(4).unwrap();
-        left.toggle(2);
-        left.toggle(3);
-        right.toggle(2);
+        left.toggle(2).unwrap();
+        left.toggle(3).unwrap();
+        right.toggle(2).unwrap();
         let residual = left.subtract(&right).unwrap();
         let mut expected = SyndromeSketch::new(4).unwrap();
-        expected.toggle(3);
+        expected.toggle(3).unwrap();
         assert_eq!(residual, expected);
         assert_eq!(
             SyndromeSketch::decode(4, &residual.encode()).unwrap(),

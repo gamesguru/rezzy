@@ -15,6 +15,7 @@
 //! Homomorphic reconciliation helpers.
 
 pub mod algebraic;
+mod pinsketch;
 
 pub use algebraic::{
     AlgebraicError, BUCKET_COUNT, Bucket, BucketSummary, EventHash, MAX_SKETCH_CAPACITY,
