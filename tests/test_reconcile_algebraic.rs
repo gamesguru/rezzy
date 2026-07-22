@@ -10,13 +10,17 @@ fn event_id(bytes: [u8; 32]) -> String {
 
 #[test]
 fn hash_derived_event_ids_feed_all_resident_layers() {
-    let first_id = event_id([0x11; 32]);
-    let second_id = event_id([0xa7; 32]);
+    let first_bytes = core::array::from_fn(|index| u8::try_from(index).unwrap());
+    let second_bytes = core::array::from_fn(|index| u8::try_from(255 - index).unwrap());
+    let first_id = event_id(first_bytes);
+    let second_id = event_id(second_bytes);
     let first = EventHash::from_event_id(&first_id, true).unwrap();
     let second = EventHash::from_event_id(&second_id, true).unwrap();
 
-    assert_eq!(first.h128, u128::from_be_bytes([0x11; 16]));
-    assert_eq!(first.h64, u64::from_be_bytes([0x11; 8]));
+    assert_eq!(first.h128, 0x0001_0203_0405_0607_0809_0a0b_0c0d_0e0f);
+    assert_eq!(first.h64, 0x0001_0203_0405_0607);
+    assert_eq!(second.h128, 0xfffe_fdfc_fbfa_f9f8_f7f6_f5f4_f3f2_f1f0);
+    assert_eq!(second.h64, 0xfffe_fdfc_fbfa_f9f8);
 
     let mut accumulator = RoomAccumulator::new();
     let mut sketch = SyndromeSketch::new(8).unwrap();
@@ -29,8 +33,8 @@ fn hash_derived_event_ids_feed_all_resident_layers() {
 
     assert_eq!(accumulator.known_event_count(), 2);
     assert!(verify_residual(accumulator.digest(), [first, second]));
-    assert_eq!(buckets.buckets()[0x11].count, 1);
-    assert_eq!(buckets.buckets()[0xa7].count, 1);
+    assert_eq!(buckets.buckets()[0x00].count, 1);
+    assert_eq!(buckets.buckets()[0xff].count, 1);
     assert_eq!(SyndromeSketch::decode(8, &sketch.encode()).unwrap(), sketch);
 }
 
@@ -39,7 +43,8 @@ fn legacy_ids_are_sha256_derived_and_stable() {
     let first = EventHash::from_event_id("$opaque:example.org", false).unwrap();
     let second = EventHash::from_event_id("$opaque:example.org", false).unwrap();
     assert_eq!(first, second);
-    assert_ne!(first.h128, 0);
+    assert_eq!(first.h128, 0xa2d4_1f14_4e8e_cf9f_f500_4fe8_cbc6_01b4);
+    assert_eq!(first.h64, 0xa2d4_1f14_4e8e_cf9f);
 }
 
 #[test]

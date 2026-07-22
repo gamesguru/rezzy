@@ -244,40 +244,46 @@ fn solve_quadratic_form(target: u64) -> Option<u64> {
 }
 
 fn find_roots(poly: Polynomial, roots: &mut Vec<u64>) -> Option<()> {
-    let degree = poly.len().checked_sub(1)?;
-    if degree == 0 {
-        return Some(());
-    }
-    if degree == 1 {
-        roots.push(poly[0]);
-        return Some(());
-    }
-    if degree == 2 {
-        let linear = poly[1];
-        if linear == 0 {
-            return None;
+    let mut pending = vec![poly];
+    while let Some(poly) = pending.pop() {
+        let degree = poly.len().checked_sub(1)?;
+        if degree == 0 {
+            continue;
         }
-        let inverse = gf64_inv(linear)?;
-        let normalized = gf64_mul(poly[0], gf64_mul(inverse, inverse));
-        let root = gf64_mul(solve_quadratic_form(normalized)?, linear);
-        roots.push(root);
-        roots.push(root ^ linear);
-        return Some(());
-    }
+        if degree == 1 {
+            roots.push(poly[0]);
+            continue;
+        }
+        if degree == 2 {
+            let linear = poly[1];
+            if linear == 0 {
+                return None;
+            }
+            let inverse = gf64_inv(linear)?;
+            let normalized = gf64_mul(poly[0], gf64_mul(inverse, inverse));
+            let root = gf64_mul(solve_quadratic_form(normalized)?, linear);
+            roots.push(root);
+            roots.push(root ^ linear);
+            continue;
+        }
 
-    let mut parameter = 1;
-    for _ in 0..64 {
-        let trace = trace_mod(&poly, parameter)?;
-        let factor = poly_gcd(poly.clone(), trace)?;
-        if factor.len() > 1 && factor.len() < poly.len() {
-            let quotient = poly_div(poly, &factor)?;
-            find_roots(factor, roots)?;
-            find_roots(quotient, roots)?;
-            return Some(());
+        let mut split = None;
+        let mut parameter = 1;
+        for _ in 0..64 {
+            let trace = trace_mod(&poly, parameter)?;
+            let factor = poly_gcd(poly.clone(), trace)?;
+            if factor.len() > 1 && factor.len() < poly.len() {
+                let quotient = poly_div(poly, &factor)?;
+                split = Some((factor, quotient));
+                break;
+            }
+            parameter = gf64_mul(parameter, 2);
         }
-        parameter = gf64_mul(parameter, 2);
+        let (factor, quotient) = split?;
+        pending.push(quotient);
+        pending.push(factor);
     }
-    None
+    Some(())
 }
 
 #[cfg(test)]
