@@ -11,7 +11,9 @@ use super::algebraic::gf64_mul;
 
 type Polynomial = Vec<u64>;
 
-const FACTOR_WORK_MULTIPLIER: usize = 16;
+const FIELD_BITS: usize = 64;
+const MIXED_FACTOR_TRIALS: usize = 8;
+const FACTOR_TRIALS: usize = MIXED_FACTOR_TRIALS + FIELD_BITS;
 const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 
 pub(crate) fn decode(odd_syndromes: &[u64], max_elements: usize) -> Option<Vec<u64>> {
@@ -262,9 +264,10 @@ fn solve_quadratic_form(target: u64) -> Option<u64> {
 
 fn find_roots(poly: Polynomial, roots: &mut Vec<u64>) -> Option<()> {
     let degree = poly.len().checked_sub(1)?;
-    let mut work = degree
-        .checked_mul(degree)?
-        .checked_mul(FACTOR_WORK_MULTIPLIER)?;
+    let squared_degrees = (3..=degree).try_fold(0_usize, |sum, factor_degree| {
+        sum.checked_add(factor_degree.checked_mul(factor_degree)?)
+    })?;
+    let mut work = squared_degrees.checked_mul(FACTOR_TRIALS)?;
     find_roots_with_budget(poly, roots, &mut work)
 }
 
@@ -294,7 +297,11 @@ fn find_roots_with_budget(poly: Polynomial, roots: &mut Vec<u64>, work: &mut usi
 
         let mut split = None;
         let mut parameter = FACTOR_PARAMETER_SEED;
-        for _ in 0..64 {
+        for trial in 0..FACTOR_TRIALS {
+            if trial >= MIXED_FACTOR_TRIALS {
+                let basis_bit = trial.checked_sub(MIXED_FACTOR_TRIALS)?;
+                parameter = 1_u64.checked_shl(u32::try_from(basis_bit).ok()?)?;
+            }
             let cost = degree.checked_mul(degree)?;
             *work = work.checked_sub(cost)?;
             let trace = trace_mod(&poly, parameter)?;
@@ -304,7 +311,9 @@ fn find_roots_with_budget(poly: Polynomial, roots: &mut Vec<u64>, work: &mut usi
                 split = Some((factor, quotient));
                 break;
             }
-            parameter = next_factor_parameter(parameter);
+            if trial < MIXED_FACTOR_TRIALS {
+                parameter = next_factor_parameter(parameter);
+            }
         }
         let (factor, quotient) = split?;
         pending.push(quotient);
@@ -373,6 +382,21 @@ mod tests {
             }
             assert_eq!(decode(&odd, size), Some(expected));
         }
+    }
+
+    #[test]
+    fn decodes_a_triple_unsplit_by_the_mixed_parameter_prefix() {
+        let expected = vec![1, 0xcd2, 0x1_d71a];
+        let mut odd = vec![0; expected.len()];
+        for value in &expected {
+            let squared = gf64_mul(*value, *value);
+            let mut power = *value;
+            for syndrome in &mut odd {
+                *syndrome ^= power;
+                power = gf64_mul(power, squared);
+            }
+        }
+        assert_eq!(decode(&odd, expected.len()), Some(expected));
     }
 
     #[test]
