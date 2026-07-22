@@ -42,7 +42,8 @@ pub enum AlgebraicError {
 pub struct EventHash {
     /// First 128 bits, interpreted in network byte order.
     pub h128: u128,
-    /// First 64 bits, interpreted in network byte order.
+    /// First non-zero 64-bit chunk of the SHA-256 digest (network byte order),
+    /// falling back to 1 if all four 64-bit chunks are zero.
     pub h64: u64,
 }
 
@@ -54,7 +55,7 @@ impl EventHash {
     ///
     /// # Errors
     /// Returns an error when the ID has no `$` sigil, contains invalid base64,
-    /// or its decoded hash is shorter than 128 bits.
+    /// or its decoded hash is shorter than 32 bytes (256 bits).
     pub fn from_event_id(event_id: &str, hash_derived: bool) -> Result<Self, AlgebraicError> {
         let encoded = event_id
             .strip_prefix('$')
