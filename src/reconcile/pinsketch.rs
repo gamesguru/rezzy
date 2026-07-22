@@ -11,6 +11,9 @@ use super::algebraic::gf64_mul;
 
 type Polynomial = Vec<u64>;
 
+const FACTOR_WORK_MULTIPLIER: usize = 16;
+const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+
 pub(crate) fn decode(odd_syndromes: &[u64], max_elements: usize) -> Option<Vec<u64>> {
     let all = reconstruct_syndromes(odd_syndromes);
     let mut locator = berlekamp_massey(&all, max_elements)?;
@@ -188,6 +191,12 @@ fn trace_mod(modulus: &[u64], parameter: u64) -> Option<Polynomial> {
     Some(trace)
 }
 
+const fn next_factor_parameter(mut state: u64) -> u64 {
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^ (state << 17)
+}
+
 fn solve_quadratic_form(target: u64) -> Option<u64> {
     // Solve the GF(2)-linear map z -> z^2 + z using a reduced 64x65 matrix.
     #[derive(Clone, Copy)]
@@ -244,6 +253,14 @@ fn solve_quadratic_form(target: u64) -> Option<u64> {
 }
 
 fn find_roots(poly: Polynomial, roots: &mut Vec<u64>) -> Option<()> {
+    let degree = poly.len().checked_sub(1)?;
+    let mut work = degree
+        .checked_mul(degree)?
+        .checked_mul(FACTOR_WORK_MULTIPLIER)?;
+    find_roots_with_budget(poly, roots, &mut work)
+}
+
+fn find_roots_with_budget(poly: Polynomial, roots: &mut Vec<u64>, work: &mut usize) -> Option<()> {
     let mut pending = vec![poly];
     while let Some(poly) = pending.pop() {
         let degree = poly.len().checked_sub(1)?;
@@ -268,8 +285,10 @@ fn find_roots(poly: Polynomial, roots: &mut Vec<u64>) -> Option<()> {
         }
 
         let mut split = None;
-        let mut parameter = 1;
+        let mut parameter = FACTOR_PARAMETER_SEED;
         for _ in 0..64 {
+            let cost = degree.checked_mul(degree)?;
+            *work = work.checked_sub(cost)?;
             let trace = trace_mod(&poly, parameter)?;
             let factor = poly_gcd(poly.clone(), trace)?;
             if factor.len() > 1 && factor.len() < poly.len() {
@@ -277,7 +296,7 @@ fn find_roots(poly: Polynomial, roots: &mut Vec<u64>) -> Option<()> {
                 split = Some((factor, quotient));
                 break;
             }
-            parameter = gf64_mul(parameter, 2);
+            parameter = next_factor_parameter(parameter);
         }
         let (factor, quotient) = split?;
         pending.push(quotient);
@@ -386,6 +405,15 @@ mod tests {
         assert!(roots.is_empty());
         assert_eq!(find_roots(vec![1, 0, 1], &mut roots), None);
         assert_eq!(find_roots(vec![1, 1, 0, 1], &mut roots), None);
+    }
+
+    #[test]
+    fn root_finding_stops_when_its_work_budget_is_exhausted() {
+        let pair_products = gf64_mul(1, 2) ^ gf64_mul(1, 3) ^ gf64_mul(2, 3);
+        let polynomial = vec![gf64_mul(gf64_mul(1, 2), 3), pair_products, 0, 1];
+        let mut roots = Vec::new();
+        assert_eq!(find_roots_with_budget(polynomial, &mut roots, &mut 0), None);
+        assert!(roots.is_empty());
     }
 
     #[test]

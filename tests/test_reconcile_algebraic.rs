@@ -112,6 +112,10 @@ fn algebraic_wire_and_capacity_errors_are_rejected() {
         Err(AlgebraicError::InvalidEventId)
     );
     assert_eq!(
+        EventHash::from_event_id(&format!("${}", URL_SAFE_NO_PAD.encode([0_u8; 33])), true,),
+        Err(AlgebraicError::InvalidEventId)
+    );
+    assert_eq!(
         EventHash::from_event_id("not-an-event-id", true),
         Err(AlgebraicError::InvalidEventId)
     );
@@ -120,11 +124,15 @@ fn algebraic_wire_and_capacity_errors_are_rejected() {
         Err(AlgebraicError::InvalidBase64)
     );
     assert_eq!(
-        RoomAccumulator::decode_digest("not base64"),
+        RoomAccumulator::decode_digest("!!!!!!!!!!!!!!!!!!!!!!"),
         Err(AlgebraicError::InvalidBase64)
     );
     assert_eq!(
         RoomAccumulator::decode_digest(&URL_SAFE_NO_PAD.encode([0_u8; 15])),
+        Err(AlgebraicError::InvalidDigestLength)
+    );
+    assert_eq!(
+        RoomAccumulator::decode_digest(&"A".repeat(23)),
         Err(AlgebraicError::InvalidDigestLength)
     );
 

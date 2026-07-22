@@ -55,7 +55,7 @@ impl EventHash {
     ///
     /// # Errors
     /// Returns an error when the ID has no `$` sigil, contains invalid base64,
-    /// or its decoded hash is shorter than 32 bytes (256 bits).
+    /// or its decoded hash is not exactly 32 bytes (256 bits).
     pub fn from_event_id(event_id: &str, hash_derived: bool) -> Result<Self, AlgebraicError> {
         let encoded = event_id
             .strip_prefix('$')
@@ -68,7 +68,7 @@ impl EventHash {
         } else {
             Sha256::digest(event_id.as_bytes()).to_vec()
         };
-        if bytes.len() < 32 {
+        if bytes.len() != 32 {
             return Err(AlgebraicError::InvalidEventId);
         }
         let mut wide = [0; 16];
@@ -150,6 +150,9 @@ impl RoomAccumulator {
     /// # Errors
     /// Returns an error for invalid base64 or any decoded length other than 16 bytes.
     pub fn decode_digest(encoded: &str) -> Result<u128, AlgebraicError> {
+        if encoded.len() != 22 {
+            return Err(AlgebraicError::InvalidDigestLength);
+        }
         let bytes = URL_SAFE_NO_PAD
             .decode(encoded)
             .map_err(|_| AlgebraicError::InvalidBase64)?;
