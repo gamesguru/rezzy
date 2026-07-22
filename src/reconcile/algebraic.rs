@@ -456,4 +456,30 @@ mod tests {
         );
         assert_ne!(accumulator.etag(["$a"]), accumulator.etag(["$b"]));
     }
+
+    #[test]
+    fn counters_reject_underflow_and_profile_overflow() {
+        let event = hash(1);
+        assert_eq!(
+            RoomAccumulator::new().remove(event),
+            Err(AlgebraicError::CountUnderflow)
+        );
+
+        let mut accumulator = RoomAccumulator {
+            digest: 0,
+            count: u64::MAX,
+        };
+        assert_eq!(
+            accumulator.insert(event),
+            Err(AlgebraicError::CountOverflow)
+        );
+
+        let mut summary = BucketSummary::default();
+        summary.buckets[1].count = 0x00ff_ffff;
+        assert_eq!(summary.insert(event), Err(AlgebraicError::CountOverflow));
+        assert_eq!(
+            BucketSummary::default().remove(event),
+            Err(AlgebraicError::CountUnderflow)
+        );
+    }
 }

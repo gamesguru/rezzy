@@ -1,6 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rezzy::reconcile::{
-    BucketSummary, EventHash, RoomAccumulator, SyndromeSketch, verify_residual,
+    AlgebraicError, BucketSummary, EventHash, MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch,
+    verify_residual,
 };
 
 fn event_id(bytes: [u8; 32]) -> String {
@@ -68,4 +69,66 @@ fn pinsketch_fails_loudly_above_the_decode_bound() {
     assert_eq!(sketch.decode_elements(4).unwrap(), [1, 2, 3, 4]);
     assert!(sketch.decode_elements(3).is_err());
     assert!(SyndromeSketch::new(1).unwrap().toggle(0).is_err());
+}
+
+#[test]
+fn algebraic_wire_and_capacity_errors_are_rejected() {
+    assert_eq!(
+        EventHash::from_event_id("$AQ", true),
+        Err(AlgebraicError::InvalidEventId)
+    );
+    assert_eq!(
+        EventHash::from_event_id("not-an-event-id", true),
+        Err(AlgebraicError::InvalidEventId)
+    );
+    assert_eq!(
+        EventHash::from_event_id("$not base64", true),
+        Err(AlgebraicError::InvalidBase64)
+    );
+    assert_eq!(
+        RoomAccumulator::decode_digest("not base64"),
+        Err(AlgebraicError::InvalidBase64)
+    );
+    assert_eq!(
+        RoomAccumulator::decode_digest(&URL_SAFE_NO_PAD.encode([0_u8; 15])),
+        Err(AlgebraicError::InvalidDigestLength)
+    );
+
+    assert_eq!(
+        SyndromeSketch::new(0),
+        Err(AlgebraicError::InvalidSketchCapacity)
+    );
+    assert_eq!(
+        SyndromeSketch::new(MAX_SKETCH_CAPACITY + 1),
+        Err(AlgebraicError::InvalidSketchCapacity)
+    );
+    let sketch = SyndromeSketch::new(2).unwrap();
+    assert_eq!(sketch.coordinates(), [0, 0]);
+    assert_eq!(
+        sketch.decode_elements(3),
+        Err(AlgebraicError::InvalidSketchCapacity)
+    );
+    assert_eq!(
+        sketch.subtract(&SyndromeSketch::new(1).unwrap()),
+        Err(AlgebraicError::InvalidSketchLength)
+    );
+    assert_eq!(
+        SyndromeSketch::decode(2, "not base64"),
+        Err(AlgebraicError::InvalidBase64)
+    );
+    assert_eq!(
+        SyndromeSketch::decode(2, &URL_SAFE_NO_PAD.encode([0_u8; 8])),
+        Err(AlgebraicError::InvalidSketchLength)
+    );
+}
+
+#[test]
+fn accumulator_residual_is_the_digest_xor() {
+    let first = EventHash::from_event_id(&event_id([0x12; 32]), true).unwrap();
+    let second = EventHash::from_event_id(&event_id([0x34; 32]), true).unwrap();
+    let mut left = RoomAccumulator::new();
+    let mut right = RoomAccumulator::new();
+    left.insert(first).unwrap();
+    right.insert(second).unwrap();
+    assert_eq!(left.residual(right), first.h128 ^ second.h128);
 }
