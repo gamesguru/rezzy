@@ -355,6 +355,8 @@ mod tests {
         assert_eq!(poly_mod(&[1, 2], &mut value), None);
         assert_eq!(poly_div(vec![1], &[1, 1]), None);
         assert_eq!(poly_div(vec![1, 2], &[1, 2]), None);
+        assert_eq!(poly_div(vec![2, 3, 1], &[1, 1]), Some(vec![2, 1]));
+        assert_eq!(poly_div(vec![0, 1, 1], &[1, 1]), Some(vec![0, 1]));
 
         let mut empty = Vec::new();
         poly_square(&mut empty).unwrap();
