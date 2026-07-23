@@ -3,8 +3,8 @@ use base64::{
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
 };
 use rezzy::reconcile::{
-    AlgebraicError, BucketSummary, EventHash, EventIdFormat, MAX_SKETCH_CAPACITY, RoomAccumulator,
-    SyndromeSketch, verify_residual,
+    AlgebraicError, BucketSummary, EventHash, EventIdFormat, MAX_LOCAL_SKETCH_DECODE_CAPACITY,
+    MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch, verify_residual,
 };
 
 fn event_id(bytes: [u8; 32]) -> String {
@@ -127,6 +127,16 @@ fn pinsketch_fails_loudly_above_the_decode_bound() {
     assert_eq!(sketch.decode_elements(4).unwrap(), [1, 2, 3, 4]);
     assert!(sketch.decode_elements(3).is_err());
     assert!(SyndromeSketch::new(1).unwrap().toggle(0).is_err());
+    assert_eq!(
+        SyndromeSketch::new(MAX_LOCAL_SKETCH_DECODE_CAPACITY + 1)
+            .unwrap()
+            .decode_elements(MAX_LOCAL_SKETCH_DECODE_CAPACITY + 1),
+        Err(AlgebraicError::InvalidSketchCapacity)
+    );
+    assert_eq!(
+        SyndromeSketch::new(1).unwrap().decode_elements(0),
+        Err(AlgebraicError::InvalidSketchCapacity)
+    );
 }
 
 #[test]

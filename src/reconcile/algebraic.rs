@@ -27,6 +27,8 @@ pub use super::gf64::mul as gf64_mul;
 pub const BUCKET_COUNT: usize = 256;
 /// Maximum extraction capacity for an unbucketed `algebraic_v1` sketch.
 pub const MAX_SKETCH_CAPACITY: usize = 1_000;
+/// Default local extraction limit for CPU-bounded sketch decoding.
+pub const MAX_LOCAL_SKETCH_DECODE_CAPACITY: usize = 64;
 
 /// An invalid event identifier, wire digest, or sketch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +39,7 @@ pub enum AlgebraicError {
     InvalidSketchCapacity,
     InvalidSketchLength,
     DecodeFailure,
+    BudgetExhausted,
     ZeroShortIdentifier,
     CountOverflow,
     CountUnderflow,
@@ -262,12 +265,17 @@ impl SyndromeSketch {
     /// # Errors
     /// Returns [`AlgebraicError::DecodeFailure`] when the residual exceeds the
     /// bound, is malformed, or does not factor into distinct field elements.
+    /// Returns [`AlgebraicError::InvalidSketchCapacity`] when `max_elements`
+    /// exceeds the sketch capacity or the local decode policy, and
+    /// [`AlgebraicError::BudgetExhausted`] when root finding reaches its work limit.
     pub fn decode_elements(&self, max_elements: usize) -> Result<Vec<u64>, AlgebraicError> {
-        if max_elements > self.capacity() {
+        if max_elements == 0
+            || max_elements > self.capacity()
+            || max_elements > MAX_LOCAL_SKETCH_DECODE_CAPACITY
+        {
             return Err(AlgebraicError::InvalidSketchCapacity);
         }
-        let decoded = super::pinsketch::decode(&self.coordinates, max_elements)
-            .ok_or(AlgebraicError::DecodeFailure)?;
+        let decoded = super::pinsketch::decode(&self.coordinates[..max_elements], max_elements)?;
         if decoded.contains(&0) {
             return Err(AlgebraicError::DecodeFailure);
         }

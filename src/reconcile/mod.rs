@@ -21,6 +21,7 @@ pub mod resident;
 
 pub use algebraic::{
     AlgebraicError, BUCKET_COUNT, Bucket, BucketSummary, EventHash, EventIdFormat,
-    MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch, gf64_mul, verify_residual,
+    MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch,
+    gf64_mul, verify_residual,
 };
 pub use resident::{ResidentBucket, ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};

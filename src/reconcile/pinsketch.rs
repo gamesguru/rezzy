@@ -7,7 +7,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use super::algebraic::gf64_mul;
+use super::algebraic::{AlgebraicError, gf64_mul};
 
 type Polynomial = Vec<u64>;
 
@@ -16,23 +16,29 @@ const MIXED_FACTOR_TRIALS: usize = 8;
 const FACTOR_TRIALS: usize = MIXED_FACTOR_TRIALS + FIELD_BITS;
 const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 const TRACE_SQUARES: usize = 63;
-const MAX_FACTOR_WORK: usize = 1_000_000;
+const MAX_FACTOR_WORK: usize = 8_000_000;
 
-pub(crate) fn decode(odd_syndromes: &[u64], max_elements: usize) -> Option<Vec<u64>> {
+pub(crate) fn decode(
+    odd_syndromes: &[u64],
+    max_elements: usize,
+) -> Result<Vec<u64>, AlgebraicError> {
     let all = reconstruct_syndromes(odd_syndromes);
-    let mut locator = berlekamp_massey(&all, max_elements)?;
+    let mut locator = berlekamp_massey(&all, max_elements).ok_or(AlgebraicError::DecodeFailure)?;
     if locator.len() == 1 {
-        return Some(Vec::new());
+        return Ok(Vec::new());
     }
     locator.reverse();
-    let expected = locator.len().checked_sub(1)?;
+    let expected = locator
+        .len()
+        .checked_sub(1)
+        .ok_or(AlgebraicError::DecodeFailure)?;
     let mut roots = Vec::with_capacity(expected);
     find_roots(locator, &mut roots)?;
     if roots.len() != expected || roots.contains(&0) {
-        return None;
+        return Err(AlgebraicError::DecodeFailure);
     }
     roots.sort_unstable();
-    Some(roots)
+    Ok(roots)
 }
 
 fn reconstruct_syndromes(odd: &[u64]) -> Vec<u64> {
@@ -264,7 +270,7 @@ fn solve_quadratic_form(target: u64) -> Option<u64> {
     (gf64_mul(solution, solution) ^ solution == target).then_some(solution)
 }
 
-fn find_roots(poly: Polynomial, roots: &mut Vec<u64>) -> Option<()> {
+fn find_roots(poly: Polynomial, roots: &mut Vec<u64>) -> Result<(), AlgebraicError> {
     let mut work = MAX_FACTOR_WORK;
     find_roots_with_budget(poly, roots, &mut work)
 }
@@ -273,10 +279,17 @@ fn factor_trial_cost(degree: usize) -> Option<usize> {
     degree.checked_mul(degree)?.checked_mul(TRACE_SQUARES)
 }
 
-fn find_roots_with_budget(poly: Polynomial, roots: &mut Vec<u64>, work: &mut usize) -> Option<()> {
+fn find_roots_with_budget(
+    poly: Polynomial,
+    roots: &mut Vec<u64>,
+    work: &mut usize,
+) -> Result<(), AlgebraicError> {
     let mut pending = vec![poly];
     while let Some(poly) = pending.pop() {
-        let degree = poly.len().checked_sub(1)?;
+        let degree = poly
+            .len()
+            .checked_sub(1)
+            .ok_or(AlgebraicError::DecodeFailure)?;
         if degree == 0 {
             continue;
         }
@@ -287,11 +300,14 @@ fn find_roots_with_budget(poly: Polynomial, roots: &mut Vec<u64>, work: &mut usi
         if degree == 2 {
             let linear = poly[1];
             if linear == 0 {
-                return None;
+                return Err(AlgebraicError::DecodeFailure);
             }
-            let inverse = gf64_inv(linear)?;
+            let inverse = gf64_inv(linear).ok_or(AlgebraicError::DecodeFailure)?;
             let normalized = gf64_mul(poly[0], gf64_mul(inverse, inverse));
-            let root = gf64_mul(solve_quadratic_form(normalized)?, linear);
+            let root = gf64_mul(
+                solve_quadratic_form(normalized).ok_or(AlgebraicError::DecodeFailure)?,
+                linear,
+            );
             roots.push(root);
             roots.push(root ^ linear);
             continue;
@@ -301,15 +317,23 @@ fn find_roots_with_budget(poly: Polynomial, roots: &mut Vec<u64>, work: &mut usi
         let mut parameter = FACTOR_PARAMETER_SEED;
         for trial in 0..FACTOR_TRIALS {
             if trial >= MIXED_FACTOR_TRIALS {
-                let basis_bit = trial.checked_sub(MIXED_FACTOR_TRIALS)?;
-                parameter = 1_u64.checked_shl(u32::try_from(basis_bit).ok()?)?;
+                let basis_bit = trial
+                    .checked_sub(MIXED_FACTOR_TRIALS)
+                    .ok_or(AlgebraicError::DecodeFailure)?;
+                let basis_bit =
+                    u32::try_from(basis_bit).map_err(|_| AlgebraicError::DecodeFailure)?;
+                parameter = 1_u64
+                    .checked_shl(basis_bit)
+                    .ok_or(AlgebraicError::DecodeFailure)?;
             }
-            let cost = factor_trial_cost(degree)?;
-            *work = work.checked_sub(cost)?;
-            let trace = trace_mod(&poly, parameter)?;
-            let factor = poly_gcd(poly.clone(), trace)?;
+            let cost = factor_trial_cost(degree).ok_or(AlgebraicError::DecodeFailure)?;
+            *work = work
+                .checked_sub(cost)
+                .ok_or(AlgebraicError::BudgetExhausted)?;
+            let trace = trace_mod(&poly, parameter).ok_or(AlgebraicError::DecodeFailure)?;
+            let factor = poly_gcd(poly.clone(), trace).ok_or(AlgebraicError::DecodeFailure)?;
             if factor.len() > 1 && factor.len() < poly.len() {
-                let quotient = poly_div(poly, &factor)?;
+                let quotient = poly_div(poly, &factor).ok_or(AlgebraicError::DecodeFailure)?;
                 split = Some((factor, quotient));
                 break;
             }
@@ -317,11 +341,11 @@ fn find_roots_with_budget(poly: Polynomial, roots: &mut Vec<u64>, work: &mut usi
                 parameter = next_factor_parameter(parameter);
             }
         }
-        let (factor, quotient) = split?;
+        let (factor, quotient) = split.ok_or(AlgebraicError::DecodeFailure)?;
         pending.push(quotient);
         pending.push(factor);
     }
-    Some(())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -347,7 +371,7 @@ mod tests {
                     power = gf64_mul(power, squared);
                 }
             }
-            assert_eq!(decode(&odd, expected.len()), Some(expected));
+            assert_eq!(decode(&odd, expected.len()), Ok(expected));
         }
     }
 
@@ -362,7 +386,7 @@ mod tests {
     #[test]
     fn decodes_deterministic_varied_sets() {
         let mut state = 0x6a09_e667_f3bc_c909_u64;
-        for size in 1..=24 {
+        for size in (1..=24).chain([32, 64]) {
             let mut expected = Vec::new();
             while expected.len() < size {
                 state ^= state << 13;
@@ -382,7 +406,7 @@ mod tests {
                     power = gf64_mul(power, squared);
                 }
             }
-            assert_eq!(decode(&odd, size), Some(expected));
+            assert_eq!(decode(&odd, size), Ok(expected));
         }
     }
 
@@ -398,12 +422,12 @@ mod tests {
                 power = gf64_mul(power, squared);
             }
         }
-        assert_eq!(decode(&odd, expected.len()), Some(expected));
+        assert_eq!(decode(&odd, expected.len()), Ok(expected));
     }
 
     #[test]
     fn empty_sketch_decodes_to_empty_set() {
-        assert_eq!(decode(&[0; 4], 4), Some(Vec::new()));
+        assert_eq!(decode(&[0; 4], 4), Ok(Vec::new()));
     }
 
     #[test]
@@ -437,8 +461,14 @@ mod tests {
         let mut roots = Vec::new();
         find_roots(vec![1], &mut roots).unwrap();
         assert!(roots.is_empty());
-        assert_eq!(find_roots(vec![1, 0, 1], &mut roots), None);
-        assert_eq!(find_roots(vec![1, 1, 0, 1], &mut roots), None);
+        assert_eq!(
+            find_roots(vec![1, 0, 1], &mut roots),
+            Err(AlgebraicError::DecodeFailure)
+        );
+        assert_eq!(
+            find_roots(vec![1, 1, 0, 1], &mut roots),
+            Err(AlgebraicError::DecodeFailure)
+        );
     }
 
     #[test]
@@ -446,7 +476,10 @@ mod tests {
         let pair_products = gf64_mul(1, 2) ^ gf64_mul(1, 3) ^ gf64_mul(2, 3);
         let polynomial = vec![gf64_mul(gf64_mul(1, 2), 3), pair_products, 0, 1];
         let mut roots = Vec::new();
-        assert_eq!(find_roots_with_budget(polynomial, &mut roots, &mut 0), None);
+        assert_eq!(
+            find_roots_with_budget(polynomial, &mut roots, &mut 0),
+            Err(AlgebraicError::BudgetExhausted)
+        );
         assert!(roots.is_empty());
     }
 
