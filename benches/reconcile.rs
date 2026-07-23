@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,38 @@ fn hash(index: u64) -> EventHash {
     }
 }
 
+struct Xorshift128 {
+    state: [u64; 2],
+}
+
+impl Xorshift128 {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: [seed, seed ^ 0x9e37_79b9_7f4a_7c15],
+        }
+    }
+
+    fn next(&mut self) -> u64 {
+        let mut value = self.state[0];
+        let other = self.state[1];
+        value ^= value << 23;
+        value ^= value >> 17;
+        value ^= other ^ (other >> 26);
+        self.state = [other, value];
+        value
+    }
+
+    fn hash(&mut self) -> EventHash {
+        let high = self.next();
+        let low = self.next();
+        let h64 = self.next() | 1;
+        EventHash {
+            h128: u128::from(high) << 64 | u128::from(low),
+            h64,
+        }
+    }
+}
+
 fn measure(iterations: u32, mut operation: impl FnMut()) -> Duration {
     let start = Instant::now();
     for _ in 0..iterations {
@@ -23,8 +56,55 @@ fn measure(iterations: u32, mut operation: impl FnMut()) -> Duration {
 }
 
 fn report(name: &str, iterations: u32, elapsed: Duration) {
-    let nanos = elapsed.as_secs_f64() * 1e9 / f64::from(iterations);
-    println!("{name}: {nanos:.2} ns/op ({iterations} iterations)");
+    let millis = elapsed.as_secs_f64() * 1e3 / f64::from(iterations);
+    println!("{name}: {millis:.6} ms/op ({iterations} iterations)");
+}
+
+fn benchmark_scale_workload() {
+    const BASE_COUNT: usize = 50_000;
+    const LOCAL_EXTRA_COUNT: usize = 2_100;
+    const REMOTE_EXTRA_COUNT: usize = 1_900;
+    let mut generator = Xorshift128::new(0x243f_6a88_85a3_08d3);
+    let base: Vec<_> = (0..BASE_COUNT).map(|_| generator.hash()).collect();
+    let local_extra: Vec<_> = (0..LOCAL_EXTRA_COUNT).map(|_| generator.hash()).collect();
+    let remote_extra: Vec<_> = (0..REMOTE_EXTRA_COUNT).map(|_| generator.hash()).collect();
+    let mut identities =
+        HashSet::with_capacity(BASE_COUNT + LOCAL_EXTRA_COUNT + REMOTE_EXTRA_COUNT);
+    for event in base.iter().chain(&local_extra).chain(&remote_extra) {
+        assert!(identities.insert((event.h128, event.h64)));
+    }
+    let mut local = ResidentKernel::new();
+    let mut remote = ResidentKernel::new();
+    for event in &base {
+        local.insert(*event).expect("benchmark hashes are valid");
+        remote.insert(*event).expect("benchmark hashes are valid");
+    }
+    for event in &local_extra {
+        local.insert(*event).expect("benchmark hashes are valid");
+    }
+    for event in &remote_extra {
+        remote.insert(*event).expect("benchmark hashes are valid");
+    }
+    assert_eq!(local.accumulator().known_event_count(), 52_100);
+    assert_eq!(remote.accumulator().known_event_count(), 51_900);
+    assert_eq!(
+        local
+            .accumulator()
+            .known_event_count()
+            .checked_sub(remote.accumulator().known_event_count())
+            .expect("local fixture is larger"),
+        200
+    );
+    let expected_residual = local_extra
+        .iter()
+        .chain(&remote_extra)
+        .fold(0, |residual, event| residual ^ event.h128);
+    assert_eq!(
+        local.accumulator().residual(remote.accumulator()),
+        expected_residual
+    );
+    assert_eq!(LOCAL_EXTRA_COUNT + REMOTE_EXTRA_COUNT, 4_000);
+    black_box((local, remote));
 }
 
 fn main() {
@@ -96,4 +176,7 @@ fn main() {
         let _ = black_box(decode_bucket_sketches(&encoded, &requests));
     });
     report("triage/parse bucket sketch", 1_000, elapsed);
+
+    let elapsed = measure(1, benchmark_scale_workload);
+    report("scale/50000 +2100/-1900", 1, elapsed);
 }
