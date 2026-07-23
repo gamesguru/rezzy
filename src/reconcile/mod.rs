@@ -19,6 +19,7 @@ pub mod client;
 pub mod gf64;
 mod pinsketch;
 pub mod resident;
+pub mod triage;
 
 pub use algebraic::{
     AlgebraicError, BUCKET_COUNT, Bucket, BucketSummary, EventHash, EventIdFormat,
@@ -27,3 +28,8 @@ pub use algebraic::{
 };
 pub use client::{ClientAction, ReconciliationClient, RemoteDigest};
 pub use resident::{ResidentBucket, ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
+pub use triage::{
+    BucketDecodeBatch, BucketDecodeSuccess, BucketDifference, BucketRequest,
+    MAX_BUCKET_SKETCH_CAPACITY, MAX_BUCKETED_SKETCH_CAPACITY, RemoteBucketSummary,
+    decode_bucket_sketches, estimate_delta, provision_bucket_capacities, select_differing_buckets,
+};

@@ -265,6 +265,27 @@ mod tests {
     }
 
     #[test]
+    fn capacity_overflow_falls_back_to_bucket_localization() {
+        let client = ReconciliationClient::default();
+        assert_eq!(
+            client.select_action(
+                RoomAccumulator::new(),
+                RemoteDigest {
+                    digest: 1,
+                    known_event_count: u64::MAX,
+                    frame_matches: true,
+                    has_unknown_extremity: false,
+                },
+                usize::MAX,
+            ),
+            ClientAction::Sketch {
+                capacity: MAX_LOCAL_SKETCH_DECODE_CAPACITY,
+                include_bucket_summary: true,
+            }
+        );
+    }
+
+    #[test]
     fn builds_a_decodable_local_sketch() {
         let hashes = [hash(1, 3), hash(2, 5)];
         let sketch = ReconciliationClient::default()
@@ -297,6 +318,16 @@ mod tests {
                 remote.digest(),
                 8,
                 &[responder_only],
+                &[(requester_only.h64, requester_only)],
+            ),
+            Err(AlgebraicError::DecodeFailure)
+        );
+        assert_eq!(
+            ReconciliationClient::verify_difference(
+                local,
+                remote.digest(),
+                requester_only.h128,
+                &[],
                 &[(requester_only.h64, requester_only)],
             ),
             Err(AlgebraicError::DecodeFailure)

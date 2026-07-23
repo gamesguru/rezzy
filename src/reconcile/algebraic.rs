@@ -227,6 +227,13 @@ pub struct SyndromeSketch {
 }
 
 impl SyndromeSketch {
+    pub(crate) fn from_coordinates(coordinates: Vec<u64>) -> Result<Self, AlgebraicError> {
+        if coordinates.is_empty() || coordinates.len() > MAX_SKETCH_CAPACITY {
+            return Err(AlgebraicError::InvalidSketchCapacity);
+        }
+        Ok(Self { coordinates })
+    }
+
     /// Allocates an empty sketch with the requested extraction capacity.
     ///
     /// # Errors
