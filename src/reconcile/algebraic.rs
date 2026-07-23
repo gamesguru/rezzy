@@ -41,6 +41,7 @@ pub enum AlgebraicError {
     DecodeFailure,
     BudgetExhausted,
     ZeroShortIdentifier,
+    InvalidBucketIndex,
     CountOverflow,
     CountUnderflow,
 }

@@ -25,7 +25,11 @@ pub struct ResidentBucket {
     pub accumulator: u128,
     /// Saturating 24-bit wire count.
     pub count: u32,
-    /// Whether the exact count or bucket contents must be rebuilt from storage.
+    /// Whether `count` is unreliable and must be restored from a storage scan.
+    ///
+    /// Under valid set updates, only the count is affected. `accumulator` and
+    /// `syndromes` are group-valued and toggled unconditionally, so they remain
+    /// exact across count saturation and repair.
     pub scan_required: bool,
     /// Odd syndrome coordinates `s1` through `s15`.
     pub syndromes: [u64; STRATUM_CAPACITY],
@@ -74,6 +78,26 @@ impl ResidentKernel {
         &self.buckets
     }
 
+    /// Returns the indices of buckets whose `count` is unreliable.
+    ///
+    /// A caller repairs these by counting the events routed to each index and
+    /// calling [`ResidentKernel::restore_bucket_count`].
+    pub fn scan_required_buckets(&self) -> impl Iterator<Item = usize> + '_ {
+        self.buckets
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bucket)| bucket.scan_required.then_some(index))
+    }
+
+    /// Whether every bucket count is exact.
+    ///
+    /// Count-residual estimation is only valid when this holds; otherwise it
+    /// must defer to the strata estimator.
+    #[must_use]
+    pub fn counts_are_exact(&self) -> bool {
+        self.buckets.iter().all(|bucket| !bucket.scan_required)
+    }
+
     /// Adds an accepted event or rejected-event tombstone.
     ///
     /// # Errors
@@ -95,11 +119,42 @@ impl ResidentKernel {
         toggle_stratum(&mut self.strata, hash.h64);
         Ok(())
     }
+
+    /// Restores a bucket count after a completed storage scan.
+    ///
+    /// `counted` is the number of events in `K` whose short identifier routes
+    /// to `index`. The accumulator and syndromes are deliberately untouched:
+    /// under valid set updates they remain exact, while suspected algebraic
+    /// content corruption requires a whole-kernel rebuild and replay.
+    ///
+    /// Values above the 24-bit wire limit leave the bucket saturated and
+    /// flagged because they cannot be represented exactly.
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::InvalidBucketIndex`] for an invalid index.
+    pub fn restore_bucket_count(
+        &mut self,
+        index: usize,
+        counted: u64,
+    ) -> Result<(), AlgebraicError> {
+        let bucket = self
+            .buckets
+            .get_mut(index)
+            .ok_or(AlgebraicError::InvalidBucketIndex)?;
+        if counted <= u64::from(MAX_BUCKET_COUNT) {
+            bucket.count = u32::try_from(counted).map_err(|_| AlgebraicError::CountOverflow)?;
+            bucket.scan_required = false;
+        } else {
+            bucket.count = MAX_BUCKET_COUNT;
+            bucket.scan_required = true;
+        }
+        Ok(())
+    }
 }
 
 fn insert_bucket(buckets: &mut [ResidentBucket], hash: EventHash) {
     let bucket = &mut buckets[(hash.h64 >> 56) as usize];
-    if bucket.count == MAX_BUCKET_COUNT {
+    if bucket.scan_required || bucket.count == MAX_BUCKET_COUNT {
         bucket.scan_required = true;
     } else {
         bucket.count = bucket.count.saturating_add(1);
@@ -109,9 +164,9 @@ fn insert_bucket(buckets: &mut [ResidentBucket], hash: EventHash) {
 
 fn remove_bucket(buckets: &mut [ResidentBucket], hash: EventHash) {
     let bucket = &mut buckets[(hash.h64 >> 56) as usize];
-    if bucket.count == 0 {
+    if bucket.scan_required || bucket.count == 0 {
         bucket.scan_required = true;
-    } else if !bucket.scan_required {
+    } else {
         bucket.count = bucket.count.saturating_sub(1);
     }
     toggle_bucket(bucket, hash);
@@ -189,5 +244,80 @@ mod tests {
         assert!(bucket.scan_required);
         assert_eq!(bucket.accumulator, event.h128);
         assert_eq!(bucket.syndromes[0], event.h64);
+    }
+
+    #[test]
+    fn saturation_leaves_the_algebraic_layers_exact() {
+        let events: Vec<EventHash> = (1_u64..=40)
+            .map(|seed| hash(u128::from(seed) * 0x9e37_79b9, seed << 3 | 1))
+            .collect();
+        let mut saturated = ResidentKernel::new();
+        let mut clean = ResidentKernel::new();
+        for bucket in &mut saturated.buckets {
+            bucket.count = MAX_BUCKET_COUNT;
+        }
+
+        for event in &events {
+            saturated.insert(*event).unwrap();
+            clean.insert(*event).unwrap();
+        }
+        for event in &events[..15] {
+            saturated.remove(*event).unwrap();
+            clean.remove(*event).unwrap();
+        }
+
+        for (left, right) in saturated.buckets().iter().zip(clean.buckets()) {
+            assert_eq!(left.accumulator, right.accumulator);
+            assert_eq!(left.syndromes, right.syndromes);
+        }
+        assert_eq!(saturated.strata(), clean.strata());
+        assert!(!saturated.counts_are_exact());
+        assert!(clean.counts_are_exact());
+    }
+
+    #[test]
+    fn flagged_counts_freeze_instead_of_drifting() {
+        let mut resident = ResidentKernel::new();
+        resident.accumulator.insert(hash(1, 1)).unwrap();
+        remove_bucket(&mut resident.buckets, hash(1, 1));
+        assert!(resident.buckets()[0].scan_required);
+
+        for seed in 2..=6_u64 {
+            resident.insert(hash(u128::from(seed), seed)).unwrap();
+        }
+        assert_eq!(resident.buckets()[0].count, 0);
+        assert!(resident.buckets()[0].scan_required);
+    }
+
+    #[test]
+    fn a_completed_scan_restores_the_count_and_clears_the_flag() {
+        let mut resident = ResidentKernel::new();
+        resident.buckets[7].count = MAX_BUCKET_COUNT;
+        resident
+            .insert(hash(0xfeed, 0x07ff_ffff_ffff_ffff))
+            .unwrap();
+        assert!(resident.buckets()[7].scan_required);
+        assert_eq!(resident.scan_required_buckets().collect::<Vec<_>>(), [7]);
+
+        resident.restore_bucket_count(7, 1234).unwrap();
+        assert_eq!(resident.buckets()[7].count, 1234);
+        assert!(!resident.buckets()[7].scan_required);
+        assert!(resident.counts_are_exact());
+        assert_eq!(resident.scan_required_buckets().count(), 0);
+    }
+
+    #[test]
+    fn restore_rejects_bad_indices_and_unrepresentable_counts() {
+        let mut resident = ResidentKernel::new();
+        assert_eq!(
+            resident.restore_bucket_count(BUCKET_COUNT, 1),
+            Err(AlgebraicError::InvalidBucketIndex)
+        );
+
+        resident
+            .restore_bucket_count(3, u64::from(MAX_BUCKET_COUNT).saturating_add(1))
+            .unwrap();
+        assert_eq!(resident.buckets()[3].count, MAX_BUCKET_COUNT);
+        assert!(resident.buckets()[3].scan_required);
     }
 }
