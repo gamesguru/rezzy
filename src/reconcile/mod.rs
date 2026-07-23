@@ -15,9 +15,12 @@
 //! Homomorphic reconciliation helpers.
 
 pub mod algebraic;
+pub mod gf64;
 mod pinsketch;
+pub mod resident;
 
 pub use algebraic::{
     AlgebraicError, BUCKET_COUNT, Bucket, BucketSummary, EventHash, EventIdFormat,
     MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch, gf64_mul, verify_residual,
 };
+pub use resident::{ResidentBucket, ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};

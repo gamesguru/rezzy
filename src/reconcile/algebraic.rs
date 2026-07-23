@@ -21,6 +21,8 @@ use base64::{
 };
 use sha2::{Digest as _, Sha256};
 
+pub use super::gf64::mul as gf64_mul;
+
 /// The number of localization buckets in the `algebraic_v1` profile.
 pub const BUCKET_COUNT: usize = 256;
 /// Maximum extraction capacity for an unbucketed `algebraic_v1` sketch.
@@ -208,24 +210,6 @@ pub fn verify_residual(
         .into_iter()
         .fold(0, |residual, hash| residual ^ hash.h128)
         == expected_residual
-}
-
-/// Carry-less multiplication in GF(2^64), reduced by `x^64+x^4+x^3+x+1`.
-#[must_use]
-pub fn gf64_mul(mut a: u64, mut b: u64) -> u64 {
-    let mut product = 0;
-    for _ in 0..64 {
-        if b & 1 != 0 {
-            product ^= a;
-        }
-        b >>= 1;
-        let carry = a >> 63;
-        a <<= 1;
-        if carry != 0 {
-            a ^= 0x1b;
-        }
-    }
-    product
 }
 
 /// Odd syndrome coordinates `s1, s3, ... s(2k-1)` over GF(2^64).
