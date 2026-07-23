@@ -15,6 +15,7 @@
 //! Homomorphic reconciliation helpers.
 
 pub mod algebraic;
+pub mod client;
 pub mod gf64;
 mod pinsketch;
 pub mod resident;
@@ -24,4 +25,5 @@ pub use algebraic::{
     MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch,
     gf64_mul, verify_residual,
 };
+pub use client::{ClientAction, ReconciliationClient, RemoteDigest};
 pub use resident::{ResidentBucket, ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
