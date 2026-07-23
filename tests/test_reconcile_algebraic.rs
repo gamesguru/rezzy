@@ -128,9 +128,7 @@ fn pinsketch_fails_loudly_above_the_decode_bound() {
     assert!(sketch.decode_elements(3).is_err());
     assert!(SyndromeSketch::new(1).unwrap().toggle(0).is_err());
     assert_eq!(
-        SyndromeSketch::new(MAX_LOCAL_SKETCH_DECODE_CAPACITY + 1)
-            .unwrap()
-            .decode_elements(MAX_LOCAL_SKETCH_DECODE_CAPACITY + 1),
+        SyndromeSketch::new(MAX_LOCAL_SKETCH_DECODE_CAPACITY + 1),
         Err(AlgebraicError::InvalidSketchCapacity)
     );
     assert_eq!(
