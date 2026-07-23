@@ -81,14 +81,18 @@ rust/test: ##H Run Rust tests (p=NAME for specific test, a=ARGS for test binary 
 ifdef p
 	$(CARGO) test --test $(p) --features $(TEST_FEATURES) $(if $(a),-- $(a))
 else
-	$(CARGO) test --all-targets --features $(TEST_FEATURES) $(if $(a),-- $(a))
+	$(CARGO) test --lib --tests --features $(TEST_FEATURES) $(if $(a),-- $(a))
 endif
+
+.PHONY: rust/bench
+rust/bench: ##H Run reconciliation Criterion benchmarks
+	$(CARGO) bench --bench reconcile
 
 .PHONY: rust/coverage
 rust/coverage: ##H Run code coverage and generate HTML report
 	# TODO: include `src/bin/` in coverage
 	# Run coverage
-	$(CARGO) +nightly llvm-cov --all-targets --features $(TEST_FEATURES)  \
+	$(CARGO) +nightly llvm-cov --lib --tests --features $(TEST_FEATURES)  \
 		--html --output-dir .coverage \
 		--ignore-filename-regex 'src/bin/.*'
 	# Process report to codecov-compatible JSON
@@ -132,9 +136,10 @@ rust/publish: ##H Preview package and simulate dry-run publish
 	$(CARGO) publish --dry-run
 
 # Convenience aliases
-.PHONY: build test install clean uninstall
+.PHONY: build test bench install clean uninstall
 build:   rust/build   ##H Alias for rust/build
 test:    rust/test    ##H Alias for rust/test
+bench:   rust/bench   ##H Alias for rust/bench
 cov:     rust/coverage ##H Alias for rust/coverage
 install: rust/install ##H Alias for rust/install
 uninstall: rust/uninstall ##H Alias for rust/uninstall

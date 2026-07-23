@@ -106,6 +106,10 @@ ureq = { version = "2.9", optional = true, default-features = false, features = 
 [dev-dependencies]
 similar = "3.1.0"
 
+[[bench]]
+name = "reconcile"
+harness = false
+
 [[test]]
 name = "test_snapshots"
 path = "tests/test_snapshots.rs"
