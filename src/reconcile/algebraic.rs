@@ -396,6 +396,9 @@ impl BucketSummary {
     /// # Errors
     /// Returns an error when the bucket's 24-bit wire count is exhausted.
     pub fn insert(&mut self, hash: EventHash) -> Result<(), AlgebraicError> {
+        if hash.h64 == 0 {
+            return Err(AlgebraicError::ZeroShortIdentifier);
+        }
         let bucket = &mut self.buckets[(hash.h64 >> 56) as usize];
         if bucket.count == 0x00ff_ffff {
             return Err(AlgebraicError::CountOverflow);

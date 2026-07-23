@@ -103,6 +103,9 @@ impl ResidentKernel {
     /// # Errors
     /// Returns an error only if the global event count reaches `u64::MAX`.
     pub fn insert(&mut self, hash: EventHash) -> Result<(), AlgebraicError> {
+        if hash.h64 == 0 {
+            return Err(AlgebraicError::ZeroShortIdentifier);
+        }
         self.accumulator.insert(hash)?;
         insert_bucket(&mut self.buckets, hash);
         toggle_stratum(&mut self.strata, hash.h64);
