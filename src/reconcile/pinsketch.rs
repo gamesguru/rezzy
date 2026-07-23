@@ -196,7 +196,7 @@ fn poly_square(poly: &mut Polynomial) -> Option<()> {
 
 fn trace_mod(modulus: &[u64], parameter: u64) -> Option<Polynomial> {
     let mut trace = vec![0, parameter];
-    for _ in 0..63 {
+    for _ in 0..TRACE_SQUARES {
         poly_square(&mut trace)?;
         if trace.len() < 2 {
             trace.resize(2, 0);
