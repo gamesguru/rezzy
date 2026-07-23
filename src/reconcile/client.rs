@@ -5,9 +5,11 @@
 
 //! Requester-side MSC0501 reconciliation decisions and verification.
 
+use super::triage::{
+    BucketDecodeBatch, BucketRequest, MAX_BUCKET_SKETCH_CAPACITY, MAX_BUCKETED_SKETCH_CAPACITY,
+};
 use super::{
     AlgebraicError, EventHash, MAX_LOCAL_SKETCH_DECODE_CAPACITY, RoomAccumulator, SyndromeSketch,
-    verify_residual,
 };
 
 /// Requester policy for one MSC0501 reconciliation exchange.
@@ -28,17 +30,24 @@ pub struct RemoteDigest {
 }
 
 /// The next request selected by the reconciliation client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientAction {
     /// The frame digest and count agree; no request is needed.
     Synchronized,
     /// Locate a common DAG anchor before attempting set extraction.
     ExtremityDiff,
     /// Send an unbucketed syndrome sketch at the given capacity.
-    Sketch {
+    UnbucketedSketch {
         capacity: usize,
         include_bucket_summary: bool,
     },
+    /// Retry independently decoded bucket sketches.
+    BucketSketches {
+        requests: alloc::vec::Vec<BucketRequest>,
+        accumulated_roots: alloc::vec::Vec<u64>,
+    },
+    /// All requested buckets decoded and are ready for host-side resolution.
+    ResolveRoots { roots: alloc::vec::Vec<u64> },
 }
 
 impl Default for ReconciliationClient {
@@ -98,7 +107,7 @@ impl ReconciliationClient {
         let capacity = provisioned
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(usize::MAX);
-        ClientAction::Sketch {
+        ClientAction::UnbucketedSketch {
             capacity: capacity.min(self.max_sketch_capacity),
             include_bucket_summary: count_delta == 0 || capacity > self.max_sketch_capacity,
         }
@@ -123,50 +132,107 @@ impl ReconciliationClient {
         Ok(sketch)
     }
 
-    /// Verifies a decoded two-sided difference against its level-0 residual.
+    /// Advances the bucket-decoding exchange without discarding prior roots.
     ///
-    /// The caller resolves responder-side event IDs and requester-only short
-    /// IDs to [`EventHash`] values before calling this method. A successful
-    /// result authenticates accidental decode correctness, not a malicious
-    /// peer; normal Matrix PDU verification remains mandatory.
+    /// Normal decode failures are retried at a strictly larger capacity. A
+    /// missing prior request, a failed maximum-capacity bucket, or an aggregate
+    /// retry above the wire cap falls back to bounded extremity discovery.
+    #[must_use]
+    pub fn transition_bucket_batch(
+        batch: BucketDecodeBatch,
+        previous_requests: &[BucketRequest],
+        mut accumulated_roots: alloc::vec::Vec<u64>,
+        global_estimate: Option<u64>,
+        aggregate_cap: usize,
+    ) -> ClientAction {
+        for success in batch.successful_buckets {
+            accumulated_roots.extend(success.roots);
+        }
+        if batch.failed_buckets.is_empty() {
+            return ClientAction::ResolveRoots {
+                roots: accumulated_roots,
+            };
+        }
+
+        let Ok(resolved_count) = u64::try_from(accumulated_roots.len()) else {
+            return ClientAction::ExtremityDiff;
+        };
+        let unaccounted = global_estimate.unwrap_or(0).saturating_sub(resolved_count);
+        let failed_count = match u64::try_from(batch.failed_buckets.len()) {
+            Ok(count) if count != 0 => count,
+            _ => return ClientAction::ExtremityDiff,
+        };
+        let share = unaccounted.checked_div(failed_count).unwrap_or(0);
+        let aggregate_limit = aggregate_cap.min(MAX_BUCKETED_SKETCH_CAPACITY);
+        let mut total = 0_usize;
+        let mut requests = alloc::vec::Vec::with_capacity(batch.failed_buckets.len());
+
+        for bucket_id in batch.failed_buckets {
+            let Some(previous) = previous_requests
+                .iter()
+                .find(|request| request.bucket_id == bucket_id)
+            else {
+                return ClientAction::ExtremityDiff;
+            };
+            if previous.capacity >= MAX_BUCKET_SKETCH_CAPACITY {
+                return ClientAction::ExtremityDiff;
+            }
+            let Some(floor) = previous.capacity.checked_add(1) else {
+                return ClientAction::ExtremityDiff;
+            };
+            let Ok(floor_u64) = u64::try_from(floor) else {
+                return ClientAction::ExtremityDiff;
+            };
+            let target = share.max(floor_u64);
+            let provisioned = target
+                .checked_add(target / 2)
+                .and_then(|value| value.checked_add(target % 2))
+                .and_then(|value| value.checked_add(4));
+            let capacity = provisioned
+                .and_then(|value| usize::try_from(value).ok())
+                .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY));
+            let Some(capacity) = capacity else {
+                return ClientAction::ExtremityDiff;
+            };
+            total = match total.checked_add(capacity) {
+                Some(total) if total <= aggregate_limit => total,
+                _ => return ClientAction::ExtremityDiff,
+            };
+            requests.push(BucketRequest {
+                bucket_id,
+                capacity,
+            });
+        }
+        ClientAction::BucketSketches {
+            requests,
+            accumulated_roots,
+        }
+    }
+
+    /// Verifies the global 128-bit residual after roots are resolved to hashes.
     ///
     /// # Errors
-    /// Returns [`AlgebraicError::DecodeFailure`] when either the requester-side
-    /// accumulator or the complete symmetric-difference residual disagrees.
-    pub fn verify_difference(
-        local: RoomAccumulator,
-        remote_digest: u128,
-        expected_requester_side_accumulator: u128,
-        responder_only: &[EventHash],
-        requester_only: &[(u64, EventHash)],
+    /// Returns [`AlgebraicError::DecodeFailure`] when the supplied roots do not
+    /// reproduce the residual.
+    pub fn verify_global_residual(
+        expected_residual: u128,
+        local_roots: &[u128],
+        remote_roots: &[u128],
     ) -> Result<(), AlgebraicError> {
-        if requester_only
+        let actual = local_roots
             .iter()
-            .any(|(short_id, hash)| *short_id != hash.h64)
-        {
-            return Err(AlgebraicError::DecodeFailure);
-        }
-        if !verify_residual(
-            expected_requester_side_accumulator,
-            requester_only.iter().map(|(_, hash)| *hash),
-        ) {
-            return Err(AlgebraicError::DecodeFailure);
-        }
-        let residual = local.digest() ^ remote_digest;
-        verify_residual(
-            residual,
-            responder_only
-                .iter()
-                .copied()
-                .chain(requester_only.iter().map(|(_, hash)| *hash)),
-        )
-        .then_some(())
-        .ok_or(AlgebraicError::DecodeFailure)
+            .chain(remote_roots)
+            .fold(0, |residual, hash| residual ^ hash);
+        (actual == expected_residual)
+            .then_some(())
+            .ok_or(AlgebraicError::DecodeFailure)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     fn hash(wide: u128, short: u64) -> EventHash {
@@ -219,7 +285,7 @@ mod tests {
                 },
                 2,
             ),
-            ClientAction::Sketch {
+            ClientAction::UnbucketedSketch {
                 capacity: 12,
                 include_bucket_summary: false,
             }
@@ -241,7 +307,7 @@ mod tests {
                 },
                 0,
             ),
-            ClientAction::Sketch {
+            ClientAction::UnbucketedSketch {
                 capacity: 16,
                 include_bucket_summary: true,
             }
@@ -257,7 +323,7 @@ mod tests {
                 },
                 0,
             ),
-            ClientAction::Sketch {
+            ClientAction::UnbucketedSketch {
                 capacity: 4,
                 include_bucket_summary: true,
             }
@@ -278,10 +344,86 @@ mod tests {
                 },
                 usize::MAX,
             ),
-            ClientAction::Sketch {
+            ClientAction::UnbucketedSketch {
                 capacity: MAX_LOCAL_SKETCH_DECODE_CAPACITY,
                 include_bucket_summary: true,
             }
+        );
+    }
+
+    #[test]
+    fn bucket_transition_resolves_and_preserves_roots() {
+        let batch = BucketDecodeBatch {
+            successful_buckets: vec![super::super::triage::BucketDecodeSuccess {
+                bucket_id: 1,
+                roots: vec![42],
+            }],
+            failed_buckets: vec![],
+        };
+        assert_eq!(
+            ReconciliationClient::transition_bucket_batch(batch, &[], vec![99], None, 4096),
+            ClientAction::ResolveRoots {
+                roots: vec![99, 42]
+            }
+        );
+    }
+
+    #[test]
+    fn bucket_transition_retries_and_preserves_partial_successes() {
+        let batch = BucketDecodeBatch {
+            successful_buckets: vec![super::super::triage::BucketDecodeSuccess {
+                bucket_id: 1,
+                roots: vec![42],
+            }],
+            failed_buckets: vec![2],
+        };
+        let previous = [BucketRequest {
+            bucket_id: 2,
+            capacity: 8,
+        }];
+        assert_eq!(
+            ReconciliationClient::transition_bucket_batch(batch, &previous, vec![99], None, 4096,),
+            ClientAction::BucketSketches {
+                requests: vec![BucketRequest {
+                    bucket_id: 2,
+                    capacity: 18,
+                }],
+                accumulated_roots: vec![99, 42],
+            }
+        );
+    }
+
+    #[test]
+    fn bucket_transition_falls_back_without_panicking() {
+        let batch = BucketDecodeBatch {
+            successful_buckets: vec![],
+            failed_buckets: vec![3],
+        };
+        assert_eq!(
+            ReconciliationClient::transition_bucket_batch(
+                batch.clone(),
+                &[BucketRequest {
+                    bucket_id: 3,
+                    capacity: MAX_BUCKET_SKETCH_CAPACITY,
+                }],
+                vec![],
+                None,
+                4096,
+            ),
+            ClientAction::ExtremityDiff
+        );
+        assert_eq!(
+            ReconciliationClient::transition_bucket_batch(
+                batch,
+                &[BucketRequest {
+                    bucket_id: 1,
+                    capacity: 8,
+                }],
+                vec![],
+                None,
+                4096,
+            ),
+            ClientAction::ExtremityDiff
         );
     }
 
@@ -295,51 +437,13 @@ mod tests {
     }
 
     #[test]
-    fn verifies_both_sides_of_a_decoded_difference() {
-        let common = hash(1, 1);
-        let requester_only = hash(2, 2);
-        let responder_only = hash(4, 4);
-        let local = accumulator(&[common, requester_only]);
-        let remote = accumulator(&[common, responder_only]);
-
+    fn verifies_global_residual_before_admission() {
         assert_eq!(
-            ReconciliationClient::verify_difference(
-                local,
-                remote.digest(),
-                requester_only.h128,
-                &[responder_only],
-                &[(requester_only.h64, requester_only)],
-            ),
+            ReconciliationClient::verify_global_residual(0x3333, &[0x1111], &[0x2222]),
             Ok(())
         );
         assert_eq!(
-            ReconciliationClient::verify_difference(
-                local,
-                remote.digest(),
-                8,
-                &[responder_only],
-                &[(requester_only.h64, requester_only)],
-            ),
-            Err(AlgebraicError::DecodeFailure)
-        );
-        assert_eq!(
-            ReconciliationClient::verify_difference(
-                local,
-                remote.digest(),
-                requester_only.h128,
-                &[],
-                &[(requester_only.h64, requester_only)],
-            ),
-            Err(AlgebraicError::DecodeFailure)
-        );
-        assert_eq!(
-            ReconciliationClient::verify_difference(
-                local,
-                remote.digest(),
-                requester_only.h128,
-                &[responder_only],
-                &[(9, requester_only)],
-            ),
+            ReconciliationClient::verify_global_residual(0xaaaa, &[0x1111], &[0x2222]),
             Err(AlgebraicError::DecodeFailure)
         );
     }
