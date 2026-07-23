@@ -29,6 +29,7 @@ pub const BUCKET_COUNT: usize = 256;
 pub const MAX_SKETCH_CAPACITY: usize = 1_000;
 /// Default local extraction limit for CPU-bounded sketch decoding.
 pub const MAX_LOCAL_SKETCH_DECODE_CAPACITY: usize = 64;
+const EVENT_HASH_ENCODED_LEN: usize = 43;
 
 /// An invalid event identifier, wire digest, or sketch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +80,9 @@ impl EventHash {
         let encoded = event_id
             .strip_prefix('$')
             .ok_or(AlgebraicError::InvalidEventId)?;
+        if format != EventIdFormat::Legacy && encoded.len() > EVENT_HASH_ENCODED_LEN {
+            return Err(AlgebraicError::InvalidBase64);
+        }
         let bytes = match format {
             EventIdFormat::Legacy => Sha256::digest(event_id.as_bytes()).to_vec(),
             EventIdFormat::V3 => STANDARD_NO_PAD

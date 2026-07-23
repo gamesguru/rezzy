@@ -145,13 +145,13 @@ fn algebraic_wire_and_capacity_errors_are_rejected() {
         EventHash::from_event_id("$AQ", EventIdFormat::V4Plus),
         Err(AlgebraicError::InvalidEventId)
     );
-    assert_eq!(
-        EventHash::from_event_id(
-            &format!("${}", URL_SAFE_NO_PAD.encode([0_u8; 33])),
-            EventIdFormat::V4Plus,
-        ),
-        Err(AlgebraicError::InvalidEventId)
-    );
+    let overlong_hash = format!("${}", URL_SAFE_NO_PAD.encode([0_u8; 33]));
+    for format in [EventIdFormat::V3, EventIdFormat::V4Plus] {
+        assert_eq!(
+            EventHash::from_event_id(&overlong_hash, format),
+            Err(AlgebraicError::InvalidBase64)
+        );
+    }
     assert_eq!(
         EventHash::from_event_id("not-an-event-id", EventIdFormat::V4Plus),
         Err(AlgebraicError::InvalidEventId)
