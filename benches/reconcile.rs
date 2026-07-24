@@ -60,16 +60,20 @@ fn report(name: &str, iterations: u32, elapsed: Duration) {
     println!("{name}: {millis:.6} ms/op ({iterations} iterations)");
 }
 
-fn benchmark_scale_workload() {
-    const BASE_COUNT: usize = 50_000;
-    const LOCAL_EXTRA_COUNT: usize = 2_100;
-    const REMOTE_EXTRA_COUNT: usize = 1_900;
+fn benchmark_scale_workload(
+    base_count: usize,
+    local_extra_count: usize,
+    remote_extra_count: usize,
+) {
     let mut generator = Xorshift128::new(0x243f_6a88_85a3_08d3);
-    let base: Vec<_> = (0..BASE_COUNT).map(|_| generator.hash()).collect();
-    let local_extra: Vec<_> = (0..LOCAL_EXTRA_COUNT).map(|_| generator.hash()).collect();
-    let remote_extra: Vec<_> = (0..REMOTE_EXTRA_COUNT).map(|_| generator.hash()).collect();
-    let mut identities =
-        HashSet::with_capacity(BASE_COUNT + LOCAL_EXTRA_COUNT + REMOTE_EXTRA_COUNT);
+    let base: Vec<_> = (0..base_count).map(|_| generator.hash()).collect();
+    let local_extra: Vec<_> = (0..local_extra_count).map(|_| generator.hash()).collect();
+    let remote_extra: Vec<_> = (0..remote_extra_count).map(|_| generator.hash()).collect();
+    let mut identities = HashSet::with_capacity(
+        base_count
+            .saturating_add(local_extra_count)
+            .saturating_add(remote_extra_count),
+    );
     for event in base.iter().chain(&local_extra).chain(&remote_extra) {
         assert!(identities.insert((event.h128, event.h64)));
     }
@@ -85,15 +89,21 @@ fn benchmark_scale_workload() {
     for event in &remote_extra {
         remote.insert(*event).expect("benchmark hashes are valid");
     }
-    assert_eq!(local.accumulator().known_event_count(), 52_100);
-    assert_eq!(remote.accumulator().known_event_count(), 51_900);
+    assert_eq!(
+        local.accumulator().known_event_count(),
+        u64::try_from(base_count.saturating_add(local_extra_count)).unwrap()
+    );
+    assert_eq!(
+        remote.accumulator().known_event_count(),
+        u64::try_from(base_count.saturating_add(remote_extra_count)).unwrap()
+    );
     assert_eq!(
         local
             .accumulator()
             .known_event_count()
             .checked_sub(remote.accumulator().known_event_count())
             .expect("local fixture is larger"),
-        200
+        local_extra_count.checked_sub(remote_extra_count).unwrap() as u64
     );
     let expected_residual = local_extra
         .iter()
@@ -103,7 +113,6 @@ fn benchmark_scale_workload() {
         local.accumulator().residual(remote.accumulator()),
         expected_residual
     );
-    assert_eq!(LOCAL_EXTRA_COUNT + REMOTE_EXTRA_COUNT, 4_000);
     black_box((local, remote));
 }
 
@@ -177,6 +186,11 @@ fn main() {
     });
     report("triage/parse bucket sketch", 1_000, elapsed);
 
-    let elapsed = measure(1, benchmark_scale_workload);
+    // Test 1: Medium Sized Room
+    let elapsed = measure(1, || benchmark_scale_workload(50_000, 2_100, 1_900));
     report("scale/50000 +2100/-1900", 1, elapsed);
+
+    // Test 2: Large Room
+    let elapsed = measure(1, || benchmark_scale_workload(100_000, 5_000, 4_000));
+    report("scale/100000 +5000/-4000", 1, elapsed);
 }

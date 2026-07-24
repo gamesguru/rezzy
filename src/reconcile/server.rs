@@ -5,7 +5,10 @@
 
 //! Responder-side MSC0501 reconciliation digest generation.
 
-use alloc::{collections::BTreeSet, string::ToString, vec::Vec};
+use alloc::{
+    collections::{BTreeSet, VecDeque},
+    string::ToString,
+};
 
 use crate::basespec::rezzy_types::EventId;
 
@@ -35,6 +38,10 @@ pub trait ForwardGraph<Id: EventId> {
 
     /// Returns the event ID format for a given known event, used to compute
     /// its algebraic digest.
+    ///
+    /// Implementations MUST return the correct format even for rejected
+    /// events (tombstones). If a rejected event's format is misidentified,
+    /// its hash will be incorrect and will silently desync the reconciliation set.
     fn event_format(&self, id: &Id) -> EventIdFormat;
 }
 
@@ -56,25 +63,31 @@ where
     Graph: ForwardGraph<Id>,
 {
     let mut accumulator = RoomAccumulator::new();
-    let mut queue = Vec::new();
+    let mut queue = VecDeque::new();
     let mut visited = BTreeSet::new();
 
     // Push frame anchor events as the starting boundary.
     for anchor in frame_event_ids {
         if graph.is_known(anchor) {
-            queue.push(anchor.clone());
+            queue.push_back(anchor.clone());
+            // Mark anchors as visited so we do not re-traverse or digest them
+            // if they are somehow referenced as children elsewhere.
+            visited.insert(anchor.clone());
         }
     }
 
     // Breadth-first traversal down the causal graph
-    while let Some(current) = queue.pop() {
+    while let Some(current) = queue.pop_front() {
         for child in graph.children(&current) {
-            // Only process each child once to avoid combinatorial explosions on forks
+            // Unconditionally mark visited to avoid re-traversing unknown forks
             if visited.insert(child.clone()) && graph.is_known(child) {
+                // CAUTION: The graph implementation must correctly yield
+                // the EventIdFormat even for rejected tombstones.
                 let format = graph.event_format(child);
                 let hash = ElementHash::from_matrix_event_id(&child.to_string(), format)?;
+
                 accumulator.insert(hash)?;
-                queue.push(child.clone());
+                queue.push_back(child.clone());
             }
         }
     }
@@ -87,6 +100,7 @@ mod tests {
     use super::*;
     use alloc::collections::BTreeMap;
     use alloc::string::String;
+    use alloc::vec::Vec;
     use core::fmt;
 
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
