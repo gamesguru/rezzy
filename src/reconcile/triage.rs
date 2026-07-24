@@ -135,20 +135,27 @@ pub fn select_differing_buckets(
         .collect()
 }
 
-/// Provisions independently bounded sketches for differing buckets.
+/// Represents a provisioned batch of bucket requests, which may be truncated if the
+/// aggregate budget is exceeded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvisionedBuckets {
+    pub requests: Vec<BucketRequest>,
+    pub truncated: bool,
+}
+
+/// Dispatches deep-triage bucket requests for MSC0501 bucket exchange.
 ///
-/// Each bucket receives `max(8, ceil(1.5 * count_delta) + 4)` coordinates,
-/// capped at 64. Equal-count differences receive the resident capacity because
-/// their two-sided cardinality is not determined by the count residual.
+/// Converts a list of locally detected depth-8 bucket differences into
+/// target capacities and optionally deepens the prefix if the estimated
+/// difference per bucket is too large.
 ///
 /// # Errors
-/// Returns [`AlgebraicError::InvalidSketchCapacity`] if the requested aggregate
-/// capacity exceeds `aggregate_cap` or the MSC0500 maximum of 4096.
+/// Returns an error for invalid sketch configurations or aggregate limits.
 pub fn provision_bucket_capacities(
     differences: &[BucketDifference],
     estimated_delta: Option<u64>,
     aggregate_cap: usize,
-) -> Result<Vec<BucketRequest>, AlgebraicError> {
+) -> Result<ProvisionedBuckets, AlgebraicError> {
     if aggregate_cap == 0 || aggregate_cap > MAX_BUCKETED_SKETCH_CAPACITY {
         return Err(AlgebraicError::InvalidSketchCapacity);
     }
@@ -161,13 +168,13 @@ pub fn provision_bucket_capacities(
         .and_then(|e| usize::try_from(e).ok())
         .unwrap_or_else(|| differences.iter().map(|d| d.count_delta as usize).sum());
 
-    let lambda = 8_usize; // Safe bucket capacity target
+    let lambda = 3_usize; // Safe bucket capacity target (k=8, lambda=3)
     let per_bucket_est = est.div_ceil(differing_count);
 
     let mut depth_shift = 0;
     if per_bucket_est > lambda {
-        let ratio = per_bucket_est.div_ceil(lambda);
-        depth_shift = ratio.next_power_of_two().trailing_zeros();
+        let required_depth = est.div_ceil(lambda).next_power_of_two().trailing_zeros();
+        depth_shift = required_depth.saturating_sub(8);
     }
 
     // Cap the depth shift so we don't overflow prefix bits or generate absurd amounts of buckets
@@ -178,10 +185,11 @@ pub fn provision_bucket_capacities(
         // We use lambda as the base capacity if we are splitting.
         // If not splitting (depth_shift == 0), we provision based on the bucket's own count_delta.
         let capacity = if depth_shift > 0 {
-            lambda.checked_add(4).unwrap_or(lambda) // Margin for two-sided variance
+            8_usize // Deep splits use a fixed safe capacity of 8
         } else {
             let count_delta = usize::try_from(difference.count_delta)
-                .map_err(|_| AlgebraicError::CountOverflow)?;
+                .map_err(|_| AlgebraicError::CountOverflow)?
+                .max(per_bucket_est);
             count_delta
                 .checked_add(count_delta / 2)
                 .and_then(|c| c.checked_add(count_delta % 2))
@@ -195,9 +203,7 @@ pub fn provision_bucket_capacities(
             if total.checked_add(capacity).is_none()
                 || total.saturating_add(capacity) > aggregate_cap
             {
-                // If we hit the aggregate cap, we just return the requests we've built so far.
-                // The client will process these and follow up with another batch later if needed.
-                return Ok(requests);
+                return Err(AlgebraicError::InvalidSketchCapacity);
             }
 
             let prefix = (u32::from(difference.bucket_id) << depth_shift) | sub;
@@ -214,8 +220,42 @@ pub fn provision_bucket_capacities(
         if differences.is_empty() && estimate != 0 {
             return Err(AlgebraicError::DecodeFailure);
         }
+        let estimate =
+            usize::try_from(estimate).map_err(|_| AlgebraicError::InvalidSketchCapacity)?;
+        let target = estimate
+            .checked_add(estimate / 2)
+            .and_then(|capacity| capacity.checked_add(estimate % 2))
+            .and_then(|capacity| capacity.checked_add(4))
+            .ok_or(AlgebraicError::InvalidSketchCapacity)?;
+        if target > aggregate_cap {
+            return Err(AlgebraicError::InvalidSketchCapacity);
+        }
+        while total < target {
+            let mut advanced = false;
+            for request in &mut requests {
+                if total == target {
+                    break;
+                }
+                if request.capacity < MAX_BUCKET_SKETCH_CAPACITY {
+                    request.capacity = request
+                        .capacity
+                        .checked_add(1)
+                        .ok_or(AlgebraicError::InvalidSketchCapacity)?;
+                    total = total
+                        .checked_add(1)
+                        .ok_or(AlgebraicError::InvalidSketchCapacity)?;
+                    advanced = true;
+                }
+            }
+            if !advanced {
+                return Err(AlgebraicError::InvalidSketchCapacity);
+            }
+        }
     }
-    Ok(requests)
+    Ok(ProvisionedBuckets {
+        requests,
+        truncated: false,
+    })
 }
 
 /// Parses and independently decodes concatenated residual bucket sketches.
@@ -287,8 +327,11 @@ fn validate_bucket_requests(requests: &[BucketRequest]) -> Result<(), AlgebraicE
         if request.capacity == 0 || request.capacity > MAX_BUCKET_SKETCH_CAPACITY {
             return Err(AlgebraicError::InvalidSketchCapacity);
         }
+        if request.depth >= 32 || request.prefix >= (1_u32 << request.depth) {
+            return Err(AlgebraicError::InvalidBucketIndex);
+        }
         if previous_prefix.is_some_and(|p| p >= request.prefix) {
-            return Err(AlgebraicError::DecodeFailure);
+            return Err(AlgebraicError::InvalidBucketIndex);
         }
         previous_prefix = Some(request.prefix);
         total_capacity = total_capacity
@@ -391,18 +434,21 @@ mod tests {
         ];
         assert_eq!(
             provision_bucket_capacities(&differences, None, 64),
-            Ok(vec![
-                BucketRequest {
-                    depth: 8,
-                    prefix: 1,
-                    capacity: 8,
-                },
-                BucketRequest {
-                    depth: 8,
-                    prefix: 2,
-                    capacity: 34,
-                },
-            ])
+            Ok(ProvisionedBuckets {
+                requests: vec![
+                    BucketRequest {
+                        depth: 8,
+                        prefix: 1,
+                        capacity: 19,
+                    },
+                    BucketRequest {
+                        depth: 8,
+                        prefix: 2,
+                        capacity: 34,
+                    },
+                ],
+                truncated: false,
+            })
         );
         assert_eq!(
             provision_bucket_capacities(&differences, None, 32),
@@ -424,18 +470,21 @@ mod tests {
         ];
         assert_eq!(
             provision_bucket_capacities(&differences, Some(20), 64),
-            Ok(vec![
-                BucketRequest {
-                    depth: 8,
-                    prefix: 1,
-                    capacity: 17,
-                },
-                BucketRequest {
-                    depth: 8,
-                    prefix: 2,
-                    capacity: 17,
-                },
-            ])
+            Ok(ProvisionedBuckets {
+                requests: vec![
+                    BucketRequest {
+                        depth: 8,
+                        prefix: 1,
+                        capacity: 19,
+                    },
+                    BucketRequest {
+                        depth: 8,
+                        prefix: 2,
+                        capacity: 19,
+                    },
+                ],
+                truncated: false,
+            })
         );
         assert_eq!(
             provision_bucket_capacities(&differences, Some(100), 128),

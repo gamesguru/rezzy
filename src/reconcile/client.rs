@@ -315,7 +315,7 @@ mod tests {
                 RemoteDigest {
                     digest: 2,
                     known_event_count: 1_000,
-                    strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
+                    strata: *local.strata(),
                     frame_matches: true,
                     has_unknown_extremity: false,
                 },
@@ -332,7 +332,7 @@ mod tests {
                 RemoteDigest {
                     digest: 2,
                     known_event_count: 1,
-                    strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
+                    strata: *local.strata(),
                     frame_matches: true,
                     has_unknown_extremity: false,
                 },

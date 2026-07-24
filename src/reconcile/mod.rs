@@ -29,7 +29,7 @@ pub use algebraic::{
 };
 pub use client::{ClientAction, ReconciliationClient, RemoteDigest};
 pub use resident::{ResidentBucket, ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
-pub use server::{ForwardGraph, compute_frame_digest};
+pub use server::{ForwardGraph, build_bucket_sketches, compute_frame_digest};
 pub use triage::{
     BucketDecodeBatch, BucketDecodeSuccess, BucketDifference, BucketRequest,
     MAX_BUCKET_SKETCH_CAPACITY, MAX_BUCKETED_SKETCH_CAPACITY, RemoteBucketSummary,

@@ -281,6 +281,13 @@ impl SyndromeSketch {
         &self.coordinates
     }
 
+    /// Subtracts (XORs) another sketch's coordinates from this one.
+    pub fn xor(&mut self, other: &Self) {
+        for (a, b) in self.coordinates.iter_mut().zip(other.coordinates.iter()) {
+            *a ^= b;
+        }
+    }
+
     /// Inserts or removes a short identifier. Both operations are XOR in characteristic two.
     /// # Errors
     /// Returns an error because zero is not representable by a `PinSketch`.

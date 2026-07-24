@@ -1,0 +1,156 @@
+use rezzy::reconcile::{
+    ElementHash, EventIdFormat, ReconciliationClient, RemoteDigest, ResidentKernel,
+    build_bucket_sketches,
+};
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::time::Instant;
+
+fn load_uuids(filename: &str) -> (ResidentKernel, Vec<ElementHash>) {
+    let mut resident = ResidentKernel::new();
+    let mut elements = Vec::new();
+
+    let file = File::open(filename).unwrap();
+    for line in BufReader::new(file).lines() {
+        let uuid = format!("${}", line.unwrap());
+        if uuid == "$" {
+            continue;
+        }
+        let hash = ElementHash::from_matrix_event_id(&uuid, EventIdFormat::Legacy).unwrap();
+        resident.insert(hash).unwrap();
+        elements.push(hash);
+    }
+    (resident, elements)
+}
+
+struct DummyGraph;
+
+impl rezzy::reconcile::ForwardGraph<String> for DummyGraph {
+    type ChildrenIter<'a> = std::iter::Empty<&'a String>;
+
+    fn children<'a>(&'a self, _id: &String) -> Self::ChildrenIter<'a> {
+        std::iter::empty()
+    }
+
+    fn is_known(&self, _id: &String) -> bool {
+        false
+    }
+
+    fn event_format(&self, _id: &String) -> EventIdFormat {
+        EventIdFormat::Legacy
+    }
+}
+
+fn main() {
+    println!("Loading A.txt...");
+    let start = Instant::now();
+    let (local_resident, local_elements) = load_uuids("A.txt");
+    println!("Loaded A.txt in {:?}", start.elapsed());
+
+    println!("Loading B.txt...");
+    let start = Instant::now();
+    let (remote_resident, remote_elements) = load_uuids("B.txt");
+    println!("Loaded B.txt in {:?}", start.elapsed());
+
+    let client = ReconciliationClient::default();
+
+    // Step 1: Client determines the difference and generates bucket requests
+    let start_triage = Instant::now();
+    let remote_digest = RemoteDigest {
+        digest: remote_resident.accumulator().digest(),
+        known_event_count: remote_resident.accumulator().known_event_count(),
+        strata: *remote_resident.strata(),
+        frame_matches: true,
+        has_unknown_extremity: false,
+    };
+
+    let mut action = client.select_action(&local_resident, remote_digest, 0);
+    let triage_duration = start_triage.elapsed();
+    println!("Client triage completed in {triage_duration:?}");
+
+    if let rezzy::reconcile::ClientAction::UnbucketedSketch {
+        include_bucket_summary: true,
+        ..
+    } = action
+    {
+        println!("Server sends bucket summary...");
+        let mut remote_summaries = Vec::new();
+        for bucket in remote_resident.buckets() {
+            remote_summaries.push(rezzy::reconcile::triage::RemoteBucketSummary {
+                accumulator: bucket.accumulator,
+                count: bucket.count,
+            });
+        }
+
+        let diffs = rezzy::reconcile::triage::select_differing_buckets(
+            local_resident.buckets(),
+            &remote_summaries,
+        )
+        .unwrap();
+
+        let estimated = rezzy::reconcile::triage::estimate_delta(
+            local_resident.strata(),
+            remote_resident.strata(),
+        )
+        .unwrap();
+
+        let provisioned =
+            rezzy::reconcile::triage::provision_bucket_capacities(&diffs, estimated, 16384)
+                .unwrap();
+
+        action = rezzy::reconcile::ClientAction::BucketSketches {
+            requests: provisioned.requests,
+            accumulated_roots: Vec::new(),
+        };
+    }
+
+    match action {
+        rezzy::reconcile::ClientAction::BucketSketches { requests, .. } => {
+            println!("Requested {} buckets.", requests.len());
+
+            // Step 2: Server builds the requested sketches
+            let start_server = Instant::now();
+            let sketches = build_bucket_sketches::<String, DummyGraph, _>(
+                &remote_resident,
+                None,
+                Some(remote_elements.into_iter()),
+                &requests,
+            )
+            .unwrap();
+            let server_duration = start_server.elapsed();
+            println!("Server extraction completed in {server_duration:?}");
+
+            // Step 3: Client decodes the sketches
+            let start_decode = Instant::now();
+            let local_sketches = build_bucket_sketches::<String, DummyGraph, _>(
+                &local_resident,
+                None,
+                Some(local_elements.clone().into_iter()),
+                &requests,
+            )
+            .unwrap();
+
+            let mut total_roots: usize = 0;
+            let mut failed_buckets: usize = 0;
+
+            for (mut remote_sketch, local_sketch) in sketches.into_iter().zip(local_sketches) {
+                remote_sketch.xor(&local_sketch);
+
+                if let Ok(roots) = remote_sketch.decode_elements(remote_sketch.capacity()) {
+                    total_roots = total_roots.saturating_add(roots.len());
+                } else {
+                    failed_buckets = failed_buckets.saturating_add(1);
+                }
+            }
+
+            let decode_duration = start_decode.elapsed();
+            println!("Client decoding completed in {decode_duration:?}");
+            println!(
+                "Decode summary: {total_roots} roots recovered, {failed_buckets} buckets failed"
+            );
+        }
+        _ => {
+            println!("Client action: {action:?}");
+        }
+    }
+}
