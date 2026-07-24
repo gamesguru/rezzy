@@ -3,7 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-//! Arithmetic for the MSC0501 minisketch-compatible binary field.
+//! Arithmetic for the MSC0500 minisketch-compatible binary field.
 
 /// Reduction polynomial without its implicit `x^64` term.
 const REDUCTION: u64 = 0x1b;
@@ -24,12 +24,76 @@ pub fn mul_bitwise(mut left: u64, mut right: u64) -> u64 {
     product
 }
 
-/// Multiplies two elements of the MSC0501 64-bit binary field.
+/// Multiplies two elements of the MSC0500 64-bit binary field.
 ///
 /// Uses the portable fallback unless a target-specific accelerated implementation is enabled.
 #[must_use]
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+#[allow(unsafe_code)]
+pub fn mul(left: u64, right: u64) -> u64 {
+    // SAFETY: accelerated_mul selects the intrinsic only after runtime feature
+    // detection and otherwise returns the portable implementation.
+    unsafe { accelerated_mul()(left, right) }
+}
+
+#[must_use]
+#[cfg(not(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64"))))]
 pub fn mul(left: u64, right: u64) -> u64 {
     mul_bitwise(left, right)
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+fn accelerated_mul() -> unsafe fn(u64, u64) -> u64 {
+    use std::sync::OnceLock;
+
+    static IMPLEMENTATION: OnceLock<unsafe fn(u64, u64) -> u64> = OnceLock::new();
+    *IMPLEMENTATION.get_or_init(|| {
+        if std::is_x86_feature_detected!("pclmulqdq") {
+            // SAFETY: the function is only selected when the CPU advertises
+            // the required instruction set.
+            mul_pclmul
+        } else {
+            mul_portable
+        }
+    })
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+#[allow(unsafe_code)]
+unsafe fn mul_portable(left: u64, right: u64) -> u64 {
+    mul_bitwise(left, right)
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+#[target_feature(enable = "pclmulqdq")]
+#[allow(unsafe_code)]
+unsafe fn mul_pclmul(left: u64, right: u64) -> u64 {
+    #[cfg(target_arch = "x86")]
+    use core::arch::x86::{_mm_clmulepi64_si128, _mm_set_epi64x, _mm_storeu_si128};
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64::{_mm_clmulepi64_si128, _mm_set_epi64x, _mm_storeu_si128};
+
+    let left = _mm_set_epi64x(0, i64::from_ne_bytes(left.to_ne_bytes()));
+    let right = _mm_set_epi64x(0, i64::from_ne_bytes(right.to_ne_bytes()));
+    let low = _mm_clmulepi64_si128(left, right, 0x00);
+    let mut low_word = [0_u64; 2];
+    _mm_storeu_si128(low_word.as_mut_ptr().cast(), low);
+    let high = low_word[1];
+    // Since x^64 = x^4 + x^3 + x + 1, fold the high half directly into the
+    // low half. Only four overflow bits remain and need a final reduction.
+    let mut product = u128::from(low_word[0])
+        ^ (u128::from(high) << 4)
+        ^ (u128::from(high) << 3)
+        ^ (u128::from(high) << 1)
+        ^ u128::from(high);
+    for bit in (64_usize..68).rev() {
+        if (product >> bit) & 1 != 0 {
+            let offset = bit.wrapping_sub(64);
+            product ^= 1_u128 << bit;
+            product ^= u128::from(REDUCTION) << offset;
+        }
+    }
+    u64::try_from(product).expect("field reduction clears the upper bits")
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ use base64::{
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
 };
 use rezzy::reconcile::{
-    AlgebraicError, BucketSummary, EventHash, EventIdFormat, MAX_LOCAL_SKETCH_DECODE_CAPACITY,
+    AlgebraicError, BucketSummary, ElementHash, EventIdFormat, MAX_LOCAL_SKETCH_DECODE_CAPACITY,
     MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch, verify_residual,
 };
 
@@ -12,13 +12,11 @@ fn event_id(bytes: [u8; 32]) -> String {
 }
 
 #[test]
-fn hash_derived_event_ids_feed_all_resident_layers() {
+fn generic_digest32_feeds_all_resident_layers() {
     let first_bytes = core::array::from_fn(|index| u8::try_from(index).unwrap());
     let second_bytes = core::array::from_fn(|index| u8::try_from(255 - index).unwrap());
-    let first_id = event_id(first_bytes);
-    let second_id = event_id(second_bytes);
-    let first = EventHash::from_event_id(&first_id, EventIdFormat::V4Plus).unwrap();
-    let second = EventHash::from_event_id(&second_id, EventIdFormat::V4Plus).unwrap();
+    let first = ElementHash::from_digest32(first_bytes);
+    let second = ElementHash::from_digest32(second_bytes);
 
     assert_eq!(first.h128, 0x0001_0203_0405_0607_0809_0a0b_0c0d_0e0f);
     assert_eq!(first.h64, 0x0001_0203_0405_0607);
@@ -42,12 +40,22 @@ fn hash_derived_event_ids_feed_all_resident_layers() {
 }
 
 #[test]
-fn legacy_ids_are_sha256_derived_and_stable() {
-    let first = EventHash::from_event_id("$opaque:example.org", EventIdFormat::Legacy).unwrap();
-    let second = EventHash::from_event_id("$opaque:example.org", EventIdFormat::Legacy).unwrap();
+fn matrix_hash_derived_event_ids_use_decoded_digest32() {
+    let bytes = core::array::from_fn(|index| u8::try_from(index).unwrap());
+    let event_id = event_id(bytes);
+    let hash = ElementHash::from_matrix_event_id(&event_id, EventIdFormat::V4Plus).unwrap();
+    assert_eq!(hash, ElementHash::from_digest32(bytes));
+}
+
+#[test]
+fn legacy_ids_are_sha3_256_derived_and_stable() {
+    let first =
+        ElementHash::from_matrix_event_id("$opaque:example.org", EventIdFormat::Legacy).unwrap();
+    let second =
+        ElementHash::from_matrix_event_id("$opaque:example.org", EventIdFormat::Legacy).unwrap();
     assert_eq!(first, second);
-    assert_eq!(first.h128, 0xa2d4_1f14_4e8e_cf9f_f500_4fe8_cbc6_01b4);
-    assert_eq!(first.h64, 0xa2d4_1f14_4e8e_cf9f);
+    assert_eq!(first.h128, 0x87d1_a07d_c174_b89c_e6b0_2374_d7fb_b274);
+    assert_eq!(first.h64, 0x87d1_a07d_c174_b89c);
 }
 
 #[test]
@@ -55,27 +63,27 @@ fn room_v3_event_ids_use_standard_base64() {
     let bytes = [0xfb_u8; 32];
     let event_id = format!("${}", STANDARD_NO_PAD.encode(bytes));
     assert!(event_id.contains('+') || event_id.contains('/'));
-    let hash = EventHash::from_event_id(&event_id, EventIdFormat::V3).unwrap();
+    let hash = ElementHash::from_matrix_event_id(&event_id, EventIdFormat::V3).unwrap();
     assert_eq!(hash.h128, u128::from_be_bytes([0xfb; 16]));
     assert_eq!(hash.h64, u64::from_be_bytes([0xfb; 8]));
     assert_eq!(
-        EventHash::from_event_id(&event_id, EventIdFormat::V4Plus),
+        ElementHash::from_matrix_event_id(&event_id, EventIdFormat::V4Plus),
         Err(AlgebraicError::InvalidBase64)
     );
 }
 
 #[test]
-fn short_id_uses_the_first_nonzero_sha256_chunk() {
+fn short_id_uses_the_first_nonzero_digest_chunk() {
     let mut second_chunk = [0_u8; 32];
     second_chunk[8..16].copy_from_slice(&42_u64.to_be_bytes());
     assert_eq!(
-        EventHash::from_event_id(&event_id(second_chunk), EventIdFormat::V4Plus)
+        ElementHash::from_matrix_event_id(&event_id(second_chunk), EventIdFormat::V4Plus)
             .unwrap()
             .h64,
         42
     );
     assert_eq!(
-        EventHash::from_event_id(&event_id([0; 32]), EventIdFormat::V4Plus)
+        ElementHash::from_matrix_event_id(&event_id([0; 32]), EventIdFormat::V4Plus)
             .unwrap()
             .h64,
         1
@@ -140,22 +148,22 @@ fn pinsketch_fails_loudly_above_the_decode_bound() {
 #[test]
 fn algebraic_wire_and_capacity_errors_are_rejected() {
     assert_eq!(
-        EventHash::from_event_id("$AQ", EventIdFormat::V4Plus),
+        ElementHash::from_matrix_event_id("$AQ", EventIdFormat::V4Plus),
         Err(AlgebraicError::InvalidEventId)
     );
     let overlong_hash = format!("${}", URL_SAFE_NO_PAD.encode([0_u8; 33]));
     for format in [EventIdFormat::V3, EventIdFormat::V4Plus] {
         assert_eq!(
-            EventHash::from_event_id(&overlong_hash, format),
+            ElementHash::from_matrix_event_id(&overlong_hash, format),
             Err(AlgebraicError::InvalidBase64)
         );
     }
     assert_eq!(
-        EventHash::from_event_id("not-an-event-id", EventIdFormat::V4Plus),
+        ElementHash::from_matrix_event_id("not-an-event-id", EventIdFormat::V4Plus),
         Err(AlgebraicError::InvalidEventId)
     );
     assert_eq!(
-        EventHash::from_event_id("$not base64", EventIdFormat::V4Plus),
+        ElementHash::from_matrix_event_id("$not base64", EventIdFormat::V4Plus),
         Err(AlgebraicError::InvalidBase64)
     );
     assert_eq!(
@@ -205,8 +213,10 @@ fn algebraic_wire_and_capacity_errors_are_rejected() {
 
 #[test]
 fn accumulator_residual_is_the_digest_xor() {
-    let first = EventHash::from_event_id(&event_id([0x12; 32]), EventIdFormat::V4Plus).unwrap();
-    let second = EventHash::from_event_id(&event_id([0x34; 32]), EventIdFormat::V4Plus).unwrap();
+    let first =
+        ElementHash::from_matrix_event_id(&event_id([0x12; 32]), EventIdFormat::V4Plus).unwrap();
+    let second =
+        ElementHash::from_matrix_event_id(&event_id([0x34; 32]), EventIdFormat::V4Plus).unwrap();
     let mut left = RoomAccumulator::new();
     let mut right = RoomAccumulator::new();
     left.insert(first).unwrap();

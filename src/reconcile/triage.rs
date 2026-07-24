@@ -3,7 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-//! Phase 0 difference estimation and bucket localization for MSC0501.
+//! Phase 0 difference estimation and bucket localization for MSC0500.
 
 use alloc::vec::Vec;
 
@@ -141,7 +141,7 @@ pub fn select_differing_buckets(
 ///
 /// # Errors
 /// Returns [`AlgebraicError::InvalidSketchCapacity`] if the requested aggregate
-/// capacity exceeds `aggregate_cap` or the MSC0501 maximum of 4096.
+/// capacity exceeds `aggregate_cap` or the MSC0500 maximum of 4096.
 pub fn provision_bucket_capacities(
     differences: &[BucketDifference],
     estimated_delta: Option<u64>,
@@ -300,10 +300,10 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use crate::reconcile::{EventHash, ResidentKernel};
+    use crate::reconcile::{ElementHash, ResidentKernel};
 
     fn toggle_stratum(strata: &mut [[u64; STRATUM_CAPACITY]; STRATA_COUNT], value: u64) {
-        let event = EventHash {
+        let event = ElementHash {
             h128: u128::from(value),
             h64: value,
         };

@@ -3,13 +3,13 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-//! Requester-side MSC0501 reconciliation decisions and verification.
+//! Requester-side MSC0501 reconciliation decisions and verification over MSC0500 digests.
 
 use super::triage::{
     BucketDecodeBatch, BucketRequest, MAX_BUCKET_SKETCH_CAPACITY, MAX_BUCKETED_SKETCH_CAPACITY,
 };
 use super::{
-    AlgebraicError, EventHash, MAX_LOCAL_SKETCH_DECODE_CAPACITY, RoomAccumulator, SyndromeSketch,
+    AlgebraicError, ElementHash, MAX_LOCAL_SKETCH_DECODE_CAPACITY, RoomAccumulator, SyndromeSketch,
 };
 
 /// Requester policy for one MSC0501 reconciliation exchange.
@@ -120,7 +120,7 @@ impl ReconciliationClient {
     pub fn build_sketch(
         self,
         capacity: usize,
-        hashes: impl IntoIterator<Item = EventHash>,
+        hashes: impl IntoIterator<Item = ElementHash>,
     ) -> Result<SyndromeSketch, AlgebraicError> {
         if capacity == 0 || capacity > self.max_sketch_capacity {
             return Err(AlgebraicError::InvalidSketchCapacity);
@@ -235,14 +235,14 @@ mod tests {
 
     use super::*;
 
-    fn hash(wide: u128, short: u64) -> EventHash {
-        EventHash {
+    fn hash(wide: u128, short: u64) -> ElementHash {
+        ElementHash {
             h128: wide,
             h64: short,
         }
     }
 
-    fn accumulator(hashes: &[EventHash]) -> RoomAccumulator {
+    fn accumulator(hashes: &[ElementHash]) -> RoomAccumulator {
         let mut accumulator = RoomAccumulator::new();
         for hash in hashes {
             accumulator.insert(*hash).unwrap();

@@ -12,14 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The `algebraic_v1` primitives from MSC0501.
+//! The MSC0500 `algebraic_v1` set reconciliation profile.
 
 use alloc::{string::String, vec, vec::Vec};
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
 };
-use sha2::{Digest as _, Sha256};
+use sha2::{Digest as Sha2Digest, Sha256};
+use sha3::Sha3_256;
 
 pub use super::gf64::mul as gf64_mul;
 
@@ -47,7 +48,7 @@ pub enum AlgebraicError {
     CountUnderflow,
 }
 
-/// Encoding used to derive a Matrix event ID's SHA-256 reference hash.
+/// Encoding used to derive a Matrix event ID's canonical 32-byte digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventIdFormat {
     /// Room versions 1 and 2 hash the complete event ID.
@@ -58,47 +59,24 @@ pub enum EventIdFormat {
     V4Plus,
 }
 
-/// The two truncations of an event's SHA-256 identifier used by MSC0501.
+/// The two truncations of a reconciled element's canonical 32-byte digest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EventHash {
+pub struct ElementHash {
     /// First 128 bits, interpreted in network byte order.
     pub h128: u128,
-    /// First non-zero 64-bit chunk of the SHA-256 digest (network byte order),
+    /// First non-zero 64-bit chunk of the element digest (network byte order),
     /// falling back to 1 if all four 64-bit chunks are zero.
     pub h64: u64,
 }
 
-impl EventHash {
-    /// Derives hashes from a Matrix event ID.
-    ///
-    /// The reference hash is derived using the room version's event-ID format.
-    ///
-    /// # Errors
-    /// Returns an error when the ID has no `$` sigil, contains invalid base64,
-    /// or its decoded hash is not exactly 32 bytes (256 bits).
-    pub fn from_event_id(event_id: &str, format: EventIdFormat) -> Result<Self, AlgebraicError> {
-        let encoded = event_id
-            .strip_prefix('$')
-            .ok_or(AlgebraicError::InvalidEventId)?;
-        if format != EventIdFormat::Legacy && encoded.len() > EVENT_HASH_ENCODED_LEN {
-            return Err(AlgebraicError::InvalidBase64);
-        }
-        let bytes = match format {
-            EventIdFormat::Legacy => Sha256::digest(event_id.as_bytes()).to_vec(),
-            EventIdFormat::V3 => STANDARD_NO_PAD
-                .decode(encoded)
-                .map_err(|_| AlgebraicError::InvalidBase64)?,
-            EventIdFormat::V4Plus => URL_SAFE_NO_PAD
-                .decode(encoded)
-                .map_err(|_| AlgebraicError::InvalidBase64)?,
-        };
-        if bytes.len() != 32 {
-            return Err(AlgebraicError::InvalidEventId);
-        }
+impl ElementHash {
+    /// Derives the MSC0500 profile truncations from a canonical 32-byte element digest.
+    #[must_use]
+    pub fn from_digest32(digest: [u8; 32]) -> Self {
         let mut wide = [0; 16];
-        wide.copy_from_slice(&bytes[..16]);
+        wide.copy_from_slice(&digest[..16]);
         let mut short = [0; 8];
-        let h64 = bytes
+        let h64 = digest
             .chunks_exact(8)
             .take(4)
             .map(|chunk| {
@@ -107,14 +85,61 @@ impl EventHash {
             })
             .find(|value| *value != 0)
             .unwrap_or(1);
-        Ok(Self {
+        Self {
             h128: u128::from_be_bytes(wide),
             h64,
-        })
+        }
+    }
+
+    /// Derives an element hash from a Matrix event ID.
+    ///
+    /// This is the MSC0500 Matrix event-ID binding. The algebraic kernel itself
+    /// is generic over canonical 32-byte element digests.
+    ///
+    /// # Errors
+    /// Returns an error when the ID has no `$` sigil, contains invalid base64,
+    /// or its decoded hash is not exactly 32 bytes (256 bits).
+    pub fn from_matrix_event_id(
+        event_id: &str,
+        format: EventIdFormat,
+    ) -> Result<Self, AlgebraicError> {
+        Self::matrix_event_digest32(event_id, format).map(Self::from_digest32)
+    }
+
+    /// Derives the MSC0500 Matrix event-ID binding digest `D(e)`.
+    ///
+    /// # Errors
+    /// Returns an error when the ID has no `$` sigil, contains invalid base64,
+    /// or its decoded hash is not exactly 32 bytes.
+    pub fn matrix_event_digest32(
+        event_id: &str,
+        format: EventIdFormat,
+    ) -> Result<[u8; 32], AlgebraicError> {
+        let encoded = event_id
+            .strip_prefix('$')
+            .ok_or(AlgebraicError::InvalidEventId)?;
+        if format != EventIdFormat::Legacy && encoded.len() > EVENT_HASH_ENCODED_LEN {
+            return Err(AlgebraicError::InvalidBase64);
+        }
+        let digest = match format {
+            EventIdFormat::Legacy => Sha3_256::digest(event_id.as_bytes()).to_vec(),
+            EventIdFormat::V3 => STANDARD_NO_PAD
+                .decode(encoded)
+                .map_err(|_| AlgebraicError::InvalidBase64)?,
+            EventIdFormat::V4Plus => URL_SAFE_NO_PAD
+                .decode(encoded)
+                .map_err(|_| AlgebraicError::InvalidBase64)?,
+        };
+        if digest.len() != 32 {
+            return Err(AlgebraicError::InvalidEventId);
+        }
+        digest
+            .try_into()
+            .map_err(|_| AlgebraicError::InvalidEventId)
     }
 }
 
-/// Incrementally maintained level-0 room digest and exact known-event count.
+/// Incrementally maintained level-0 set digest and exact element count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RoomAccumulator {
     digest: u128,
@@ -138,11 +163,11 @@ impl RoomAccumulator {
         self.count
     }
 
-    /// Adds a known event.
+    /// Adds a known element.
     ///
     /// # Errors
     /// Returns [`AlgebraicError::CountOverflow`] at `u64::MAX` events.
-    pub fn insert(&mut self, hash: EventHash) -> Result<(), AlgebraicError> {
+    pub fn insert(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
         self.count = self
             .count
             .checked_add(1)
@@ -151,11 +176,11 @@ impl RoomAccumulator {
         Ok(())
     }
 
-    /// Removes a known event.
+    /// Removes a known element.
     ///
     /// # Errors
     /// Returns [`AlgebraicError::CountUnderflow`] when the accumulator is empty.
-    pub fn remove(&mut self, hash: EventHash) -> Result<(), AlgebraicError> {
+    pub fn remove(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
         self.count = self
             .count
             .checked_sub(1)
@@ -212,7 +237,7 @@ impl RoomAccumulator {
 #[must_use]
 pub fn verify_residual(
     expected_residual: u128,
-    hashes: impl IntoIterator<Item = EventHash>,
+    hashes: impl IntoIterator<Item = ElementHash>,
 ) -> bool {
     hashes
         .into_iter()
@@ -371,7 +396,7 @@ pub struct Bucket {
     pub syndromes: [u64; 8],
 }
 
-/// The 256-bucket resident structure described by MSC0501.
+/// The 256-bucket summary described by MSC0500.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketSummary {
     buckets: Vec<Bucket>,
@@ -395,7 +420,7 @@ impl BucketSummary {
     ///
     /// # Errors
     /// Returns an error when the bucket's 24-bit wire count is exhausted.
-    pub fn insert(&mut self, hash: EventHash) -> Result<(), AlgebraicError> {
+    pub fn insert(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
         if hash.h64 == 0 {
             return Err(AlgebraicError::ZeroShortIdentifier);
         }
@@ -415,7 +440,7 @@ impl BucketSummary {
     ///
     /// # Errors
     /// Returns an error when the selected bucket is empty.
-    pub fn remove(&mut self, hash: EventHash) -> Result<(), AlgebraicError> {
+    pub fn remove(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
         let bucket = &mut self.buckets[(hash.h64 >> 56) as usize];
         bucket.count = bucket
             .count
@@ -426,7 +451,7 @@ impl BucketSummary {
     }
 }
 
-fn toggle_bucket(bucket: &mut Bucket, hash: EventHash) {
+fn toggle_bucket(bucket: &mut Bucket, hash: ElementHash) {
     bucket.accumulator ^= hash.h128;
     let squared = gf64_mul(hash.h64, hash.h64);
     let mut odd_power = hash.h64;
@@ -440,8 +465,8 @@ fn toggle_bucket(bucket: &mut Bucket, hash: EventHash) {
 mod tests {
     use super::*;
 
-    fn hash(seed: u8) -> EventHash {
-        EventHash {
+    fn hash(seed: u8) -> ElementHash {
+        ElementHash {
             h128: u128::from(seed) << 120,
             h64: u64::from(seed) << 56,
         }

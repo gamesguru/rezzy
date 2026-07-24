@@ -217,7 +217,7 @@ name = "test_lattice"
 path = "tests/test_lattice.rs"
 
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(coverage)",
     "cfg(coverage_nightly)",

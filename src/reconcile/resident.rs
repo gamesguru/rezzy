@@ -3,12 +3,12 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-//! Incrementally maintained MSC0501 reconciliation state.
+//! Incrementally maintained MSC0500 reconciliation state.
 
 use alloc::{vec, vec::Vec};
 
 use super::{
-    algebraic::{AlgebraicError, BUCKET_COUNT, EventHash, RoomAccumulator},
+    algebraic::{AlgebraicError, BUCKET_COUNT, ElementHash, RoomAccumulator},
     gf64,
 };
 
@@ -21,7 +21,7 @@ pub const STRATUM_CAPACITY: usize = 8;
 /// One resident depth-8 localization bucket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResidentBucket {
-    /// Fault-detection accumulator over full event hashes.
+    /// Fault-detection accumulator over full element hashes.
     pub accumulator: u128,
     /// Saturating 24-bit wire count.
     pub count: u32,
@@ -35,7 +35,7 @@ pub struct ResidentBucket {
     pub syndromes: [u64; STRATUM_CAPACITY],
 }
 
-/// Per-frame resident reconciliation state over accepted events and rejected tombstones.
+/// Per-population resident reconciliation state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidentKernel {
     accumulator: RoomAccumulator,
@@ -98,11 +98,11 @@ impl ResidentKernel {
         self.buckets.iter().all(|bucket| !bucket.scan_required)
     }
 
-    /// Adds an accepted event or rejected-event tombstone.
+    /// Adds an element to the reconciled population.
     ///
     /// # Errors
     /// Returns an error only if the global event count reaches `u64::MAX`.
-    pub fn insert(&mut self, hash: EventHash) -> Result<(), AlgebraicError> {
+    pub fn insert(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
         if hash.h64 == 0 {
             return Err(AlgebraicError::ZeroShortIdentifier);
         }
@@ -112,11 +112,11 @@ impl ResidentKernel {
         Ok(())
     }
 
-    /// Removes an accepted event or rejected-event tombstone.
+    /// Removes an element from the reconciled population.
     ///
     /// # Errors
     /// Returns an error only if the global event count is already zero.
-    pub fn remove(&mut self, hash: EventHash) -> Result<(), AlgebraicError> {
+    pub fn remove(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
         self.accumulator.remove(hash)?;
         remove_bucket(&mut self.buckets, hash);
         toggle_stratum(&mut self.strata, hash.h64);
@@ -158,7 +158,7 @@ impl ResidentKernel {
     }
 }
 
-fn insert_bucket(buckets: &mut [ResidentBucket], hash: EventHash) {
+fn insert_bucket(buckets: &mut [ResidentBucket], hash: ElementHash) {
     let bucket = &mut buckets[(hash.h64 >> 56) as usize];
     if bucket.scan_required || bucket.count == MAX_BUCKET_COUNT {
         bucket.scan_required = true;
@@ -168,7 +168,7 @@ fn insert_bucket(buckets: &mut [ResidentBucket], hash: EventHash) {
     toggle_bucket(bucket, hash);
 }
 
-fn remove_bucket(buckets: &mut [ResidentBucket], hash: EventHash) {
+fn remove_bucket(buckets: &mut [ResidentBucket], hash: ElementHash) {
     let bucket = &mut buckets[(hash.h64 >> 56) as usize];
     if bucket.scan_required || bucket.count == 0 {
         bucket.scan_required = true;
@@ -178,7 +178,7 @@ fn remove_bucket(buckets: &mut [ResidentBucket], hash: EventHash) {
     toggle_bucket(bucket, hash);
 }
 
-fn toggle_bucket(bucket: &mut ResidentBucket, hash: EventHash) {
+fn toggle_bucket(bucket: &mut ResidentBucket, hash: ElementHash) {
     bucket.accumulator ^= hash.h128;
     let squared = gf64::mul(hash.h64, hash.h64);
     let mut odd_power = hash.h64;
@@ -203,8 +203,8 @@ fn toggle_stratum(strata: &mut [[u64; STRATUM_CAPACITY]; STRATA_COUNT], value: u
 mod tests {
     use super::*;
 
-    fn hash(h128: u128, h64: u64) -> EventHash {
-        EventHash { h128, h64 }
+    fn hash(h128: u128, h64: u64) -> ElementHash {
+        ElementHash { h128, h64 }
     }
 
     #[test]
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn saturation_leaves_the_algebraic_layers_exact() {
-        let events: Vec<EventHash> = (1_u64..=40)
+        let events: Vec<ElementHash> = (1_u64..=40)
             .map(|seed| hash(u128::from(seed) * 0x9e37_79b9, seed << 3 | 1))
             .collect();
         let mut saturated = ResidentKernel::new();

@@ -22,7 +22,7 @@ pub mod resident;
 pub mod triage;
 
 pub use algebraic::{
-    AlgebraicError, BUCKET_COUNT, Bucket, BucketSummary, EventHash, EventIdFormat,
+    AlgebraicError, BUCKET_COUNT, Bucket, BucketSummary, ElementHash, EventIdFormat,
     MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch,
     gf64_mul, verify_residual,
 };

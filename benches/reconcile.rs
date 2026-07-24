@@ -3,13 +3,13 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use rezzy::{
-    BucketRequest, EventHash, ResidentKernel, SyndromeSketch, decode_bucket_sketches,
+    BucketRequest, ElementHash, ResidentKernel, SyndromeSketch, decode_bucket_sketches,
     estimate_delta, gf64_mul,
 };
 
-fn hash(index: u64) -> EventHash {
+fn hash(index: u64) -> ElementHash {
     let h64 = index.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(17) | 1;
-    EventHash {
+    ElementHash {
         h128: u128::from(h64) << 64 | u128::from(index),
         h64,
     }
@@ -36,11 +36,11 @@ impl Xorshift128 {
         value
     }
 
-    fn hash(&mut self) -> EventHash {
+    fn hash(&mut self) -> ElementHash {
         let high = self.next();
         let low = self.next();
         let h64 = self.next() | 1;
-        EventHash {
+        ElementHash {
             h128: u128::from(high) << 64 | u128::from(low),
             h64,
         }
