@@ -112,16 +112,17 @@ where
 ///
 /// # Errors
 /// Returns an error if any sketches exceed capacity limits or graph traversal fails.
-pub fn build_bucket_sketches<Id, Graph, I>(
+///
+/// # Panics
+/// Panics if the calculated prefix falls out of the bounds of a `u32` (should never happen for shifts <= 64).
+pub fn build_bucket_sketches<I, F>(
     resident: &ResidentKernel,
-    _graph_or_fallback: Option<&Graph>,
-    fallback_elements: Option<I>,
+    elements_provider: F,
     requests: &[BucketRequest],
 ) -> Result<Vec<SyndromeSketch>, AlgebraicError>
 where
-    Id: EventId,
-    Graph: ForwardGraph<Id>,
-    I: Iterator<Item = ElementHash> + Clone,
+    I: Iterator<Item = ElementHash>,
+    F: FnOnce() -> I,
 {
     let mut sketches = Vec::with_capacity(requests.len());
 
@@ -129,12 +130,7 @@ where
 
     let mut scanned_elements = Vec::new();
     if requires_scan {
-        if let Some(elements) = fallback_elements {
-            scanned_elements.extend(elements);
-        } else {
-            // Note: In production, we would traverse the graph and hash the elements.
-            // For the benchmark purposes, the fallback_elements iterator is used.
-        }
+        scanned_elements.extend(elements_provider());
     }
 
     for request in requests {
@@ -172,9 +168,7 @@ where
                 let element_prefix = if shift == 64 {
                     0
                 } else {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let prefix = (hash.h64 >> shift) as u32;
-                    prefix
+                    u32::try_from(hash.h64 >> shift).unwrap()
                 };
 
                 if element_prefix == request.prefix {
@@ -313,14 +307,7 @@ mod tests {
             capacity: 4,
         }];
 
-        let empty_elements: Option<core::iter::Empty<ElementHash>> = None;
-        let sketches = build_bucket_sketches::<MockId, MockGraph, _>(
-            &resident,
-            None,
-            empty_elements,
-            &requests,
-        )
-        .unwrap();
+        let sketches = build_bucket_sketches(&resident, core::iter::empty, &requests).unwrap();
 
         assert_eq!(sketches.len(), 1);
         let roots = sketches[0].clone().decode_elements(4).unwrap();
@@ -344,14 +331,7 @@ mod tests {
             capacity: 4,
         }];
 
-        let empty_elements: Option<core::iter::Empty<ElementHash>> = None;
-        let sketches = build_bucket_sketches::<MockId, MockGraph, _>(
-            &resident,
-            None,
-            empty_elements,
-            &requests,
-        )
-        .unwrap();
+        let sketches = build_bucket_sketches(&resident, core::iter::empty, &requests).unwrap();
 
         assert_eq!(sketches.len(), 1);
         let mut roots = sketches[0].clone().decode_elements(4).unwrap();
@@ -374,7 +354,7 @@ mod tests {
 
         let depth = 16;
         let shift = 64 - depth;
-        let prefix = u32::try_from(h1.h64 >> shift);
+        let prefix = u32::try_from(h1.h64 >> shift).unwrap();
 
         let requests = [BucketRequest {
             depth,
@@ -382,15 +362,10 @@ mod tests {
             capacity: 4,
         }];
 
-        // Deep extraction uses fallback_elements
+        // Deep extraction uses elements_provider
         let elements = vec![h1, h2];
-        let sketches = build_bucket_sketches::<MockId, MockGraph, _>(
-            &resident,
-            None,
-            Some(elements.into_iter()),
-            &requests,
-        )
-        .unwrap();
+        let sketches =
+            build_bucket_sketches(&resident, || elements.into_iter(), &requests).unwrap();
 
         assert_eq!(sketches.len(), 1);
         // Only elements that match the prefix should be present.

@@ -23,24 +23,6 @@ fn load_uuids(filename: &str) -> (ResidentKernel, Vec<ElementHash>) {
     (resident, elements)
 }
 
-struct DummyGraph;
-
-impl rezzy::reconcile::ForwardGraph<String> for DummyGraph {
-    type ChildrenIter<'a> = std::iter::Empty<&'a String>;
-
-    fn children<'a>(&'a self, _id: &String) -> Self::ChildrenIter<'a> {
-        std::iter::empty()
-    }
-
-    fn is_known(&self, _id: &String) -> bool {
-        false
-    }
-
-    fn event_format(&self, _id: &String) -> EventIdFormat {
-        EventIdFormat::Legacy
-    }
-}
-
 fn main() {
     println!("Loading A.txt...");
     let start = Instant::now();
@@ -110,22 +92,17 @@ fn main() {
 
             // Step 2: Server builds the requested sketches
             let start_server = Instant::now();
-            let sketches = build_bucket_sketches::<String, DummyGraph, _>(
-                &remote_resident,
-                None,
-                Some(remote_elements.into_iter()),
-                &requests,
-            )
-            .unwrap();
+            let sketches =
+                build_bucket_sketches(&remote_resident, || remote_elements.into_iter(), &requests)
+                    .unwrap();
             let server_duration = start_server.elapsed();
             println!("Server extraction completed in {server_duration:?}");
 
             // Step 3: Client decodes the sketches
             let start_decode = Instant::now();
-            let local_sketches = build_bucket_sketches::<String, DummyGraph, _>(
+            let local_sketches = build_bucket_sketches(
                 &local_resident,
-                None,
-                Some(local_elements.clone().into_iter()),
+                || local_elements.clone().into_iter(),
                 &requests,
             )
             .unwrap();
