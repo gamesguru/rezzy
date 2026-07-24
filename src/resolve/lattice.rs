@@ -210,7 +210,8 @@ fn compute_lattice_coordinatized_winners<
 
     #[cfg(feature = "std")]
     {
-        let num_threads = std::thread::available_parallelism().map_or(4, core::num::NonZero::get);
+        let num_threads =
+            std::thread::available_parallelism().map_or(4, core::num::NonZeroUsize::get);
         let chunk_size = (non_power_events
             .len()
             .saturating_add(num_threads)

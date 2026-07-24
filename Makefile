@@ -28,7 +28,12 @@ fix:	##H Clippy auto-fix
 
 .PHONY: lint
 lint: ##H Run all linters
-	$(CARGO) clippy --all-targets --features $(TEST_FEATURES) -- -W clippy::perf -W clippy::pedantic
+	@if $(CARGO) clippy --version >/dev/null 2>&1; then \
+		$(CARGO) clippy --all-targets --features $(TEST_FEATURES) -- -W clippy::perf -W clippy::pedantic; \
+	else \
+		echo "warning: Clippy is unavailable; running cargo check only"; \
+		$(CARGO) check --all-targets --features $(TEST_FEATURES); \
+	fi
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Lean targets

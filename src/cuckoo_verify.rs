@@ -16,6 +16,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use core::fmt::Write;
+use core::mem::size_of;
 use sha3::{Digest, Keccak256};
 
 pub const ALGORITHM: &str = "tk.nutra.msc45xx.pow.cuckoo-cycle-42-29-keccak256-cogen";
