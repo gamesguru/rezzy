@@ -40,6 +40,16 @@ exclude = [
     "Makefile",
 ]
 
+[package.metadata.cargo-machete]
+ignored = [
+    # Direct optional anchors for transitive CLI dependency versions that still
+    # parse and build on the Rust 1.75 MSRV.
+    "idna_adapter",
+    "native-tls",
+    "openssl",
+    "openssl-sys",
+]
+
 [[bin]]
 name = "rezzy"
 path = "src/bin/rezzy/main.rs"
@@ -67,14 +77,13 @@ cli = [
 ]
 regen = ["std"]
 hashing = []
-signing = ["dep:ed25519-consensus"]
+signing = []
 mock-ruma = [
     "dep:insta",
     "dep:ruma-common",
     "dep:ruma-events",
     "dep:ruma-state-res",
     "dep:test-log",
-    "dep:tracing-subscriber",
 ]
 stress = ["dep:bincode"]
 mimalloc = ["dep:mimalloc"]
@@ -85,7 +94,6 @@ base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 bincode = { version = "1", optional = true }
 blake2 = { version = "0.10", default-features = false }
 clap = { version = ">=4.4, <4.6", optional = true, features = ["derive", "env"] }
-ed25519-consensus = { version = "2", optional = true, default-features = false }
 hashbrown = { version = "0.15", default-features = false, features = [
     "default-hasher",
     "inline-more",
@@ -111,7 +119,6 @@ serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.10.8", default-features = false }
 sha3 = { version = "0.10.8", default-features = false }
 test-log = { version = "0.2.20", optional = true }
-tracing-subscriber = { version = "0.3.23", optional = true }
 ureq = { version = "2.9", optional = true, default-features = false, features = [
     "json",
     "native-tls",
