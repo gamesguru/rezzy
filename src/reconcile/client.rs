@@ -443,6 +443,10 @@ mod tests {
             Ok(())
         );
         assert_eq!(
+            ReconciliationClient::verify_global_residual(0x7777, &[0x1111], &[0x2222]),
+            Err(AlgebraicError::DecodeFailure)
+        );
+        assert_eq!(
             ReconciliationClient::verify_global_residual(0xaaaa, &[0x1111], &[0x2222]),
             Err(AlgebraicError::DecodeFailure)
         );

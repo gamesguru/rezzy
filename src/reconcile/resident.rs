@@ -144,15 +144,15 @@ impl ResidentKernel {
             .buckets
             .get_mut(index)
             .ok_or(AlgebraicError::InvalidBucketIndex)?;
-        match u32::try_from(counted) {
-            Ok(count) if count <= MAX_BUCKET_COUNT => {
-                bucket.count = count;
-                bucket.scan_required = false;
-            }
-            _ => {
-                bucket.count = MAX_BUCKET_COUNT;
-                bucket.scan_required = true;
-            }
+        if counted <= u64::from(MAX_BUCKET_COUNT) {
+            let Ok(count) = u32::try_from(counted) else {
+                unreachable!("counted is guarded by the 24-bit bucket limit");
+            };
+            bucket.count = count;
+            bucket.scan_required = false;
+        } else {
+            bucket.count = MAX_BUCKET_COUNT;
+            bucket.scan_required = true;
         }
         Ok(())
     }
