@@ -11,10 +11,56 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  toolchain-checks:
+    name: Rust ${{ matrix.rust }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: ["1.75.0", "1.82.0", "1.85.0", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-${{ matrix.rust }}
+
+      - name: Toolchain Versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make rust/test
+
+      - name: Build CLI
+        run: make build
+
   checks:
+    name: Format, Coverage, and Summary
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-stable-summary
 
       - name: Install dependencies
         run: |
@@ -26,7 +72,7 @@ jobs:
         run: make format
 
       - name: Lint (Clippy)
-        run: cargo clippy --all-targets --features hashing,cli -- -D warnings -D clippy::perf -D clippy::pedantic
+        run: TEST_FEATURES=hashing,cli make lint
 
       - name: Install nightly toolchain (for llvm-cov)
         run: rustup toolchain install nightly --profile minimal
@@ -68,7 +114,7 @@ jobs:
           fail_ci_if_error: false
 
   publish-badge:
-    needs: checks
+    needs: [checks, toolchain-checks]
     if: always() && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     permissions:
