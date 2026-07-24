@@ -38,10 +38,10 @@ jobs:
           cargo --version
 
       - name: Lint
-        run: CARGO_FEATURE_ARGS="--features cli" make lint
+        run: CARGO_FEATURE_ARGS="--locked --features cli" make lint
 
       - name: Test
-        run: CARGO_FEATURE_ARGS="--features cli" make rust/test
+        run: CARGO_FEATURE_ARGS="--locked --features cli" make rust/test
 
       - name: Build CLI
         run: make build
@@ -73,10 +73,10 @@ jobs:
           cargo --version
 
       - name: Lint
-        run: CARGO_FEATURE_ARGS=--all-features make lint
+        run: CARGO_FEATURE_ARGS="--locked --all-features" make lint
 
       - name: Test
-        run: CARGO_FEATURE_ARGS=--all-features make rust/test
+        run: CARGO_FEATURE_ARGS="--locked --all-features" make rust/test
 
   checks:
     name: Format, Coverage, and Summary
@@ -104,7 +104,7 @@ jobs:
         run: make format
 
       - name: Lint (Clippy)
-        run: CARGO_FEATURE_ARGS=--all-features make lint
+        run: CARGO_FEATURE_ARGS="--locked --all-features" make lint
 
       - name: Install nightly toolchain (for llvm-cov)
         run: rustup toolchain install nightly --profile minimal
@@ -113,7 +113,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Test Suite
-        run: set -o pipefail; CARGO_FEATURE_ARGS=--all-features make rust/test 2>&1 | tee test-results.txt
+        run: set -o pipefail; CARGO_FEATURE_ARGS="--locked --all-features" make rust/test 2>&1 | tee test-results.txt
 
       - name: Code Coverage
         run: make rust/coverage
