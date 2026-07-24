@@ -38,10 +38,10 @@ jobs:
           cargo --version
 
       - name: Lint
-        run: make lint
+        run: CARGO_FEATURE_ARGS=--all-features make lint
 
       - name: Test
-        run: make rust/test
+        run: CARGO_FEATURE_ARGS=--all-features make rust/test
 
       - name: Build CLI
         run: make build
@@ -72,7 +72,7 @@ jobs:
         run: make format
 
       - name: Lint (Clippy)
-        run: TEST_FEATURES=hashing,cli make lint
+        run: CARGO_FEATURE_ARGS=--all-features make lint
 
       - name: Install nightly toolchain (for llvm-cov)
         run: rustup toolchain install nightly --profile minimal
@@ -81,7 +81,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Test Suite
-        run: set -o pipefail; make rust/test 2>&1 | tee test-results.txt
+        run: set -o pipefail; CARGO_FEATURE_ARGS=--all-features make rust/test 2>&1 | tee test-results.txt
 
       - name: Code Coverage
         run: make rust/coverage

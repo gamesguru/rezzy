@@ -159,13 +159,14 @@ fn test_unredacted_lounge_mismatch_subgraph() {
         "$Hk-xXbs52DhNQI_Ca1E2DkyNMazBITKkepo8IuqC7EI",
     ];
 
-    let resolved_eids: std::collections::HashSet<&String> = resolved.values().collect();
+    let resolved_eids: std::collections::HashSet<&str> =
+        resolved.values().map(String::as_str).collect();
 
     let mut mismatches = 0u32;
 
     println!("\n=== Checking expected PRESENT ===");
     for id in &expected_present {
-        if resolved_eids.contains(&id.to_string()) {
+        if resolved_eids.contains(id) {
             println!("  OK: {id}");
         } else {
             // Find what actually won in that slot
@@ -202,7 +203,7 @@ fn test_unredacted_lounge_mismatch_subgraph() {
 
     println!("\n=== Checking expected ABSENT ===");
     for id in &expected_absent {
-        if resolved_eids.contains(&id.to_string()) {
+        if resolved_eids.contains(id) {
             println!("MISMATCH: expected ABSENT but PRESENT: {id}");
             mismatches += 1;
         } else {

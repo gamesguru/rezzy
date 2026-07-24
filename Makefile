@@ -3,6 +3,8 @@ SHELL=/bin/bash
 
 LAKE ?= lake
 CARGO ?= cargo
+TEST_FEATURES ?=
+CARGO_FEATURE_ARGS ?= $(if $(TEST_FEATURES),--features $(TEST_FEATURES),)
 
 LINT_LOCS_PY = $$(git ls-files '*.py')
 LINT_LOCS_SH = $$(git ls-files '*.sh')
@@ -22,16 +24,16 @@ format: ##H Format codebase (Rust + Lean + scripts)
 
 .PHONY: fix
 fix:	##H Clippy auto-fix
-	$(CARGO) clippy --allow-dirty --fix --all-targets
+	$(CARGO) clippy --allow-dirty --fix --all-targets $(CARGO_FEATURE_ARGS)
 	# $(CARGO) fix --all-targets --allow-dirty
 
 .PHONY: lint
 lint: ##H Run all linters
 	@if $(CARGO) clippy --version >/dev/null 2>&1; then \
-		$(CARGO) clippy --all-targets; \
+		$(CARGO) clippy --all-targets $(CARGO_FEATURE_ARGS); \
 	else \
 		echo "warning: Clippy is unavailable; running cargo check only"; \
-		$(CARGO) check --all-targets; \
+		$(CARGO) check --all-targets $(CARGO_FEATURE_ARGS); \
 	fi
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -83,9 +85,9 @@ rust/doc: ##H Generate rustdoc API documentation
 .PHONY: rust/test
 rust/test: ##H Run Rust tests (p=NAME for specific test, a=ARGS for test binary args)
 ifdef p
-	$(CARGO) test --test $(p) $(if $(a),-- $(a))
+	$(CARGO) test --test $(p) $(CARGO_FEATURE_ARGS) $(if $(a),-- $(a))
 else
-	$(CARGO) test --lib --tests $(if $(a),-- $(a))
+	$(CARGO) test --lib --tests $(CARGO_FEATURE_ARGS) $(if $(a),-- $(a))
 endif
 
 .PHONY: rust/bench
