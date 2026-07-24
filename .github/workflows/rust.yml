@@ -12,12 +12,12 @@ env:
 
 jobs:
   toolchain-checks:
-    name: Rust ${{ matrix.rust }}
+    name: Rust ${{ matrix.rust }} MSRV features
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        rust: ["1.75.0", "1.82.0", "1.85.0", "1.92.0", "stable", "beta", "nightly"]
+        rust: ["1.75.0", "1.82.0", "1.85.0"]
     steps:
       - uses: actions/checkout@v4
 
@@ -38,13 +38,45 @@ jobs:
           cargo --version
 
       - name: Lint
+        run: CARGO_FEATURE_ARGS="--features cli" make lint
+
+      - name: Test
+        run: CARGO_FEATURE_ARGS="--features cli" make rust/test
+
+      - name: Build CLI
+        run: make build
+
+  all-features:
+    name: Rust ${{ matrix.rust }} all features
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: ["1.92.0", "stable", "beta", "nightly"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+          components: clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-${{ matrix.rust }}-all-features
+
+      - name: Toolchain Versions
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Lint
         run: CARGO_FEATURE_ARGS=--all-features make lint
 
       - name: Test
         run: CARGO_FEATURE_ARGS=--all-features make rust/test
-
-      - name: Build CLI
-        run: make build
 
   checks:
     name: Format, Coverage, and Summary
@@ -114,7 +146,7 @@ jobs:
           fail_ci_if_error: false
 
   publish-badge:
-    needs: [checks, toolchain-checks]
+    needs: [checks, toolchain-checks, all-features]
     if: always() && github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     permissions:
