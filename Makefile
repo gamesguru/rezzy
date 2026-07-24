@@ -3,7 +3,6 @@ SHELL=/bin/bash
 
 LAKE ?= lake
 CARGO ?= cargo
-TEST_FEATURES ?= hashing
 
 LINT_LOCS_PY = $$(git ls-files '*.py')
 LINT_LOCS_SH = $$(git ls-files '*.sh')
@@ -23,16 +22,16 @@ format: ##H Format codebase (Rust + Lean + scripts)
 
 .PHONY: fix
 fix:	##H Clippy auto-fix
-	$(CARGO) clippy --allow-dirty --fix --all-targets --features $(TEST_FEATURES)
-	# $(CARGO) fix --all-targets --features $(TEST_FEATURES) --allow-dirty
+	$(CARGO) clippy --allow-dirty --fix --all-targets
+	# $(CARGO) fix --all-targets --allow-dirty
 
 .PHONY: lint
 lint: ##H Run all linters
 	@if $(CARGO) clippy --version >/dev/null 2>&1; then \
-		$(CARGO) clippy --all-targets --features $(TEST_FEATURES); \
+		$(CARGO) clippy --all-targets; \
 	else \
 		echo "warning: Clippy is unavailable; running cargo check only"; \
-		$(CARGO) check --all-targets --features $(TEST_FEATURES); \
+		$(CARGO) check --all-targets; \
 	fi
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -74,19 +73,19 @@ lint: ##H Run all linters
 
 .PHONY: rust/build
 rust/build: ##H Compile Rust binary (release)
-	$(CARGO) build --release --timings --features hashing,cli
+	$(CARGO) build --release --timings --features cli
 
 .PHONY: rust/doc
 rust/doc: ##H Generate rustdoc API documentation
-	$(CARGO) doc --no-deps --features hashing
+	$(CARGO) doc --no-deps
 	echo '<meta http-equiv="refresh" content="0;url=rezzy/index.html">' > target/doc/index.html
 
 .PHONY: rust/test
 rust/test: ##H Run Rust tests (p=NAME for specific test, a=ARGS for test binary args)
 ifdef p
-	$(CARGO) test --test $(p) --features $(TEST_FEATURES) $(if $(a),-- $(a))
+	$(CARGO) test --test $(p) $(if $(a),-- $(a))
 else
-	$(CARGO) test --lib --tests --features $(TEST_FEATURES) $(if $(a),-- $(a))
+	$(CARGO) test --lib --tests $(if $(a),-- $(a))
 endif
 
 .PHONY: rust/bench
@@ -97,7 +96,7 @@ rust/bench: ##H Run reconciliation benchmarks
 rust/coverage: ##H Run code coverage and generate HTML report
 	# TODO: include `src/bin/` in coverage
 	# Run coverage
-	$(CARGO) +nightly llvm-cov --lib --tests --features $(TEST_FEATURES)  \
+	$(CARGO) +nightly llvm-cov --lib --tests \
 		--html --output-dir .coverage \
 		--ignore-filename-regex 'src/bin/.*'
 	# Process report to codecov-compatible JSON
@@ -114,7 +113,7 @@ rust/clean: ##H Remove Rust build artifacts
 
 .PHONY: rust/install
 rust/install: ##H Install rezzy binary to cargo bin
-	$(CARGO) install --locked --features cli,hashing --path . --bin rezzy
+	$(CARGO) install --locked --features cli --path . --bin rezzy
 
 .PHONY: rust/uninstall
 rust/uninstall: ##H Uninstall rezzy binary from cargo bin
@@ -127,7 +126,7 @@ rust/e2e: ##H Run e2e integration test on real JSON
 		ARGS=""; \
 		if [ "$$f" = "res/real_dag_52k_room.json" -o "$$f" = "res/real_dag_nheko.json" ]; then ARGS="--state-res v2"; fi; \
 		if [ "$$f" = "res/remote-dag-sM2LwqNHGQOgLf35gqxPMy9D7oYde2q9ADg8HPBM3kE-v12-unredacted.org-PARTIAL.jsonl" ]; then ARGS="--state-res v2-1"; fi; \
-		$(CARGO) run --release --features cli,hashing -- $$ARGS -i "$$f" || exit 1; \
+		$(CARGO) run --release --features cli -- $$ARGS -i "$$f" || exit 1; \
 	done
 
 .PHONY: rust/publish
