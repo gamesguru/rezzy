@@ -219,12 +219,14 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 ] }
 
 [lints.clippy]
-pedantic = "warn"
-perf = "warn"
-complexity = "warn"
-style = "warn"
-correctness = "warn"
-suspicious = "warn"
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+correctness = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
 
 # High-Value Security & Robustness restrictions
 arithmetic_side_effects = "warn"

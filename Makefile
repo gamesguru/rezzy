@@ -23,13 +23,13 @@ format: ##H Format codebase (Rust + Lean + scripts)
 
 .PHONY: fix
 fix:	##H Clippy auto-fix
-	$(CARGO) clippy --allow-dirty --fix --all-targets --features $(TEST_FEATURES) -- -W clippy::perf -W clippy::pedantic
+	$(CARGO) clippy --allow-dirty --fix --all-targets --features $(TEST_FEATURES)
 	# $(CARGO) fix --all-targets --features $(TEST_FEATURES) --allow-dirty
 
 .PHONY: lint
 lint: ##H Run all linters
 	@if $(CARGO) clippy --version >/dev/null 2>&1; then \
-		$(CARGO) clippy --all-targets --features $(TEST_FEATURES) -- -W clippy::perf -W clippy::pedantic; \
+		$(CARGO) clippy --all-targets --features $(TEST_FEATURES); \
 	else \
 		echo "warning: Clippy is unavailable; running cargo check only"; \
 		$(CARGO) check --all-targets --features $(TEST_FEATURES); \
