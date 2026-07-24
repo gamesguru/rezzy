@@ -259,7 +259,7 @@ pub fn format_summary_output(ctx: &FormattingContext) -> serde_json::Value {
     for status in &membership_order {
         if let Some(list) = members.get(*status) {
             membership_obj.insert(
-                status.to_string(),
+                (*status).to_string(),
                 serde_json::json!({
                     "count": list.len(),
                     "users": list
