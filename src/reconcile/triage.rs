@@ -34,14 +34,16 @@ pub struct BucketDifference {
 /// One localized sketch request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BucketRequest {
-    pub bucket_id: u8,
+    pub depth: u8,
+    pub prefix: u32,
     pub capacity: usize,
 }
 
 /// Roots recovered from one independently decoded bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketDecodeSuccess {
-    pub bucket_id: u8,
+    pub depth: u8,
+    pub prefix: u32,
     pub roots: Vec<u64>,
 }
 
@@ -49,7 +51,7 @@ pub struct BucketDecodeSuccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketDecodeBatch {
     pub successful_buckets: Vec<BucketDecodeSuccess>,
-    pub failed_buckets: Vec<u8>,
+    pub failed_buckets: Vec<u32>,
 }
 
 /// Estimates the symmetric difference from corresponding strata sketches.
@@ -152,62 +154,65 @@ pub fn provision_bucket_capacities(
     }
 
     let mut total = 0_usize;
-    let mut requests = Vec::with_capacity(differences.len());
+    let mut requests = Vec::new();
+
+    let differing_count = differences.len().max(1);
+    let est = estimated_delta
+        .and_then(|e| usize::try_from(e).ok())
+        .unwrap_or_else(|| differences.iter().map(|d| d.count_delta as usize).sum());
+
+    let lambda = 8_usize; // Safe bucket capacity target
+    let per_bucket_est = est.div_ceil(differing_count);
+
+    let mut depth_shift = 0;
+    if per_bucket_est > lambda {
+        let ratio = per_bucket_est.div_ceil(lambda);
+        depth_shift = ratio.next_power_of_two().trailing_zeros();
+    }
+
+    // Cap the depth shift so we don't overflow prefix bits or generate absurd amounts of buckets
+    depth_shift = depth_shift.min(16);
+    let target_depth = 8_u8.saturating_add(u8::try_from(depth_shift).unwrap_or(0));
+
     for difference in differences {
-        let count_delta =
-            usize::try_from(difference.count_delta).map_err(|_| AlgebraicError::CountOverflow)?;
-        let provisioned = count_delta
-            .checked_add(count_delta / 2)
-            .and_then(|capacity| capacity.checked_add(count_delta % 2))
-            .and_then(|capacity| capacity.checked_add(4))
-            .unwrap_or(usize::MAX);
-        let capacity = provisioned.clamp(STRATUM_CAPACITY, MAX_BUCKET_SKETCH_CAPACITY);
-        total = total
-            .checked_add(capacity)
-            .ok_or(AlgebraicError::InvalidSketchCapacity)?;
-        if total > aggregate_cap {
-            return Err(AlgebraicError::InvalidSketchCapacity);
+        // We use lambda as the base capacity if we are splitting.
+        // If not splitting (depth_shift == 0), we provision based on the bucket's own count_delta.
+        let capacity = if depth_shift > 0 {
+            lambda.checked_add(4).unwrap_or(lambda) // Margin for two-sided variance
+        } else {
+            let count_delta = usize::try_from(difference.count_delta)
+                .map_err(|_| AlgebraicError::CountOverflow)?;
+            count_delta
+                .checked_add(count_delta / 2)
+                .and_then(|c| c.checked_add(count_delta % 2))
+                .and_then(|c| c.checked_add(4))
+                .unwrap_or(usize::MAX)
+                .clamp(STRATUM_CAPACITY, MAX_BUCKET_SKETCH_CAPACITY)
+        };
+
+        let sub_bucket_count = 1_u32 << depth_shift;
+        for sub in 0..sub_bucket_count {
+            if total.checked_add(capacity).is_none()
+                || total.saturating_add(capacity) > aggregate_cap
+            {
+                // If we hit the aggregate cap, we just return the requests we've built so far.
+                // The client will process these and follow up with another batch later if needed.
+                return Ok(requests);
+            }
+
+            let prefix = (u32::from(difference.bucket_id) << depth_shift) | sub;
+            requests.push(BucketRequest {
+                depth: target_depth,
+                prefix,
+                capacity,
+            });
+            total = total.saturating_add(capacity);
         }
-        requests.push(BucketRequest {
-            bucket_id: difference.bucket_id,
-            capacity,
-        });
     }
 
     if let Some(estimate) = estimated_delta {
         if differences.is_empty() && estimate != 0 {
             return Err(AlgebraicError::DecodeFailure);
-        }
-        let estimate =
-            usize::try_from(estimate).map_err(|_| AlgebraicError::InvalidSketchCapacity)?;
-        let target = estimate
-            .checked_add(estimate / 2)
-            .and_then(|capacity| capacity.checked_add(estimate % 2))
-            .and_then(|capacity| capacity.checked_add(4))
-            .ok_or(AlgebraicError::InvalidSketchCapacity)?;
-        if target > aggregate_cap {
-            return Err(AlgebraicError::InvalidSketchCapacity);
-        }
-        while total < target {
-            let mut advanced = false;
-            for request in &mut requests {
-                if total == target {
-                    break;
-                }
-                if request.capacity < MAX_BUCKET_SKETCH_CAPACITY {
-                    request.capacity = request
-                        .capacity
-                        .checked_add(1)
-                        .ok_or(AlgebraicError::InvalidSketchCapacity)?;
-                    total = total
-                        .checked_add(1)
-                        .ok_or(AlgebraicError::InvalidSketchCapacity)?;
-                    advanced = true;
-                }
-            }
-            if !advanced {
-                return Err(AlgebraicError::InvalidSketchCapacity);
-            }
         }
     }
     Ok(requests)
@@ -258,10 +263,11 @@ pub fn decode_bucket_sketches(
         let sketch = SyndromeSketch::from_coordinates(coordinates)?;
         match sketch.decode_elements(request.capacity) {
             Ok(roots) => successful_buckets.push(BucketDecodeSuccess {
-                bucket_id: request.bucket_id,
+                depth: request.depth,
+                prefix: request.prefix,
                 roots,
             }),
-            Err(AlgebraicError::DecodeFailure) => failed_buckets.push(request.bucket_id),
+            Err(AlgebraicError::DecodeFailure) => failed_buckets.push(request.prefix),
             Err(error) => return Err(error),
         }
     }
@@ -275,20 +281,20 @@ pub fn decode_bucket_sketches(
 }
 
 fn validate_bucket_requests(requests: &[BucketRequest]) -> Result<(), AlgebraicError> {
-    let mut total = 0_usize;
-    let mut previous = None;
+    let mut total_capacity = 0_usize;
+    let mut previous_prefix: Option<u32> = None;
     for request in requests {
         if request.capacity == 0 || request.capacity > MAX_BUCKET_SKETCH_CAPACITY {
             return Err(AlgebraicError::InvalidSketchCapacity);
         }
-        if previous.is_some_and(|bucket_id| bucket_id >= request.bucket_id) {
-            return Err(AlgebraicError::InvalidBucketIndex);
+        if previous_prefix.is_some_and(|p| p >= request.prefix) {
+            return Err(AlgebraicError::DecodeFailure);
         }
-        previous = Some(request.bucket_id);
-        total = total
+        previous_prefix = Some(request.prefix);
+        total_capacity = total_capacity
             .checked_add(request.capacity)
             .ok_or(AlgebraicError::InvalidSketchCapacity)?;
-        if total > MAX_BUCKETED_SKETCH_CAPACITY {
+        if total_capacity > MAX_BUCKETED_SKETCH_CAPACITY {
             return Err(AlgebraicError::InvalidSketchCapacity);
         }
     }
@@ -387,11 +393,13 @@ mod tests {
             provision_bucket_capacities(&differences, None, 64),
             Ok(vec![
                 BucketRequest {
-                    bucket_id: 1,
+                    depth: 8,
+                    prefix: 1,
                     capacity: 8,
                 },
                 BucketRequest {
-                    bucket_id: 2,
+                    depth: 8,
+                    prefix: 2,
                     capacity: 34,
                 },
             ])
@@ -418,11 +426,13 @@ mod tests {
             provision_bucket_capacities(&differences, Some(20), 64),
             Ok(vec![
                 BucketRequest {
-                    bucket_id: 1,
+                    depth: 8,
+                    prefix: 1,
                     capacity: 17,
                 },
                 BucketRequest {
-                    bucket_id: 2,
+                    depth: 8,
+                    prefix: 2,
                     capacity: 17,
                 },
             ])
@@ -437,11 +447,13 @@ mod tests {
     fn bucket_decoder_retains_successes_and_isolates_decode_failures() {
         let requests = [
             BucketRequest {
-                bucket_id: 1,
+                depth: 8,
+                prefix: 1,
                 capacity: 2,
             },
             BucketRequest {
-                bucket_id: 9,
+                depth: 8,
+                prefix: 9,
                 capacity: 2,
             },
         ];
@@ -467,7 +479,8 @@ mod tests {
             decode_bucket_sketches(&encoded, &requests),
             Ok(BucketDecodeBatch {
                 successful_buckets: vec![BucketDecodeSuccess {
-                    bucket_id: 1,
+                    depth: 8,
+                    prefix: 1,
                     roots: vec![7],
                 }],
                 failed_buckets: vec![9],
@@ -479,11 +492,13 @@ mod tests {
     fn bucket_decoder_rejects_order_and_length_mismatches() {
         let unordered = [
             BucketRequest {
-                bucket_id: 2,
+                depth: 8,
+                prefix: 2,
                 capacity: 1,
             },
             BucketRequest {
-                bucket_id: 1,
+                depth: 8,
+                prefix: 1,
                 capacity: 1,
             },
         ];
@@ -495,7 +510,8 @@ mod tests {
             decode_bucket_sketches(
                 &[0; 7],
                 &[BucketRequest {
-                    bucket_id: 1,
+                    depth: 8,
+                    prefix: 1,
                     capacity: 1,
                 }],
             ),
@@ -505,7 +521,8 @@ mod tests {
             decode_bucket_sketches(
                 &[0; 9],
                 &[BucketRequest {
-                    bucket_id: 1,
+                    depth: 8,
+                    prefix: 1,
                     capacity: 1,
                 }],
             ),

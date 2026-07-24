@@ -5,12 +5,12 @@
 
 //! Requester-side MSC0501 reconciliation decisions and verification over MSC0500 digests.
 
+use super::resident::{ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
 use super::triage::{
     BucketDecodeBatch, BucketRequest, MAX_BUCKET_SKETCH_CAPACITY, MAX_BUCKETED_SKETCH_CAPACITY,
+    estimate_delta,
 };
-use super::{
-    AlgebraicError, ElementHash, MAX_LOCAL_SKETCH_DECODE_CAPACITY, RoomAccumulator, SyndromeSketch,
-};
+use super::{AlgebraicError, ElementHash, MAX_LOCAL_SKETCH_DECODE_CAPACITY, SyndromeSketch};
 
 /// Requester policy for one MSC0501 reconciliation exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,7 @@ pub struct ReconciliationClient {
 pub struct RemoteDigest {
     pub digest: u128,
     pub known_event_count: u64,
+    pub strata: [[u64; STRATUM_CAPACITY]; STRATA_COUNT],
     /// Whether both digests cover the same frame anchors.
     pub frame_matches: bool,
     /// Whether the responder advertised an extremity unknown to the requester.
@@ -82,34 +83,44 @@ impl ReconciliationClient {
     #[must_use]
     pub fn select_action(
         self,
-        local: RoomAccumulator,
+        local: &ResidentKernel,
         remote: RemoteDigest,
         concurrency_headroom: usize,
     ) -> ClientAction {
         if !remote.frame_matches || remote.has_unknown_extremity {
             return ClientAction::ExtremityDiff;
         }
-        if local.digest() == remote.digest && local.known_event_count() == remote.known_event_count
+        if local.accumulator().digest() == remote.digest
+            && local.accumulator().known_event_count() == remote.known_event_count
         {
             return ClientAction::Synchronized;
         }
 
-        let count_delta = local.known_event_count().abs_diff(remote.known_event_count);
+        let count_delta = local
+            .accumulator()
+            .known_event_count()
+            .abs_diff(remote.known_event_count);
+        let estimated_delta = estimate_delta(local.strata(), &remote.strata)
+            .unwrap_or(None)
+            .unwrap_or(count_delta)
+            .max(count_delta);
+
         let provisioned = u64::try_from(concurrency_headroom)
             .ok()
             .and_then(|headroom| {
-                count_delta
-                    .checked_add(count_delta / 2)
-                    .and_then(|capacity| capacity.checked_add(count_delta % 2))
+                estimated_delta
+                    .checked_add(estimated_delta / 2)
+                    .and_then(|capacity| capacity.checked_add(estimated_delta % 2))
                     .and_then(|capacity| capacity.checked_add(4))
                     .and_then(|capacity| capacity.checked_add(headroom))
             });
         let capacity = provisioned
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(usize::MAX);
+
         ClientAction::UnbucketedSketch {
             capacity: capacity.min(self.max_sketch_capacity),
-            include_bucket_summary: count_delta == 0 || capacity > self.max_sketch_capacity,
+            include_bucket_summary: estimated_delta == 0 || capacity > self.max_sketch_capacity,
         }
     }
 
@@ -167,10 +178,10 @@ impl ReconciliationClient {
         let mut total = 0_usize;
         let mut requests = alloc::vec::Vec::with_capacity(batch.failed_buckets.len());
 
-        for bucket_id in batch.failed_buckets {
+        for prefix in batch.failed_buckets {
             let Some(previous) = previous_requests
                 .iter()
-                .find(|request| request.bucket_id == bucket_id)
+                .find(|request| request.prefix == prefix)
             else {
                 return ClientAction::ExtremityDiff;
             };
@@ -199,7 +210,8 @@ impl ReconciliationClient {
                 _ => return ClientAction::ExtremityDiff,
             };
             requests.push(BucketRequest {
-                bucket_id,
+                depth: previous.depth,
+                prefix,
                 capacity,
             });
         }
@@ -242,12 +254,12 @@ mod tests {
         }
     }
 
-    fn accumulator(hashes: &[ElementHash]) -> RoomAccumulator {
-        let mut accumulator = RoomAccumulator::new();
+    fn accumulator(hashes: &[ElementHash]) -> ResidentKernel {
+        let mut kernel = ResidentKernel::new();
         for hash in hashes {
-            accumulator.insert(*hash).unwrap();
+            kernel.insert(*hash).unwrap();
         }
-        accumulator
+        kernel
     }
 
     #[test]
@@ -255,18 +267,19 @@ mod tests {
         let local = accumulator(&[hash(1, 1), hash(2, 2)]);
         let client = ReconciliationClient::default();
         let matching = RemoteDigest {
-            digest: local.digest(),
+            digest: local.accumulator().digest(),
             known_event_count: 2,
+            strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
             frame_matches: true,
             has_unknown_extremity: false,
         };
         assert_eq!(
-            client.select_action(local, matching, 0),
+            client.select_action(&local, matching, 0),
             ClientAction::Synchronized
         );
         assert_eq!(
             client.select_action(
-                local,
+                &local,
                 RemoteDigest {
                     frame_matches: false,
                     ..matching
@@ -277,7 +290,7 @@ mod tests {
         );
         assert_eq!(
             client.select_action(
-                local,
+                &local,
                 RemoteDigest {
                     digest: 7,
                     known_event_count: 6,
@@ -298,10 +311,11 @@ mod tests {
         let local = accumulator(&[hash(1, 1)]);
         assert_eq!(
             client.select_action(
-                local,
+                &local,
                 RemoteDigest {
                     digest: 2,
                     known_event_count: 1_000,
+                    strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
                     frame_matches: true,
                     has_unknown_extremity: false,
                 },
@@ -314,10 +328,11 @@ mod tests {
         );
         assert_eq!(
             client.select_action(
-                local,
+                &local,
                 RemoteDigest {
                     digest: 2,
                     known_event_count: 1,
+                    strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
                     frame_matches: true,
                     has_unknown_extremity: false,
                 },
@@ -335,10 +350,11 @@ mod tests {
         let client = ReconciliationClient::default();
         assert_eq!(
             client.select_action(
-                RoomAccumulator::new(),
+                &ResidentKernel::new(),
                 RemoteDigest {
                     digest: 1,
                     known_event_count: u64::MAX,
+                    strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
                     frame_matches: true,
                     has_unknown_extremity: false,
                 },
@@ -355,7 +371,8 @@ mod tests {
     fn bucket_transition_resolves_and_preserves_roots() {
         let batch = BucketDecodeBatch {
             successful_buckets: vec![super::super::triage::BucketDecodeSuccess {
-                bucket_id: 1,
+                depth: 8,
+                prefix: 1,
                 roots: vec![42],
             }],
             failed_buckets: vec![],
@@ -372,20 +389,23 @@ mod tests {
     fn bucket_transition_retries_and_preserves_partial_successes() {
         let batch = BucketDecodeBatch {
             successful_buckets: vec![super::super::triage::BucketDecodeSuccess {
-                bucket_id: 1,
+                depth: 8,
+                prefix: 1,
                 roots: vec![42],
             }],
             failed_buckets: vec![2],
         };
         let previous = [BucketRequest {
-            bucket_id: 2,
+            depth: 8,
+            prefix: 2,
             capacity: 8,
         }];
         assert_eq!(
             ReconciliationClient::transition_bucket_batch(batch, &previous, vec![99], None, 4096,),
             ClientAction::BucketSketches {
                 requests: vec![BucketRequest {
-                    bucket_id: 2,
+                    depth: 8,
+                    prefix: 2,
                     capacity: 18,
                 }],
                 accumulated_roots: vec![99, 42],
@@ -403,7 +423,8 @@ mod tests {
             ReconciliationClient::transition_bucket_batch(
                 batch.clone(),
                 &[BucketRequest {
-                    bucket_id: 3,
+                    depth: 8,
+                    prefix: 3,
                     capacity: MAX_BUCKET_SKETCH_CAPACITY,
                 }],
                 vec![],
@@ -416,7 +437,8 @@ mod tests {
             ReconciliationClient::transition_bucket_batch(
                 batch,
                 &[BucketRequest {
-                    bucket_id: 1,
+                    depth: 8,
+                    prefix: 1,
                     capacity: 8,
                 }],
                 vec![],
