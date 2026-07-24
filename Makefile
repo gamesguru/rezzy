@@ -23,12 +23,12 @@ format: ##H Format codebase (Rust + Lean + scripts)
 
 .PHONY: fix
 fix:	##H Clippy auto-fix
-	$(CARGO) +nightly clippy --allow-dirty --fix --all-targets --features $(TEST_FEATURES) -- -W clippy::perf -W clippy::pedantic
+	$(CARGO) clippy --allow-dirty --fix --all-targets --features $(TEST_FEATURES) -- -W clippy::perf -W clippy::pedantic
 	# $(CARGO) fix --all-targets --features $(TEST_FEATURES) --allow-dirty
 
 .PHONY: lint
 lint: ##H Run all linters
-	$(CARGO) +nightly clippy --all-targets --features $(TEST_FEATURES) -- -W clippy::perf -W clippy::pedantic
+	$(CARGO) clippy --all-targets --features $(TEST_FEATURES) -- -W clippy::perf -W clippy::pedantic
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 # Lean targets
@@ -85,7 +85,7 @@ else
 endif
 
 .PHONY: rust/bench
-rust/bench: ##H Run reconciliation Criterion benchmarks
+rust/bench: ##H Run reconciliation benchmarks
 	$(CARGO) bench --bench reconcile
 
 .PHONY: rust/coverage
