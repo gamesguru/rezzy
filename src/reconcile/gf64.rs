@@ -48,13 +48,13 @@ fn accelerated_mul() -> unsafe fn(u64, u64) -> u64 {
 
     static IMPLEMENTATION: OnceLock<unsafe fn(u64, u64) -> u64> = OnceLock::new();
     *IMPLEMENTATION.get_or_init(|| {
+        let mut func: unsafe fn(u64, u64) -> u64 = mul_portable;
         if std::is_x86_feature_detected!("pclmulqdq") {
             // SAFETY: the function is only selected when the CPU advertises
             // the required instruction set.
-            mul_pclmul
-        } else {
-            mul_portable
+            func = mul_pclmul;
         }
+        func
     })
 }
 
@@ -125,6 +125,37 @@ mod tests {
                 mul(left, right ^ addend),
                 mul(left, right) ^ mul(left, addend)
             );
+        }
+    }
+
+    #[test]
+    fn mul_bitwise_matches_mul() {
+        let mut state = 0x6a09_e667_f3bc_c909_u64;
+        for _ in 0..256 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let left = state;
+            state = state.rotate_left(23) ^ 0x9e37_79b9_7f4a_7c15;
+            let right = state;
+            assert_eq!(mul_bitwise(left, right), mul(left, right));
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+    #[allow(unsafe_code)]
+    fn mul_portable_matches_mul() {
+        let mut state = 0x6a09_e667_f3bc_c909_u64;
+        for _ in 0..256 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let left = state;
+            state = state.rotate_left(23) ^ 0x9e37_79b9_7f4a_7c15;
+            let right = state;
+            // SAFETY: The portable implementation does not actually rely on any hardware features.
+            assert_eq!(unsafe { mul_portable(left, right) }, mul(left, right));
         }
     }
 }
