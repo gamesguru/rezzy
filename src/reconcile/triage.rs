@@ -80,7 +80,7 @@ pub fn estimate_delta(
     }
     let shift = u32::try_from(stratum).map_err(|_| AlgebraicError::CountOverflow)?;
     let scale = 1_u64.checked_shl(shift).unwrap_or(0);
-    Ok(Some(decoded_tail.checked_mul(scale).unwrap_or(u64::MAX)))
+    Ok(Some(decoded_tail.saturating_mul(scale)))
 }
 
 /// Parses and independently decodes concatenated residual bucket sketches.

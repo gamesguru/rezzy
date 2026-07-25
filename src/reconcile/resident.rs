@@ -71,7 +71,6 @@ impl ResidentKernel {
             return Err(AlgebraicError::ZeroShortIdentifier);
         }
         self.accumulator.remove(hash)?;
-        remove_bucket(&mut self.buckets, hash);
         toggle_stratum(&mut self.strata, hash.h64);
         Ok(())
     }
