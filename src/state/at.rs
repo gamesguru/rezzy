@@ -2097,15 +2097,15 @@ where
 /// A high-performance, non-fallible variant of [`compute_state_at_streaming`] designed for
 /// massive rebuild pipelines.
 ///
-/// TODO: this swallows `CycleDetected` with an eprintln (silent under `no_std`) and returns
-/// having invoked zero callbacks — callers can't distinguish "cycle" from "no targets found."
-/// Consider returning a bool or steering users to `try_compute_state_at_streaming_optimized`.
+/// Returns `true` if the graph traversal completed successfully, or `false` if a cycle
+/// was detected in the reachable subgraph.
 pub fn compute_state_at_streaming_optimized<Id, C, Q, S, F>(
     target_event_ids: &[&Q],
     events_map: &HashMap<Id, LeanEvent<Id, C>, S>,
     version: StateResVersion,
     mut on_target_resolved: F,
-) where
+) -> bool
+where
     Id: crate::basespec::rezzy_types::EventId + core::borrow::Borrow<Q>,
     Q: ?Sized + Eq + core::hash::Hash + Ord,
     S: core::hash::BuildHasher,
@@ -2123,13 +2123,8 @@ pub fn compute_state_at_streaming_optimized<Id, C, Q, S, F>(
     );
 
     match result {
-        Ok(()) => {}
-        Err(StateComputationError::CycleDetected) => {
-            #[cfg(feature = "std")]
-            std::eprintln!(
-                "rezzy::compute_state_at_streaming_optimized: Cycle detected! Reachable subgraph is malformed."
-            );
-        }
+        Ok(()) => true,
+        Err(StateComputationError::CycleDetected) => false,
         Err(StateComputationError::Callback(infallible)) => match infallible {},
     }
 }

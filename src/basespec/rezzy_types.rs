@@ -113,6 +113,71 @@ impl StateResVersion {
     }
 }
 
+/// Returns the array of preserved `content` keys for an event type upon redaction
+/// according to the specified Matrix room version (v1 through v11+).
+#[must_use]
+pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> &'static [&'static str] {
+    let ver_num: u32 = room_version.parse().unwrap_or(1);
+    match event_type {
+        crate::basespec::event_types::M_ROOM_CREATE => {
+            if ver_num >= 11 {
+                &[] // v11+ preserves all keys
+            } else {
+                &["creator"]
+            }
+        }
+        crate::basespec::event_types::M_ROOM_MEMBER => {
+            if ver_num >= 11 {
+                &[
+                    "membership",
+                    "join_authorised_via_users_server",
+                    "third_party_invite",
+                ]
+            } else if ver_num >= 9 {
+                &["membership", "join_authorised_via_users_server"]
+            } else {
+                &["membership"]
+            }
+        }
+        crate::basespec::event_types::M_ROOM_POWER_LEVELS => {
+            if ver_num >= 11 {
+                &[
+                    "ban",
+                    "events",
+                    "events_default",
+                    "invite",
+                    "kick",
+                    "redact",
+                    "state_default",
+                    "users",
+                    "users_default",
+                ]
+            } else {
+                &[
+                    "ban",
+                    "events",
+                    "events_default",
+                    "kick",
+                    "redact",
+                    "state_default",
+                    "users",
+                    "users_default",
+                ]
+            }
+        }
+        crate::basespec::event_types::M_ROOM_JOIN_RULES => {
+            if ver_num >= 9 {
+                &["join_rule", "allow"]
+            } else {
+                &["join_rule"]
+            }
+        }
+        crate::basespec::event_types::M_ROOM_HISTORY_VISIBILITY => &["history_visibility"],
+        "m.room.redaction" => &["redacts"],
+        _ => &[],
+    }
+}
+
 impl serde::Serialize for StateResVersion {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

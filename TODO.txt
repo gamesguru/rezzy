@@ -25,13 +25,13 @@
 
   • State Resolution / Graph Traversal (at.rs):
       • Evaluate V2.2 (MSC4242 State DAGs) requirements for merge base selection.
-      • Handle CycleDetected errors more explicitly instead of falling back on log outputs.
+      ✓ Handle CycleDetected errors explicitly via return status in streaming optimization rather than swallowing in logs.
   • LtHash Allocation (lthash.rs):
-      • LtHash allocates a 2KiB stack frame ([u16; 1024]); consider optimizing state updates.
+      ✓ Optimize LtHash SIMD loop unrolling (8-lane chunks), pass references for seeds, and single-pass checksum byte updating.
   • Spec Invariants & Redaction (rezzy_types.rs):
       ✓ Enforce PDU structural syntax validation ($ prefix rules for event IDs, MXID sender validation, depth bounds).
       ✓ Expand test coverage for soft-failed vs. rejected events.
-      • Complete full redaction rules matrix across legacy room versions.
+      ✓ Complete full redaction rules matrix (`redaction_preserved_keys`) across Matrix room versions 1–11+.
 
   ──────
   ### 3. Other Active / Parallel Branches in Repository
