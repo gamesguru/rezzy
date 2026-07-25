@@ -2099,6 +2099,8 @@ where
 ///
 /// Returns `true` if the graph traversal completed successfully, or `false` if a cycle
 /// was detected in the reachable subgraph.
+#[must_use = "a `false` return means a cycle was detected and results are incomplete; \
+              silently discarding it defeats the purpose of cycle detection"]
 pub fn compute_state_at_streaming_optimized<Id, C, Q, S, F>(
     target_event_ids: &[&Q],
     events_map: &HashMap<Id, LeanEvent<Id, C>, S>,
@@ -3023,11 +3025,15 @@ mod tests {
         );
 
         let target = ["A"];
-        compute_state_at_streaming_optimized(
+        let completed = compute_state_at_streaming_optimized(
             &target,
             &events_map,
             StateResVersion::V2_1_1,
             |_, _| {},
+        );
+        assert!(
+            !completed,
+            "cycle A <-> B must be reported, not silently ignored"
         );
     }
 
@@ -3110,7 +3116,7 @@ mod tests {
         let mut c_parent_unchanged_id = None;
         let mut d_has_new_state = false;
 
-        compute_state_at_streaming_optimized(
+        let completed = compute_state_at_streaming_optimized(
             &["B", "C", "D"],
             &events_map,
             crate::StateResVersion::V2,
@@ -3138,6 +3144,7 @@ mod tests {
         );
 
         // Assert updates are correct
+        assert!(completed, "acyclic diamond graph must not report a cycle");
         assert!(b_has_new_state, "B should have been yielded as New!");
         assert_eq!(
             c_parent_unchanged_id.as_deref(),

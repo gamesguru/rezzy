@@ -3038,14 +3038,44 @@ fn test_redaction_preserved_keys_matrix() {
         redaction_preserved_keys("m.room.history_visibility", "1"),
         &["history_visibility"]
     );
+    // `redacts` only moved into `content` in v11+; earlier versions preserve nothing.
     assert_eq!(
         redaction_preserved_keys("m.room.redaction", "1"),
+        &[] as &[&str]
+    );
+    assert_eq!(
+        redaction_preserved_keys("m.room.redaction", "11"),
         &["redacts"]
+    );
+
+    // m.room.aliases preserves `aliases` in v1-5, removed from v6 onward.
+    assert_eq!(
+        redaction_preserved_keys("m.room.aliases", "1"),
+        &["aliases"]
+    );
+    assert_eq!(
+        redaction_preserved_keys("m.room.aliases", "5"),
+        &["aliases"]
+    );
+    assert_eq!(
+        redaction_preserved_keys("m.room.aliases", "6"),
+        &[] as &[&str]
     );
 
     // Unknown event type falls through to the default arm
     assert_eq!(
         redaction_preserved_keys("m.room.unknown", "1"),
+        &[] as &[&str]
+    );
+
+    // Unsupported/malformed room versions must fail closed (preserve nothing),
+    // never silently fall back to permissive v1 rules.
+    assert_eq!(
+        redaction_preserved_keys("m.room.power_levels", "not-a-version"),
+        &[] as &[&str]
+    );
+    assert_eq!(
+        redaction_preserved_keys("m.room.power_levels", "999"),
         &[] as &[&str]
     );
 }

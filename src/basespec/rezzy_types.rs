@@ -117,7 +117,23 @@ impl StateResVersion {
 /// according to the specified Matrix room version (v1 through v11+).
 #[must_use]
 pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> &'static [&'static str] {
-    let ver_num: u32 = room_version.parse().unwrap_or(1);
+    // Explicitly recognized room versions only: an unsupported or malformed
+    // version ID must NOT silently fall back to v1 rules. Failing closed
+    // (preserving nothing) is safer than guessing a permissive rule set.
+    let ver_num: u32 = match room_version {
+        "1" => 1,
+        "2" => 2,
+        "3" => 3,
+        "4" => 4,
+        "5" => 5,
+        "6" => 6,
+        "7" => 7,
+        "8" => 8,
+        "9" => 9,
+        "10" => 10,
+        "11" => 11,
+        _ => return &[],
+    };
     match event_type {
         crate::basespec::event_types::M_ROOM_CREATE => {
             if ver_num >= 11 {
@@ -173,7 +189,20 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> &'stati
             }
         }
         crate::basespec::event_types::M_ROOM_HISTORY_VISIBILITY => &["history_visibility"],
-        "m.room.redaction" => &["redacts"],
+        "m.room.aliases" => {
+            if ver_num <= 5 {
+                &["aliases"]
+            } else {
+                &[] // removed starting with v6-redactions.txt
+            }
+        }
+        "m.room.redaction" => {
+            if ver_num >= 11 {
+                &["redacts"] // `redacts` only moved into `content` in v11+
+            } else {
+                &[]
+            }
+        }
         _ => &[],
     }
 }

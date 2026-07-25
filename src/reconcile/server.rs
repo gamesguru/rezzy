@@ -283,7 +283,13 @@ mod tests {
             }
 
             fn event_hash(&self, id: &MockId) -> Result<ElementHash, AlgebraicError> {
-                ElementHash::from_matrix_event_id(&id.0, EventIdFormat::Legacy)
+                // Deliberately distinct from the default legacy hash of `id.0`
+                // (which would hash "$child") so the assertion below can only
+                // pass if traversal actually dispatches through this override.
+                ElementHash::from_matrix_event_id(
+                    &alloc::format!("$custom-{}", id.0),
+                    EventIdFormat::Legacy,
+                )
             }
         }
 
@@ -297,6 +303,15 @@ mod tests {
         );
 
         let digest = compute_frame_digest(&custom_graph, &[id("$anchor")]).unwrap();
+
+        let mut expected = RoomAccumulator::new();
+        expected
+            .insert(
+                ElementHash::from_matrix_event_id("$custom-$child", EventIdFormat::Legacy).unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(digest.digest(), expected.digest());
         assert_eq!(digest.known_event_count(), 1);
     }
 
