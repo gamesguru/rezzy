@@ -62,13 +62,16 @@ impl ResidentKernel {
         toggle_stratum(&mut self.strata, hash.h64);
         Ok(())
     }
-
     /// Removes an element from the reconciled population.
     ///
     /// # Errors
     /// Returns an error only if the global event count is already zero.
     pub fn remove(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
+        if hash.h64 == 0 {
+            return Err(AlgebraicError::ZeroShortIdentifier);
+        }
         self.accumulator.remove(hash)?;
+        remove_bucket(&mut self.buckets, hash);
         toggle_stratum(&mut self.strata, hash.h64);
         Ok(())
     }
