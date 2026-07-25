@@ -6063,10 +6063,19 @@ fn test_performance_and_correctness_dense_bifurcations() {
 
 #[test]
 fn test_lean_event_serialize_propagates_write_error() {
-    struct FailingWriter;
+    // Accumulates everything written so far and searches the whole buffer on
+    // every call, rather than assuming `state_key` arrives in a single
+    // `write()` call. serde_json's chunking of a `write_all`/formatter call
+    // into individual `write()` calls is an implementation detail that can
+    // change across versions, so the match must be robust to the needle
+    // landing on either side of a call boundary.
+    struct FailingWriter {
+        buffered: Vec<u8>,
+    }
     impl std::io::Write for FailingWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if buf.windows(9).any(|w| w == b"state_key") {
+            self.buffered.extend_from_slice(buf);
+            if self.buffered.windows(9).any(|w| w == b"state_key") {
                 return Err(std::io::Error::other("simulated I/O failure"));
             }
             Ok(buf.len())
@@ -6091,6 +6100,11 @@ fn test_lean_event_serialize_propagates_write_error() {
         soft_fail: false,
     };
 
-    let result = serde_json::to_writer(FailingWriter, &ev);
+    let result = serde_json::to_writer(
+        FailingWriter {
+            buffered: Vec::new(),
+        },
+        &ev,
+    );
     assert!(result.is_err());
 }
