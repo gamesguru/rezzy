@@ -29,8 +29,8 @@
   • LtHash Allocation (lthash.rs):
       • LtHash allocates a 2KiB stack frame ([u16; 1024]); consider optimizing state updates.
   • Spec Invariants & Redaction (rezzy_types.rs):
-      • Enforce PDU structural syntax validation ($ prefix rules for event IDs).
-      • Expand test coverage for soft-failed vs. rejected events.
+      ✓ Enforce PDU structural syntax validation ($ prefix rules for event IDs, MXID sender validation, depth bounds).
+      ✓ Expand test coverage for soft-failed vs. rejected events.
       • Complete full redaction rules matrix across legacy room versions.
 
   ──────
