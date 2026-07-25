@@ -54,6 +54,24 @@ pub trait ForwardGraph<Id: EventId> {
     /// events (tombstones). If a rejected event's format is misidentified,
     /// its hash will be incorrect and will silently desync the reconciliation set.
     fn event_format(&self, id: &Id) -> EventIdFormat;
+
+    /// Returns the computed `ElementHash` for a given event ID.
+    ///
+    /// The default implementation resolves `event_id_str` (or `Display`) and `event_format`
+    /// to derive `ElementHash::from_matrix_event_id`.
+    /// Custom implementations using integer/interned IDs (e.g. `u64` short IDs) can override
+    /// this method to compute `ElementHash` directly without string formatting or allocations.
+    ///
+    /// # Errors
+    /// Returns an error if the event ID format is invalid or hashing fails.
+    fn event_hash(&self, id: &Id) -> Result<ElementHash, AlgebraicError> {
+        let format = self.event_format(id);
+        if let Some(s) = self.event_id_str(id) {
+            ElementHash::from_matrix_event_id(s, format)
+        } else {
+            ElementHash::from_matrix_event_id(&id.to_string(), format)
+        }
+    }
 }
 
 /// Computes the MSC0501 room digest over a negotiated frame.
@@ -87,14 +105,7 @@ pub fn compute_frame_digest<Id: EventId, G: ForwardGraph<Id>>(
         for child in graph.children(&current) {
             // Unconditionally mark visited to avoid re-traversing unknown forks
             if visited.insert(child.clone()) && graph.is_known(child) {
-                // CAUTION: The graph implementation must correctly yield
-                // the EventIdFormat even for rejected tombstones.
-                let format = graph.event_format(child);
-                let hash = match graph.event_id_str(child) {
-                    Some(s) => ElementHash::from_matrix_event_id(s, format)?,
-                    None => ElementHash::from_matrix_event_id(&child.to_string(), format)?,
-                };
-
+                let hash = graph.event_hash(child)?;
                 accumulator.insert(hash)?;
                 queue.push_back(child.clone());
             }
