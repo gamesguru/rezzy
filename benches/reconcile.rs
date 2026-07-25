@@ -3,8 +3,8 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use rezzy::{
-    BucketRequest, ElementHash, ResidentKernel, SyndromeSketch, decode_bucket_sketches,
-    estimate_delta, gf64_mul,
+    BucketRequest, ClientAction, ElementHash, ReconciliationClient, RemoteDigest, ResidentKernel,
+    SyndromeSketch, build_bucket_sketches, decode_bucket_sketches, estimate_delta, gf64_mul,
 };
 
 fn hash(index: u64) -> ElementHash {
@@ -116,6 +116,7 @@ fn benchmark_scale_workload(
     black_box((local, remote));
 }
 
+#[allow(clippy::too_many_lines)]
 fn main() {
     let elapsed = measure(1_000_000, || {
         black_box(gf64_mul(
@@ -198,4 +199,105 @@ fn main() {
     // Test 3: Huge Room
     let elapsed = measure(1, || benchmark_scale_workload(10_000_000, 500_000, 400_000));
     report("scale/10000000 +500000/-400000", 1, elapsed);
+
+    // -------------------------------------------------------------------------
+    // Extraction sweep: confirms O(log N + Δ) scaling of build_bucket_sketches.
+    // Builds a sorted 10M-element h64 index once, then benchmarks extraction at
+    // increasing Δ by requesting proportionally more capacity per bucket.
+    // -------------------------------------------------------------------------
+    println!("\n--- build_bucket_sketches extraction sweep (N=10M sorted index) ---");
+    {
+        let n: usize = 10_000_000;
+        let mut gen = Xorshift128::new(0xdead_beef_cafe_babe);
+        let mut sorted_h64: Vec<u64> = (0..n).map(|_| gen.next() | 1).collect();
+        sorted_h64.sort_unstable();
+
+        // For each Δ, request a single depth-0 bucket covering the full space.
+        // Capacity is set to Δ so the sketch can actually hold the difference.
+        for delta in [64_usize, 512, 4_096, 16_384, 65_536] {
+            let capacity = delta.min(4096); // capped by MAX_BUCKET_SKETCH_CAPACITY
+            let requests = [BucketRequest {
+                depth: 0,
+                prefix: 0,
+                capacity,
+            }];
+            let iterations = if delta <= 512 { 100 } else { 10 };
+            let elapsed = measure(iterations, || {
+                let _ = black_box(build_bucket_sketches(black_box(&sorted_h64), &requests));
+            });
+            report(
+                &format!("extract/N=10M cap={capacity}"),
+                iterations,
+                elapsed,
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Full round-trip: triage → build_bucket_sketches → XOR → decode.
+    // Measures end-to-end latency for one reconciliation round at realistic
+    // (N, Δ) workloads. Does NOT include strata estimation (that's above).
+    // -------------------------------------------------------------------------
+    println!("\n--- full round-trip: triage → extract → decode ---");
+    for (n, delta) in [
+        (10_000_usize, 100_usize),
+        (100_000, 1_000),
+        (1_000_000, 10_000),
+    ] {
+        let mut gen = Xorshift128::new(0x1234_5678_abcd_ef00 ^ delta as u64);
+        // Common base
+        let base: Vec<ElementHash> = (0..n).map(|_| gen.hash()).collect();
+        // Remote has `delta` extra events local doesn't know about
+        let remote_extra: Vec<ElementHash> = (0..delta).map(|_| gen.hash()).collect();
+
+        let mut local_kernel = ResidentKernel::new();
+        let mut remote_kernel = ResidentKernel::new();
+        for h in &base {
+            local_kernel.insert(*h).unwrap();
+            remote_kernel.insert(*h).unwrap();
+        }
+        for h in &remote_extra {
+            remote_kernel.insert(*h).unwrap();
+        }
+
+        // Pre-sort both sides' h64 indices (in production this is maintained)
+        let mut local_sorted: Vec<u64> = base.iter().map(|h| h.h64).collect();
+        local_sorted.sort_unstable();
+        let mut remote_sorted: Vec<u64> = base.iter().chain(&remote_extra).map(|h| h.h64).collect();
+        remote_sorted.sort_unstable();
+
+        let remote_digest = RemoteDigest {
+            digest: remote_kernel.accumulator().digest(),
+            known_event_count: remote_kernel.accumulator().known_event_count(),
+            strata: *remote_kernel.strata(),
+            frame_matches: true,
+            has_unknown_extremity: false,
+        };
+        let client = ReconciliationClient::default();
+
+        let elapsed = measure(3, || {
+            // Triage: client decides what to request
+            let action = client.select_action(&local_kernel, remote_digest, 0);
+            let ClientAction::BucketSketches { requests, .. } = action else {
+                return;
+            };
+
+            // Server builds sketches from sorted index
+            let remote_sketches =
+                build_bucket_sketches(black_box(&remote_sorted), &requests).unwrap();
+            let local_sketches =
+                build_bucket_sketches(black_box(&local_sorted), &requests).unwrap();
+
+            // Client XORs and decodes
+            let mut recovered = 0usize;
+            for (mut remote_sk, local_sk) in remote_sketches.into_iter().zip(local_sketches) {
+                remote_sk.xor(&local_sk);
+                if let Ok(roots) = remote_sk.decode_elements(remote_sk.capacity()) {
+                    recovered = recovered.saturating_add(roots.len());
+                }
+            }
+            black_box(recovered);
+        });
+        report(&format!("roundtrip/N={n} Δ={delta}"), 3, elapsed);
+    }
 }
