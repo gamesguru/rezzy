@@ -3017,6 +3017,37 @@ fn test_redaction_preserved_keys_matrix() {
         ]
     );
     assert!(redaction_preserved_keys("m.room.power_levels", "11").contains(&"invite"));
+
+    // Pre-v11 power_levels omits invite (only added in v11)
+    assert_eq!(
+        redaction_preserved_keys("m.room.power_levels", "1"),
+        &[
+            "ban",
+            "events",
+            "events_default",
+            "kick",
+            "redact",
+            "state_default",
+            "users",
+            "users_default",
+        ]
+    );
+
+    // history_visibility and redaction are version-independent
+    assert_eq!(
+        redaction_preserved_keys("m.room.history_visibility", "1"),
+        &["history_visibility"]
+    );
+    assert_eq!(
+        redaction_preserved_keys("m.room.redaction", "1"),
+        &["redacts"]
+    );
+
+    // Unknown event type falls through to the default arm
+    assert_eq!(
+        redaction_preserved_keys("m.room.unknown", "1"),
+        &[] as &[&str]
+    );
 }
 
 #[test]
