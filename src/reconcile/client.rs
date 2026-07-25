@@ -224,7 +224,7 @@ impl ReconciliationClient {
                     capacity,
                 });
             } else {
-                if previous.depth >= 32 {
+                if previous.depth >= 31 {
                     return ClientAction::ExtremityDiff;
                 }
 

@@ -344,7 +344,7 @@ where
     C: Clone + crate::basespec::rezzy_types::EventContent,
     E: EventLike<Id = Id, Content = C>,
 {
-    use crate::basespec::event_types::M_EMPTY_STATE_KEY;
+use crate::basespec::event_types::{M_EMPTY_STATE_KEY, M_ROOM_POWER_LEVELS};
 
     let mut mainline = Vec::new();
     let mut seen_in_mainline = hashbrown::HashSet::new();
