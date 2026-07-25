@@ -509,6 +509,48 @@ mod tests {
     }
 
     #[test]
+    fn bucket_provisioning_pads_capacity_when_deep_splitting() {
+        // We need an estimate large enough to force depth_shift > 0.
+        // est > 768 will do it (e.g., 800).
+        let estimate = 800;
+        let mut differences = Vec::new();
+        // Use enough differing buckets so that max total capacity (N * 2 * 64) >= target (1204)
+        for i in 0..10 {
+            differences.push(BucketDifference {
+                bucket_id: i,
+                count_delta: 0,
+            });
+        }
+        
+        let provisioned = provision_bucket_capacities(&differences, Some(estimate), 4096).unwrap();
+        
+        // Target capacity for estimate 800 is 800 + 400 + 0 + 4 = 1204.
+        let total_capacity: usize = provisioned.requests.iter().map(|req| req.capacity).sum();
+        assert_eq!(total_capacity, 1204);
+        
+        // The requests should be padded evenly up from 8.
+        for req in &provisioned.requests {
+            assert!(req.capacity >= 60 && req.capacity <= 61);
+            assert_eq!(req.depth, 9);
+        }
+    }
+
+    #[test]
+    fn bucket_provisioning_fails_padding_when_max_capacity_reached() {
+        // Same as above, but with only 1 bucket. Max capacity is 2 * 64 = 128.
+        // Target is 1204, which cannot be met, triggering the !advanced failure.
+        let estimate = 800;
+        let differences = [BucketDifference {
+            bucket_id: 1,
+            count_delta: 0,
+        }];
+        assert_eq!(
+            provision_bucket_capacities(&differences, Some(estimate), 4096),
+            Err(AlgebraicError::InvalidSketchCapacity)
+        );
+    }
+
+    #[test]
     fn bucket_decoder_retains_successes_and_isolates_decode_failures() {
         let requests = [
             BucketRequest {
