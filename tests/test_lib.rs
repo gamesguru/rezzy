@@ -2938,7 +2938,12 @@ fn test_types_validate_syntactic() {
     ev.sender = "@alice:example.com".to_string();
     assert!(ev.validate_syntactic().is_ok());
 
-    // Test depth bounds check (< 2^53 - 1)
+    // Test depth bounds check (<= 2^53 - 1, the canonical-JSON safe integer bound)
+    ev.depth = (1u64 << 53) - 1;
+    assert!(
+        ev.validate_syntactic().is_ok(),
+        "2^53 - 1 is the inclusive upper bound and must be accepted"
+    );
     ev.depth = 1u64 << 53;
     assert_eq!(
         ev.validate_syntactic(),

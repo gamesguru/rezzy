@@ -92,6 +92,10 @@ pub const DEFAULT_PL_CREATOR_V11: i64 = 100;
 /// Values above this lose integer precision.
 pub const MAX_POWER_LEVEL_JSON: i64 = 9_007_199_254_740_991; // 2^53 - 1
 
+/// Maximum safe JSON integer, as a `u64`. Same bound as [`MAX_POWER_LEVEL_JSON`],
+/// just typed for unsigned fields (e.g. `depth`) instead of power levels.
+pub const MAX_SAFE_JSON_INTEGER: u64 = MAX_POWER_LEVEL_JSON as u64;
+
 /// Maximum safe INTERNAL power level value (`i64::MAX`).
 ///
 /// Used for creator implicit PL in v12+ rooms, where the creator must always

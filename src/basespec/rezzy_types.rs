@@ -20,7 +20,7 @@ use core::cmp::Ordering;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::basespec::event_types::MAX_POWER_LEVEL_JSON;
+use crate::basespec::event_types::{MAX_POWER_LEVEL_JSON, MAX_SAFE_JSON_INTEGER};
 
 /// Trait alias for types that can serve as event identifiers.
 ///
@@ -1342,7 +1342,7 @@ impl<Id, C> LeanEvent<Id, C> {
     /// - `signatures` is required
     /// - `room_id` is version-dependent (present in v1-v11, omitted from create in v12+)
     /// - `sender` must be a valid MXID
-    /// - `depth` must be < 2^53 - 1
+    /// - `depth` must be <= [`MAX_SAFE_JSON_INTEGER`] (2^53 - 1, the canonical-JSON safe integer bound)
     ///
     /// These should be validated and tested per room version.
     ///
@@ -1369,7 +1369,7 @@ impl<Id, C> LeanEvent<Id, C> {
         {
             return Err("sender must be a valid MXID starting with '@' and containing ':'");
         }
-        if self.depth >= (1u64 << 53) - 1 {
+        if self.depth > MAX_SAFE_JSON_INTEGER {
             return Err("depth exceeds maximum allowed value");
         }
 
