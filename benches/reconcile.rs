@@ -314,14 +314,30 @@ fn main() {
 
         // Triage runs once outside the timed loop — cost not included.
         let client = ReconciliationClient::default();
-        let ClientAction::BucketSketches { requests, .. } =
-            client.select_action(&local_kernel, remote_digest, 0)
-        else {
-            println!("extract+decode/N={n} Δ={delta}: triage did not yield bucket requests");
+        let action = client.select_action(&local_kernel, remote_digest, 0);
+        let ClientAction::BucketSketches { requests, .. } = action else {
+            // Δ exceeds gate_threshold (MAX_RECONCILIATION_ROUNDS × MAX_BUCKETED_SKETCH_CAPACITY
+            // = 20 × 4096 = 81920): select_action returns ExtremityDiff, not BucketSketches.
+            println!("extract+decode/N={n} Δ={delta}: gated to ExtremityDiff (Δ > 81920)");
             continue;
         };
 
-        let elapsed = measure(30, || {
+        let total_cap: usize = requests.iter().map(|r| r.capacity).sum();
+        println!(
+            "  [triage] N={n} Δ={delta}: {} requests, aggregate_cap={total_cap}",
+            requests.len(),
+        );
+
+        // Scale iterations down for expensive cases so total bench time stays reasonable.
+        // Target: ~3-5 seconds per (N, Δ) pair.
+        let iterations: u32 = match n {
+            0..=10_000 => 30,
+            10_001..=100_000 => 10,
+            100_001..=1_000_000 => 3,
+            _ => 1,
+        };
+
+        let elapsed = measure(iterations, || {
             let remote_sk = build_bucket_sketches(black_box(&remote_sorted), &requests).unwrap();
             let local_sk = build_bucket_sketches(black_box(&local_sorted), &requests).unwrap();
             let mut recovered = 0usize;
@@ -333,6 +349,10 @@ fn main() {
             }
             black_box(recovered);
         });
-        report(&format!("extract+decode/N={n} Δ={delta}"), 30, elapsed);
+        report(
+            &format!("extract+decode/N={n} Δ={delta}"),
+            iterations,
+            elapsed,
+        );
     }
 }
