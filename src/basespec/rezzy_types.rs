@@ -1341,8 +1341,9 @@ impl<Id, C> LeanEvent<Id, C> {
     /// - `hashes` is required (sha256 content hash)
     /// - `signatures` is required
     /// - `room_id` is version-dependent (present in v1-v11, omitted from create in v12+)
-    /// - `sender` must be a valid MXID
-    /// - `depth` must be <= [`MAX_SAFE_JSON_INTEGER`] (2^53 - 1, the canonical-JSON safe integer bound)
+    /// - `sender` must be a valid MXID (currently only checked for '@' prefix and ':';
+    ///   localpart charset per the spec's User Identifiers grammar is not validated)
+    /// - `event_id`/room alias length must not exceed 255 bytes (not currently checked)
     ///
     /// These should be validated and tested per room version.
     ///
