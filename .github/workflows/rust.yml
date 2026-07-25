@@ -12,14 +12,20 @@ env:
 
 jobs:
   toolchain-checks:
-    name: Rust ${{ matrix.rust }} MSRV features
+    name: Rust ${{ matrix.rust }} ${{ matrix.label }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        rust: ["1.75.0", "1.82.0", "1.85.0"]
+        include:
+          - rust: "1.75.0"
+            label: "MSRV (default features)"
+          - rust: "1.82.0"
+            label: "cli feature"
+          - rust: "1.85.0"
+            label: "cli feature"
     steps:
       - uses: actions/checkout@v4
         with:
