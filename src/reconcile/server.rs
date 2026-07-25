@@ -128,9 +128,10 @@ where
 
     let requires_scan = requests.iter().any(|req| req.depth > 8 || req.capacity > 8);
 
-    let mut scanned_elements = Vec::new();
+    let mut sorted_index: Vec<u64> = Vec::new();
     if requires_scan {
-        scanned_elements.extend(elements_provider());
+        sorted_index.extend(elements_provider().map(|h| h.h64));
+        sorted_index.sort_unstable();
     }
 
     for request in requests {
@@ -161,20 +162,28 @@ where
             }
             sketches.push(SyndromeSketch::from_coordinates(synthesized)?);
         } else {
-            // Slow path: construct sketch from scanned elements
+            // Slow path: construct sketch from sorted index slice
             let mut sketch = SyndromeSketch::new(request.capacity)?;
-            for hash in &scanned_elements {
-                let shift = 64_u8.saturating_sub(request.depth);
-                let element_prefix = if shift == 64 {
-                    0
-                } else {
-                    u32::try_from(hash.h64 >> shift).unwrap()
-                };
 
-                if element_prefix == request.prefix {
-                    sketch.toggle(hash.h64)?;
-                }
+            let shift = 64_u8.saturating_sub(request.depth);
+            let start_h64 = if shift == 64 {
+                0
+            } else {
+                u64::from(request.prefix) << shift
+            };
+            let end_h64_inclusive = if shift == 64 {
+                u64::MAX
+            } else {
+                start_h64 | (1_u64 << shift).wrapping_sub(1)
+            };
+
+            let start_idx = sorted_index.partition_point(|&x| x < start_h64);
+            let end_idx = sorted_index.partition_point(|&x| x <= end_h64_inclusive);
+
+            for &h64 in &sorted_index[start_idx..end_idx] {
+                sketch.toggle(h64)?;
             }
+
             sketches.push(sketch);
         }
     }

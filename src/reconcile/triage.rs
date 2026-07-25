@@ -322,7 +322,7 @@ pub fn decode_bucket_sketches(
 
 fn validate_bucket_requests(requests: &[BucketRequest]) -> Result<(), AlgebraicError> {
     let mut total_capacity = 0_usize;
-    let mut previous_prefix: Option<u32> = None;
+    let mut previous_end_inclusive: Option<u64> = None;
     for request in requests {
         if request.capacity == 0 || request.capacity > MAX_BUCKET_SKETCH_CAPACITY {
             return Err(AlgebraicError::InvalidSketchCapacity);
@@ -330,10 +330,26 @@ fn validate_bucket_requests(requests: &[BucketRequest]) -> Result<(), AlgebraicE
         if request.depth >= 32 || request.prefix >= (1_u32 << request.depth) {
             return Err(AlgebraicError::InvalidBucketIndex);
         }
-        if previous_prefix.is_some_and(|p| p >= request.prefix) {
-            return Err(AlgebraicError::InvalidBucketIndex);
+
+        let shift = 64_u8.saturating_sub(request.depth);
+        let start = if shift == 64 {
+            0
+        } else {
+            u64::from(request.prefix) << shift
+        };
+        let end_inclusive = if shift == 64 {
+            u64::MAX
+        } else {
+            start | (1_u64 << shift).wrapping_sub(1)
+        };
+
+        if let Some(prev_end) = previous_end_inclusive {
+            if start <= prev_end {
+                return Err(AlgebraicError::InvalidBucketIndex);
+            }
         }
-        previous_prefix = Some(request.prefix);
+        previous_end_inclusive = Some(end_inclusive);
+
         total_capacity = total_capacity
             .checked_add(request.capacity)
             .ok_or(AlgebraicError::InvalidSketchCapacity)?;
