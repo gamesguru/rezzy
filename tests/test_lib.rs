@@ -3007,6 +3007,22 @@ fn test_types_validate_syntactic() {
     );
     ev.state_key = Some("@alice:example.com".to_string());
     assert!(ev.validate_syntactic("11").is_ok());
+
+    // Test Rule 1.3: m.room.create must not declare an unrecognised
+    // content.room_version.
+    ev.event_type = "m.room.create".to_string();
+    ev.content = serde_json::json!({ "room_version": "999" });
+    assert_eq!(
+        ev.validate_syntactic("11"),
+        Err("m.room.create content.room_version is not a recognised room version")
+    );
+    ev.content = serde_json::json!({ "room_version": "11" });
+    assert!(ev.validate_syntactic("11").is_ok());
+    ev.content = serde_json::json!({});
+    assert!(
+        ev.validate_syntactic("11").is_ok(),
+        "absent room_version defaults to \"1\" per spec, not rejected"
+    );
 }
 
 #[test]

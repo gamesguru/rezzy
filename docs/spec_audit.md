@@ -15,30 +15,30 @@ authorization rules. Three distinct rule sets exist:
 
 <!-- markdownlint-disable MD013 -->
 
-| #          | Rule                                                                                 | Versions | rezzy | Notes                                                        |
-| ---------- | ------------------------------------------------------------------------------------ | -------- | ----- | ------------------------------------------------------------ |
-| 1          | **m.room.create**: reject if `prev_events` present                                   | all      | [x]   | `CreateWithPrevEvents`                                       |
-| 1.2        | **m.room.create**: `room_id` domain must match `sender` domain                       | V1–V11   | [ ]   | Not checked — rezzy has no domain parsing                    |
-| 1.2        | **m.room.create**: reject if event has `room_id` (V12: room_id is event_id with `!`) | V12      | [ ]   | Not checked                                                  |
-| 1.3        | **m.room.create**: reject unrecognised `content.room_version`                        | all      | [ ]   | Not checked                                                  |
-| 1.4        | **m.room.create**: reject if no `creator` property in content                        | V1–V11   | [ ]   | Not checked                                                  |
-| 1.4        | **m.room.create**: reject invalid `additional_creators`                              | V12      | [ ]   | Not checked                                                  |
-| 2.1        | **auth_events**: reject duplicate (type, state_key) pairs                            | all      | [ ]   | Not checked                                                  |
-| 2.2        | **auth_events**: entries must match auth events selection algorithm                  | all      | [~]   | Soft-checked via `warn_unexpected_auth_events` (stderr only) |
-| 2.3        | **auth_events**: reject if any auth event was itself rejected                        | all      | [ ]   | Requires rejected-event tracking                             |
-| 2.4        | **auth_events**: reject if no `m.room.create` among entries                          | V1–V11   | [ ]   | Not checked                                                  |
-| 2.5        | **auth_events**: reject if any auth event has wrong `room_id`                        | all      | [ ]   | Not checked                                                  |
-| 2 (V12)    | Reject if `room_id` is not an accepted `m.room.create` event ID                      | V12      | [ ]   | Not checked                                                  |
-| 3          | **m.federate**: reject cross-domain if `m.federate` is false                         | all      | [ ]   | Not checked — rezzy has no domain parsing                    |
-| 4 (V1–V3)  | **m.room.aliases**: reject if no `state_key` or domain mismatch                      | V1–V7    | [ ]   | Removed in V8+; not implemented                              |
-| —          | **m.room.member** rules (see below)                                                  | all      | [x]   | Detailed breakdown below                                     |
-| 6          | Sender must be joined (non-member events)                                            | all      | [x]   | `NotMember` error                                            |
-| 7          | **m.room.third_party_invite**: sender PL ≥ invite level                              | all      | [x]   | `get_required_power_level` returns invite level              |
-| 8          | Event type required PL check                                                         | all      | [x]   | `get_required_power_level`                                   |
-| 9          | **State key starts with `@`**: must match sender                                     | all      | [x]   | Implemented via exact match check                            |
-| 10         | **m.room.power_levels** validation (see below)                                       | all      | [x]   | Completed coverage                                           |
-| 11 (V1–V2) | **m.room.redaction**: PL ≥ redact level, or same domain                              | V1–V2    | [ ]   | Not checked                                                  |
-| 11         | Otherwise, allow                                                                     | V3+      | [x]   | Implicit                                                     |
+| #          | Rule                                                                                 | Versions | rezzy | Notes                                                                                                |
+| ---------- | ------------------------------------------------------------------------------------ | -------- | ----- | ---------------------------------------------------------------------------------------------------- |
+| 1          | **m.room.create**: reject if `prev_events` present                                   | all      | [x]   | `CreateWithPrevEvents`                                                                               |
+| 1.2        | **m.room.create**: `room_id` domain must match `sender` domain                       | V1–V11   | [ ]   | Not checked — rezzy has no domain parsing                                                            |
+| 1.2        | **m.room.create**: reject if event has `room_id` (V12: room_id is event_id with `!`) | V12      | [ ]   | Not checked                                                                                          |
+| 1.3        | **m.room.create**: reject unrecognised `content.room_version`                        | all      | [x]   | `validate_syntactic`, via `StateResVersion::from_room_version`; absent value defaults to v1 per spec |
+| 1.4        | **m.room.create**: reject if no `creator` property in content                        | V1–V11   | [ ]   | Not checked                                                                                          |
+| 1.4        | **m.room.create**: reject invalid `additional_creators`                              | V12      | [ ]   | Not checked                                                                                          |
+| 2.1        | **auth_events**: reject duplicate (type, state_key) pairs                            | all      | [ ]   | Not checked                                                                                          |
+| 2.2        | **auth_events**: entries must match auth events selection algorithm                  | all      | [~]   | Soft-checked via `warn_unexpected_auth_events` (stderr only)                                         |
+| 2.3        | **auth_events**: reject if any auth event was itself rejected                        | all      | [ ]   | Requires rejected-event tracking                                                                     |
+| 2.4        | **auth_events**: reject if no `m.room.create` among entries                          | V1–V11   | [ ]   | Not checked                                                                                          |
+| 2.5        | **auth_events**: reject if any auth event has wrong `room_id`                        | all      | [ ]   | Not checked                                                                                          |
+| 2 (V12)    | Reject if `room_id` is not an accepted `m.room.create` event ID                      | V12      | [ ]   | Not checked                                                                                          |
+| 3          | **m.federate**: reject cross-domain if `m.federate` is false                         | all      | [ ]   | Not checked — rezzy has no domain parsing                                                            |
+| 4 (V1–V3)  | **m.room.aliases**: reject if no `state_key` or domain mismatch                      | V1–V7    | [ ]   | Removed in V8+; not implemented                                                                      |
+| —          | **m.room.member** rules (see below)                                                  | all      | [x]   | Detailed breakdown below                                                                             |
+| 6          | Sender must be joined (non-member events)                                            | all      | [x]   | `NotMember` error                                                                                    |
+| 7          | **m.room.third_party_invite**: sender PL ≥ invite level                              | all      | [x]   | `get_required_power_level` returns invite level                                                      |
+| 8          | Event type required PL check                                                         | all      | [x]   | `get_required_power_level`                                                                           |
+| 9          | **State key starts with `@`**: must match sender                                     | all      | [x]   | Implemented via exact match check                                                                    |
+| 10         | **m.room.power_levels** validation (see below)                                       | all      | [x]   | Completed coverage                                                                                   |
+| 11 (V1–V2) | **m.room.redaction**: PL ≥ redact level, or same domain                              | V1–V2    | [ ]   | Not checked                                                                                          |
+| 11         | Otherwise, allow                                                                     | V3+      | [x]   | Implicit                                                                                             |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -124,7 +124,7 @@ authorization rules. Three distinct rule sets exist:
 | `depth` bounds (`MAX_SAFE_JSON_INTEGER`)                          | all      | [x]   | 2^53−1 accepted as valid ceiling                              |
 | 255-byte hard limit: `event_id`/`sender`/`event_type`/`state_key` | V11+     | [x]   | Synapse parity (`strict_event_byte_limits_room_versions`)     |
 | 255-byte limit pre-v11                                            | V1–V10   | [~]   | Warn only (`eprintln!`, `std` feature only), never hard-fails |
-| Reject unrecognised `content.room_version`                        | all      | [ ]   | Still not checked — same gap as audit rule 1.3 below          |
+| Reject unrecognised `content.room_version` (m.room.create only)   | all      | [x]   | Fixed — see audit rule 1.3 above                              |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -142,8 +142,7 @@ authorization rules. Three distinct rule sets exist:
 
 1. **Rule 1.2 / 3 / 4**: no domain-parsing utility, so room_id↔sender domain
    match, `m.federate`, and `m.room.aliases` domain checks are unimplemented.
-2. **Rule 1.3**: unrecognised `content.room_version` not rejected (also the
-   one open row in the PDU Syntactic Invariants table above).
+2. ~~**Rule 1.3**: unrecognised `content.room_version` not rejected~~ — FIXED
 3. **Rule 1.4**: missing `creator` / invalid `additional_creators` on
    `m.room.create` not checked.
 4. **Rule 2.1 / 2.3 / 2.4**: `auth_events` duplicate-pair, rejected-ancestor,

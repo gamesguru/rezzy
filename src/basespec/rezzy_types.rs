@@ -1370,6 +1370,7 @@ impl<Id, C> LeanEvent<Id, C> {
     pub fn validate_syntactic(&self, room_version: &str) -> Result<(), &'static str>
     where
         Id: core::fmt::Display,
+        C: EventContent,
     {
         if self.prev_events.len() > 20 {
             return Err("prev_events exceeds maximum allowed length of 20");
@@ -1379,6 +1380,18 @@ impl<Id, C> LeanEvent<Id, C> {
         }
         if self.event_type.is_empty() {
             return Err("event_type cannot be empty");
+        }
+        // Rule 1.3: an `m.room.create` event must not declare an unrecognised
+        // `content.room_version`. Absent room_version defaults to "1" per spec,
+        // so only a *present but unrecognised* value is rejected here.
+        if self.event_type == crate::basespec::event_types::M_ROOM_CREATE {
+            if let Some(v) = self.content.get_room_version() {
+                if StateResVersion::from_room_version(v).is_none() {
+                    return Err(
+                        "m.room.create content.room_version is not a recognised room version",
+                    );
+                }
+            }
         }
         let id_str = alloc::format!("{}", self.event_id);
         if !id_str.is_empty() && !id_str.starts_with('$') {
