@@ -229,6 +229,78 @@ mod tests {
     }
 
     #[test]
+    fn test_event_id_str_some_branch() {
+        // Exercises the `Some(...)` arm of the default `event_hash` impl directly,
+        // without needing a full graph traversal.
+        struct StringIdGraph;
+        impl ForwardGraph<MockId> for StringIdGraph {
+            type ChildrenIter<'a> = core::slice::Iter<'a, MockId>;
+
+            fn children<'a>(&'a self, _id: &MockId) -> Self::ChildrenIter<'a> {
+                [].iter()
+            }
+
+            fn is_known(&self, _id: &MockId) -> bool {
+                true
+            }
+
+            fn event_id_str<'a>(&'a self, id: &'a MockId) -> Option<&'a str> {
+                Some(&id.0)
+            }
+
+            fn event_format(&self, _id: &MockId) -> EventIdFormat {
+                EventIdFormat::Legacy
+            }
+        }
+
+        let event_id = id("$anchor");
+        assert!(StringIdGraph.is_known(&event_id));
+        assert_eq!(StringIdGraph.children(&event_id).next(), None);
+
+        let hash = StringIdGraph.event_hash(&event_id).unwrap();
+        assert_eq!(
+            hash,
+            ElementHash::from_matrix_event_id("$anchor", EventIdFormat::Legacy).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_custom_event_hash_override() {
+        struct CustomHashGraph(MockGraph);
+        impl ForwardGraph<MockId> for CustomHashGraph {
+            type ChildrenIter<'a> = core::slice::Iter<'a, MockId>;
+
+            fn children<'a>(&'a self, id: &MockId) -> Self::ChildrenIter<'a> {
+                self.0.children(id)
+            }
+
+            fn is_known(&self, id: &MockId) -> bool {
+                self.0.is_known(id)
+            }
+
+            fn event_format(&self, id: &MockId) -> EventIdFormat {
+                self.0.event_format(id)
+            }
+
+            fn event_hash(&self, id: &MockId) -> Result<ElementHash, AlgebraicError> {
+                ElementHash::from_matrix_event_id(&id.0, EventIdFormat::Legacy)
+            }
+        }
+
+        let mut base = MockGraph::new();
+        base.add_edge("$anchor", "$child");
+        let custom_graph = CustomHashGraph(base);
+
+        assert_eq!(
+            custom_graph.event_format(&id("$anchor")),
+            EventIdFormat::Legacy
+        );
+
+        let digest = compute_frame_digest(&custom_graph, &[id("$anchor")]).unwrap();
+        assert_eq!(digest.known_event_count(), 1);
+    }
+
+    #[test]
     fn tests_frame_bounds() {
         let mut graph = MockGraph::new();
         // pre-join history
