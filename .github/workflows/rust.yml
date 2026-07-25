@@ -41,13 +41,26 @@ jobs:
           rustc --version
           cargo --version
 
-      - name: Lint
+      # rustc 1.75.0 is the library's MSRV; `cli` now pulls in openssl >=0.10.79,
+      # which requires rustc 1.80+, so the 1.75.0 job checks default features only.
+      - name: Lint (default features)
+        if: matrix.rust == '1.75.0'
+        run: CARGO_FEATURE_ARGS="--locked" make lint
+
+      - name: Test (default features)
+        if: matrix.rust == '1.75.0'
+        run: CARGO_FEATURE_ARGS="--locked" make rust/test
+
+      - name: Lint (cli feature)
+        if: matrix.rust != '1.75.0'
         run: CARGO_FEATURE_ARGS="--locked --features cli" make lint
 
-      - name: Test
+      - name: Test (cli feature)
+        if: matrix.rust != '1.75.0'
         run: CARGO_FEATURE_ARGS="--locked --features cli" make rust/test
 
       - name: Build CLI
+        if: matrix.rust != '1.75.0'
         run: make build
 
   all-features:
