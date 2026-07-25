@@ -3434,7 +3434,7 @@ fn test_empty_event_type_rejected() {
     );
 
     // validate_syntactic path
-    let syntactic = event.validate_syntactic();
+    let syntactic = event.validate_syntactic("11");
     assert!(syntactic.is_err());
     assert_eq!(syntactic.unwrap_err(), "event_type cannot be empty");
 }

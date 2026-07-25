@@ -1325,31 +1325,49 @@ impl EventContent for Value {
     }
 }
 
+/// Returns `true` if `room_version`'s major version is 11 or later.
+///
+/// Mirrors Synapse's `strict_event_byte_limits_room_versions` flag
+/// (`rust/src/room_versions.rs`): versions 1-10 inherit `false`, only v11
+/// (and everything derived from it, e.g. v12) sets it `true`. Handles
+/// dotted identifiers like `"12.1"` by comparing the leading major version.
+/// Malformed/unparseable input is treated as pre-v11 (i.e. not strict),
+/// matching the "warn, don't hard-fail" default used for unrecognized input
+/// elsewhere in this validator.
+fn room_version_is_v11_or_later(room_version: &str) -> bool {
+    room_version
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= 11)
+}
+
 impl<Id, C> LeanEvent<Id, C> {
     /// Validates basic syntactic limits (`prev_events`, `auth_events` array sizes).
     ///
     /// NOTE: Event types are NOT whitelisted — the spec does not restrict types at the auth level.
     /// Any event type is valid as long as the sender has sufficient PL.
     ///
-    /// # Errors
-    ///
-    /// Returns static string error if structural limits are exceeded.
+    /// Per Synapse parity, the 255-byte length limits on `event_id`/`sender`/
+    /// `event_type`/`state_key` are only hard-enforced for room version 11+
+    /// (`strict_event_byte_limits_room_versions`); for earlier versions a
+    /// violation is logged (via `eprintln!`, `std` feature only) rather than
+    /// rejected, to avoid breaking pre-existing rooms with legacy oversized
+    /// fields.
     ///
     /// # TODO(compliance): PDU structural invariants not yet enforced
     ///
     /// - `content` is required (must be present, even if `{}`)
     /// - `hashes` is required (sha256 content hash)
     /// - `signatures` is required
-    /// - `room_id` is version-dependent (present in v1-v11, omitted from create in v12+)
-    /// - `sender` must be a valid MXID (currently only checked for '@' prefix and ':';
-    ///   localpart charset per the spec's User Identifiers grammar is not validated)
-    /// - `event_id`/room alias length must not exceed 255 bytes (not currently checked)
+    /// - `room_id` is version-dependent (present in v1-v11, omitted from create in v12+);
+    ///   `LeanEvent` has no `room_id` field, so its length limit isn't checked here
     ///
     /// These should be validated and tested per room version.
     ///
     /// # Errors
     /// Returns an error if the event violates spec invariants (e.g. >20 `prev_events`).
-    pub fn validate_syntactic(&self) -> Result<(), &'static str>
+    pub fn validate_syntactic(&self, room_version: &str) -> Result<(), &'static str>
     where
         Id: core::fmt::Display,
     {
@@ -1366,12 +1384,54 @@ impl<Id, C> LeanEvent<Id, C> {
         if !id_str.is_empty() && !id_str.starts_with('$') {
             return Err("event_id must start with '$'");
         }
-        if !self.sender.is_empty() && (!self.sender.starts_with('@') || !self.sender.contains(':'))
-        {
-            return Err("sender must be a valid MXID starting with '@' and containing ':'");
+        if !self.sender.is_empty() {
+            let localpart_and_domain = self
+                .sender
+                .strip_prefix('@')
+                .and_then(|rest| rest.split_once(':'));
+            let Some((localpart, _domain)) = localpart_and_domain else {
+                return Err("sender must be a valid MXID starting with '@' and containing ':'");
+            };
+            let localpart_valid = !localpart.is_empty()
+                && localpart.bytes().all(|b| {
+                    b.is_ascii_lowercase()
+                        || b.is_ascii_digit()
+                        || matches!(b, b'.' | b'_' | b'=' | b'-' | b'/' | b'+')
+                });
+            if !localpart_valid {
+                return Err(
+                    "sender localpart must be non-empty and contain only a-z, 0-9, '.', '_', '=', '-', '/', '+'",
+                );
+            }
         }
         if self.depth > MAX_SAFE_JSON_INTEGER {
             return Err("depth exceeds maximum allowed value");
+        }
+
+        let strict_length_limits = room_version_is_v11_or_later(room_version);
+        macro_rules! check_length {
+            ($field:expr, $name:literal) => {
+                if $field.len() > 255 {
+                    if strict_length_limits {
+                        return Err(concat!($name, " exceeds maximum allowed length of 255 bytes"));
+                    }
+                    #[cfg(feature = "std")]
+                    std::eprintln!(
+                        "rezzy::validate_syntactic: {} exceeds 255 bytes in pre-v11 room version {:?}; allowed for backwards compatibility",
+                        $name,
+                        room_version
+                    );
+                }
+            };
+        }
+        check_length!(id_str, "event_id");
+        check_length!(self.sender, "sender");
+        check_length!(self.event_type, "event_type");
+        // NOTE: For Synapse parity, v11+ hard-enforces this the same as the other
+        // fields above; state_key is optional (only present on state events), so
+        // this branch is skipped entirely for non-state events.
+        if let Some(ref state_key) = self.state_key {
+            check_length!(state_key, "state_key");
         }
 
         Ok(())

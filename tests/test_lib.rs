@@ -2908,49 +2908,105 @@ fn test_types_validate_syntactic() {
         event_type: "m.room.message".to_string(),
         ..Default::default()
     };
-    assert!(ev.validate_syntactic().is_ok());
+    assert!(ev.validate_syntactic("11").is_ok());
 
     // Custom/unknown event types are allowed
     // (spec doesn't whitelist types for auth)
     ev.event_type = "org.custom.whatever".to_string();
-    assert!(ev.validate_syntactic().is_ok());
+    assert!(ev.validate_syntactic("11").is_ok());
 
     ev.event_type = "m.room.message".to_string();
     ev.prev_events = vec!["$a".to_string(); 21];
-    assert!(ev.validate_syntactic().is_err());
+    assert!(ev.validate_syntactic("11").is_err());
 
     ev.prev_events = vec![];
     ev.auth_events = vec!["$a".to_string(); 11];
-    assert!(ev.validate_syntactic().is_err());
+    assert!(ev.validate_syntactic("11").is_err());
 
     // Test event_id format validation (must start with '$' if non-empty)
     ev.auth_events = vec![];
     ev.event_id = "invalid_no_dollar".to_string();
-    assert_eq!(ev.validate_syntactic(), Err("event_id must start with '$'"));
+    assert_eq!(
+        ev.validate_syntactic("11"),
+        Err("event_id must start with '$'")
+    );
     ev.event_id = "$valid_event_id:example.com".to_string();
-    assert!(ev.validate_syntactic().is_ok());
+    assert!(ev.validate_syntactic("11").is_ok());
 
     // Test sender format validation (must start with '@' and contain ':')
     ev.sender = "user_without_at:example.com".to_string();
-    assert!(ev.validate_syntactic().is_err());
+    assert!(ev.validate_syntactic("11").is_err());
     ev.sender = "@user_without_colon".to_string();
-    assert!(ev.validate_syntactic().is_err());
+    assert!(ev.validate_syntactic("11").is_err());
     ev.sender = "@alice:example.com".to_string();
-    assert!(ev.validate_syntactic().is_ok());
+    assert!(ev.validate_syntactic("11").is_ok());
+
+    // Test sender localpart charset (only a-z, 0-9, '.', '_', '=', '-', '/', '+')
+    ev.sender = "@Alice:example.com".to_string();
+    assert!(
+        ev.validate_syntactic("11").is_err(),
+        "uppercase is not a valid localpart character"
+    );
+    ev.sender = "@:example.com".to_string();
+    assert!(
+        ev.validate_syntactic("11").is_err(),
+        "empty localpart is invalid"
+    );
+    ev.sender = "@alice.1_2=3-4/5+6:example.com".to_string();
+    assert!(
+        ev.validate_syntactic("11").is_ok(),
+        "all allowed localpart characters"
+    );
+    ev.sender = "@alice:example.com".to_string();
 
     // Test depth bounds check (<= 2^53 - 1, the canonical-JSON safe integer bound)
     ev.depth = (1u64 << 53) - 1;
     assert!(
-        ev.validate_syntactic().is_ok(),
+        ev.validate_syntactic("11").is_ok(),
         "2^53 - 1 is the inclusive upper bound and must be accepted"
     );
     ev.depth = 1u64 << 53;
     assert_eq!(
-        ev.validate_syntactic(),
+        ev.validate_syntactic("11"),
         Err("depth exceeds maximum allowed value")
     );
     ev.depth = 100;
-    assert!(ev.validate_syntactic().is_ok());
+    assert!(ev.validate_syntactic("11").is_ok());
+
+    // Test 255-byte length limit on event_id, hard-enforced only for v11+
+    // (Synapse's `strict_event_byte_limits_room_versions`, false for v1-v10).
+    ev.event_id = format!("${}", "a".repeat(255));
+    assert_eq!(
+        ev.validate_syntactic("11"),
+        Err("event_id exceeds maximum allowed length of 255 bytes")
+    );
+    assert!(
+        ev.validate_syntactic("10").is_ok(),
+        "pre-v11 rooms only warn on oversized event_id, never hard-fail"
+    );
+    assert!(
+        ev.validate_syntactic("12.1").is_err(),
+        "v12.1 must be treated as >= v11 (dotted version identifiers)"
+    );
+    assert!(
+        ev.validate_syntactic("not-a-version").is_ok(),
+        "malformed room_version defaults to non-strict (warn, don't hard-fail)"
+    );
+    ev.event_id = "$valid_event_id:example.com".to_string();
+    assert!(ev.validate_syntactic("11").is_ok());
+
+    // Test 255-byte length limit on state_key (same v11+ gating as the other fields)
+    ev.state_key = Some("a".repeat(256));
+    assert_eq!(
+        ev.validate_syntactic("11"),
+        Err("state_key exceeds maximum allowed length of 255 bytes")
+    );
+    assert!(
+        ev.validate_syntactic("10").is_ok(),
+        "pre-v11 rooms only warn on oversized state_key, never hard-fail"
+    );
+    ev.state_key = Some("@alice:example.com".to_string());
+    assert!(ev.validate_syntactic("11").is_ok());
 }
 
 #[test]
