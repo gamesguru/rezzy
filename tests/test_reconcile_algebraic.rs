@@ -3,7 +3,7 @@ use base64::{
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
 };
 use rezzy::reconcile::{
-    AlgebraicError, BucketSummary, ElementHash, EventIdFormat, MAX_LOCAL_SKETCH_DECODE_CAPACITY,
+    AlgebraicError, ElementHash, EventIdFormat, MAX_LOCAL_SKETCH_DECODE_CAPACITY,
     MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch, verify_residual,
 };
 
@@ -25,17 +25,13 @@ fn generic_digest32_feeds_all_resident_layers() {
 
     let mut accumulator = RoomAccumulator::new();
     let mut sketch = SyndromeSketch::new(8).unwrap();
-    let mut buckets = BucketSummary::default();
     for hash in [first, second] {
         accumulator.insert(hash).unwrap();
         sketch.toggle(hash.h64).unwrap();
-        buckets.insert(hash).unwrap();
     }
 
     assert_eq!(accumulator.known_event_count(), 2);
     assert!(verify_residual(accumulator.digest(), [first, second]));
-    assert_eq!(buckets.buckets()[0x00].count, 1);
-    assert_eq!(buckets.buckets()[0xff].count, 1);
     assert_eq!(SyndromeSketch::decode(8, &sketch.encode()).unwrap(), sketch);
 }
 

@@ -12,6 +12,9 @@ use super::triage::{
 };
 use super::{AlgebraicError, ElementHash, MAX_LOCAL_SKETCH_DECODE_CAPACITY, SyndromeSketch};
 
+/// Maximum number of rounds allowed for a single reconciliation exchange.
+pub const MAX_RECONCILIATION_ROUNDS: usize = 20;
+
 /// Requester policy for one MSC0501 reconciliation exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReconciliationClient {
@@ -37,11 +40,7 @@ pub enum ClientAction {
     Synchronized,
     /// Locate a common DAG anchor before attempting set extraction.
     ExtremityDiff,
-    /// Send an unbucketed syndrome sketch at the given capacity.
-    UnbucketedSketch {
-        capacity: usize,
-        include_bucket_summary: bool,
-    },
+
     /// Retry independently decoded bucket sketches.
     BucketSketches {
         requests: alloc::vec::Vec<BucketRequest>,
@@ -105,6 +104,13 @@ impl ReconciliationClient {
             .unwrap_or(count_delta)
             .max(count_delta);
 
+        let gate_threshold =
+            u64::try_from(MAX_RECONCILIATION_ROUNDS * MAX_BUCKETED_SKETCH_CAPACITY)
+                .unwrap_or(u64::MAX);
+        if estimated_delta > gate_threshold {
+            return ClientAction::ExtremityDiff;
+        }
+
         let provisioned = u64::try_from(concurrency_headroom)
             .ok()
             .and_then(|headroom| {
@@ -118,9 +124,13 @@ impl ReconciliationClient {
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(usize::MAX);
 
-        ClientAction::UnbucketedSketch {
-            capacity: capacity.min(self.max_sketch_capacity),
-            include_bucket_summary: estimated_delta == 0 || capacity > self.max_sketch_capacity,
+        ClientAction::BucketSketches {
+            requests: alloc::vec![BucketRequest {
+                depth: 0,
+                prefix: 0,
+                capacity: capacity.clamp(4, MAX_BUCKET_SKETCH_CAPACITY),
+            }],
+            accumulated_roots: alloc::vec![],
         }
     }
 
@@ -185,35 +195,71 @@ impl ReconciliationClient {
             else {
                 return ClientAction::ExtremityDiff;
             };
-            if previous.capacity >= MAX_BUCKET_SKETCH_CAPACITY {
-                return ClientAction::ExtremityDiff;
+
+            if previous.capacity < MAX_BUCKET_SKETCH_CAPACITY {
+                let Some(floor) = previous.capacity.checked_add(1) else {
+                    return ClientAction::ExtremityDiff;
+                };
+                let Ok(floor_u64) = u64::try_from(floor) else {
+                    return ClientAction::ExtremityDiff;
+                };
+                let target = share.max(floor_u64);
+                let provisioned = target
+                    .checked_add(target / 2)
+                    .and_then(|value| value.checked_add(target % 2))
+                    .and_then(|value| value.checked_add(4));
+                let capacity = provisioned
+                    .and_then(|value| usize::try_from(value).ok())
+                    .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY));
+                let Some(capacity) = capacity else {
+                    return ClientAction::ExtremityDiff;
+                };
+                total = match total.checked_add(capacity) {
+                    Some(total) if total <= aggregate_limit => total,
+                    _ => return ClientAction::ExtremityDiff,
+                };
+                requests.push(BucketRequest {
+                    depth: previous.depth,
+                    prefix,
+                    capacity,
+                });
+            } else {
+                if previous.depth >= 32 {
+                    return ClientAction::ExtremityDiff;
+                }
+
+                let floor = 4_usize;
+                let Ok(floor_u64) = u64::try_from(floor) else {
+                    return ClientAction::ExtremityDiff;
+                };
+                let target = (share / 2).max(floor_u64);
+                let provisioned = target
+                    .checked_add(target / 2)
+                    .and_then(|value| value.checked_add(target % 2))
+                    .and_then(|value| value.checked_add(4));
+                let capacity = provisioned
+                    .and_then(|value| usize::try_from(value).ok())
+                    .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY));
+                let Some(capacity) = capacity else {
+                    return ClientAction::ExtremityDiff;
+                };
+
+                let Some(next_depth) = previous.depth.checked_add(1) else {
+                    return ClientAction::ExtremityDiff;
+                };
+
+                for sub in 0..2 {
+                    total = match total.checked_add(capacity) {
+                        Some(total) if total <= aggregate_limit => total,
+                        _ => return ClientAction::ExtremityDiff,
+                    };
+                    requests.push(BucketRequest {
+                        depth: next_depth,
+                        prefix: (previous.prefix << 1) | sub,
+                        capacity,
+                    });
+                }
             }
-            let Some(floor) = previous.capacity.checked_add(1) else {
-                return ClientAction::ExtremityDiff;
-            };
-            let Ok(floor_u64) = u64::try_from(floor) else {
-                return ClientAction::ExtremityDiff;
-            };
-            let target = share.max(floor_u64);
-            let provisioned = target
-                .checked_add(target / 2)
-                .and_then(|value| value.checked_add(target % 2))
-                .and_then(|value| value.checked_add(4));
-            let capacity = provisioned
-                .and_then(|value| usize::try_from(value).ok())
-                .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY));
-            let Some(capacity) = capacity else {
-                return ClientAction::ExtremityDiff;
-            };
-            total = match total.checked_add(capacity) {
-                Some(total) if total <= aggregate_limit => total,
-                _ => return ClientAction::ExtremityDiff,
-            };
-            requests.push(BucketRequest {
-                depth: previous.depth,
-                prefix,
-                capacity,
-            });
         }
         ClientAction::BucketSketches {
             requests,
@@ -298,9 +344,13 @@ mod tests {
                 },
                 2,
             ),
-            ClientAction::UnbucketedSketch {
-                capacity: 12,
-                include_bucket_summary: false,
+            ClientAction::BucketSketches {
+                requests: vec![BucketRequest {
+                    depth: 0,
+                    prefix: 0,
+                    capacity: 12,
+                }],
+                accumulated_roots: vec![],
             }
         );
     }
@@ -321,9 +371,13 @@ mod tests {
                 },
                 0,
             ),
-            ClientAction::UnbucketedSketch {
-                capacity: 16,
-                include_bucket_summary: true,
+            ClientAction::BucketSketches {
+                requests: vec![BucketRequest {
+                    depth: 0,
+                    prefix: 0,
+                    capacity: 64,
+                }],
+                accumulated_roots: vec![],
             }
         );
         assert_eq!(
@@ -338,15 +392,19 @@ mod tests {
                 },
                 0,
             ),
-            ClientAction::UnbucketedSketch {
-                capacity: 4,
-                include_bucket_summary: true,
+            ClientAction::BucketSketches {
+                requests: vec![BucketRequest {
+                    depth: 0,
+                    prefix: 0,
+                    capacity: 4,
+                }],
+                accumulated_roots: vec![],
             }
         );
     }
 
     #[test]
-    fn capacity_overflow_falls_back_to_bucket_localization() {
+    fn capacity_overflow_falls_back_to_extremity_diff() {
         let client = ReconciliationClient::default();
         assert_eq!(
             client.select_action(
@@ -360,10 +418,7 @@ mod tests {
                 },
                 usize::MAX,
             ),
-            ClientAction::UnbucketedSketch {
-                capacity: MAX_LOCAL_SKETCH_DECODE_CAPACITY,
-                include_bucket_summary: true,
-            }
+            ClientAction::ExtremityDiff
         );
     }
 
@@ -431,7 +486,21 @@ mod tests {
                 None,
                 4096,
             ),
-            ClientAction::ExtremityDiff
+            ClientAction::BucketSketches {
+                requests: vec![
+                    BucketRequest {
+                        depth: 9,
+                        prefix: 6,
+                        capacity: 10,
+                    },
+                    BucketRequest {
+                        depth: 9,
+                        prefix: 7,
+                        capacity: 10,
+                    },
+                ],
+                accumulated_roots: vec![],
+            }
         );
         assert_eq!(
             ReconciliationClient::transition_bucket_batch(

@@ -46,45 +46,9 @@ fn main() {
         has_unknown_extremity: false,
     };
 
-    let mut action = client.select_action(&local_resident, remote_digest, 0);
+    let action = client.select_action(&local_resident, remote_digest, 0);
     let triage_duration = start_triage.elapsed();
     println!("Client triage completed in {triage_duration:?}");
-
-    if let rezzy::reconcile::ClientAction::UnbucketedSketch {
-        include_bucket_summary: true,
-        ..
-    } = action
-    {
-        println!("Server sends bucket summary...");
-        let mut remote_summaries = Vec::new();
-        for bucket in remote_resident.buckets() {
-            remote_summaries.push(rezzy::reconcile::triage::RemoteBucketSummary {
-                accumulator: bucket.accumulator,
-                count: bucket.count,
-            });
-        }
-
-        let diffs = rezzy::reconcile::triage::select_differing_buckets(
-            local_resident.buckets(),
-            &remote_summaries,
-        )
-        .unwrap();
-
-        let estimated = rezzy::reconcile::triage::estimate_delta(
-            local_resident.strata(),
-            remote_resident.strata(),
-        )
-        .unwrap();
-
-        let provisioned =
-            rezzy::reconcile::triage::provision_bucket_capacities(&diffs, estimated, 16384)
-                .unwrap();
-
-        action = rezzy::reconcile::ClientAction::BucketSketches {
-            requests: provisioned.requests,
-            accumulated_roots: Vec::new(),
-        };
-    }
 
     match action {
         rezzy::reconcile::ClientAction::BucketSketches { requests, .. } => {

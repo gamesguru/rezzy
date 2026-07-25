@@ -23,7 +23,7 @@ pub mod server;
 pub mod triage;
 
 pub use algebraic::{
-    AlgebraicError, BUCKET_COUNT, Bucket, BucketSummary, ElementHash, EventIdFormat,
+    AlgebraicError, BUCKET_COUNT, Bucket, ElementHash, EventIdFormat,
     MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch,
     gf64_mul, verify_residual,
 };
@@ -31,7 +31,6 @@ pub use client::{ClientAction, ReconciliationClient, RemoteDigest};
 pub use resident::{ResidentBucket, ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
 pub use server::{ForwardGraph, build_bucket_sketches, compute_frame_digest};
 pub use triage::{
-    BucketDecodeBatch, BucketDecodeSuccess, BucketDifference, BucketRequest,
-    MAX_BUCKET_SKETCH_CAPACITY, MAX_BUCKETED_SKETCH_CAPACITY, RemoteBucketSummary,
-    decode_bucket_sketches, estimate_delta, provision_bucket_capacities, select_differing_buckets,
+    BucketDecodeBatch, BucketDecodeSuccess, BucketRequest, MAX_BUCKETED_SKETCH_CAPACITY,
+    decode_bucket_sketches, estimate_delta,
 };

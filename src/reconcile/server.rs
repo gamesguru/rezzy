@@ -386,7 +386,7 @@ mod tests {
     fn test_build_bucket_sketches_invalid_indices() {
         use crate::reconcile::triage::BucketRequest;
         let resident = ResidentKernel::new();
-        
+
         let requests = [BucketRequest {
             depth: 8,
             prefix: 256, // out of bounds for resident.buckets().len() == 256
@@ -422,7 +422,8 @@ mod tests {
         }];
 
         let elements = vec![h1];
-        let sketches = build_bucket_sketches(&resident, || elements.into_iter(), &requests).unwrap();
+        let sketches =
+            build_bucket_sketches(&resident, || elements.into_iter(), &requests).unwrap();
 
         assert_eq!(sketches.len(), 1);
         let roots = sketches[0].clone().decode_elements(10).unwrap();

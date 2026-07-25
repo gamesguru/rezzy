@@ -403,71 +403,6 @@ pub struct Bucket {
     pub syndromes: [u64; 8],
 }
 
-/// The 256-bucket summary described by MSC0500.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BucketSummary {
-    buckets: Vec<Bucket>,
-}
-
-impl Default for BucketSummary {
-    fn default() -> Self {
-        Self {
-            buckets: vec![Bucket::default(); BUCKET_COUNT],
-        }
-    }
-}
-
-impl BucketSummary {
-    #[must_use]
-    pub fn buckets(&self) -> &[Bucket] {
-        &self.buckets
-    }
-
-    /// Adds an event to its leading-byte bucket.
-    ///
-    /// # Errors
-    /// Returns an error when the bucket's 24-bit wire count is exhausted.
-    pub fn insert(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
-        if hash.h64 == 0 {
-            return Err(AlgebraicError::ZeroShortIdentifier);
-        }
-        let bucket = &mut self.buckets[(hash.h64 >> 56) as usize];
-        if bucket.count == 0x00ff_ffff {
-            return Err(AlgebraicError::CountOverflow);
-        }
-        bucket.count = bucket
-            .count
-            .checked_add(1)
-            .ok_or(AlgebraicError::CountOverflow)?;
-        toggle_bucket(bucket, hash);
-        Ok(())
-    }
-
-    /// Removes an event from its leading-byte bucket.
-    ///
-    /// # Errors
-    /// Returns an error when the selected bucket is empty.
-    pub fn remove(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
-        let bucket = &mut self.buckets[(hash.h64 >> 56) as usize];
-        bucket.count = bucket
-            .count
-            .checked_sub(1)
-            .ok_or(AlgebraicError::CountUnderflow)?;
-        toggle_bucket(bucket, hash);
-        Ok(())
-    }
-}
-
-fn toggle_bucket(bucket: &mut Bucket, hash: ElementHash) {
-    bucket.accumulator ^= hash.h128;
-    let squared = gf64_mul(hash.h64, hash.h64);
-    let mut odd_power = hash.h64;
-    for syndrome in &mut bucket.syndromes {
-        *syndrome ^= odd_power;
-        odd_power = gf64_mul(odd_power, squared);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,15 +444,6 @@ mod tests {
     }
 
     #[test]
-    fn bucket_updates_are_reversible() {
-        let mut summary = BucketSummary::default();
-        summary.insert(hash(42)).unwrap();
-        assert_eq!(summary.buckets()[42].count, 1);
-        summary.remove(hash(42)).unwrap();
-        assert_eq!(summary, BucketSummary::default());
-    }
-
-    #[test]
     fn etag_is_independent_of_extremity_order() {
         let accumulator = RoomAccumulator {
             digest: 42,
@@ -545,14 +471,6 @@ mod tests {
         assert_eq!(
             accumulator.insert(event),
             Err(AlgebraicError::CountOverflow)
-        );
-
-        let mut summary = BucketSummary::default();
-        summary.buckets[1].count = 0x00ff_ffff;
-        assert_eq!(summary.insert(event), Err(AlgebraicError::CountOverflow));
-        assert_eq!(
-            BucketSummary::default().remove(event),
-            Err(AlgebraicError::CountUnderflow)
         );
     }
 
