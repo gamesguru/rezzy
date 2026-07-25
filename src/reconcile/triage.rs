@@ -144,7 +144,16 @@ pub fn decode_bucket_sketches(
     })
 }
 
-fn validate_bucket_requests(requests: &[BucketRequest]) -> Result<(), AlgebraicError> {
+/// Validates a list of bucket requests to ensure they adhere to limits and form an antichain.
+///
+/// Ensures no single request exceeds the per-node extraction limit (`MAX_BUCKET_SKETCH_CAPACITY`),
+/// that the overall extraction respects `MAX_BUCKETED_SKETCH_CAPACITY`, and that the requests
+/// do not overlap (thereby forming an antichain of subsets).
+///
+/// # Errors
+/// Returns an error if any capacity or bound constraint is violated, or if the requests
+/// overlap/are incorrectly ordered.
+pub fn validate_bucket_requests(requests: &[BucketRequest]) -> Result<(), AlgebraicError> {
     let mut total_capacity = 0_usize;
     let mut previous_end_inclusive: Option<u64> = None;
     for request in requests {

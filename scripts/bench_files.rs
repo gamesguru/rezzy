@@ -56,20 +56,17 @@ fn main() {
 
             // Step 2: Server builds the requested sketches
             let start_server = Instant::now();
-            let sketches =
-                build_bucket_sketches(&remote_resident, || remote_elements.into_iter(), &requests)
-                    .unwrap();
+            let mut sorted_remote_h64: Vec<u64> = remote_elements.iter().map(|h| h.h64).collect();
+            sorted_remote_h64.sort_unstable();
+            let sketches = build_bucket_sketches(&sorted_remote_h64, &requests).unwrap();
             let server_duration = start_server.elapsed();
             println!("Server extraction completed in {server_duration:?}");
 
             // Step 3: Client decodes the sketches
             let start_decode = Instant::now();
-            let local_sketches = build_bucket_sketches(
-                &local_resident,
-                || local_elements.clone().into_iter(),
-                &requests,
-            )
-            .unwrap();
+            let mut sorted_local_h64: Vec<u64> = local_elements.iter().map(|h| h.h64).collect();
+            sorted_local_h64.sort_unstable();
+            let local_sketches = build_bucket_sketches(&sorted_local_h64, &requests).unwrap();
 
             let mut total_roots: usize = 0;
             let mut failed_buckets: usize = 0;

@@ -12,12 +12,11 @@ use alloc::{
 
 use crate::basespec::rezzy_types::EventId;
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{
     AlgebraicError, ElementHash, EventIdFormat, RoomAccumulator, algebraic::SyndromeSketch,
-    resident::ResidentKernel, triage::BucketRequest,
+    triage::BucketRequest,
 };
 
 /// Abstraction for forward traversal through the room DAG.
@@ -103,89 +102,45 @@ where
 
 /// Constructs bucket sketches for the provided MSC0501 triage requests.
 ///
-/// Requests for shallow subsets (`depth <= 8` and `capacity <= 8`) are
-/// synthesized dynamically from the pre-computed resident bounds in $O(1)$ time.
-///
-/// Requests for deeper partitions (`depth > 8` or `capacity > 8`) require
-/// a scan of the causal frame (provided either by graph traversal or an explicitly
-/// supplied element iterator).
+/// This uses an $O(\log n)$ binary search on a pre-sorted array of 64-bit event IDs,
+/// extracting and toggling only the slice of events requested in each bucket.
 ///
 /// # Errors
-/// Returns an error if any sketches exceed capacity limits or graph traversal fails.
+/// Returns an error if any sketches exceed capacity limits or if requests are invalid.
 ///
 /// # Panics
-/// Panics if the calculated prefix falls out of the bounds of a `u32` (should never happen for shifts <= 64).
-pub fn build_bucket_sketches<I, F>(
-    resident: &ResidentKernel,
-    elements_provider: F,
+/// Panics if the calculated prefix falls out of the bounds of a `u32`.
+pub fn build_bucket_sketches(
+    sorted_h64: &[u64],
     requests: &[BucketRequest],
-) -> Result<Vec<SyndromeSketch>, AlgebraicError>
-where
-    I: Iterator<Item = ElementHash>,
-    F: FnOnce() -> I,
-{
+) -> Result<Vec<SyndromeSketch>, AlgebraicError> {
+    crate::reconcile::triage::validate_bucket_requests(requests)?;
+
     let mut sketches = Vec::with_capacity(requests.len());
 
-    let requires_scan = requests.iter().any(|req| req.depth > 8 || req.capacity > 8);
-
-    let mut sorted_index: Vec<u64> = Vec::new();
-    if requires_scan {
-        sorted_index.extend(elements_provider().map(|h| h.h64));
-        sorted_index.sort_unstable();
-    }
-
     for request in requests {
-        if request.depth == 8 && request.capacity <= 8 {
-            // Fast path: synthesize from ResidentKernel
-            let bucket_index = request.prefix as usize;
-            if bucket_index >= resident.buckets().len() {
-                return Err(AlgebraicError::InvalidBucketIndex);
-            }
-            let bucket = &resident.buckets()[bucket_index];
-            let coords = bucket.syndromes[..request.capacity].to_vec();
-            sketches.push(SyndromeSketch::from_coordinates(coords)?);
-        } else if request.depth <= 8 && request.capacity <= 8 {
-            // Dynamic summation (XORing constituent buckets)
-            let mut synthesized = vec![0_u64; request.capacity];
-            let shift = 8_u8.saturating_sub(request.depth);
-            let start_index = (request.prefix << shift) as usize;
-            let end_index = start_index.saturating_add(1 << shift);
+        let mut sketch = SyndromeSketch::new(request.capacity)?;
 
-            if end_index > resident.buckets().len() {
-                return Err(AlgebraicError::InvalidBucketIndex);
-            }
-
-            for bucket in &resident.buckets()[start_index..end_index] {
-                for (i, coord) in synthesized.iter_mut().enumerate() {
-                    *coord ^= bucket.syndromes[i];
-                }
-            }
-            sketches.push(SyndromeSketch::from_coordinates(synthesized)?);
+        let shift = 64_u8.saturating_sub(request.depth);
+        let start_h64 = if shift == 64 {
+            0
         } else {
-            // Slow path: construct sketch from sorted index slice
-            let mut sketch = SyndromeSketch::new(request.capacity)?;
+            u64::from(request.prefix) << shift
+        };
+        let end_h64_inclusive = if shift == 64 {
+            u64::MAX
+        } else {
+            start_h64 | (1_u64 << shift).wrapping_sub(1)
+        };
 
-            let shift = 64_u8.saturating_sub(request.depth);
-            let start_h64 = if shift == 64 {
-                0
-            } else {
-                u64::from(request.prefix) << shift
-            };
-            let end_h64_inclusive = if shift == 64 {
-                u64::MAX
-            } else {
-                start_h64 | (1_u64 << shift).wrapping_sub(1)
-            };
+        let start_idx = sorted_h64.partition_point(|&x| x < start_h64);
+        let end_idx = sorted_h64.partition_point(|&x| x <= end_h64_inclusive);
 
-            let start_idx = sorted_index.partition_point(|&x| x < start_h64);
-            let end_idx = sorted_index.partition_point(|&x| x <= end_h64_inclusive);
-
-            for &h64 in &sorted_index[start_idx..end_idx] {
-                sketch.toggle(h64)?;
-            }
-
-            sketches.push(sketch);
+        for &h64 in &sorted_h64[start_idx..end_idx] {
+            sketch.toggle(h64)?;
         }
+
+        sketches.push(sketch);
     }
 
     Ok(sketches)
@@ -196,6 +151,7 @@ mod tests {
     use super::*;
     use alloc::collections::BTreeMap;
     use alloc::string::String;
+    use alloc::vec;
     use alloc::vec::Vec;
     use core::fmt;
 
@@ -305,9 +261,7 @@ mod tests {
     #[test]
     fn test_build_bucket_sketches_exact_match() {
         use crate::reconcile::triage::BucketRequest;
-        let mut resident = ResidentKernel::new();
         let h1 = ElementHash::from_matrix_event_id("$1", EventIdFormat::Legacy).unwrap();
-        resident.insert(h1).unwrap();
 
         let bucket_idx = (h1.h64 >> 56) as u32;
         let requests = [BucketRequest {
@@ -316,7 +270,8 @@ mod tests {
             capacity: 4,
         }];
 
-        let sketches = build_bucket_sketches(&resident, core::iter::empty, &requests).unwrap();
+        let sorted_h64 = vec![h1.h64];
+        let sketches = build_bucket_sketches(&sorted_h64, &requests).unwrap();
 
         assert_eq!(sketches.len(), 1);
         let roots = sketches[0].clone().decode_elements(4).unwrap();
@@ -327,11 +282,8 @@ mod tests {
     #[test]
     fn test_build_bucket_sketches_dynamic_summation() {
         use crate::reconcile::triage::BucketRequest;
-        let mut resident = ResidentKernel::new();
         let h1 = ElementHash::from_matrix_event_id("$1", EventIdFormat::Legacy).unwrap();
         let h2 = ElementHash::from_matrix_event_id("$2", EventIdFormat::Legacy).unwrap();
-        resident.insert(h1).unwrap();
-        resident.insert(h2).unwrap();
 
         // Depth 0 encompasses everything
         let requests = [BucketRequest {
@@ -340,7 +292,9 @@ mod tests {
             capacity: 4,
         }];
 
-        let sketches = build_bucket_sketches(&resident, core::iter::empty, &requests).unwrap();
+        let mut sorted_h64 = vec![h1.h64, h2.h64];
+        sorted_h64.sort_unstable();
+        let sketches = build_bucket_sketches(&sorted_h64, &requests).unwrap();
 
         assert_eq!(sketches.len(), 1);
         let mut roots = sketches[0].clone().decode_elements(4).unwrap();
@@ -355,11 +309,8 @@ mod tests {
     #[test]
     fn test_build_bucket_sketches_deep_extraction() {
         use crate::reconcile::triage::BucketRequest;
-        let mut resident = ResidentKernel::new();
         let h1 = ElementHash::from_matrix_event_id("$1", EventIdFormat::Legacy).unwrap();
         let h2 = ElementHash::from_matrix_event_id("$2", EventIdFormat::Legacy).unwrap();
-        resident.insert(h1).unwrap();
-        resident.insert(h2).unwrap();
 
         let depth = 16;
         let shift = 64 - depth;
@@ -372,9 +323,9 @@ mod tests {
         }];
 
         // Deep extraction uses elements_provider
-        let elements = vec![h1, h2];
-        let sketches =
-            build_bucket_sketches(&resident, || elements.into_iter(), &requests).unwrap();
+        let mut sorted_h64 = vec![h1.h64, h2.h64];
+        sorted_h64.sort_unstable();
+        let sketches = build_bucket_sketches(&sorted_h64, &requests).unwrap();
 
         assert_eq!(sketches.len(), 1);
         // Only elements that match the prefix should be present.
@@ -385,25 +336,24 @@ mod tests {
     #[test]
     fn test_build_bucket_sketches_invalid_indices() {
         use crate::reconcile::triage::BucketRequest;
-        let resident = ResidentKernel::new();
-
+        let sorted_h64 = vec![];
         let requests = [BucketRequest {
             depth: 8,
-            prefix: 256, // out of bounds for resident.buckets().len() == 256
+            prefix: 256, // out of bounds for depth 8 (max prefix is 255)
             capacity: 4,
         }];
         assert_eq!(
-            build_bucket_sketches(&resident, core::iter::empty, &requests),
+            build_bucket_sketches(&sorted_h64, &requests),
             Err(AlgebraicError::InvalidBucketIndex)
         );
 
         let requests = [BucketRequest {
             depth: 7,
-            prefix: 256, // start_index = 512, out of bounds
+            prefix: 256, // out of bounds
             capacity: 4,
         }];
         assert_eq!(
-            build_bucket_sketches(&resident, core::iter::empty, &requests),
+            build_bucket_sketches(&sorted_h64, &requests),
             Err(AlgebraicError::InvalidBucketIndex)
         );
     }
@@ -411,9 +361,7 @@ mod tests {
     #[test]
     fn test_build_bucket_sketches_depth_0_slow_path() {
         use crate::reconcile::triage::BucketRequest;
-        let mut resident = ResidentKernel::new();
         let h1 = ElementHash::from_matrix_event_id("$1", EventIdFormat::Legacy).unwrap();
-        resident.insert(h1).unwrap();
 
         let requests = [BucketRequest {
             depth: 0,
@@ -421,9 +369,8 @@ mod tests {
             capacity: 10, // > 8 forces the slow path
         }];
 
-        let elements = vec![h1];
-        let sketches =
-            build_bucket_sketches(&resident, || elements.into_iter(), &requests).unwrap();
+        let sorted_h64 = vec![h1.h64];
+        let sketches = build_bucket_sketches(&sorted_h64, &requests).unwrap();
 
         assert_eq!(sketches.len(), 1);
         let roots = sketches[0].clone().decode_elements(10).unwrap();

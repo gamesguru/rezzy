@@ -8,7 +8,6 @@
 use super::resident::{ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
 use super::triage::{
     BucketDecodeBatch, BucketRequest, MAX_BUCKET_SKETCH_CAPACITY, MAX_BUCKETED_SKETCH_CAPACITY,
-    estimate_delta,
 };
 use super::{AlgebraicError, ElementHash, MAX_LOCAL_SKETCH_DECODE_CAPACITY, SyndromeSketch};
 
@@ -99,10 +98,11 @@ impl ReconciliationClient {
             .accumulator()
             .known_event_count()
             .abs_diff(remote.known_event_count);
-        let estimated_delta = estimate_delta(local.strata(), &remote.strata)
-            .unwrap_or(None)
-            .unwrap_or(count_delta)
-            .max(count_delta);
+        let estimated_delta =
+            crate::reconcile::triage::estimate_delta(local.strata(), &remote.strata)
+                .unwrap_or(None)
+                .unwrap_or(count_delta)
+                .max(count_delta);
 
         let gate_threshold =
             u64::try_from(MAX_RECONCILIATION_ROUNDS * MAX_BUCKETED_SKETCH_CAPACITY)
