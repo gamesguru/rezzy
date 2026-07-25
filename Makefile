@@ -16,6 +16,7 @@ LINT_LOCS_SH = $$(git ls-files '*.sh')
 .PHONY: format
 format: ##H Format codebase (Rust + Lean + scripts)
 	-prettier -w .
+	-markdownlint $$(git ls-files '*.md')
 	-pre-commit run --all-files
 	-black $(LINT_LOCS_PY)
 	-isort $(LINT_LOCS_PY)

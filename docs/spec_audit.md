@@ -4,11 +4,16 @@ Cross-version compliance audit of rezzy's `check_auth` against the Matrix spec
 authorization rules. Three distinct rule sets exist:
 
 - **v1**: Room versions 1–2 (`v1-auth-rules.txt`)
-- **v3**: Room versions 3–7 (`v3-auth-rules.txt`) — removes `m.room.aliases`, removes `m.room.redaction` auth rule
-- **v8**: Room versions 8–11 (`v8-auth-rules.txt`) — adds knock, restricted joins, `join_authorised_via_users_server`
-- **v12**: Room version 12 (`v12.txt`) — removes `m.room.create` from auth_events, adds creators, adds knock_restricted to knock rule, PL validation changes
+- **v3**: Room versions 3–7 (`v3-auth-rules.txt`) — removes `m.room.aliases`,
+  removes `m.room.redaction` auth rule
+- **v8**: Room versions 8–11 (`v8-auth-rules.txt`) — adds knock, restricted joins,
+  `join_authorised_via_users_server`
+- **v12**: Room version 12 (`v12.txt`) — removes `m.room.create` from auth_events,
+  adds creators, adds knock_restricted to knock rule, PL validation changes
 
 ## Auth Rule Compliance Matrix
+
+<!-- markdownlint-disable MD013 -->
 
 | #          | Rule                                                                                 | Versions | rezzy | Notes                                                        |
 | ---------- | ------------------------------------------------------------------------------------ | -------- | ----- | ------------------------------------------------------------ |
@@ -35,7 +40,11 @@ authorization rules. Three distinct rule sets exist:
 | 11 (V1–V2) | **m.room.redaction**: PL ≥ redact level, or same domain                              | V1–V2    | [ ]   | Not checked                                                  |
 | 11         | Otherwise, allow                                                                     | V3+      | [x]   | Implicit                                                     |
 
+<!-- markdownlint-enable MD013 -->
+
 ## m.room.member Rules
+
+<!-- markdownlint-disable MD013 -->
 
 | #     | Sub-rule                                                         | Versions | rezzy | Notes                                                 |
 | ----- | ---------------------------------------------------------------- | -------- | ----- | ----------------------------------------------------- |
@@ -66,7 +75,11 @@ authorization rules. Three distinct rule sets exist:
 | 5.7.3 | **knock**: allow if NOT ban/invite/join                          | V7+      | [x]   | `check_knock_rules`                                   |
 | 5.8   | Unknown membership: reject                                       | all      | [x]   | `InvalidSyntax` — was `_ => {}`, now rejects          |
 
+<!-- markdownlint-enable MD013 -->
+
 ## m.room.power_levels Validation (Rule 10)
+
+<!-- markdownlint-disable MD013 -->
 
 | #     | Sub-rule                                                      | Versions | rezzy | Notes                                                |
 | ----- | ------------------------------------------------------------- | -------- | ----- | ---------------------------------------------------- |
@@ -81,6 +94,40 @@ authorization rules. Three distinct rule sets exist:
 | 10.9  | Validate `users` removals/changes                             | all      | [x]   | Users map diff — old value >= sender PL rejected     |
 | 10.10 | Validate `users` additions                                    | all      | [x]   | Users map diff — new value > sender PL rejected      |
 
+<!-- markdownlint-enable MD013 -->
+
+## Redaction Algorithm (`redaction_preserved_keys`)
+
+<!-- markdownlint-disable MD013 -->
+
+| Event type                  | Versions | rezzy | Notes                                                                                                                 |
+| --------------------------- | -------- | ----- | --------------------------------------------------------------------------------------------------------------------- |
+| `m.room.create`             | all      | [x]   | v11+: whole event dropped; v1–v10: preserves `creator`                                                                |
+| `m.room.member`             | all      | [x]   | v11+ adds `third_party_invite.signed`; v9+ adds `join_authorised_via_users_server`; v1–v8 preserves `membership` only |
+| `m.room.power_levels`       | all      | [x]   | v11+ adds `invite` to preserved keys                                                                                  |
+| `m.room.join_rules`         | all      | [x]   | v9+ adds `allow`                                                                                                      |
+| `m.room.history_visibility` | all      | [x]   | preserves `history_visibility`                                                                                        |
+| `m.room.aliases`            | V1–V5    | [x]   | preserves `aliases`; removed entirely v6+ (`RedactionRule::None`)                                                     |
+| `m.room.redaction`          | V11+     | [x]   | preserves `redacts` (moved into `content` in v11); none pre-v11                                                       |
+| Unrecognized `room_version` | —        | [x]   | Fails closed: `RedactionRule::None` rather than guessing a fallback rule set                                          |
+
+<!-- markdownlint-enable MD013 -->
+
+## PDU Syntactic Invariants (`validate_syntactic`)
+
+<!-- markdownlint-disable MD013 -->
+
+| Check                                                             | Versions | rezzy | Notes                                                         |
+| ----------------------------------------------------------------- | -------- | ----- | ------------------------------------------------------------- |
+| `event_id` must be `$`-prefixed                                   | all      | [x]   | `InvalidSyntax`                                               |
+| `sender` MXID localpart charset                                   | all      | [x]   | Added this session                                            |
+| `depth` bounds (`MAX_SAFE_JSON_INTEGER`)                          | all      | [x]   | 2^53−1 accepted as valid ceiling                              |
+| 255-byte hard limit: `event_id`/`sender`/`event_type`/`state_key` | V11+     | [x]   | Synapse parity (`strict_event_byte_limits_room_versions`)     |
+| 255-byte limit pre-v11                                            | V1–V10   | [~]   | Warn only (`eprintln!`, `std` feature only), never hard-fails |
+| Reject unrecognised `content.room_version`                        | all      | [ ]   | Still not checked — same gap as audit rule 1.3 below          |
+
+<!-- markdownlint-enable MD013 -->
+
 ## Key Gaps (Prioritized)
 
 ### Critical (affects authorization correctness)
@@ -93,15 +140,21 @@ authorization rules. Three distinct rule sets exist:
 
 ### Medium (federation/integrity concerns, not core auth)
 
-5. **Rule 2.x**: auth_events validation (duplicates, wrong types, wrong room_id)
-6. **Rule 3**: `m.federate` enforcement
-7. **Rule 1.2–1.4**: m.room.create content validation
-8. ~~**Rule 5.1**: Missing state_key/membership presence check~~ — FIXED
+1. **Rule 1.2 / 3 / 4**: no domain-parsing utility, so room_id↔sender domain
+   match, `m.federate`, and `m.room.aliases` domain checks are unimplemented.
+2. **Rule 1.3**: unrecognised `content.room_version` not rejected (also the
+   one open row in the PDU Syntactic Invariants table above).
+3. **Rule 1.4**: missing `creator` / invalid `additional_creators` on
+   `m.room.create` not checked.
+4. **Rule 2.1 / 2.3 / 2.4**: `auth_events` duplicate-pair, rejected-ancestor,
+   and missing-`m.room.create` checks — 2.3 needs rejected-event tracking
+   rezzy doesn't have.
+5. ~~**Rule 5.1**: Missing state_key/membership presence check~~ — FIXED
 
 ### Low (version-specific, rarely triggered)
 
-9. **Rule 4 (V1–V7)**: `m.room.aliases` validation (deprecated)
-10. **Rule 11 (V1–V2)**: `m.room.redaction` auth rule (obsolete)
+1. **Rule 4 (V1–V7)** and **Rule 11 (V1–V2)**: `m.room.aliases` validation
+   and the `m.room.redaction` auth rule — both obsolete rule sets.
 
 ## Notes
 

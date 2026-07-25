@@ -1,5 +1,54 @@
 7/25/2026
 
+All rows have 7 columns consistently — CSV is valid. Not staging/committing since the user didn't say "commit."
+
+  Ran 4 shell commands
+
+Docs are updated (staged already, it looks like a hook/linter reformatted the tables for alignment — cosmetic only, content intact). Here's what's left, unchanged from before:
+
+Added:
+- docs/spec_coverage.csv: rows for MSC0501 (PinSketch gossip reconciliation, full/pure-CPU-core), the redaction redaction_preserved_keys matrix (full), and PDU syntactic invariants (partial).
+- docs/spec_audit.md: new "Redaction Algorithm" table (8 rows, all [x]) and "PDU Syntactic Invariants" table (6 rows, mostly [x], one [~] warn-only, one [ ]).
+
+Still open (nothing new found, same gaps as before, now just properly indexed):
+
+Critical/Medium — auth rules:
+- Rule 1.2/2.5/3/4: domain parsing (room_id↔sender match, m.federate, m.room.aliases domain check) — rezzy has no domain-parsing utility at all.
+- Rule 1.3: reject unrecognised content.room_version — same gap shows up in the new PDU-invariantsyntactic doesn't check it either.
+- Rule 1.4: m.room.create missing creator/invalid additional_creators.
+- Rule 2.1/2.3/2.4: auth_events duplicate-pair, rejected-ancestor, and missing-create checks (2.3 g, which is homeserver state rezzy doesn't have).
+
+Low priority:
+- Rule 4 (v1–v7 m.room.aliases) and rule 11 (v1–v2 redaction PL/domain check) — both obsolete rule
+
+MSC0501-specific (from TODO.txt, not a correctness gap):
+- Two un-squashed fixup commits pending rebase before merge.
+- Homeserver HTTP route integration (/_matrix/federation/v1/reconcile/...) is explicitly out of se.
+
+No new spec violations turned up beyond what was already tracked — this was a coverage gap in thein the code.
+  ❯ src/reconcile/0501-federation-room-gossip-reconciliation.md 132ms (unchanged)
+    markdownlint $(git ls-files '*.md')
+  ❯ src/reconcile/0501-federation-room-gossip-reconciliation.md 132ms (unchanged)
+    markdownlint $(git ls-files '*.md')
+  ❯ src/reconcile/0501-federation-room-gossip-reconciliation.md 132ms (unchanged)
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Good — that confirms it. docs/spec_coverage.csv and docs/spec_audit.md haven't been touched since commit 3caa4ca, but a lot has landed since then that they don't reflect:
+
+Not tracked in the docs at all:
+- MSC0501/MSC45xx PDU set reconciliation via PinSketch (0c7cca2) — a whole new gossip-reconciliation subsystem, no CSV row.
+- Redaction rules matrix (redaction_preserved_keys across room versions 1–11+, ab60e5a/earlier commits) — spec_audit.md only mentions redaction in the auth-rule context (rule 11, obsolete), not the actual event-redaction key-preservation matrix.
+- PDU syntactic invariants (d6fd27b, 9ce24c1) — $-prefix event ID rules, MXID localpart charset validation, version-gated 255-byte length limits, depth bounds via MAX_SAFE_JSON_INTEGER. None of this maps to a spec_audit.md row; it's closest to audit rule 1.3 ("reject unrecognised content.room_version" — still [ ]) and arguably new ground the audit doesn't have categories for (PDU-level syntax vs. auth rules).
+- event_hash trait method for non-string ID backends (9f64774) — internal, probably doesn't need a spec row.
+- LtHash loop optimization / streaming cycle-error handling (ab60e5a) — implementation detail, not spec-relevant, fine to leave untracked.
+
+No new violations beyond what's already flagged — the audit's existing gap list (rules 1.2–1.4 domain/room_version/creator checks, 2.x auth_events validation, rule 3 m.federate, rule 4 aliases, rule 11 v1–v2 redaction-PL) is still accurate for what it covers. The issue is coverage, not correctness: the two tracking files are about 5 feature commits stale and missing entries for two entire subsystems (PinSketch reconciliation, redaction matrix) plus the PDU syntactic-validation work from this session.
+
+Want me to update docs/spec_coverage.csv and docs/spec_audit.md to add rows for MSC0501, the redaction matrix, and the PDU syntactic checks?
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
   Here is the status of the repository and the current branch (feat/msc45xx-pdu-set-reconciliation-via-pinsketch).
   ──────
   ### 1. Current Branch: feat/msc45xx-pdu-set-reconciliation-via-pinsketch
