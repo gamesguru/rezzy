@@ -41,6 +41,12 @@ pub trait ForwardGraph<Id: EventId> {
     /// MSC0501 strictly requires that rejected events are included.
     fn is_known(&self, id: &Id) -> bool;
 
+    /// Returns the string representation of an event ID if available without allocation.
+    /// Defaults to `None`, falling back to `Display::to_string`.
+    fn event_id_str<'a>(&'a self, _id: &'a Id) -> Option<&'a str> {
+        None
+    }
+
     /// Returns the event ID format for a given known event, used to compute
     /// its algebraic digest.
     ///
@@ -58,25 +64,20 @@ pub trait ForwardGraph<Id: EventId> {
 /// precede the anchor, such as pre-join history, are excluded.
 ///
 /// # Errors
-/// Returns an error if any of the descendant event IDs fail to hash properly.
-pub fn compute_frame_digest<Id, Graph>(
-    graph: &Graph,
-    frame_event_ids: &[Id],
-) -> Result<RoomAccumulator, AlgebraicError>
-where
-    Id: EventId,
-    Graph: ForwardGraph<Id>,
-{
+/// Returns an error if any frame event IDs violate format rules or element
+/// hashing limits.
+pub fn compute_frame_digest<Id: EventId, G: ForwardGraph<Id>>(
+    graph: &G,
+    frame_anchors: &[Id],
+) -> Result<RoomAccumulator, AlgebraicError> {
     let mut accumulator = RoomAccumulator::new();
     let mut queue = VecDeque::new();
     let mut visited = BTreeSet::new();
 
-    // Push frame anchor events as the starting boundary.
-    for anchor in frame_event_ids {
+    // Initialize traversal frontier from the frame anchor antichain
+    for anchor in frame_anchors {
         if graph.is_known(anchor) {
             queue.push_back(anchor.clone());
-            // Mark anchors as visited so we do not re-traverse or digest them
-            // if they are somehow referenced as children elsewhere.
             visited.insert(anchor.clone());
         }
     }
@@ -89,7 +90,10 @@ where
                 // CAUTION: The graph implementation must correctly yield
                 // the EventIdFormat even for rejected tombstones.
                 let format = graph.event_format(child);
-                let hash = ElementHash::from_matrix_event_id(&child.to_string(), format)?;
+                let hash = match graph.event_id_str(child) {
+                    Some(s) => ElementHash::from_matrix_event_id(s, format)?,
+                    None => ElementHash::from_matrix_event_id(&child.to_string(), format)?,
+                };
 
                 accumulator.insert(hash)?;
                 queue.push_back(child.clone());

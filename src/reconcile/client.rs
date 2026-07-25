@@ -99,10 +99,11 @@ impl ReconciliationClient {
             .known_event_count()
             .abs_diff(remote.known_event_count);
         let estimated_delta =
-            crate::reconcile::triage::estimate_delta(local.strata(), &remote.strata)
-                .unwrap_or(None)
-                .unwrap_or(count_delta)
-                .max(count_delta);
+            match crate::reconcile::triage::estimate_delta(local.strata(), &remote.strata) {
+                Ok(Some(value)) => value.max(count_delta),
+                Ok(None) => count_delta,
+                Err(_) => return ClientAction::ExtremityDiff,
+            };
 
         let gate_threshold =
             u64::try_from(MAX_RECONCILIATION_ROUNDS * MAX_BUCKETED_SKETCH_CAPACITY)
