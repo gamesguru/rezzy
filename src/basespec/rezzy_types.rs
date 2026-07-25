@@ -131,7 +131,7 @@ pub enum RedactionRule {
 }
 
 /// Returns the redaction rule for an event type according to the specified
-/// Matrix room version (v1 through v11+).
+/// Matrix room version (v1 through v11). Unknown/malformed versions fail closed.
 #[must_use]
 pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> RedactionRule {
     // Explicitly recognized room versions only: an unsupported or malformed
@@ -215,7 +215,7 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> Redacti
                 RedactionRule::None // removed starting with v6-redactions.txt
             }
         }
-        "m.room.redaction" => {
+        crate::basespec::event_types::M_ROOM_REDACTION => {
             if ver_num >= 11 {
                 RedactionRule::Keys(&["redacts"]) // `redacts` only moved into `content` in v11+
             } else {

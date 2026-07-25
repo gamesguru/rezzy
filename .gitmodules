@@ -6,3 +6,4 @@
 [submodule "spec"]
 	path = spec
 	url = https://github.com/wombat-foundation/matrix-spec.git
+	update = none

@@ -143,7 +143,6 @@ impl LtHash {
     }
 
     /// Add a seed into the hash (insert).
-    /// Add a seed into the hash (insert).
     #[inline]
     fn add_seed(&mut self, seed: &Self) {
         // Process in 8-lane chunks to assist SIMD auto-vectorization

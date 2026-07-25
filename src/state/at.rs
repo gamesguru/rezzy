@@ -2099,8 +2099,7 @@ where
 ///
 /// Returns `true` if the graph traversal completed successfully, or `false` if a cycle
 /// was detected in the reachable subgraph.
-#[must_use = "a `false` return means a cycle was detected and results are incomplete; \
-              silently discarding it defeats the purpose of cycle detection"]
+#[must_use = "a `false` return means a cycle was detected and results are incomplete; silently discarding it defeats the purpose of cycle detection"]
 pub fn compute_state_at_streaming_optimized<Id, C, Q, S, F>(
     target_event_ids: &[&Q],
     events_map: &HashMap<Id, LeanEvent<Id, C>, S>,
