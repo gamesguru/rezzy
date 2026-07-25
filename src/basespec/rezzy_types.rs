@@ -954,6 +954,13 @@ pub trait EventContent: Clone + core::fmt::Debug + Default {
     }
     /// Specific to V12+ rooms.
     fn has_additional_creator(&self, sender: &str) -> bool;
+    /// Returns `true` if `additional_creators` is absent, or present as an
+    /// array of strings each passing the same MXID grammar as `sender`
+    /// (rule 1.4, V12+). Defaults to permissive (`true`) for content types
+    /// that don't expose the raw array.
+    fn additional_creators_are_valid(&self) -> bool {
+        true
+    }
     /// Returns the `join_authorised_via_users_server` field, if present.
     /// Used for `restricted`/`knock_restricted` join rules (room version 8+).
     fn get_join_authorised_via_users_server(&self) -> Option<&str>;
@@ -1165,6 +1172,16 @@ impl EventContent for Value {
             .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(sender)))
     }
 
+    fn additional_creators_are_valid(&self) -> bool {
+        match self.get(crate::basespec::event_types::FIELD_ADDITIONAL_CREATORS) {
+            None => true,
+            Some(v) => v.as_array().is_some_and(|arr| {
+                arr.iter()
+                    .all(|entry| entry.as_str().is_some_and(is_valid_mxid))
+            }),
+        }
+    }
+
     fn get_join_authorised_via_users_server(&self) -> Option<&str> {
         self.get(crate::basespec::event_types::FIELD_JOIN_AUTHORISED_VIA_USERS_SERVER)?
             .as_str()
@@ -1342,6 +1359,25 @@ fn room_version_is_v11_or_later(room_version: &str) -> bool {
         .is_some_and(|major| major >= 11)
 }
 
+/// Returns `true` if `id` is a syntactically valid Matrix user ID: `@` prefix,
+/// a `:` separating localpart from domain, and a non-empty localpart drawn
+/// from the restricted charset (`a-z`, `0-9`, `.`, `_`, `=`, `-`, `/`, `+`).
+///
+/// Shared by the `sender` check and, for V12+ rooms, `additional_creators`
+/// entries — both are held to the same grammar per MSC4289.
+fn is_valid_mxid(id: &str) -> bool {
+    let Some((localpart, _domain)) = id.strip_prefix('@').and_then(|rest| rest.split_once(':'))
+    else {
+        return false;
+    };
+    !localpart.is_empty()
+        && localpart.bytes().all(|b| {
+            b.is_ascii_lowercase()
+                || b.is_ascii_digit()
+                || matches!(b, b'.' | b'_' | b'=' | b'-' | b'/' | b'+')
+        })
+}
+
 impl<Id, C> LeanEvent<Id, C> {
     /// Validates basic syntactic limits (`prev_events`, `auth_events` array sizes).
     ///
@@ -1397,24 +1433,26 @@ impl<Id, C> LeanEvent<Id, C> {
         if !id_str.is_empty() && !id_str.starts_with('$') {
             return Err("event_id must start with '$'");
         }
-        if !self.sender.is_empty() {
-            let localpart_and_domain = self
-                .sender
-                .strip_prefix('@')
-                .and_then(|rest| rest.split_once(':'));
-            let Some((localpart, _domain)) = localpart_and_domain else {
-                return Err("sender must be a valid MXID starting with '@' and containing ':'");
-            };
-            let localpart_valid = !localpart.is_empty()
-                && localpart.bytes().all(|b| {
-                    b.is_ascii_lowercase()
-                        || b.is_ascii_digit()
-                        || matches!(b, b'.' | b'_' | b'=' | b'-' | b'/' | b'+')
-                });
-            if !localpart_valid {
-                return Err(
-                    "sender localpart must be non-empty and contain only a-z, 0-9, '.', '_', '=', '-', '/', '+'",
-                );
+        if !self.sender.is_empty() && !is_valid_mxid(&self.sender) {
+            return Err(
+                "sender must be a valid MXID: '@' prefix, ':' separator, and a localpart of only a-z, 0-9, '.', '_', '=', '-', '/', '+'",
+            );
+        }
+        // Rule 1.4: pre-v12 m.room.create must declare a `creator`; v12+
+        // instead derives creators from `sender` + `additional_creators`,
+        // and validates any `additional_creators` entries against the same
+        // MXID grammar as `sender`.
+        if self.event_type == crate::basespec::event_types::M_ROOM_CREATE {
+            let is_v12_plus =
+                StateResVersion::from_room_version(room_version).is_some_and(|v| v.is_v2_1_plus());
+            if is_v12_plus {
+                if !self.content.additional_creators_are_valid() {
+                    return Err(
+                        "m.room.create content.additional_creators must be an array of valid MXID strings",
+                    );
+                }
+            } else if self.content.get_creator().is_none() {
+                return Err("m.room.create content must have a 'creator' property");
             }
         }
         if self.depth > MAX_SAFE_JSON_INTEGER {

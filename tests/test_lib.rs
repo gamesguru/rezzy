@@ -3007,22 +3007,52 @@ fn test_types_validate_syntactic() {
     );
     ev.state_key = Some("@alice:example.com".to_string());
     assert!(ev.validate_syntactic("11").is_ok());
+}
 
-    // Test Rule 1.3: m.room.create must not declare an unrecognised
-    // content.room_version.
-    ev.event_type = "m.room.create".to_string();
-    ev.content = serde_json::json!({ "room_version": "999" });
+#[test]
+fn test_types_validate_syntactic_create_rules() {
+    let mut ev: LeanEvent = LeanEvent {
+        event_type: "m.room.create".to_string(),
+        ..Default::default()
+    };
+
+    // Rule 1.3: m.room.create must not declare an unrecognised content.room_version.
+    ev.content = serde_json::json!({ "room_version": "999", "creator": "@alice:example.com" });
     assert_eq!(
         ev.validate_syntactic("11"),
         Err("m.room.create content.room_version is not a recognised room version")
     );
-    ev.content = serde_json::json!({ "room_version": "11" });
+    ev.content = serde_json::json!({ "room_version": "11", "creator": "@alice:example.com" });
     assert!(ev.validate_syntactic("11").is_ok());
-    ev.content = serde_json::json!({});
+    ev.content = serde_json::json!({ "creator": "@alice:example.com" });
     assert!(
         ev.validate_syntactic("11").is_ok(),
         "absent room_version defaults to \"1\" per spec, not rejected"
     );
+
+    // Rule 1.4 (pre-v12): m.room.create must have a `creator` property.
+    ev.content = serde_json::json!({});
+    assert_eq!(
+        ev.validate_syntactic("11"),
+        Err("m.room.create content must have a 'creator' property")
+    );
+    ev.content = serde_json::json!({ "creator": "@alice:example.com" });
+    assert!(ev.validate_syntactic("11").is_ok());
+
+    // Rule 1.4 (v12+): `creator` is no longer required, but any
+    // `additional_creators` entries must pass the same MXID grammar as `sender`.
+    ev.content = serde_json::json!({});
+    assert!(
+        ev.validate_syntactic("12").is_ok(),
+        "v12+ derives creators from sender/additional_creators, not the creator field"
+    );
+    ev.content = serde_json::json!({ "additional_creators": ["@bob:example.com", "not-a-mxid"] });
+    assert_eq!(
+        ev.validate_syntactic("12"),
+        Err("m.room.create content.additional_creators must be an array of valid MXID strings")
+    );
+    ev.content = serde_json::json!({ "additional_creators": ["@bob:example.com"] });
+    assert!(ev.validate_syntactic("12").is_ok());
 }
 
 #[test]

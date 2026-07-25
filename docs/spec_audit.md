@@ -21,8 +21,8 @@ authorization rules. Three distinct rule sets exist:
 | 1.2        | **m.room.create**: `room_id` domain must match `sender` domain                       | V1–V11   | [ ]   | Not checked — rezzy has no domain parsing                                                            |
 | 1.2        | **m.room.create**: reject if event has `room_id` (V12: room_id is event_id with `!`) | V12      | [ ]   | Not checked                                                                                          |
 | 1.3        | **m.room.create**: reject unrecognised `content.room_version`                        | all      | [x]   | `validate_syntactic`, via `StateResVersion::from_room_version`; absent value defaults to v1 per spec |
-| 1.4        | **m.room.create**: reject if no `creator` property in content                        | V1–V11   | [ ]   | Not checked                                                                                          |
-| 1.4        | **m.room.create**: reject invalid `additional_creators`                              | V12      | [ ]   | Not checked                                                                                          |
+| 1.4        | **m.room.create**: reject if no `creator` property in content                        | V1–V11   | [x]   | `validate_syntactic`                                                                                 |
+| 1.4        | **m.room.create**: reject invalid `additional_creators`                              | V12      | [x]   | `validate_syntactic` via `additional_creators_are_valid` / `is_valid_mxid`                           |
 | 2.1        | **auth_events**: reject duplicate (type, state_key) pairs                            | all      | [ ]   | Not checked                                                                                          |
 | 2.2        | **auth_events**: entries must match auth events selection algorithm                  | all      | [~]   | Soft-checked via `warn_unexpected_auth_events` (stderr only)                                         |
 | 2.3        | **auth_events**: reject if any auth event was itself rejected                        | all      | [ ]   | Requires rejected-event tracking                                                                     |
@@ -143,8 +143,8 @@ authorization rules. Three distinct rule sets exist:
 1. **Rule 1.2 / 3 / 4**: no domain-parsing utility, so room_id↔sender domain
    match, `m.federate`, and `m.room.aliases` domain checks are unimplemented.
 2. ~~**Rule 1.3**: unrecognised `content.room_version` not rejected~~ — FIXED
-3. **Rule 1.4**: missing `creator` / invalid `additional_creators` on
-   `m.room.create` not checked.
+3. ~~**Rule 1.4**: missing `creator` / invalid `additional_creators` on
+   `m.room.create` not checked~~ — FIXED
 4. **Rule 2.1 / 2.3 / 2.4**: `auth_events` duplicate-pair, rejected-ancestor,
    and missing-`m.room.create` checks — 2.3 needs rejected-event tracking
    rezzy doesn't have.
