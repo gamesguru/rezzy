@@ -2979,6 +2979,47 @@ fn test_soft_fail_vs_rejected_events_behavior() {
 }
 
 #[test]
+fn test_redaction_preserved_keys_matrix() {
+    use rezzy::basespec::rezzy_types::redaction_preserved_keys;
+
+    // Room version 1 (v1 baseline)
+    assert_eq!(redaction_preserved_keys("m.room.create", "1"), &["creator"]);
+    assert_eq!(
+        redaction_preserved_keys("m.room.member", "1"),
+        &["membership"]
+    );
+    assert_eq!(
+        redaction_preserved_keys("m.room.join_rules", "1"),
+        &["join_rule"]
+    );
+
+    // Room version 9 (adds join_authorised_via_users_server & allow)
+    assert_eq!(
+        redaction_preserved_keys("m.room.member", "9"),
+        &["membership", "join_authorised_via_users_server"]
+    );
+    assert_eq!(
+        redaction_preserved_keys("m.room.join_rules", "9"),
+        &["join_rule", "allow"]
+    );
+
+    // Room version 11 (adds third_party_invite & invite, preserves all create keys)
+    assert_eq!(
+        redaction_preserved_keys("m.room.create", "11"),
+        &[] as &[&str]
+    );
+    assert_eq!(
+        redaction_preserved_keys("m.room.member", "11"),
+        &[
+            "membership",
+            "join_authorised_via_users_server",
+            "third_party_invite"
+        ]
+    );
+    assert!(redaction_preserved_keys("m.room.power_levels", "11").contains(&"invite"));
+}
+
+#[test]
 fn test_types_deserialize_power_level_variants() {
     let json_int =
         r#"{"event_id":"$1","type":"m.room.message","origin_server_ts":1,"power_level":100}"#;
