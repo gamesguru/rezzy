@@ -2916,12 +2916,66 @@ fn test_types_validate_syntactic() {
     assert!(ev.validate_syntactic().is_ok());
 
     ev.event_type = "m.room.message".to_string();
-    ev.prev_events = vec!["a".to_string(); 21];
+    ev.prev_events = vec!["$a".to_string(); 21];
     assert!(ev.validate_syntactic().is_err());
 
     ev.prev_events = vec![];
-    ev.auth_events = vec!["a".to_string(); 11];
+    ev.auth_events = vec!["$a".to_string(); 11];
     assert!(ev.validate_syntactic().is_err());
+
+    // Test event_id format validation (must start with '$' if non-empty)
+    ev.auth_events = vec![];
+    ev.event_id = "invalid_no_dollar".to_string();
+    assert_eq!(ev.validate_syntactic(), Err("event_id must start with '$'"));
+    ev.event_id = "$valid_event_id:example.com".to_string();
+    assert!(ev.validate_syntactic().is_ok());
+
+    // Test sender format validation (must start with '@' and contain ':')
+    ev.sender = "user_without_at:example.com".to_string();
+    assert!(ev.validate_syntactic().is_err());
+    ev.sender = "@user_without_colon".to_string();
+    assert!(ev.validate_syntactic().is_err());
+    ev.sender = "@alice:example.com".to_string();
+    assert!(ev.validate_syntactic().is_ok());
+
+    // Test depth bounds check (< 2^53 - 1)
+    ev.depth = 1u64 << 53;
+    assert_eq!(
+        ev.validate_syntactic(),
+        Err("depth exceeds maximum allowed value")
+    );
+    ev.depth = 100;
+    assert!(ev.validate_syntactic().is_ok());
+}
+
+#[test]
+fn test_soft_fail_vs_rejected_events_behavior() {
+    use rezzy::EventLike;
+
+    let normal_ev: LeanEvent = LeanEvent {
+        event_id: "$normal".to_string(),
+        event_type: "m.room.message".to_string(),
+        sender: "@alice:example.com".to_string(),
+        rejected: false,
+        soft_fail: false,
+        ..Default::default()
+    };
+    let mut soft_fail_ev = normal_ev.clone();
+    soft_fail_ev.event_id = "$soft_failed".to_string();
+    soft_fail_ev.soft_fail = true;
+
+    let mut rejected_ev = normal_ev.clone();
+    rejected_ev.event_id = "$rejected".to_string();
+    rejected_ev.rejected = true;
+
+    // Both soft-failed and rejected events are recognized as invalid for state resolution
+    assert!(!normal_ev.rejected && !normal_ev.soft_fail);
+    assert!(soft_fail_ev.soft_fail && !soft_fail_ev.rejected);
+    assert!(rejected_ev.rejected && !rejected_ev.soft_fail);
+
+    // Verify soft_fail trait getter
+    assert!(!normal_ev.soft_fail());
+    assert!(soft_fail_ev.soft_fail());
 }
 
 #[test]

@@ -1235,9 +1235,10 @@ impl<Id, C> LeanEvent<Id, C> {
     ///
     /// # Errors
     /// Returns an error if the event violates spec invariants (e.g. >20 `prev_events`).
-    pub fn validate_syntactic(&self) -> Result<(), &'static str> {
-        // TODO: Are there any other invariants?
-        // TODO: Validate event_id format/prefix syntax (e.g., starts with '$') once standard room version rules are fully integrated.
+    pub fn validate_syntactic(&self) -> Result<(), &'static str>
+    where
+        Id: core::fmt::Display,
+    {
         if self.prev_events.len() > 20 {
             return Err("prev_events exceeds maximum allowed length of 20");
         }
@@ -1246,6 +1247,17 @@ impl<Id, C> LeanEvent<Id, C> {
         }
         if self.event_type.is_empty() {
             return Err("event_type cannot be empty");
+        }
+        let id_str = alloc::format!("{}", self.event_id);
+        if !id_str.is_empty() && !id_str.starts_with('$') {
+            return Err("event_id must start with '$'");
+        }
+        if !self.sender.is_empty() && (!self.sender.starts_with('@') || !self.sender.contains(':'))
+        {
+            return Err("sender must be a valid MXID starting with '@' and containing ':'");
+        }
+        if self.depth >= (1u64 << 53) - 1 {
+            return Err("depth exceeds maximum allowed value");
         }
 
         Ok(())
