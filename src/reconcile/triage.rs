@@ -200,6 +200,70 @@ mod tests {
     use super::*;
     use crate::reconcile::{ElementHash, ResidentKernel};
 
+    #[test]
+    fn test_validate_bucket_requests_rejects_overlap() {
+        // Correct disjoint requests
+        assert!(
+            validate_bucket_requests(&[BucketRequest {
+                depth: 0,
+                prefix: 0,
+                capacity: 4
+            }])
+            .is_ok()
+        );
+
+        // Nested ranges: depth 0 prefix 0 contains depth 1 prefix 0
+        assert!(
+            validate_bucket_requests(&[
+                BucketRequest {
+                    depth: 0,
+                    prefix: 0,
+                    capacity: 4
+                },
+                BucketRequest {
+                    depth: 1,
+                    prefix: 0,
+                    capacity: 4
+                }
+            ])
+            .is_err()
+        );
+
+        // Unordered ranges
+        assert!(
+            validate_bucket_requests(&[
+                BucketRequest {
+                    depth: 1,
+                    prefix: 1,
+                    capacity: 4
+                },
+                BucketRequest {
+                    depth: 1,
+                    prefix: 0,
+                    capacity: 4
+                }
+            ])
+            .is_err()
+        );
+
+        // Disjoint and ordered
+        assert!(
+            validate_bucket_requests(&[
+                BucketRequest {
+                    depth: 1,
+                    prefix: 0,
+                    capacity: 4
+                },
+                BucketRequest {
+                    depth: 1,
+                    prefix: 1,
+                    capacity: 4
+                }
+            ])
+            .is_ok()
+        );
+    }
+
     fn toggle_stratum(strata: &mut [[u64; STRATUM_CAPACITY]; STRATA_COUNT], value: u64) {
         let event = ElementHash {
             h128: u128::from(value),

@@ -122,6 +122,10 @@ pub fn build_bucket_sketches(
         let mut sketch = SyndromeSketch::new(request.capacity)?;
 
         let shift = 64_u8.saturating_sub(request.depth);
+        // NOTE: this prefix bounds calculation implicitly assumes big-endian semantics
+        // (meaning the `request.prefix` bits align with the most significant bits of the h64 values).
+        // Since `h64` is consistently treated as an integer and sorted numerically, this aligns with
+        // the client's tree traversal.
         let start_h64 = if shift == 64 {
             0
         } else {

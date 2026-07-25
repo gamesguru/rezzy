@@ -28,7 +28,7 @@ pub use algebraic::{
     gf64_mul, verify_residual,
 };
 pub use client::{ClientAction, ReconciliationClient, RemoteDigest};
-pub use resident::{ResidentBucket, ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
+pub use resident::{ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
 pub use server::{ForwardGraph, build_bucket_sketches, compute_frame_digest};
 pub use triage::{
     BucketDecodeBatch, BucketDecodeSuccess, BucketRequest, MAX_BUCKETED_SKETCH_CAPACITY,
