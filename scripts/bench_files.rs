@@ -1,6 +1,6 @@
 use rezzy::reconcile::{
-    ElementHash, EventIdFormat, ReconciliationClient, RemoteDigest, ResidentKernel,
-    build_bucket_sketches,
+    build_bucket_sketches, ElementHash, EventIdFormat, ReconciliationClient, RemoteDigest,
+    ResidentKernel,
 };
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -72,7 +72,7 @@ fn main() {
             let mut failed_buckets: usize = 0;
 
             for (mut remote_sketch, local_sketch) in sketches.into_iter().zip(local_sketches) {
-                remote_sketch.xor(&local_sketch);
+                remote_sketch.xor(&local_sketch).unwrap();
 
                 if let Ok(roots) = remote_sketch.decode_elements(remote_sketch.capacity()) {
                     total_roots = total_roots.saturating_add(roots.len());

@@ -3,8 +3,8 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use rezzy::{
-    BucketRequest, ClientAction, ElementHash, ReconciliationClient, RemoteDigest, ResidentKernel,
-    SyndromeSketch, build_bucket_sketches, decode_bucket_sketches, estimate_delta, gf64_mul,
+    build_bucket_sketches, decode_bucket_sketches, estimate_delta, gf64_mul, BucketRequest,
+    ClientAction, ElementHash, ReconciliationClient, RemoteDigest, ResidentKernel, SyndromeSketch,
 };
 
 fn hash(index: u64) -> ElementHash {
@@ -342,7 +342,7 @@ fn main() {
             let local_sk = build_bucket_sketches(black_box(&local_sorted), &requests).unwrap();
             let mut recovered = 0usize;
             for (mut rs, ls) in remote_sk.into_iter().zip(local_sk) {
-                rs.xor(&ls);
+                rs.xor(&ls).unwrap();
                 if let Ok(roots) = rs.decode_elements(rs.capacity()) {
                     recovered = recovered.saturating_add(roots.len());
                 }

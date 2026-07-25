@@ -15,8 +15,8 @@ use crate::basespec::rezzy_types::EventId;
 use alloc::vec::Vec;
 
 use super::{
-    AlgebraicError, ElementHash, EventIdFormat, RoomAccumulator, algebraic::SyndromeSketch,
-    triage::BucketRequest,
+    algebraic::SyndromeSketch, triage::BucketRequest, AlgebraicError, ElementHash, EventIdFormat,
+    RoomAccumulator,
 };
 
 /// Abstraction for forward traversal through the room DAG.

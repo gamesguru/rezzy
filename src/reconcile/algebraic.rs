@@ -16,16 +16,14 @@
 
 use alloc::{string::String, vec, vec::Vec};
 use base64::{
-    Engine as _,
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+    Engine as _,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
 use sha3::Sha3_256;
 
 pub use super::gf64::mul as gf64_mul;
 
-/// The number of localization buckets in the `algebraic_v1` profile.
-pub const BUCKET_COUNT: usize = 256;
 /// Maximum extraction capacity for an unbucketed `algebraic_v1` sketch.
 pub const MAX_SKETCH_CAPACITY: usize = 64;
 /// Default local extraction limit for CPU-bounded sketch decoding.
@@ -282,10 +280,17 @@ impl SyndromeSketch {
     }
 
     /// Subtracts (XORs) another sketch's coordinates from this one.
-    pub fn xor(&mut self, other: &Self) {
+    ///
+    /// # Errors
+    /// Returns an error when sketch capacities differ.
+    pub fn xor(&mut self, other: &Self) -> Result<(), AlgebraicError> {
+        if self.capacity() != other.capacity() {
+            return Err(AlgebraicError::InvalidSketchLength);
+        }
         for (a, b) in self.coordinates.iter_mut().zip(other.coordinates.iter()) {
             *a ^= b;
         }
+        Ok(())
     }
 
     /// Inserts or removes a short identifier. Both operations are XOR in characteristic two.
@@ -394,15 +399,6 @@ impl SyndromeSketch {
     }
 }
 
-/// One resident localization bucket.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Bucket {
-    pub accumulator: u128,
-    pub count: u32,
-    /// Resident fast-path coordinates s1 through s15 (odd powers only).
-    pub syndromes: [u64; 8],
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,7 +480,7 @@ mod tests {
         right.toggle(2).unwrap();
         right.toggle(3).unwrap();
 
-        left.xor(&right);
+        left.xor(&right).unwrap();
 
         let mut expected = SyndromeSketch::new(4).unwrap();
         expected.toggle(1).unwrap();

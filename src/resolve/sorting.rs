@@ -17,11 +17,11 @@ use alloc::collections::{BinaryHeap, VecDeque};
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
-use crate::HashMap;
-use crate::basespec::event_types::{M_ROOM_POWER_LEVELS, MAX_POWER_LEVEL_RUST};
+use crate::basespec::event_types::{MAX_POWER_LEVEL_RUST, M_ROOM_POWER_LEVELS};
 #[cfg(test)]
 use crate::basespec::rezzy_types::LeanEvent;
 use crate::basespec::rezzy_types::{EventLike, KahnSortResult, SortPriority, StateResVersion};
+use crate::HashMap;
 
 /// Dynamically fetches the sender's power level by inspecting the event's immediate `auth_events`.
 /// Recursive traversal of the auth chain is avoided to prevent bypassing immediate restrictions.

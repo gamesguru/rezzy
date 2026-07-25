@@ -14,12 +14,16 @@ jobs:
   toolchain-checks:
     name: Rust ${{ matrix.rust }} MSRV features
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         rust: ["1.75.0", "1.82.0", "1.85.0"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -49,12 +53,16 @@ jobs:
   all-features:
     name: Rust ${{ matrix.rust }} all features
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         rust: ["1.92.0", "stable", "beta", "nightly"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -81,8 +89,12 @@ jobs:
   checks:
     name: Format, Coverage, and Summary
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

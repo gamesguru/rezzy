@@ -1,5 +1,4 @@
 unstable_features = true
-style_edition = "2024"
 ignore = [
     "ruma/",
     "tests/resolve.rs",   # symlink -> ruma/crates/ruma-state-res/tests/it/resolve.rs

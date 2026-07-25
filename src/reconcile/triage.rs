@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use super::{AlgebraicError, STRATA_COUNT, STRATUM_CAPACITY, SyndromeSketch, pinsketch};
+use super::{pinsketch, AlgebraicError, SyndromeSketch, STRATA_COUNT, STRATUM_CAPACITY};
 
 /// Maximum sum of capacities in one bucketed sketch request.
 pub const MAX_BUCKETED_SKETCH_CAPACITY: usize = 4_096;
@@ -34,7 +34,8 @@ pub struct BucketDecodeSuccess {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketDecodeBatch {
     pub successful_buckets: Vec<BucketDecodeSuccess>,
-    pub failed_buckets: Vec<u32>,
+    /// Each entry is `(depth, prefix)` — the full bucket identifier, not prefix alone.
+    pub failed_buckets: Vec<(u8, u32)>,
 }
 
 /// Estimates the symmetric difference from corresponding strata sketches.
@@ -79,8 +80,9 @@ pub fn estimate_delta(
         return Ok(None);
     }
     let shift = u32::try_from(stratum).map_err(|_| AlgebraicError::CountOverflow)?;
-    let scale = 1_u64.checked_shl(shift).unwrap_or(0);
-    Ok(Some(decoded_tail.saturating_mul(scale)))
+    // saturating_mul overflows to u64::MAX rather than silently collapsing to 0
+    // (which the old checked_shl(shift).unwrap_or(0) scale factor could do).
+    Ok(Some(decoded_tail.saturating_mul(1_u64 << shift)))
 }
 
 /// Parses and independently decodes concatenated residual bucket sketches.
@@ -132,7 +134,9 @@ pub fn decode_bucket_sketches(
                 prefix: request.prefix,
                 roots,
             }),
-            Err(AlgebraicError::DecodeFailure) => failed_buckets.push(request.prefix),
+            Err(AlgebraicError::DecodeFailure) => {
+                failed_buckets.push((request.depth, request.prefix));
+            }
             Err(error) => return Err(error),
         }
     }
@@ -204,65 +208,57 @@ mod tests {
     #[test]
     fn test_validate_bucket_requests_rejects_overlap() {
         // Correct disjoint requests
-        assert!(
-            validate_bucket_requests(&[BucketRequest {
+        assert!(validate_bucket_requests(&[BucketRequest {
+            depth: 0,
+            prefix: 0,
+            capacity: 4
+        }])
+        .is_ok());
+
+        // Nested ranges: depth 0 prefix 0 contains depth 1 prefix 0
+        assert!(validate_bucket_requests(&[
+            BucketRequest {
                 depth: 0,
                 prefix: 0,
                 capacity: 4
-            }])
-            .is_ok()
-        );
-
-        // Nested ranges: depth 0 prefix 0 contains depth 1 prefix 0
-        assert!(
-            validate_bucket_requests(&[
-                BucketRequest {
-                    depth: 0,
-                    prefix: 0,
-                    capacity: 4
-                },
-                BucketRequest {
-                    depth: 1,
-                    prefix: 0,
-                    capacity: 4
-                }
-            ])
-            .is_err()
-        );
+            },
+            BucketRequest {
+                depth: 1,
+                prefix: 0,
+                capacity: 4
+            }
+        ])
+        .is_err());
 
         // Unordered ranges
-        assert!(
-            validate_bucket_requests(&[
-                BucketRequest {
-                    depth: 1,
-                    prefix: 1,
-                    capacity: 4
-                },
-                BucketRequest {
-                    depth: 1,
-                    prefix: 0,
-                    capacity: 4
-                }
-            ])
-            .is_err()
-        );
+        assert!(validate_bucket_requests(&[
+            BucketRequest {
+                depth: 1,
+                prefix: 1,
+                capacity: 4
+            },
+            BucketRequest {
+                depth: 1,
+                prefix: 0,
+                capacity: 4
+            }
+        ])
+        .is_err());
 
         // Disjoint and ordered
-        assert!(
-            validate_bucket_requests(&[
-                BucketRequest {
-                    depth: 1,
-                    prefix: 0,
-                    capacity: 4
-                },
-                BucketRequest {
-                    depth: 1,
-                    prefix: 1,
-                    capacity: 4
-                }
-            ])
-            .is_ok()
-        );
+        assert!(validate_bucket_requests(&[
+            BucketRequest {
+                depth: 1,
+                prefix: 0,
+                capacity: 4
+            },
+            BucketRequest {
+                depth: 1,
+                prefix: 1,
+                capacity: 4
+            }
+        ])
+        .is_ok());
     }
 
     fn toggle_stratum(strata: &mut [[u64; STRATUM_CAPACITY]; STRATA_COUNT], value: u64) {
@@ -340,7 +336,7 @@ mod tests {
                     prefix: 1,
                     roots: vec![7],
                 }],
-                failed_buckets: vec![9],
+                failed_buckets: vec![(8, 9)],
             })
         );
     }

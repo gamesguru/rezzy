@@ -1,10 +1,10 @@
 use base64::{
-    Engine as _,
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
+    Engine as _,
 };
 use rezzy::reconcile::{
-    AlgebraicError, ElementHash, EventIdFormat, MAX_LOCAL_SKETCH_DECODE_CAPACITY,
-    MAX_SKETCH_CAPACITY, RoomAccumulator, SyndromeSketch, verify_residual,
+    verify_residual, AlgebraicError, ElementHash, EventIdFormat, RoomAccumulator, SyndromeSketch,
+    MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_SKETCH_CAPACITY,
 };
 
 fn event_id(bytes: [u8; 32]) -> String {

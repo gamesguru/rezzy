@@ -7,9 +7,9 @@
 
 use super::resident::{ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
 use super::triage::{
-    BucketDecodeBatch, BucketRequest, MAX_BUCKET_SKETCH_CAPACITY, MAX_BUCKETED_SKETCH_CAPACITY,
+    BucketDecodeBatch, BucketRequest, MAX_BUCKETED_SKETCH_CAPACITY, MAX_BUCKET_SKETCH_CAPACITY,
 };
-use super::{AlgebraicError, ElementHash, MAX_LOCAL_SKETCH_DECODE_CAPACITY, SyndromeSketch};
+use super::{AlgebraicError, ElementHash, SyndromeSketch, MAX_LOCAL_SKETCH_DECODE_CAPACITY};
 
 /// Maximum number of rounds allowed for a single reconciliation exchange.
 pub const MAX_RECONCILIATION_ROUNDS: usize = 20;
@@ -188,10 +188,10 @@ impl ReconciliationClient {
         let mut total = 0_usize;
         let mut requests = alloc::vec::Vec::with_capacity(batch.failed_buckets.len());
 
-        for prefix in batch.failed_buckets {
+        for (depth, prefix) in batch.failed_buckets {
             let Some(previous) = previous_requests
                 .iter()
-                .find(|request| request.prefix == prefix)
+                .find(|request| request.prefix == prefix && request.depth == depth)
             else {
                 return ClientAction::ExtremityDiff;
             };
@@ -448,7 +448,7 @@ mod tests {
                 prefix: 1,
                 roots: vec![42],
             }],
-            failed_buckets: vec![2],
+            failed_buckets: vec![(8, 2)],
         };
         let previous = [BucketRequest {
             depth: 8,
@@ -472,7 +472,7 @@ mod tests {
     fn bucket_transition_falls_back_without_panicking() {
         let batch = BucketDecodeBatch {
             successful_buckets: vec![],
-            failed_buckets: vec![3],
+            failed_buckets: vec![(8, 3)],
         };
         assert_eq!(
             ReconciliationClient::transition_bucket_batch(

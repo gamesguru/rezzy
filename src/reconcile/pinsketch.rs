@@ -7,7 +7,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use super::algebraic::{AlgebraicError, gf64_mul};
+use super::algebraic::{gf64_mul, AlgebraicError};
 
 type Polynomial = Vec<u64>;
 
