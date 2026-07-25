@@ -381,4 +381,52 @@ mod tests {
         let roots = sketches[0].clone().decode_elements(4).unwrap();
         assert!(roots.contains(&h1.h64));
     }
+
+    #[test]
+    fn test_build_bucket_sketches_invalid_indices() {
+        use crate::reconcile::triage::BucketRequest;
+        let resident = ResidentKernel::new();
+        
+        let requests = [BucketRequest {
+            depth: 8,
+            prefix: 256, // out of bounds for resident.buckets().len() == 256
+            capacity: 4,
+        }];
+        assert_eq!(
+            build_bucket_sketches(&resident, core::iter::empty, &requests),
+            Err(AlgebraicError::InvalidBucketIndex)
+        );
+
+        let requests = [BucketRequest {
+            depth: 7,
+            prefix: 256, // start_index = 512, out of bounds
+            capacity: 4,
+        }];
+        assert_eq!(
+            build_bucket_sketches(&resident, core::iter::empty, &requests),
+            Err(AlgebraicError::InvalidBucketIndex)
+        );
+    }
+
+    #[test]
+    fn test_build_bucket_sketches_depth_0_slow_path() {
+        use crate::reconcile::triage::BucketRequest;
+        let mut resident = ResidentKernel::new();
+        let h1 = ElementHash::from_matrix_event_id("$1", EventIdFormat::Legacy).unwrap();
+        resident.insert(h1).unwrap();
+
+        let requests = [BucketRequest {
+            depth: 0,
+            prefix: 0,
+            capacity: 10, // > 8 forces the slow path
+        }];
+
+        let elements = vec![h1];
+        let sketches = build_bucket_sketches(&resident, || elements.into_iter(), &requests).unwrap();
+
+        assert_eq!(sketches.len(), 1);
+        let roots = sketches[0].clone().decode_elements(10).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0], h1.h64);
+    }
 }

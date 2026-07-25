@@ -555,4 +555,23 @@ mod tests {
             Err(AlgebraicError::CountUnderflow)
         );
     }
+
+    #[test]
+    fn sketch_xor_modifies_in_place() {
+        let mut left = SyndromeSketch::new(4).unwrap();
+        left.toggle(1).unwrap();
+        left.toggle(2).unwrap();
+
+        let mut right = SyndromeSketch::new(4).unwrap();
+        right.toggle(2).unwrap();
+        right.toggle(3).unwrap();
+
+        left.xor(&right);
+
+        let mut expected = SyndromeSketch::new(4).unwrap();
+        expected.toggle(1).unwrap();
+        expected.toggle(3).unwrap();
+
+        assert_eq!(left, expected);
+    }
 }
