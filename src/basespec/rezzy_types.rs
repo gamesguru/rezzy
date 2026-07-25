@@ -113,10 +113,27 @@ impl StateResVersion {
     }
 }
 
-/// Returns the array of preserved `content` keys for an event type upon redaction
-/// according to the specified Matrix room version (v1 through v11+).
+/// The set of `content` keys preserved for an event type upon redaction.
+///
+/// A flat key list cannot distinguish "preserve everything" from "preserve
+/// nothing" (both would otherwise be represented as an empty slice), so this
+/// is an explicit tri-state. Keys may use a dotted path (e.g.
+/// `"third_party_invite.signed"`) to denote a nested field that survives
+/// redaction even though its parent object does not survive verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RedactionRule {
+    /// No keys in `content` survive redaction.
+    None,
+    /// All of `content` survives redaction untouched (e.g. `m.room.create` in v11+).
+    All,
+    /// Only the listed keys (or dotted nested paths) survive redaction.
+    Keys(&'static [&'static str]),
+}
+
+/// Returns the redaction rule for an event type according to the specified
+/// Matrix room version (v1 through v11+).
 #[must_use]
-pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> &'static [&'static str] {
+pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> RedactionRule {
     // Explicitly recognized room versions only: an unsupported or malformed
     // version ID must NOT silently fall back to v1 rules. Failing closed
     // (preserving nothing) is safer than guessing a permissive rule set.
@@ -132,32 +149,32 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> &'stati
         "9" => 9,
         "10" => 10,
         "11" => 11,
-        _ => return &[],
+        _ => return RedactionRule::None,
     };
     match event_type {
         crate::basespec::event_types::M_ROOM_CREATE => {
             if ver_num >= 11 {
-                &[] // v11+ preserves all keys
+                RedactionRule::All
             } else {
-                &["creator"]
+                RedactionRule::Keys(&["creator"])
             }
         }
         crate::basespec::event_types::M_ROOM_MEMBER => {
             if ver_num >= 11 {
-                &[
+                RedactionRule::Keys(&[
                     "membership",
                     "join_authorised_via_users_server",
-                    "third_party_invite",
-                ]
+                    "third_party_invite.signed",
+                ])
             } else if ver_num >= 9 {
-                &["membership", "join_authorised_via_users_server"]
+                RedactionRule::Keys(&["membership", "join_authorised_via_users_server"])
             } else {
-                &["membership"]
+                RedactionRule::Keys(&["membership"])
             }
         }
         crate::basespec::event_types::M_ROOM_POWER_LEVELS => {
             if ver_num >= 11 {
-                &[
+                RedactionRule::Keys(&[
                     "ban",
                     "events",
                     "events_default",
@@ -167,9 +184,9 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> &'stati
                     "state_default",
                     "users",
                     "users_default",
-                ]
+                ])
             } else {
-                &[
+                RedactionRule::Keys(&[
                     "ban",
                     "events",
                     "events_default",
@@ -178,32 +195,34 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> &'stati
                     "state_default",
                     "users",
                     "users_default",
-                ]
+                ])
             }
         }
         crate::basespec::event_types::M_ROOM_JOIN_RULES => {
             if ver_num >= 9 {
-                &["join_rule", "allow"]
+                RedactionRule::Keys(&["join_rule", "allow"])
             } else {
-                &["join_rule"]
+                RedactionRule::Keys(&["join_rule"])
             }
         }
-        crate::basespec::event_types::M_ROOM_HISTORY_VISIBILITY => &["history_visibility"],
+        crate::basespec::event_types::M_ROOM_HISTORY_VISIBILITY => {
+            RedactionRule::Keys(&["history_visibility"])
+        }
         "m.room.aliases" => {
             if ver_num <= 5 {
-                &["aliases"]
+                RedactionRule::Keys(&["aliases"])
             } else {
-                &[] // removed starting with v6-redactions.txt
+                RedactionRule::None // removed starting with v6-redactions.txt
             }
         }
         "m.room.redaction" => {
             if ver_num >= 11 {
-                &["redacts"] // `redacts` only moved into `content` in v11+
+                RedactionRule::Keys(&["redacts"]) // `redacts` only moved into `content` in v11+
             } else {
-                &[]
+                RedactionRule::None
             }
         }
-        _ => &[],
+        _ => RedactionRule::None,
     }
 }
 

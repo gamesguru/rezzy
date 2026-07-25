@@ -2980,48 +2980,54 @@ fn test_soft_fail_vs_rejected_events_behavior() {
 
 #[test]
 fn test_redaction_preserved_keys_matrix() {
-    use rezzy::basespec::rezzy_types::redaction_preserved_keys;
+    use rezzy::basespec::rezzy_types::{redaction_preserved_keys, RedactionRule};
 
     // Room version 1 (v1 baseline)
-    assert_eq!(redaction_preserved_keys("m.room.create", "1"), &["creator"]);
+    assert_eq!(
+        redaction_preserved_keys("m.room.create", "1"),
+        RedactionRule::Keys(&["creator"])
+    );
     assert_eq!(
         redaction_preserved_keys("m.room.member", "1"),
-        &["membership"]
+        RedactionRule::Keys(&["membership"])
     );
     assert_eq!(
         redaction_preserved_keys("m.room.join_rules", "1"),
-        &["join_rule"]
+        RedactionRule::Keys(&["join_rule"])
     );
 
     // Room version 9 (adds join_authorised_via_users_server & allow)
     assert_eq!(
         redaction_preserved_keys("m.room.member", "9"),
-        &["membership", "join_authorised_via_users_server"]
+        RedactionRule::Keys(&["membership", "join_authorised_via_users_server"])
     );
     assert_eq!(
         redaction_preserved_keys("m.room.join_rules", "9"),
-        &["join_rule", "allow"]
+        RedactionRule::Keys(&["join_rule", "allow"])
     );
 
-    // Room version 11 (adds third_party_invite & invite, preserves all create keys)
+    // Room version 11: m.room.create preserves ALL content, distinct from "no keys"
     assert_eq!(
         redaction_preserved_keys("m.room.create", "11"),
-        &[] as &[&str]
+        RedactionRule::All
     );
     assert_eq!(
         redaction_preserved_keys("m.room.member", "11"),
-        &[
+        RedactionRule::Keys(&[
             "membership",
             "join_authorised_via_users_server",
-            "third_party_invite"
-        ]
+            "third_party_invite.signed"
+        ])
     );
-    assert!(redaction_preserved_keys("m.room.power_levels", "11").contains(&"invite"));
+    assert!(matches!(
+        redaction_preserved_keys("m.room.power_levels", "11"),
+        RedactionRule::Keys(keys) if keys.contains(&"invite")
+    ));
 
     // Pre-v11 power_levels omits invite (only added in v11)
     assert_eq!(
         redaction_preserved_keys("m.room.power_levels", "1"),
-        &[
+        RedactionRule::Keys(&[
             "ban",
             "events",
             "events_default",
@@ -3030,53 +3036,53 @@ fn test_redaction_preserved_keys_matrix() {
             "state_default",
             "users",
             "users_default",
-        ]
+        ])
     );
 
-    // history_visibility and redaction are version-independent
+    // history_visibility and redaction are version-independent / version-gated
     assert_eq!(
         redaction_preserved_keys("m.room.history_visibility", "1"),
-        &["history_visibility"]
+        RedactionRule::Keys(&["history_visibility"])
     );
     // `redacts` only moved into `content` in v11+; earlier versions preserve nothing.
     assert_eq!(
         redaction_preserved_keys("m.room.redaction", "1"),
-        &[] as &[&str]
+        RedactionRule::None
     );
     assert_eq!(
         redaction_preserved_keys("m.room.redaction", "11"),
-        &["redacts"]
+        RedactionRule::Keys(&["redacts"])
     );
 
     // m.room.aliases preserves `aliases` in v1-5, removed from v6 onward.
     assert_eq!(
         redaction_preserved_keys("m.room.aliases", "1"),
-        &["aliases"]
+        RedactionRule::Keys(&["aliases"])
     );
     assert_eq!(
         redaction_preserved_keys("m.room.aliases", "5"),
-        &["aliases"]
+        RedactionRule::Keys(&["aliases"])
     );
     assert_eq!(
         redaction_preserved_keys("m.room.aliases", "6"),
-        &[] as &[&str]
+        RedactionRule::None
     );
 
     // Unknown event type falls through to the default arm
     assert_eq!(
         redaction_preserved_keys("m.room.unknown", "1"),
-        &[] as &[&str]
+        RedactionRule::None
     );
 
     // Unsupported/malformed room versions must fail closed (preserve nothing),
     // never silently fall back to permissive v1 rules.
     assert_eq!(
         redaction_preserved_keys("m.room.power_levels", "not-a-version"),
-        &[] as &[&str]
+        RedactionRule::None
     );
     assert_eq!(
         redaction_preserved_keys("m.room.power_levels", "999"),
-        &[] as &[&str]
+        RedactionRule::None
     );
 }
 
