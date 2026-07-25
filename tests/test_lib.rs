@@ -6060,3 +6060,37 @@ fn test_performance_and_correctness_dense_bifurcations() {
         );
     }
 }
+
+#[test]
+fn test_lean_event_serialize_propagates_write_error() {
+    struct FailingWriter;
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if buf.windows(9).any(|w| w == b"state_key") {
+                return Err(std::io::Error::other("simulated I/O failure"));
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let ev = LeanEvent::<String> {
+        event_id: "$test".into(),
+        event_type: "m.room.message".into(),
+        state_key: Some("x".into()),
+        power_level: 0,
+        sender: "@alice:x.com".into(),
+        origin_server_ts: 1,
+        content: serde_json::json!({}),
+        prev_events: vec![],
+        auth_events: vec![],
+        depth: 1,
+        rejected: false,
+        soft_fail: false,
+    };
+
+    let result = serde_json::to_writer(FailingWriter, &ev);
+    assert!(result.is_err());
+}
