@@ -202,52 +202,90 @@ fn main() {
 
     // -------------------------------------------------------------------------
     // Extraction sweep: confirms O(log N + Δ) scaling of build_bucket_sketches.
-    // Builds a sorted 10M-element h64 index once, then benchmarks extraction at
-    // increasing Δ by requesting proportionally more capacity per bucket.
+    //
+    // Plants exactly BUCKET_CAP (64) elements in each of n_buckets depth-24
+    // prefixes. With N=10M background, ~0.6 background elements land in any
+    // given prefix on average (10M / 2^24), so each bucket extract touches
+    // ~BUCKET_CAP planted elements — isolating cost to Δ, not N.
+    //
+    // Capacities are capped at 64 per bucket (MAX_BUCKET_SKETCH_CAPACITY).
+    // Multiple buckets are used for larger Δ to stay within the limit.
     // -------------------------------------------------------------------------
-    println!("\n--- build_bucket_sketches extraction sweep (N=10M sorted index) ---");
+    println!("\n--- build_bucket_sketches extraction sweep (N=10M, varying Δ) ---");
     {
-        let n: usize = 10_000_000;
-        let mut gen = Xorshift128::new(0xdead_beef_cafe_babe);
-        let mut sorted_h64: Vec<u64> = (0..n).map(|_| gen.next() | 1).collect();
-        sorted_h64.sort_unstable();
+        const DEPTH: u8 = 24;
+        // 64 − DEPTH; the prefix occupies the top DEPTH bits of h64.
+        const HIGH_SHIFT: u32 = 40_u32;
+        // Bottom HIGH_SHIFT bits mask — avoids `(1_u64 << 40) - 1` form.
+        const LOW_MASK: u64 = u64::MAX >> 24_u32;
+        const BUCKET_CAP: usize = 64; // MAX_BUCKET_SKETCH_CAPACITY per bucket
+        const BASE_PREFIX: u32 = 0x00_10_00; // arbitrary 24-bit starting prefix
 
-        // For each Δ, request a single depth-0 bucket covering the full space.
-        // Capacity is set to Δ so the sketch can actually hold the difference.
-        for delta in [64_usize, 512, 4_096, 16_384, 65_536] {
-            let capacity = delta.min(4096); // capped by MAX_BUCKET_SKETCH_CAPACITY
-            let requests = [BucketRequest {
-                depth: 0,
-                prefix: 0,
-                capacity,
-            }];
-            let iterations = if delta <= 512 { 100 } else { 10 };
+        let n: usize = 10_000_000;
+
+        let mut gen = Xorshift128::new(0xdead_beef_cafe_babe);
+
+        // 1, 8, 64 buckets → Δ ≈ 64, 512, 4096 extracted elements.
+        // Aggregate capacity: n_buckets × 64 ≤ 4096 = MAX_BUCKETED_SKETCH_CAPACITY.
+        for n_buckets in [1_usize, 8, 64] {
+            let delta = n_buckets.saturating_mul(BUCKET_CAP);
+            // Consecutive depth-24 prefixes: each covers a disjoint h64 range.
+            let prefixes: Vec<u32> = (0..n_buckets)
+                .map(|i| {
+                    BASE_PREFIX.saturating_add(u32::try_from(i).expect("n_buckets always fits u32"))
+                })
+                .collect();
+
+            let mut h64_index: Vec<u64> = Vec::with_capacity(n);
+
+            // Plant BUCKET_CAP odd-h64 elements in each prefix range.
+            for (&prefix, bucket_i) in prefixes.iter().zip(0_u64..) {
+                for j in 0_u64..BUCKET_CAP as u64 {
+                    let suffix = (gen.next() ^ (bucket_i << 16) ^ j) & LOW_MASK;
+                    h64_index.push((u64::from(prefix) << HIGH_SHIFT) | suffix | 1);
+                }
+            }
+            // Uniform background noise filling the rest of the index.
+            for _ in delta..n {
+                h64_index.push(gen.next() | 1);
+            }
+            h64_index.sort_unstable();
+
+            // One request per bucket, all valid (capacity ≤ 64, aggregate ≤ 4096).
+            let requests: Vec<BucketRequest> = prefixes
+                .iter()
+                .map(|&prefix| BucketRequest {
+                    depth: DEPTH,
+                    prefix,
+                    capacity: BUCKET_CAP,
+                })
+                .collect();
+
+            let iterations: u32 = if n_buckets == 1 { 1000 } else { 100 };
             let elapsed = measure(iterations, || {
-                let _ = black_box(build_bucket_sketches(black_box(&sorted_h64), &requests));
+                let _ = black_box(build_bucket_sketches(black_box(&h64_index), &requests));
             });
-            report(
-                &format!("extract/N=10M cap={capacity}"),
-                iterations,
-                elapsed,
-            );
+            report(&format!("extract/N=10M Δ≈{delta}"), iterations, elapsed);
         }
     }
 
     // -------------------------------------------------------------------------
-    // Full round-trip: triage → build_bucket_sketches → XOR → decode.
-    // Measures end-to-end latency for one reconciliation round at realistic
-    // (N, Δ) workloads. Does NOT include strata estimation (that's above).
+    // Extraction + decode (triage pre-computed).
+    //
+    // `select_action` (which includes strata estimation) is called ONCE outside
+    // the timed loop so that only `build_bucket_sketches` + XOR + `decode` are
+    // measured. This isolates server-side extraction and client-side decode from
+    // the strata-estimation cost already benchmarked above.
     // -------------------------------------------------------------------------
-    println!("\n--- full round-trip: triage → extract → decode ---");
+    println!("\n--- extract + decode (triage pre-computed, N varies) ---");
     for (n, delta) in [
         (10_000_usize, 100_usize),
         (100_000, 1_000),
         (1_000_000, 10_000),
+        (10_000_000, 100_000),
     ] {
         let mut gen = Xorshift128::new(0x1234_5678_abcd_ef00 ^ delta as u64);
-        // Common base
         let base: Vec<ElementHash> = (0..n).map(|_| gen.hash()).collect();
-        // Remote has `delta` extra events local doesn't know about
         let remote_extra: Vec<ElementHash> = (0..delta).map(|_| gen.hash()).collect();
 
         let mut local_kernel = ResidentKernel::new();
@@ -273,31 +311,28 @@ fn main() {
             frame_matches: true,
             has_unknown_extremity: false,
         };
+
+        // Triage runs once outside the timed loop — cost not included.
         let client = ReconciliationClient::default();
+        let ClientAction::BucketSketches { requests, .. } =
+            client.select_action(&local_kernel, remote_digest, 0)
+        else {
+            println!("extract+decode/N={n} Δ={delta}: triage did not yield bucket requests");
+            continue;
+        };
 
-        let elapsed = measure(3, || {
-            // Triage: client decides what to request
-            let action = client.select_action(&local_kernel, remote_digest, 0);
-            let ClientAction::BucketSketches { requests, .. } = action else {
-                return;
-            };
-
-            // Server builds sketches from sorted index
-            let remote_sketches =
-                build_bucket_sketches(black_box(&remote_sorted), &requests).unwrap();
-            let local_sketches =
-                build_bucket_sketches(black_box(&local_sorted), &requests).unwrap();
-
-            // Client XORs and decodes
+        let elapsed = measure(30, || {
+            let remote_sk = build_bucket_sketches(black_box(&remote_sorted), &requests).unwrap();
+            let local_sk = build_bucket_sketches(black_box(&local_sorted), &requests).unwrap();
             let mut recovered = 0usize;
-            for (mut remote_sk, local_sk) in remote_sketches.into_iter().zip(local_sketches) {
-                remote_sk.xor(&local_sk);
-                if let Ok(roots) = remote_sk.decode_elements(remote_sk.capacity()) {
+            for (mut rs, ls) in remote_sk.into_iter().zip(local_sk) {
+                rs.xor(&ls);
+                if let Ok(roots) = rs.decode_elements(rs.capacity()) {
                     recovered = recovered.saturating_add(roots.len());
                 }
             }
             black_box(recovered);
         });
-        report(&format!("roundtrip/N={n} Δ={delta}"), 3, elapsed);
+        report(&format!("extract+decode/N={n} Δ={delta}"), 30, elapsed);
     }
 }
