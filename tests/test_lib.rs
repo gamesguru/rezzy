@@ -4541,6 +4541,10 @@ fn test_event_content_default_trait_methods() {
     assert!(!c.has_non_integer_users_pl(true));
     assert!(!c.has_non_integer_users_pl(false));
     assert!(!c.has_user_in_users("@someone:x"));
+    assert!(
+        c.additional_creators_are_valid(),
+        "default impl is permissive for content types that don't expose the raw array"
+    );
 }
 
 /// Coverage: default `EventVerifier::verify_third_party_invite` (line 369-375).
