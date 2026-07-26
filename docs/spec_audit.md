@@ -161,5 +161,6 @@ authorization rules. Three distinct rule sets exist:
 - **Signature verification**: Rule 5.2 (`join_authorised_via_users_server` signature
   check) is a homeserver networking concern, not a state resolution concern. Correctly
   excluded.
-- **room_id checks**: Rules 2.5 and V12 room_id checks are structurally out of scope as
-  `LeanEvent` omits `room_id` by design (callers filter by room before passing to state res).
+- **room_id checks**: Rules 2.5 and V12 room_id checks are structurally out of
+  scope as `LeanEvent` omits `room_id` by design (callers filter by room before
+  passing to state res).
