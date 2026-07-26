@@ -2916,6 +2916,7 @@ fn test_types_kahn_sort_result_methods() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn test_types_validate_syntactic() {
     let mut ev: LeanEvent = LeanEvent {
         event_id: "$valid_event_id:example.com".to_string(),

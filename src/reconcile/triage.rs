@@ -151,9 +151,19 @@ pub fn decode_bucket_sketches(
 
 /// Validates a list of bucket requests to ensure they adhere to limits and form an antichain.
 ///
-/// Ensures no single request exceeds the per-node extraction limit (`MAX_BUCKET_SKETCH_CAPACITY`),
-/// that the overall extraction respects `MAX_BUCKETED_SKETCH_CAPACITY`, and that the requests
-/// do not overlap (thereby forming an antichain of subsets).
+/// Normatively, the request set MUST be an antichain under the prefix-containment relation.
+/// For two requests `R_i = (d_i, p_i)` and `R_j = (d_j, p_j)`, `R_i` is an ancestor of `R_j`
+/// if and only if `d_i <= d_j` and the `d_i` most-significant bits of `p_j` equal `p_i`.
+/// A receiver MUST reject any request list containing an ancestor/descendant pair before
+/// performing sketch subtraction or field operations.
+///
+/// This function also ensures no single request exceeds the per-node extraction limit
+/// (`MAX_BUCKET_SKETCH_CAPACITY`), that the overall extraction respects
+/// `MAX_BUCKETED_SKETCH_CAPACITY`, and that bucket indices are well-formed.
+///
+/// Implementation note (non-normative): a canonical `O(N log N)` verifier can sort requests
+/// by ascending `depth`, then compare each candidate only against previously validated shallower
+/// requests using the same prefix test. A binary prefix trie can reduce this to `O(N)`.
 ///
 /// # Errors
 /// Returns an error if any capacity or bound constraint is violated, or if the requests
@@ -259,6 +269,25 @@ mod tests {
             }
         ])
         .is_ok());
+    }
+
+    #[test]
+    fn test_validate_bucket_requests_enforces_depth_31_prefix_bounds() {
+        assert!(validate_bucket_requests(&[BucketRequest {
+            depth: 31,
+            prefix: (1_u32 << 31) - 1,
+            capacity: 4,
+        }])
+        .is_ok());
+
+        assert_eq!(
+            validate_bucket_requests(&[BucketRequest {
+                depth: 31,
+                prefix: 1_u32 << 31,
+                capacity: 4,
+            }]),
+            Err(AlgebraicError::InvalidBucketIndex)
+        );
     }
 
     fn toggle_stratum(strata: &mut [[u64; STRATUM_CAPACITY]; STRATA_COUNT], value: u64) {
