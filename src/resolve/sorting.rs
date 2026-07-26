@@ -321,10 +321,8 @@ where
     C: Clone + crate::basespec::rezzy_types::EventContent,
     E: EventLike<Id = Id, Content = C>,
 {
-    // TODO: Thread a persistent cache through callers that invoke build_mainline
-    // repeatedly (e.g., the delta loop in compute_state_at, lattice fold checkpoints).
-    // Currently each call starts with a fresh cache, so the memoization never hits
-    // in production — only the unit test exercises the cache-hit path.
+    // Convenience wrapper: callers that repeatedly query the same DAG should use
+    // `build_mainline_with_cache` and keep the cache alive across calls.
     build_mainline_with_cache(resolved, auth_context, &mut HashMap::new())
 }
 

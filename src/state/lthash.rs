@@ -47,9 +47,9 @@
 /// - **Order independence**: addition is commutative + associative.
 /// - **Cryptographic security**: hard to find set collisions (SVP).
 ///
-/// TODO: `LtHash` is Copy over [u16; 1024] (2KiB). Each `StateUpdate::New/Unchanged`
-/// copies this. Consider boxing or using references in hot rebuild loops if profiling
-/// shows this as a bottleneck.
+/// `LtHash` is `Copy` over `[u16; 1024]` (2 KiB), so `StateUpdate::New/Unchanged`
+/// copies the full value. If profiling shows this is hot, consider boxing or
+/// using references in rebuild loops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LtHash(pub [u16; 1024]);
 

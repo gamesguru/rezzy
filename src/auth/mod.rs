@@ -27,9 +27,9 @@ use core::fmt;
 use crate::basespec::event_types::{
     DEFAULT_PL_BAN, DEFAULT_PL_INVITE, DEFAULT_PL_KICK, DEFAULT_PL_REDACT, FIELD_MEMBERSHIP,
     FIELD_SIGNED, FIELD_THIRD_PARTY_INVITE, FIELD_TOKEN, MEM_BAN, MEM_INVITE, MEM_JOIN, MEM_KNOCK,
-    MEM_LEAVE, M_ROOM_CREATE, M_ROOM_JOIN_RULES, M_ROOM_MEMBER, M_ROOM_POWER_LEVELS,
-    M_ROOM_REDACTION, M_ROOM_THIRD_PARTY_INVITE, RULE_INVITE, RULE_KNOCK, RULE_KNOCK_RESTRICTED,
-    RULE_PUBLIC, RULE_RESTRICTED,
+    MEM_LEAVE, M_EMPTY_STATE_KEY, M_ROOM_CREATE, M_ROOM_JOIN_RULES, M_ROOM_MEMBER,
+    M_ROOM_POWER_LEVELS, M_ROOM_REDACTION, M_ROOM_THIRD_PARTY_INVITE, RULE_INVITE, RULE_KNOCK,
+    RULE_KNOCK_RESTRICTED, RULE_PUBLIC, RULE_RESTRICTED,
 };
 use crate::basespec::rezzy_types::{is_valid_mxid, EventLike, LeanEvent, StateResVersion};
 
@@ -384,12 +384,8 @@ pub fn check_auth_with_context<
 
     // Optional verification pipeline (steps 1-3).
     // Callers pass None during state resolution; Some during PDU receipt.
-    // TODO: different room versions use different hashing algorithms for event IDs:
-    //   - v1-v3: event IDs are opaque (assigned by origin server, no hash verification)
-    //   - v4:    SHA256 reference hash (URL-safe unpadded base64)
-    //   - v5+:   SHA256 reference hash (URL-safe unpadded base64, but with different
-    //            redaction rules affecting which fields are stripped before hashing)
-    //   Pass `version` to the verifier once per-version hashing is supported.
+    // Room-version-specific event ID hashing is delegated to the verifier
+    // implementation; this layer only sequences the checks.
     if let Some(v) = verifier {
         v.verify_event_id_hash(event.event_id())
             .map_err(AuthError::InvalidSyntax)?;
@@ -907,8 +903,8 @@ pub(crate) fn get_redact_power_level<
 >(
     state: &impl StateProvider<Id, C, E>,
 ) -> i64 {
-    // TODO: call chain nested statement. define FIELD_EMPTY_STRING
-    if let Some(pl_event) = state.get_event(M_ROOM_POWER_LEVELS, "") {
+    // The redact level is stored on the room power-level event at the empty state key.
+    if let Some(pl_event) = state.get_event(M_ROOM_POWER_LEVELS, M_EMPTY_STATE_KEY) {
         if let Some(redact) = pl_event.get_redact() {
             return redact;
         }

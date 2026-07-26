@@ -107,7 +107,7 @@ impl<
                     true
                 }
             }
-            // TODO: determine if V2.2 (MSC4242 State DAGs) *does* want this. It may not!
+            // V2.1.1 and V2.2 both gather member and power-level auth context transitively.
             StateResVersion::V2_1_1 | StateResVersion::V2_2 => {
                 (event_type == M_ROOM_POWER_LEVELS && state_key == M_EMPTY_STATE_KEY)
                     || (event_type == M_ROOM_MEMBER)
@@ -350,8 +350,7 @@ where
         {
             update_local_auth(&mut local_auth, aev, current_depth);
 
-            // NOTE: V2.1.1 (Proposed) replaces unbounded DFS with a pure memoized BFS traversal.
-            // Therefore, both V2.1.1 and V2.2 natively gather transitive auth context!
+            // V2.1.1 and V2.2 gather transitive auth context via the memoized BFS traversal.
             // For V2.1 and below, we only check the immediate auth_events.
             if matches!(version, StateResVersion::V2_1_1 | StateResVersion::V2_2) {
                 for parent_id in &aev.auth_events {
@@ -869,7 +868,7 @@ where
 /// - **Space**: `O(V)` for the bitmask map, where each bitmask is a compressed
 ///   roaring bitmap.
 ///
-/// ## **TODO:** Future optimization
+/// ## Future optimization
 ///
 /// With offline preprocessing (binary lifting or Euler tour + sparse table),
 /// repeated LCA queries against the same DAG could be answered in `O(log V)`
