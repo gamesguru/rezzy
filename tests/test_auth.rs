@@ -4377,6 +4377,86 @@ fn test_rule_4_aliases_domain_mismatch_v1_rejected() {
 }
 
 #[test]
+fn test_rule_4_aliases_enforced_v2_through_v5_not_v6_plus() {
+    use rezzy::basespec::event_types::M_ROOM_MEMBER;
+
+    // Room versions 2-5 all resolve to StateResVersion::V2, but Rule 4 must
+    // still be enforced for each of them individually (it's only removed
+    // starting real room version 6, per v6.txt).
+    for room_version in ["2", "3", "4", "5"] {
+        let mut state = RoomState::new();
+        let create_ev = make_event(
+            "$c",
+            M_ROOM_CREATE,
+            Some(""),
+            "@admin:example.com",
+            json!({"room_version": room_version}),
+        );
+        state.insert((M_ROOM_CREATE.into(), String::new()), create_ev);
+        state.insert(
+            (M_ROOM_MEMBER.into(), "@admin:example.com".into()),
+            make_event(
+                "$m",
+                M_ROOM_MEMBER,
+                Some("@admin:example.com"),
+                "@admin:example.com",
+                json!({"membership": "join"}),
+            ),
+        );
+
+        let bad_alias = make_event(
+            "$alias",
+            "m.room.aliases",
+            Some("otherdomain.com"),
+            "@admin:example.com",
+            json!({"aliases": ["#test:otherdomain.com"]}),
+        );
+        let res = check_auth(&bad_alias, &state, StateResVersion::V2, None);
+        assert!(
+            matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("m.room.aliases state_key domain must match")),
+            "room_version {room_version}: alias domain mismatch must be rejected, got {res:?}"
+        );
+    }
+
+    // Room version 6+ removes Rule 4 entirely; a domain mismatch must no
+    // longer be rejected by this check.
+    for room_version in ["6", "7", "10"] {
+        let mut state = RoomState::new();
+        let create_ev = make_event(
+            "$c",
+            M_ROOM_CREATE,
+            Some(""),
+            "@admin:example.com",
+            json!({"room_version": room_version}),
+        );
+        state.insert((M_ROOM_CREATE.into(), String::new()), create_ev);
+        state.insert(
+            (M_ROOM_MEMBER.into(), "@admin:example.com".into()),
+            make_event(
+                "$m",
+                M_ROOM_MEMBER,
+                Some("@admin:example.com"),
+                "@admin:example.com",
+                json!({"membership": "join"}),
+            ),
+        );
+
+        let mismatched_alias = make_event(
+            "$alias",
+            "m.room.aliases",
+            Some("otherdomain.com"),
+            "@admin:example.com",
+            json!({"aliases": ["#test:otherdomain.com"]}),
+        );
+        let res = check_auth(&mismatched_alias, &state, StateResVersion::V2, None);
+        assert!(
+            !matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("m.room.aliases state_key domain must match")),
+            "room_version {room_version}: Rule 4 is removed, domain mismatch must not be rejected by it, got {res:?}"
+        );
+    }
+}
+
+#[test]
 fn test_rule_2_1_duplicate_auth_event_pair_rejected() {
     use rezzy::basespec::event_types::M_ROOM_MEMBER;
     let mut state = RoomState::new();

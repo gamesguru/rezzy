@@ -425,18 +425,29 @@ pub fn check_auth_with_context<
         }
     }
 
-    // Rule 4 (V1–V7): m.room.aliases domain mismatch check
-    if event_type == crate::basespec::event_types::M_ROOM_ALIASES && version == StateResVersion::V1
-    {
-        let Some(state_key) = event.state_key() else {
-            return Err(AuthError::InvalidSyntax(
-                "m.room.aliases event must have a state_key".into(),
-            ));
-        };
-        if !crate::basespec::rezzy_types::domain_matches(state_key, event.sender()) {
-            return Err(AuthError::InvalidSyntax(
-                "m.room.aliases state_key domain must match sender domain".into(),
-            ));
+    // Rule 4 (V1–V5): m.room.aliases domain mismatch check. Removed starting
+    // v6 (v6.txt: "Rule 4 ... is removed"). This must be read from the
+    // m.room.create event's actual `content.room_version` (defaulting to "1"
+    // per spec when absent), not the collapsed `StateResVersion` enum:
+    // `StateResVersion::V2` covers real room versions 2-11 uniformly, so
+    // gating on `version == StateResVersion::V1` would only ever match real
+    // room version "1" and silently skip versions 2-5.
+    if event_type == crate::basespec::event_types::M_ROOM_ALIASES {
+        let room_version = state
+            .get_event(M_ROOM_CREATE, "")
+            .and_then(|create_ev| create_ev.content().get_room_version())
+            .unwrap_or("1");
+        if matches!(room_version, "1" | "2" | "3" | "4" | "5") {
+            let Some(state_key) = event.state_key() else {
+                return Err(AuthError::InvalidSyntax(
+                    "m.room.aliases event must have a state_key".into(),
+                ));
+            };
+            if !crate::basespec::rezzy_types::domain_matches(state_key, event.sender()) {
+                return Err(AuthError::InvalidSyntax(
+                    "m.room.aliases state_key domain must match sender domain".into(),
+                ));
+            }
         }
     }
 

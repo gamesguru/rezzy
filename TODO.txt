@@ -3,13 +3,6 @@ Open items (see docs/spec_audit.md for full compliance matrix)
 Auth rules:
 - Rule 11 (V1-V2): m.room.redaction PL >= redact level, or same-domain check.
   Not implemented (spec_audit.md still lists this as "Not checked").
-- Rule 4 (V1-V5): m.room.aliases domain-mismatch check is gated on
-  `version == StateResVersion::V1` in check_auth (src/auth/mod.rs), but
-  StateResVersion::V1 only maps to real room version "1" -- versions 2-5
-  use StateResVersion::V2 and never hit this check. spec_audit.md currently
-  marks this [x] for V1-V5; needs either a code fix (thread the raw
-  room_version string through, not just the StateResVersion enum) or a doc
-  correction to reflect the real coverage.
 
 MSC0501 (PinSketch gossip reconciliation):
 - Homeserver HTTP route integration (/_matrix/federation/v1/reconcile/...)
