@@ -211,7 +211,7 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> Redacti
         crate::basespec::event_types::M_ROOM_HISTORY_VISIBILITY => {
             RedactionRule::Keys(&["history_visibility"])
         }
-        "m.room.aliases" => {
+        crate::basespec::event_types::M_ROOM_ALIASES => {
             if ver_num <= 5 {
                 RedactionRule::Keys(&["aliases"])
             } else {
