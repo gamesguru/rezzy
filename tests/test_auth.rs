@@ -725,10 +725,10 @@ fn test_auth_chain_rejects_unauthorized() {
     let events = utils::parse_jsonl_events(
         r#"
 {"event_id":"$create","type":"m.room.create","state_key":"","sender":"@alice:x.com","depth":0,"origin_server_ts":1000,"content":{},"prev_events":[],"auth_events":[]}
-{"event_id":"$alice_join","type":"m.room.member","state_key":"@alice:x.com","sender":"@alice:x.com","depth":1,"origin_server_ts":1001,"content":{"membership":"join"},"prev_events":["$create"],"auth_events":["$create"]}
-{"event_id":"$pl","type":"m.room.power_levels","state_key":"","sender":"@alice:x.com","depth":2,"origin_server_ts":1002,"content":{"ban":50,"users":{"@alice:x.com":100}},"prev_events":["$alice_join"],"auth_events":["$create","$alice_join"]}
-{"event_id":"$ban_bob","type":"m.room.member","state_key":"@bob:x.com","sender":"@alice:x.com","depth":3,"origin_server_ts":1003,"content":{"membership":"ban"},"prev_events":["$pl"],"auth_events":["$create","$alice_join","$pl"]}
-{"event_id":"$bob_msg","type":"m.room.message","sender":"@bob:x.com","depth":4,"origin_server_ts":1004,"content":{"body":"I am banned"},"prev_events":["$ban_bob"],"auth_events":["$create"]}
+{"event_id":"$alice_join","type":"m.room.member","state_key":"@alice:x.com","sender":"@alice:x.com","depth":1,"origin_server_ts":1001,"content":{"membership":"join"},"prev_events":["$create"],"auth_events":[]}
+{"event_id":"$pl","type":"m.room.power_levels","state_key":"","sender":"@alice:x.com","depth":2,"origin_server_ts":1002,"content":{"ban":50,"users":{"@alice:x.com":100}},"prev_events":["$alice_join"],"auth_events":["$alice_join"]}
+{"event_id":"$ban_bob","type":"m.room.member","state_key":"@bob:x.com","sender":"@alice:x.com","depth":3,"origin_server_ts":1003,"content":{"membership":"ban"},"prev_events":["$pl"],"auth_events":["$alice_join","$pl"]}
+{"event_id":"$bob_msg","type":"m.room.message","sender":"@bob:x.com","depth":4,"origin_server_ts":1004,"content":{"body":"I am banned"},"prev_events":["$ban_bob"],"auth_events":[]}
     "#,
     );
 
@@ -744,7 +744,7 @@ fn test_auth_chain_rejects_unauthorized() {
     assert_eq!(rejected[0].0, "$bob_msg");
     assert!(
         matches!(rejected[0].1, AuthError::BannedUser { .. }),
-        "Rejection reason must be BannedUser, got: {:?}",
+        "Expected BannedUser error, got: {:?}",
         rejected[0].1
     );
 }
@@ -1120,6 +1120,7 @@ fn test_equal_power_invite_override_allowed() {
 /// if the sender meets `ban_pl`. Previously the kick check ran unconditionally
 /// after the unban check, incorrectly requiring `kick_pl` for unbans.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn test_unban_succeeds_when_kick_pl_exceeds_ban_pl() {
     let mut state = RoomState::new();
 
@@ -4249,4 +4250,391 @@ fn test_auth_types_for_event_join_authorised_via_users_server() {
         StateResVersion::V2_1,
     );
     assert!(types.contains(&("m.room.member".to_string(), "@admin:x.com".to_string())));
+}
+
+#[test]
+fn test_domain_parsing_helpers() {
+    use rezzy::basespec::rezzy_types::{domain_matches, extract_domain};
+    assert_eq!(extract_domain("@alice:example.com"), Some("example.com"));
+    assert_eq!(
+        extract_domain("!room:matrix.org:8448"),
+        Some("matrix.org:8448")
+    );
+    assert_eq!(extract_domain("$ev:foo.bar"), Some("foo.bar"));
+    assert_eq!(extract_domain("example.com"), None);
+
+    assert!(domain_matches("@alice:example.com", "@bob:EXAMPLE.COM"));
+    assert!(domain_matches("example.com", "@bob:example.com"));
+    assert!(!domain_matches("@alice:foo.com", "@bob:bar.com"));
+}
+
+#[test]
+fn test_rule_1_2_create_invalid_sender_domain() {
+    let state = RoomState::new();
+    let create_ev = make_event(
+        "$c",
+        M_ROOM_CREATE,
+        Some(""),
+        "invalid_no_domain",
+        json!({"room_version": "10"}),
+    );
+    let res = check_auth(&create_ev, &state, StateResVersion::V2, None);
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("sender domain is invalid"))
+    );
+}
+
+#[test]
+fn test_rule_3_m_federate_false_cross_domain_rejected() {
+    use rezzy::basespec::event_types::M_ROOM_MEMBER;
+    let mut state = RoomState::new();
+    let create_ev = make_event(
+        "$c",
+        M_ROOM_CREATE,
+        Some(""),
+        "@admin:example.com",
+        json!({"m.federate": false}),
+    );
+    state.insert((M_ROOM_CREATE.into(), String::new()), create_ev);
+
+    let cross_domain_msg = make_event(
+        "$msg",
+        "m.room.message",
+        None,
+        "@evil:otherdomain.com",
+        json!({"body": "hi"}),
+    );
+    let res = check_auth(&cross_domain_msg, &state, StateResVersion::V2, None);
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("m.federate=false")),
+        "Cross-domain event must be rejected when m.federate is false, got {res:?}"
+    );
+
+    let same_domain_join = make_event(
+        "$join",
+        M_ROOM_MEMBER,
+        Some("@bob:example.com"),
+        "@bob:example.com",
+        json!({"membership": "join"}),
+    );
+    // Same domain should pass m.federate check (fails next on PL/state if unjoined, but passes m.federate)
+    let res2 = check_auth(&same_domain_join, &state, StateResVersion::V2, None);
+    assert!(
+        !matches!(res2, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("m.federate=false"))
+    );
+}
+
+#[test]
+fn test_rule_4_aliases_domain_mismatch_v1_rejected() {
+    use rezzy::basespec::event_types::M_ROOM_MEMBER;
+    let mut state = RoomState::new();
+    let create_ev = make_event(
+        "$c",
+        M_ROOM_CREATE,
+        Some(""),
+        "@admin:example.com",
+        json!({"room_version": "1"}),
+    );
+    state.insert((M_ROOM_CREATE.into(), String::new()), create_ev);
+
+    let member_ev = make_event(
+        "$m",
+        M_ROOM_MEMBER,
+        Some("@admin:example.com"),
+        "@admin:example.com",
+        json!({"membership": "join"}),
+    );
+    state.insert(
+        (M_ROOM_MEMBER.into(), "@admin:example.com".into()),
+        member_ev,
+    );
+
+    let bad_alias = make_event(
+        "$alias",
+        "m.room.aliases",
+        Some("otherdomain.com"),
+        "@admin:example.com",
+        json!({"aliases": ["#test:otherdomain.com"]}),
+    );
+    let res = check_auth(&bad_alias, &state, StateResVersion::V1, None);
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("m.room.aliases state_key domain must match")),
+        "Alias event with domain mismatch in V1 must be rejected, got {res:?}"
+    );
+
+    let good_alias = make_event(
+        "$alias2",
+        "m.room.aliases",
+        Some("example.com"),
+        "@admin:example.com",
+        json!({"aliases": ["#test:example.com"]}),
+    );
+    let res_good = check_auth(&good_alias, &state, StateResVersion::V1, None);
+    assert!(
+        res_good.is_ok(),
+        "Matching domain alias event in V1 should be accepted"
+    );
+}
+
+#[test]
+fn test_rule_2_1_duplicate_auth_event_pair_rejected() {
+    use rezzy::basespec::event_types::M_ROOM_MEMBER;
+    let mut state = RoomState::new();
+    let create_ev = make_event(
+        "$c",
+        M_ROOM_CREATE,
+        Some(""),
+        "@admin:example.com",
+        json!({}),
+    );
+    state.insert((M_ROOM_CREATE.into(), String::new()), create_ev.clone());
+
+    let member1 = make_event(
+        "$m1",
+        M_ROOM_MEMBER,
+        Some("@admin:example.com"),
+        "@admin:example.com",
+        json!({"membership": "join"}),
+    );
+    let member2 = make_event(
+        "$m2",
+        M_ROOM_MEMBER,
+        Some("@admin:example.com"),
+        "@admin:example.com",
+        json!({"membership": "join"}),
+    );
+
+    let mut provider = rezzy::HashMap::new();
+    provider.insert("$c".to_string(), create_ev);
+    provider.insert("$m1".to_string(), member1);
+    provider.insert("$m2".to_string(), member2);
+
+    let mut msg = make_event(
+        "$msg",
+        "m.room.message",
+        None,
+        "@admin:example.com",
+        json!({"body": "dup"}),
+    );
+    msg.auth_events = vec!["$c".into(), "$m1".into(), "$m2".into()];
+
+    let res = check_auth_with_context(&msg, &state, StateResVersion::V2, None, Some(&provider));
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("duplicate (type, state_key)")),
+        "Duplicate auth events of same type and state_key must be rejected, got {res:?}"
+    );
+}
+
+#[test]
+fn test_rule_2_2_invalid_auth_event_type_and_v12_create() {
+    let mut state = RoomState::new();
+    let create_ev = make_event(
+        "$c",
+        M_ROOM_CREATE,
+        Some(""),
+        "@admin:example.com",
+        json!({}),
+    );
+    state.insert((M_ROOM_CREATE.into(), String::new()), create_ev.clone());
+
+    let msg_as_auth = make_event(
+        "$invalid_auth",
+        "m.room.message",
+        None,
+        "@admin:example.com",
+        json!({"body": "invalid"}),
+    );
+
+    let mut provider = rezzy::HashMap::new();
+    provider.insert("$c".to_string(), create_ev);
+    provider.insert("$invalid_auth".to_string(), msg_as_auth);
+
+    let mut msg = make_event(
+        "$msg",
+        "m.room.name",
+        Some(""),
+        "@admin:example.com",
+        json!({"name": "test"}),
+    );
+    msg.auth_events = vec!["$c".into(), "$invalid_auth".into()];
+
+    let res = check_auth_with_context(&msg, &state, StateResVersion::V2, None, Some(&provider));
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("unexpected event type in auth_events")),
+        "Unexpected event type in auth_events must be rejected, got {res:?}"
+    );
+
+    // In V12+ (V2_1), referencing m.room.create in auth_events is forbidden
+    let mut msg_v12 = make_event(
+        "$msg2",
+        "m.room.name",
+        Some(""),
+        "@admin:example.com",
+        json!({"name": "test"}),
+    );
+    msg_v12.auth_events = vec!["$c".into()];
+    let res_v12 = check_auth_with_context(
+        &msg_v12,
+        &state,
+        StateResVersion::V2_1,
+        None,
+        Some(&provider),
+    );
+    assert!(
+        matches!(res_v12, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("forbidden in room v12+")),
+        "Referencing m.room.create in v12+ auth_events must be rejected, got {res_v12:?}"
+    );
+}
+
+#[test]
+fn test_rule_2_3_rejected_auth_event() {
+    use rezzy::basespec::event_types::M_ROOM_MEMBER;
+    let mut state = RoomState::new();
+    let create_ev = make_event(
+        "$c",
+        M_ROOM_CREATE,
+        Some(""),
+        "@admin:example.com",
+        json!({}),
+    );
+    state.insert((M_ROOM_CREATE.into(), String::new()), create_ev.clone());
+
+    let mut rejected_member = make_event(
+        "$rej_m",
+        M_ROOM_MEMBER,
+        Some("@bob:example.com"),
+        "@bob:example.com",
+        json!({"membership": "join"}),
+    );
+    rejected_member.rejected = true;
+
+    let mut provider = rezzy::HashMap::new();
+    provider.insert("$c".to_string(), create_ev);
+    provider.insert("$rej_m".to_string(), rejected_member);
+
+    let mut msg = make_event(
+        "$msg",
+        "m.room.message",
+        None,
+        "@bob:example.com",
+        json!({"body": "test"}),
+    );
+    msg.auth_events = vec!["$c".into(), "$rej_m".into()];
+
+    let res = check_auth_with_context(&msg, &state, StateResVersion::V2, None, Some(&provider));
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("was previously rejected")),
+        "Auth check must reject when an auth_event was previously rejected, got {res:?}"
+    );
+}
+
+#[test]
+fn test_rule_2_4_missing_create_in_v1_v11_auth_events() {
+    use rezzy::basespec::event_types::M_ROOM_MEMBER;
+    let mut state = RoomState::new();
+    let create_ev = make_event(
+        "$c",
+        M_ROOM_CREATE,
+        Some(""),
+        "@admin:example.com",
+        json!({}),
+    );
+    state.insert((M_ROOM_CREATE.into(), String::new()), create_ev.clone());
+
+    let member_ev = make_event(
+        "$m",
+        M_ROOM_MEMBER,
+        Some("@admin:example.com"),
+        "@admin:example.com",
+        json!({"membership": "join"}),
+    );
+    state.insert(
+        (M_ROOM_MEMBER.into(), "@admin:example.com".into()),
+        member_ev,
+    );
+
+    let mut provider = rezzy::HashMap::new();
+    provider.insert("$c".to_string(), create_ev);
+
+    let msg_missing_create = make_event(
+        "$msg",
+        "m.room.message",
+        None,
+        "@admin:example.com",
+        json!({"body": "test"}),
+    );
+    let res = check_auth_with_context(
+        &msg_missing_create,
+        &state,
+        StateResVersion::V2,
+        None,
+        Some(&provider),
+    );
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("must contain m.room.create")),
+        "Pre-v12 events missing m.room.create in auth_events must be rejected when auth_context is supplied, got {res:?}"
+    );
+}
+
+#[test]
+fn test_event_content_default_get_m_federate() {
+    use rezzy::basespec::rezzy_types::EventContent;
+
+    #[derive(Clone, Debug, Default)]
+    struct DummyContent;
+
+    impl EventContent for DummyContent {
+        fn get_membership(&self) -> Option<&str> {
+            None
+        }
+        fn get_third_party_invite_token(&self) -> Option<&str> {
+            None
+        }
+        fn get_join_rule(&self) -> Option<&str> {
+            None
+        }
+        fn get_user_power_level(&self, _user: &str) -> Option<i64> {
+            None
+        }
+        fn get_event_power_level(&self, _event_type: &str) -> Option<i64> {
+            None
+        }
+        fn get_users_default(&self) -> Option<i64> {
+            None
+        }
+        fn get_events_default(&self) -> Option<i64> {
+            None
+        }
+        fn get_state_default(&self) -> Option<i64> {
+            None
+        }
+        fn get_ban(&self) -> Option<i64> {
+            None
+        }
+        fn get_kick(&self) -> Option<i64> {
+            None
+        }
+        fn get_invite(&self) -> Option<i64> {
+            None
+        }
+        fn get_redact(&self) -> Option<i64> {
+            None
+        }
+        fn get_creator(&self) -> Option<&str> {
+            None
+        }
+        fn has_additional_creator(&self, _sender: &str) -> bool {
+            false
+        }
+        fn get_join_authorised_via_users_server(&self) -> Option<&str> {
+            None
+        }
+        fn visit_event_power_levels<'a>(&'a self, _: &mut dyn FnMut(&'a str, i64)) {}
+        fn visit_user_power_levels<'a>(&'a self, _: &mut dyn FnMut(&'a str, i64)) {}
+        fn visit_notification_power_levels<'a>(&'a self, _: &mut dyn FnMut(&'a str, i64)) {}
+        fn visit_user_keys<'a>(&'a self, _: &mut dyn FnMut(&'a str)) {}
+    }
+
+    let dummy = DummyContent;
+    assert_eq!(dummy.get_m_federate(), None);
 }

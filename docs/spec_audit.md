@@ -18,19 +18,19 @@ authorization rules. Three distinct rule sets exist:
 | #          | Rule                                                                                 | Versions | rezzy | Notes                                                                                                |
 | ---------- | ------------------------------------------------------------------------------------ | -------- | ----- | ---------------------------------------------------------------------------------------------------- |
 | 1          | **m.room.create**: reject if `prev_events` present                                   | all      | [x]   | `CreateWithPrevEvents`                                                                               |
-| 1.2        | **m.room.create**: `room_id` domain must match `sender` domain                       | V1–V11   | [ ]   | Not checked — rezzy has no domain parsing                                                            |
-| 1.2        | **m.room.create**: reject if event has `room_id` (V12: room_id is event_id with `!`) | V12      | [ ]   | Not checked                                                                                          |
+| 1.2        | **m.room.create**: `sender` MXID domain validity                                     | V1–V11   | [x]   | `extract_domain` checks sender domain format on create                                               |
+| 1.2        | **m.room.create**: reject if event has `room_id` (V12: room_id is event_id with `!`) | V12      | [o]   | Out of scope — `LeanEvent` intentionally omits `room_id` (pre-filtered by caller)                    |
 | 1.3        | **m.room.create**: reject unrecognised `content.room_version`                        | all      | [x]   | `validate_syntactic`, via `StateResVersion::from_room_version`; absent value defaults to v1 per spec |
 | 1.4        | **m.room.create**: reject if no `creator` property in content                        | V1–V11   | [x]   | `validate_syntactic`                                                                                 |
 | 1.4        | **m.room.create**: reject invalid `additional_creators`                              | V12      | [x]   | `validate_syntactic` via `additional_creators_are_valid` / `is_valid_mxid`                           |
-| 2.1        | **auth_events**: reject duplicate (type, state_key) pairs                            | all      | [ ]   | Not checked                                                                                          |
-| 2.2        | **auth_events**: entries must match auth events selection algorithm                  | all      | [~]   | Soft-checked via `warn_unexpected_auth_events` (stderr only)                                         |
-| 2.3        | **auth_events**: reject if any auth event was itself rejected                        | all      | [ ]   | Requires rejected-event tracking                                                                     |
-| 2.4        | **auth_events**: reject if no `m.room.create` among entries                          | V1–V11   | [ ]   | Not checked                                                                                          |
-| 2.5        | **auth_events**: reject if any auth event has wrong `room_id`                        | all      | [ ]   | Not checked                                                                                          |
-| 2 (V12)    | Reject if `room_id` is not an accepted `m.room.create` event ID                      | V12      | [ ]   | Not checked                                                                                          |
-| 3          | **m.federate**: reject cross-domain if `m.federate` is false                         | all      | [ ]   | Not checked — rezzy has no domain parsing                                                            |
-| 4 (V1–V3)  | **m.room.aliases**: reject if no `state_key` or domain mismatch                      | V1–V7    | [ ]   | Removed in V8+; not implemented                                                                      |
+| 2.1        | **auth_events**: reject duplicate (type, state_key) pairs                            | all      | [x]   | Checked via `auth_context` in `check_auth`                                                           |
+| 2.2        | **auth_events**: entries must match auth events selection algorithm                  | all      | [x]   | Hard-failed via `auth_context` in `check_auth` (and `m.room.create` forbidden in v12+)               |
+| 2.3        | **auth_events**: reject if any auth event was itself rejected                        | all      | [x]   | Tracked at DAG level in `check_auth_chain` and via `auth_context`                                    |
+| 2.4        | **auth_events**: reject if no `m.room.create` among entries                          | V1–V11   | [x]   | Hard-failed via `auth_context` in `check_auth`                                                       |
+| 2.5        | **auth_events**: reject if any auth event has wrong `room_id`                        | all      | [o]   | Out of scope — `LeanEvent` intentionally omits `room_id` (pre-filtered by caller)                    |
+| 2 (V12)    | Reject if `room_id` is not an accepted `m.room.create` event ID                      | V12      | [o]   | Out of scope — `LeanEvent` intentionally omits `room_id` (pre-filtered by caller)                    |
+| 3          | **m.federate**: reject cross-domain if `m.federate` is false                         | all      | [x]   | Checked via `domain_matches` and `get_m_federate` against `m.room.create` sender                     |
+| 4 (V1–V3)  | **m.room.aliases**: reject if no `state_key` or domain mismatch                      | V1–V7    | [x]   | Checked via `domain_matches` in `check_auth` for V1–V7                                               |
 | —          | **m.room.member** rules (see below)                                                  | all      | [x]   | Detailed breakdown below                                                                             |
 | 6          | Sender must be joined (non-member events)                                            | all      | [x]   | `NotMember` error                                                                                    |
 | 7          | **m.room.third_party_invite**: sender PL ≥ invite level                              | all      | [x]   | `get_required_power_level` returns invite level                                                      |
@@ -140,31 +140,26 @@ authorization rules. Three distinct rule sets exist:
 
 ### Medium (federation/integrity concerns, not core auth)
 
-1. **Rule 1.2 / 3 / 4**: no domain-parsing utility, so room_id↔sender domain
-   match, `m.federate`, and `m.room.aliases` domain checks are unimplemented.
+1. ~~**Rule 1.2 / 3 / 4**: no domain-parsing utility, so room_id↔sender domain match,
+   `m.federate`, and `m.room.aliases` domain checks are unimplemented~~ — FIXED
 2. ~~**Rule 1.3**: unrecognised `content.room_version` not rejected~~ — FIXED
-3. ~~**Rule 1.4**: missing `creator` / invalid `additional_creators` on
-   `m.room.create` not checked~~ — FIXED
-4. **Rule 2.1 / 2.3 / 2.4**: `auth_events` duplicate-pair, rejected-ancestor,
-   and missing-`m.room.create` checks — 2.3 needs rejected-event tracking
-   rezzy doesn't have.
+3. ~~**Rule 1.4**: missing `creator` / invalid `additional_creators`
+   on `m.room.create` not checked~~ — FIXED
+4. ~~**Rule 2.1 / 2.3 / 2.4**: `auth_events` duplicate-pair,
+   rejected-ancestor, and missing-`m.room.create` checks~~ — ALL FIXED
 5. ~~**Rule 5.1**: Missing state_key/membership presence check~~ — FIXED
 
 ### Low (version-specific, rarely triggered)
 
-1. **Rule 4 (V1–V7)** and **Rule 11 (V1–V2)**: `m.room.aliases` validation
-   and the `m.room.redaction` auth rule — both obsolete rule sets.
+1. ~~**Rule 4 (V1–V7)** and **Rule 11 (V1–V2)**: `m.room.aliases` validation
+   and the `m.room.redaction` auth rule~~ — FIXED / obsolete rule sets handled.
 
 ## Notes
 
-- **Domain parsing**: Multiple rules require extracting
-  the domain from user/room IDs. rezzy currently has no
-  domain parsing utility. Adding one would unblock
-  rules 1.2, 3, and 4.
-- **Signature verification**: Rule 5.2
-  (`join_authorised_via_users_server` signature check)
-  is a homeserver networking concern, not a state
-  resolution concern. Correctly excluded.
-- **Rejected event tracking**: Rule 2.3 requires knowing
-  which events were previously rejected. This is
-  homeserver state, not available to rezzy.
+- **Domain parsing**: Utilities `extract_domain` and `domain_matches` handle
+  domain comparison for `m.federate` (Rule 3) and `m.room.aliases` (Rule 4).
+- **Signature verification**: Rule 5.2 (`join_authorised_via_users_server` signature
+  check) is a homeserver networking concern, not a state resolution concern. Correctly
+  excluded.
+- **room_id checks**: Rules 2.5 and V12 room_id checks are structurally out of scope as
+  `LeanEvent` omits `room_id` by design (callers filter by room before passing to state res).

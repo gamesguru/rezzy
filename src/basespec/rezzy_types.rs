@@ -578,7 +578,7 @@ impl<Id: EventId, C: EventContent> EventLike for LeanEvent<Id, C> {
 ///
 /// // Usage — zero boilerplate, one JSON parse:
 /// let event = rezzy::ParsedEvent::new(&pdu);
-/// rezzy::auth::check_auth(&event, &state, version, None)?;
+/// rezzy::auth::check_auth(&event, &state, version, None, None)?;
 /// ```
 pub trait RawEvent {
     /// The event ID type (e.g. `OwnedEventId`, `String`).
@@ -952,6 +952,10 @@ pub trait EventContent: Clone + core::fmt::Debug + Default {
     fn get_room_version(&self) -> Option<&str> {
         None
     }
+    /// Returns the `m.federate` field from `m.room.create` content, if present.
+    fn get_m_federate(&self) -> Option<bool> {
+        None
+    }
     /// Specific to V12+ rooms.
     fn has_additional_creator(&self, sender: &str) -> bool;
     /// Returns `true` if `additional_creators` is absent, or present as an
@@ -1166,6 +1170,10 @@ impl EventContent for Value {
             .as_str()
     }
 
+    fn get_m_federate(&self) -> Option<bool> {
+        self.get("m.federate")?.as_bool()
+    }
+
     fn has_additional_creator(&self, sender: &str) -> bool {
         self.get(crate::basespec::event_types::FIELD_ADDITIONAL_CREATORS)
             .and_then(|v| v.as_array())
@@ -1376,6 +1384,26 @@ fn is_valid_mxid(id: &str) -> bool {
                 || b.is_ascii_digit()
                 || matches!(b, b'.' | b'_' | b'=' | b'-' | b'/' | b'+')
         })
+}
+
+/// Extracts the domain (server name) portion of a Matrix identifier (e.g. `@user:example.com` -> `example.com`,
+/// `!room:example.com:8448` -> `example.com:8448`).
+///
+/// Returns `None` if there is no `:` in the identifier.
+#[must_use]
+pub fn extract_domain(id: &str) -> Option<&str> {
+    id.split_once(':').map(|(_, domain)| domain)
+}
+
+/// Returns `true` if `id1` and `id2` have matching domains (ASCII case-insensitive match).
+///
+/// If a string lacks a `:` prefix (e.g. `"example.com"` as in `m.room.aliases` state keys),
+/// it is treated directly as the domain.
+#[must_use]
+pub fn domain_matches(id1: &str, id2: &str) -> bool {
+    let d1 = extract_domain(id1).unwrap_or(id1);
+    let d2 = extract_domain(id2).unwrap_or(id2);
+    !d1.is_empty() && !d2.is_empty() && d1.eq_ignore_ascii_case(d2)
 }
 
 impl<Id, C> LeanEvent<Id, C> {

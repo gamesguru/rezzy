@@ -1,5 +1,77 @@
 7/25/2026
 
+❯ is m.federate fully checked/supported now?
+
+  Searched for 1 pattern
+
+No — m.federate is not implemented anywhere in the codebase. It's still the open gap flagged in docs/spec_audit.md (Rule 3): rejecting cross-domain event delivery when content.m.federate is false on the create event. It's blocked on the same missing piece as Rules 1.2 and 4 — rezzy has no domain-parsing utility to extract/compare the domain parts of MXIDs and room IDs, so none of those three rules can be checked yet.
+
+✻ Cogitated for 7s
+
+❯ what about rejection tracking? WHat were the other gaps mentioned? summarize it all and let's re-triage
+
+  Read 1 file
+
+Rule 2.3 — rejected-event tracking
+
+Rule 2.3: reject an event if any of its auth_events were themselves rejected. This needs a rejected-event registry — rezzy would have to know, for an arbitrary event ID, "was this rejected by a prior check_auth call?" That's homeserver-side persistent state (a database of past auth decisions across the whole room history), not something a stateless state-resolution library can determine from the DAG slice it's given. It's arguably out of scope for rezzy entirely rather than a "gap to close" — same category as Rule 5.2 (signature verification), which the doc already excludes as HS-side.
+
+Full remaining-gap summary (current state of docs/spec_audit.md)
+
+Blocked on domain parsing (one shared missing utility unlocks all three):
+- Rule 1.2 — room_id domain must match sender domain (V1–V11); reject if event has room_id at all
+- Rule 3 — m.federate: false should block cross-domain events
+- Rule 4 (V1–V7) — m.room.aliases domain mismatch check (also listed Low-priority since it's an ob
+
+auth_events validation (Rule 2.x), needs resolving full auth-event bodies, not just IDs:
+- 2.1 — reject duplicate (type, state_key) pairs
+- 2.3 — reject if any auth event was itself rejected (homeserver state — likely out of scope, see
+- 2.4 — reject if no m.room.create among entries (V1–V11)
+- 2.5 — reject if any auth event has wrong room_id
+- V12's equivalent: reject if room_id isn't an accepted m.room.create event ID
+
+Soft-checked only:
+- 2.2 — auth_events entries must match the selection algorithm; currently just a stderr warning (w never rejects
+
+Low priority / obsolete rule sets:
+- Rule 11 (V1–V2) — m.room.redaction: PL ≥ redact level, or same domain (also blocked on domain psince it's V1–V2 only)
+
+Everything else in the audit is [x] fixed — rules 1, 1.3, 1.4, 5.1–5.8 (full member matrix), 6, 7redaction matrix and PDU syntactic invariants tables are fully green except the intentional pre-v11 warn-only row.
+
+For re-triage, the real fork in the road is: 2.1/2.4/2.5/V12-room_id are tractable if check_auth's in resolved auth-event bodies (or IDs it can look up) rather than just the event under test —worth checking what data check_auth actually receives today. 1.2/3/4 all wait on a domain-parsing utility, which is a reasonable single unit of work. 2.3 I'd flag as won't-fix / out-of-scope rather than a backlog item, since it requires state rezzy structurally doesn't have.
+
+Want me to check what check_auth's current signature gives it access to, to see whether 2.1/2.4/2hout new plumbing?
+
+
+❯ yes
+
+
+Confirmed and matches the doc's design decision — LeanEvent deliberately has no room_id field, by design (rezzy filters by room_id before calling in). So Rules 2.5 and the V12 room_id rule are structurally out of scope, not just unimplemented — they'd require a field the type intentionally omits.
+
+  Searched for 4 patterns, ran 2 shell commands
+
+Confirmed: warn_unexpected_auth_events is entirely standalone — it's a separate opt-in function callers can invoke themselves, never wired into check_auth's actual Result. That reframes the re-triage significantly.
+
+Good news: 2.1, 2.4, and upgrading 2.2 are all reachable, not blocked. The infrastructure already exists (EventProvider<Id, C> — ID→event lookup, implemented for HashMap) — it's just not plumbed into check_auth. Concretely:
+- Rule 2.2 (auth_events entries must match the selection-algorithm types) — the exact logic already exists in warn_unexpected_auth_events; it just needs to become a hard Err inside check_auth instead of a standalone eprintln! helper.
+- Rule 2.4 (missing m.room.create among entries, V1–V11) — trivially reachable without even needing EventProvider: state.get_event(M_ROOM_CREATE, "") (already available via StateProvider) gives the create event; just check its ID is in event.auth_events().
+- Rule 2.1 (duplicate (type, state_key) pairs) — reachable with EventProvider: resolve each auth_by (type, state_key), reject on collision.
+
+Reframing Rule 2.3 (rejected-ancestor check) — the doc currently says this needs "rejected-event  but check_auth_chain (mod.rs:1300) already accumulates a rejected: Vec<(Id, AuthError)> as it
+walks the DAG. So it's not actually impossible — it's a scope question: check_auth itself (single know this, but check_auth_chain (the multi-event driver) already has the exact data needed and
+could pass a rejected-ID set down. This is "reachable at the chain level," not homeserver-only.
+
+Still structurally blocked (by design, not by missing plumbing):
+- Rule 2.5 and the V12 room_id rule — LeanEvent deliberately omits room_id (explicit doc comment filters by room_id before calling in"). Checking these would mean adding a field the type
+intentionally excludes.
+- Rules 1.2 / 3 / 4 — still blocked on a domain-parsing utility, unrelated to this plumbing question.
+
+The catch for all of 2.1/2.2/2.4: it requires changing check_auth's signature to accept an option EventProvider<Id, C>>, mirroring how verifier: Option<&dyn EventVerifier<Id>> is already optional— a real but contained API change, and every existing call site (including check_auth_chain, whicwn rejected set through for 2.3) needs updating.
+
+Want me to implement this — add the auth_context parameter, hard-fail rules 2.1/2.2/2.4, and thread the rejected-set through check_auth_chain for 2.3?
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 All rows have 7 columns consistently — CSV is valid. Not staging/committing since the user didn't say "commit."
 
   Ran 4 shell commands

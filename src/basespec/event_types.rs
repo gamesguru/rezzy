@@ -19,6 +19,7 @@ pub const M_ROOM_MESSAGE: &str = "m.room.message";
 pub const M_ROOM_REDACTION: &str = "m.room.redaction";
 pub const M_SPACE_CHILD: &str = "m.space.child";
 pub const M_SPACE_PARENT: &str = "m.space.parent";
+pub const M_ROOM_ALIASES: &str = "m.room.aliases";
 
 pub const M_EMPTY_STATE_KEY: &str = "";
 
