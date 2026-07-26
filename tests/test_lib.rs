@@ -794,6 +794,19 @@ mod tests {
     }
 
     #[test]
+    fn test_redacts_top_level_is_promoted_into_content() {
+        let event_json = r#"{
+            "event_id": "$redact",
+            "type": "m.room.redaction",
+            "sender": "@alice:example.com",
+            "content": {},
+            "redacts": "$target:example.com"
+        }"#;
+        let event: LeanEvent = serde_json::from_str(event_json).unwrap();
+        assert_eq!(event.get_redacts(), Some("$target:example.com"));
+    }
+
+    #[test]
     fn test_partial_ord_implementations() {
         let e1: LeanEvent = LeanEvent {
             event_id: "a".into(),

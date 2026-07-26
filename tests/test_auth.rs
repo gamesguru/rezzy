@@ -4509,8 +4509,8 @@ fn test_rule_4_aliases_enforced_v2_through_v5_not_v6_plus() {
         );
         let res = check_auth(&mismatched_alias, &state, StateResVersion::V2, None);
         assert!(
-            !matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("m.room.aliases state_key domain must match")),
-            "room_version {room_version}: Rule 4 is removed, domain mismatch must not be rejected by it, got {res:?}"
+            res.is_ok(),
+            "room_version {room_version}: Rule 4 is removed, domain mismatch should be allowed, got {res:?}"
         );
     }
 }

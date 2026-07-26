@@ -130,7 +130,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pre-commit
-          npm install -g prettier markdownlint-cli
+          npm install -g prettier@3.6.2 markdownlint-cli@0.43.0
           cargo install cargo-sort
 
       - name: Format Check

@@ -1685,8 +1685,8 @@ impl<'de> Deserialize<'de> for LeanEvent<String, Value> {
     {
         use crate::basespec::event_types::{
             FIELD_AUTH_EVENTS, FIELD_CONTENT, FIELD_DEPTH, FIELD_EVENT_ID, FIELD_ORIGIN_SERVER_TS,
-            FIELD_POWER_LEVEL, FIELD_PREV_EVENTS, FIELD_REJECTED, FIELD_SENDER, FIELD_SOFT_FAIL,
-            FIELD_STATE_KEY, FIELD_TYPE,
+            FIELD_POWER_LEVEL, FIELD_PREV_EVENTS, FIELD_REDACTS, FIELD_REJECTED, FIELD_SENDER,
+            FIELD_SOFT_FAIL, FIELD_STATE_KEY, FIELD_TYPE, M_ROOM_REDACTION,
         };
 
         let value = Value::deserialize(deserializer)?;
@@ -1769,7 +1769,27 @@ impl<'de> Deserialize<'de> for LeanEvent<String, Value> {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .into();
-        let content = value.get(FIELD_CONTENT).cloned().unwrap_or(Value::Null);
+        let mut content = value.get(FIELD_CONTENT).cloned().unwrap_or(Value::Null);
+
+        if event_type == M_ROOM_REDACTION {
+            if let Some(redacts) = value.get(FIELD_REDACTS).and_then(|v| v.as_str()) {
+                match &mut content {
+                    Value::Object(obj) => {
+                        obj.entry(String::from(FIELD_REDACTS))
+                            .or_insert_with(|| Value::String(String::from(redacts)));
+                    }
+                    Value::Null => {
+                        let mut obj = serde_json::Map::new();
+                        obj.insert(
+                            String::from(FIELD_REDACTS),
+                            Value::String(String::from(redacts)),
+                        );
+                        content = Value::Object(obj);
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         let parse_string_array = |key: &str| -> Vec<String> {
             value
