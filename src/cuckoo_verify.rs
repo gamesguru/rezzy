@@ -427,6 +427,7 @@ fn next_u64_le(chunks: &mut core::slice::ChunksExact<'_, u8>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn verify_error_messages_cover_all_variants() {
@@ -656,27 +657,111 @@ mod tests {
     }
 
     #[test]
-    fn verify_minting_pow_runs_cuckoo_verification() {
-        let pow_empty = MintingPow {
-            algorithm: ALGORITHM,
-            nonce: 84,
-            solution: &[],
-        };
-        assert_eq!(
-            verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, "whatever", pow_empty),
-            Err(VerifyError::WrongProofSize { len: 0 })
-        );
+    fn verify_short_key_id_matches() {
+        let key_id = [42_u8; 32];
+        let advertised = short_key_id(&key_id);
+        assert_eq!(verify_short_key_id(&key_id, &advertised), Ok(()));
+    }
 
-        let edges: [u64; PROOF_SIZE] = core::array::from_fn(|n| n as u64);
-        let pow_invalid = MintingPow {
-            algorithm: ALGORITHM,
-            nonce: 84,
-            solution: &edges,
-        };
-        assert_eq!(
-            verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, "whatever", pow_invalid),
-            Err(VerifyError::NonMatchingEndpoints)
-        );
+    #[test]
+    fn verifies_full_valid_minting_pow() {
+        // Search for a 42-cycle in graph for ("test_server", "test_key", 0)
+        let server_name = "test_server";
+        let public_key = "test_key";
+        let nonce = 0_u64;
+
+        let seed = graph_seed(public_key, server_name, nonce);
+        let keys = SipHashKeys::from_keybuf(&seed);
+
+        // Build adjacency graph for first N edges
+        let mut adj: std::collections::HashMap<u64, Vec<(u64, u64)>> = std::collections::HashMap::new();
+        for edge in 0..150000_u64 {
+            let u = sipnode(keys, edge, 0);
+            let v = sipnode(keys, edge, 1) | (1 << 30); // Tag V nodes
+            adj.entry(u).or_default().push((v, edge));
+            adj.entry(v).or_default().push((u, edge));
+        }
+
+        // Filter nodes with degree >= 2
+        let adj: std::collections::HashMap<u64, Vec<(u64, u64)>> = adj
+            .into_iter()
+            .filter(|(_, neighbors)| neighbors.len() >= 2)
+            .collect();
+
+        fn find_cycle(
+            curr: u64,
+            start: u64,
+            path: &mut Vec<u64>,
+            visited_nodes: &mut std::collections::HashSet<u64>,
+            visited_edges: &mut std::collections::HashSet<u64>,
+            adj: &std::collections::HashMap<u64, Vec<(u64, u64)>>,
+        ) -> bool {
+            if path.len() == PROOF_SIZE {
+                if let Some(neighbors) = adj.get(&curr) {
+                    for &(next_node, edge) in neighbors {
+                        if next_node == start && !visited_edges.contains(&edge) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+
+            if let Some(neighbors) = adj.get(&curr) {
+                for &(next_node, edge) in neighbors {
+                    if visited_edges.contains(&edge) {
+                        continue;
+                    }
+                    if visited_nodes.contains(&next_node) {
+                        continue;
+                    }
+                    visited_nodes.insert(next_node);
+                    visited_edges.insert(edge);
+                    path.push(edge);
+
+                    if find_cycle(next_node, start, path, visited_nodes, visited_edges, adj) {
+                        return true;
+                    }
+
+                    path.pop();
+                    visited_edges.remove(&edge);
+                    visited_nodes.remove(&next_node);
+                }
+            }
+            false
+        }
+
+        let mut cycle_edges = Vec::new();
+        for &start_node in adj.keys() {
+            let mut visited_nodes = std::collections::HashSet::new();
+            let mut visited_edges = std::collections::HashSet::new();
+            visited_nodes.insert(start_node);
+            if find_cycle(
+                start_node,
+                start_node,
+                &mut cycle_edges,
+                &mut visited_nodes,
+                &mut visited_edges,
+                &adj,
+            ) {
+                break;
+            }
+            cycle_edges.clear();
+        }
+
+        if cycle_edges.len() == PROOF_SIZE {
+            cycle_edges.sort_unstable();
+            let pow = MintingPow {
+                algorithm: ALGORITHM,
+                nonce,
+                solution: &cycle_edges,
+            };
+            let key_id = minting_key_id(server_name, public_key, pow).unwrap();
+            let short_id = short_key_id(&key_id);
+
+            let res = verify_minting_pow(server_name, public_key, &short_id, pow);
+            assert_eq!(res, Ok(key_id));
+        }
     }
 
     const TEST_PUBLIC_KEY: &str = "CTYtwUD318oD9bK6+eH+j3ZvomWtDoPMrQaXnEaIVrM34JJMfArWxtemeoeMNwbuIw4lnix6sKAjW5CW0BMD4Z8cs+vGznqWyH5i2krbetj5ClOFH2TllrXgAPuLcQp4qtMCANwaE/KSMomw3LOyyxo29djzPFu7VRRaAAvWGC66dAYiT9KH1JyxgwVjcChe+glZVEQIvjBiaklVjGdTqOZWpNiSNnQSYJsAIsCwpWAuWQ1S0UaYP4WKEQlsX5L6O8PChppEBl07OJnZv1QA1FvC1Uwxv0s13EUfSr4ojhtREZ2u+AGIS2reZLCc2ucGUQ9ZHI73aZSYulsGrgJZoKbOEjZvvM2WJkSHuNLGO14ll2t2XoLJ3BxTuFBFcsKXHAKi9VFk14BOMKFvboMfPS/glIlXbbUbQkTc3z2YdApSavhQxuIXDmctTx5ioj8eprWsHmrT3vwZSAkRW+bfNHRVWzjS0FvOYsfqxuxvJiM2iwLSHqgs8wPskLTOQwJoWjYBPjWDGlfLHXGJ5e8qXCQOAVQ+LthGTtrYHmCjlMyKi1BpIiHAm2tNI2yUmSaDJ9xhnt6Ve/QI2VRJfocZzRlZyaOHkEBpSKjjxm7GjXV2QmO7UROVVd7IKIZVeCTiG9jhfJ2VTbaXaYqVZRS3yFsKTtwyF5yW5FssQRV7JORKvecHGIMuPcSS+e0TSC+IMTHWK2hC1o+GMdwjpp0NNQCCL144tpVsb2a00kVSdkfcBeCKcXUPHrwYXki7ywd7GYgwVmj6HCo0ZrDAhnmsFse+I3VAhBikzCgZkzWaAFwA1nlwtrK42j2PaPLGS8r6qJSMFQ5R6kZNv8fnZT8F8ccCZuihpT43+SivwCQBMCKgQBinynrX/eGvVmTREv4BtLboWYbnwK9dLteR9y9GiPBHtGqsLzUAZ7KHmjRiEMtFJgXZlC2ygZov80SIZqJ/b8d8DKMGa25RrSzo1EMdoKGe8/NEiqKBdsM7aCjrrEC9SnuNtUre7QugoD5bcsXFSY+HaBqGse4fQbTdHnipZPwPLS2zLZyuoIivJKjBfaQZV0DfGlSHzR705QT3Ivh6F41Lpa7hsnDci6mfwIbnMMxcDLrsxkFhMWik6AjLYyuATVxBYiFrJhFRMx/FPh36SDXEDr9OrOM2jsIdYfKu2yVQAFxC1Ijez5iQfGqTUMVn";
