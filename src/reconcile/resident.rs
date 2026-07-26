@@ -128,4 +128,26 @@ mod tests {
             expected = gf64::mul(expected, squared);
         }
     }
+
+    #[test]
+    fn rejects_zero_short_identifier_on_insert() {
+        let mut resident = ResidentKernel::new();
+
+        assert_eq!(
+            resident.insert(hash(1, 0)),
+            Err(AlgebraicError::ZeroShortIdentifier)
+        );
+        assert_eq!(resident, ResidentKernel::new());
+    }
+
+    #[test]
+    fn rejects_zero_short_identifier_on_remove() {
+        let mut resident = ResidentKernel::new();
+
+        assert_eq!(
+            resident.remove(hash(1, 0)),
+            Err(AlgebraicError::ZeroShortIdentifier)
+        );
+        assert_eq!(resident, ResidentKernel::new());
+    }
 }
