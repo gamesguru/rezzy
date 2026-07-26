@@ -683,6 +683,20 @@ mod tests {
             verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, "whatever", pow_invalid),
             Err(VerifyError::NonMatchingEndpoints)
         );
+
+        let valid_matching_edges = [
+            0, 1, 2, 5, 7, 8, 9, 12, 15, 20, 21, 22, 23, 24, 25, 26, 27, 29, 31, 33, 34, 35, 37,
+            39, 41, 42, 43, 46, 47, 49, 50, 51, 52, 53, 54, 56, 57, 58, 59, 60, 61, 62,
+        ];
+        let pow_matching = MintingPow {
+            algorithm: ALGORITHM,
+            nonce: 84,
+            solution: &valid_matching_edges,
+        };
+        assert_eq!(
+            verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, "whatever", pow_matching),
+            Err(VerifyError::DeadEnd)
+        );
     }
 
     #[test]
