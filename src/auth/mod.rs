@@ -384,6 +384,8 @@ pub fn check_auth_with_context<
 
     // Optional verification pipeline (steps 1-3).
     // Callers pass None during state resolution; Some during PDU receipt.
+    // TODO: make the verifier version-aware once per-room-version hash
+    // verification is implemented across the call sites.
     // Room-version-specific event ID hashing is delegated to the verifier
     // implementation; this layer only sequences the checks.
     if let Some(v) = verifier {
