@@ -22,6 +22,8 @@ jobs:
         include:
           - rust: "1.75.0"
             label: "MSRV (default features)"
+          - rust: "1.80.0"
+            label: "cli feature (MSRV floor)"
           - rust: "1.82.0"
             label: "cli feature"
           - rust: "1.85.0"
@@ -128,7 +130,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install pre-commit
-          npm install -g prettier
+          npm install -g prettier markdownlint-cli
           cargo install cargo-sort
 
       - name: Format Check

@@ -663,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn verifies_full_valid_minting_pow() {
+    fn rejects_empty_invalid_and_dead_end_minting_pow() {
         let pow_empty = MintingPow {
             algorithm: ALGORITHM,
             nonce: 84,

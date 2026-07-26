@@ -4,8 +4,10 @@ Cross-version compliance audit of rezzy's `check_auth` against the Matrix spec
 authorization rules. Three distinct rule sets exist:
 
 - **v1**: Room versions 1–2 (`v1-auth-rules.txt`)
-- **v3**: Room versions 3–7 (`v3-auth-rules.txt`) — removes `m.room.aliases`,
-  removes `m.room.redaction` auth rule
+- **v3**: Room versions 3–5 (`v3-auth-rules.txt`) — removes `m.room.redaction`
+  auth rule; `m.room.aliases` (Rule 4) still applies
+- **v6**: Room versions 6–7 (`v3-auth-rules.txt`, unchanged otherwise) —
+  removes `m.room.aliases` (Rule 4)
 - **v8**: Room versions 8–11 (`v8-auth-rules.txt`) — adds knock, restricted joins,
   `join_authorised_via_users_server`
 - **v12**: Room version 12 (`v12.txt`) — removes `m.room.create` from auth_events,
@@ -30,7 +32,7 @@ authorization rules. Three distinct rule sets exist:
 | 2.5        | **auth_events**: reject if any auth event has wrong `room_id`                        | all      | [o]   | Out of scope — `LeanEvent` intentionally omits `room_id` (pre-filtered by caller)                    |
 | 2 (V12)    | Reject if `room_id` is not an accepted `m.room.create` event ID                      | V12      | [o]   | Out of scope — `LeanEvent` intentionally omits `room_id` (pre-filtered by caller)                    |
 | 3          | **m.federate**: reject cross-domain if `m.federate` is false                         | all      | [x]   | Checked via `domain_matches` and `get_m_federate` against `m.room.create` sender                     |
-| 4 (V1–V3)  | **m.room.aliases**: reject if no `state_key` or domain mismatch                      | V1–V7    | [x]   | Checked via `domain_matches` in `check_auth` for V1–V7                                               |
+| 4 (V1–V3)  | **m.room.aliases**: reject if no `state_key` or domain mismatch                      | V1–V5    | [x]   | Checked via `domain_matches` in `check_auth` for V1–V5                                               |
 | —          | **m.room.member** rules (see below)                                                  | all      | [x]   | Detailed breakdown below                                                                             |
 | 6          | Sender must be joined (non-member events)                                            | all      | [x]   | `NotMember` error                                                                                    |
 | 7          | **m.room.third_party_invite**: sender PL ≥ invite level                              | all      | [x]   | `get_required_power_level` returns invite level                                                      |
@@ -102,7 +104,7 @@ authorization rules. Three distinct rule sets exist:
 
 | Event type                  | Versions | rezzy | Notes                                                                                                                 |
 | --------------------------- | -------- | ----- | --------------------------------------------------------------------------------------------------------------------- |
-| `m.room.create`             | all      | [x]   | v11+: whole event dropped; v1–v10: preserves `creator`                                                                |
+| `m.room.create`             | all      | [x]   | v11+: all content keys preserved; v1–v10: preserves `creator`                                                         |
 | `m.room.member`             | all      | [x]   | v11+ adds `third_party_invite.signed`; v9+ adds `join_authorised_via_users_server`; v1–v8 preserves `membership` only |
 | `m.room.power_levels`       | all      | [x]   | v11+ adds `invite` to preserved keys                                                                                  |
 | `m.room.join_rules`         | all      | [x]   | v9+ adds `allow`                                                                                                      |
@@ -151,7 +153,7 @@ authorization rules. Three distinct rule sets exist:
 
 ### Low (version-specific, rarely triggered)
 
-1. ~~**Rule 4 (V1–V7)** and **Rule 11 (V1–V2)**: `m.room.aliases` validation
+1. ~~**Rule 4 (V1–V5)** and **Rule 11 (V1–V2)**: `m.room.aliases` validation
    and the `m.room.redaction` auth rule~~ — FIXED / obsolete rule sets handled.
 
 ## Notes

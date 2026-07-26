@@ -31,7 +31,7 @@ use crate::basespec::event_types::{
     M_ROOM_THIRD_PARTY_INVITE, RULE_INVITE, RULE_KNOCK, RULE_KNOCK_RESTRICTED, RULE_PUBLIC,
     RULE_RESTRICTED,
 };
-use crate::basespec::rezzy_types::{EventLike, LeanEvent, StateResVersion};
+use crate::basespec::rezzy_types::{is_valid_mxid, EventLike, LeanEvent, StateResVersion};
 
 /// An error indicating why an event failed authorization.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -403,10 +403,8 @@ pub fn check_auth_with_context<
         if !event.prev_events().is_empty() {
             return Err(AuthError::CreateWithPrevEvents);
         }
-        // Rule 1.2: Check sender MXID domain validity for m.room.create
-        if crate::basespec::rezzy_types::extract_domain(event.sender())
-            .is_none_or(str::is_empty)
-        {
+        // Rule 1.2: Check sender MXID validity for m.room.create
+        if !is_valid_mxid(event.sender()) {
             return Err(AuthError::InvalidSyntax(
                 "m.room.create sender domain is invalid".into(),
             ));
@@ -470,34 +468,36 @@ pub fn check_auth_with_context<
         let mut seen_tuples = crate::HashSet::new();
 
         for auth_id in event.auth_events() {
-            if let Some(auth_ev) = provider.get_event(auth_id) {
-                if auth_ev.rejected() {
-                    return Err(AuthError::InvalidSyntax(alloc::format!(
-                        "auth event {auth_id:?} was previously rejected"
-                    )));
-                }
+            let Some(auth_ev) = provider.get_event(auth_id) else {
+                return Err(AuthError::MissingAuthEvent(auth_id.clone()));
+            };
 
-                let auth_type = auth_ev.event_type();
+            if auth_ev.rejected() {
+                return Err(AuthError::InvalidSyntax(alloc::format!(
+                    "auth event {auth_id:?} was previously rejected"
+                )));
+            }
 
-                if version.is_v2_1_plus() && auth_type == M_ROOM_CREATE {
-                    return Err(AuthError::InvalidSyntax(
-                        "referencing m.room.create in auth_events is forbidden in room v12+".into(),
-                    ));
-                }
+            let auth_type = auth_ev.event_type();
 
-                if !VALID_AUTH_TYPES.contains(&auth_type.as_ref()) {
-                    return Err(AuthError::InvalidSyntax(alloc::format!(
-                        "unexpected event type in auth_events: {auth_type}"
-                    )));
-                }
+            if version.is_v2_1_plus() && auth_type == M_ROOM_CREATE {
+                return Err(AuthError::InvalidSyntax(
+                    "referencing m.room.create in auth_events is forbidden in room v12+".into(),
+                ));
+            }
 
-                let sk = auth_ev.state_key().unwrap_or("");
-                let key = (auth_type.into_owned(), alloc::string::String::from(sk));
-                if !seen_tuples.insert(key) {
-                    return Err(AuthError::InvalidSyntax(
-                        "auth_events contains duplicate (type, state_key) pair".into(),
-                    ));
-                }
+            if !VALID_AUTH_TYPES.contains(&auth_type.as_ref()) {
+                return Err(AuthError::InvalidSyntax(alloc::format!(
+                    "unexpected event type in auth_events: {auth_type}"
+                )));
+            }
+
+            let sk = auth_ev.state_key().unwrap_or("");
+            let key = (auth_type.into_owned(), alloc::string::String::from(sk));
+            if !seen_tuples.insert(key) {
+                return Err(AuthError::InvalidSyntax(
+                    "auth_events contains duplicate (type, state_key) pair".into(),
+                ));
             }
         }
     }

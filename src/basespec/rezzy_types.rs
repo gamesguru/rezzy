@@ -131,7 +131,8 @@ pub enum RedactionRule {
 }
 
 /// Returns the redaction rule for an event type according to the specified
-/// Matrix room version (v1 through v11). Unknown/malformed versions fail closed.
+/// Matrix room version (v1 through v12; v12 inherits v11's rules).
+/// Unknown/malformed versions fail closed.
 #[must_use]
 pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> RedactionRule {
     // Explicitly recognized room versions only: an unsupported or malformed
@@ -148,7 +149,9 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> Redacti
         "8" => 8,
         "9" => 9,
         "10" => 10,
-        "11" => 11,
+        // v12 inherits v11's redaction rules verbatim (v12.txt includes the
+        // v11-redactions spec fragment rather than defining its own).
+        "11" | "12" => 11,
         _ => return RedactionRule::None,
     };
     match event_type {
@@ -1368,17 +1371,19 @@ fn room_version_is_v11_or_later(room_version: &str) -> bool {
 }
 
 /// Returns `true` if `id` is a syntactically valid Matrix user ID: `@` prefix,
-/// a `:` separating localpart from domain, and a non-empty localpart drawn
-/// from the restricted charset (`a-z`, `0-9`, `.`, `_`, `=`, `-`, `/`, `+`).
+/// a `:` separating localpart from domain, a non-empty localpart drawn from
+/// the restricted charset (`a-z`, `0-9`, `.`, `_`, `=`, `-`, `/`, `+`), and a
+/// non-empty domain.
 ///
 /// Shared by the `sender` check and, for V12+ rooms, `additional_creators`
 /// entries — both are held to the same grammar per MSC4289.
-fn is_valid_mxid(id: &str) -> bool {
-    let Some((localpart, _domain)) = id.strip_prefix('@').and_then(|rest| rest.split_once(':'))
+pub(crate) fn is_valid_mxid(id: &str) -> bool {
+    let Some((localpart, domain)) = id.strip_prefix('@').and_then(|rest| rest.split_once(':'))
     else {
         return false;
     };
     !localpart.is_empty()
+        && !domain.is_empty()
         && localpart.bytes().all(|b| {
             b.is_ascii_lowercase()
                 || b.is_ascii_digit()
@@ -1461,9 +1466,9 @@ impl<Id, C> LeanEvent<Id, C> {
         if !id_str.is_empty() && !id_str.starts_with('$') {
             return Err("event_id must start with '$'");
         }
-        if !self.sender.is_empty() && !is_valid_mxid(&self.sender) {
+        if !is_valid_mxid(&self.sender) {
             return Err(
-                "sender must be a valid MXID: '@' prefix, ':' separator, and a localpart of only a-z, 0-9, '.', '_', '=', '-', '/', '+'",
+                "sender must be a valid MXID: '@' prefix, ':' separator, non-empty domain, and a localpart of only a-z, 0-9, '.', '_', '=', '-', '/', '+'",
             );
         }
         // Rule 1.4: pre-v12 m.room.create must declare a `creator`; v12+

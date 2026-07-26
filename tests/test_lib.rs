@@ -2906,6 +2906,7 @@ fn test_types_kahn_sort_result_methods() {
 fn test_types_validate_syntactic() {
     let mut ev: LeanEvent = LeanEvent {
         event_type: "m.room.message".to_string(),
+        sender: "@alice:example.com".to_string(),
         ..Default::default()
     };
     assert!(ev.validate_syntactic("11").is_ok());
@@ -2938,6 +2939,16 @@ fn test_types_validate_syntactic() {
     assert!(ev.validate_syntactic("11").is_err());
     ev.sender = "@user_without_colon".to_string();
     assert!(ev.validate_syntactic("11").is_err());
+    ev.sender = String::new();
+    assert!(
+        ev.validate_syntactic("11").is_err(),
+        "empty sender must be rejected, not silently skipped"
+    );
+    ev.sender = "@alice:".to_string();
+    assert!(
+        ev.validate_syntactic("11").is_err(),
+        "sender with an empty domain must be rejected"
+    );
     ev.sender = "@alice:example.com".to_string();
     assert!(ev.validate_syntactic("11").is_ok());
 
@@ -3013,6 +3024,7 @@ fn test_types_validate_syntactic() {
 fn test_types_validate_syntactic_create_rules() {
     let mut ev: LeanEvent = LeanEvent {
         event_type: "m.room.create".to_string(),
+        sender: "@alice:example.com".to_string(),
         ..Default::default()
     };
 
@@ -3130,6 +3142,21 @@ fn test_redaction_preserved_keys_matrix() {
         redaction_preserved_keys("m.room.power_levels", "11"),
         RedactionRule::Keys(keys) if keys.contains(&"invite")
     ));
+
+    // Room version 12 inherits v11's redaction rules verbatim (v12.txt includes
+    // the v11-redactions spec fragment rather than defining its own).
+    assert_eq!(
+        redaction_preserved_keys("m.room.create", "12"),
+        RedactionRule::All
+    );
+    assert_eq!(
+        redaction_preserved_keys("m.room.member", "12"),
+        redaction_preserved_keys("m.room.member", "11")
+    );
+    assert_eq!(
+        redaction_preserved_keys("m.room.power_levels", "12"),
+        redaction_preserved_keys("m.room.power_levels", "11")
+    );
 
     // Pre-v11 power_levels omits invite (only added in v11)
     assert_eq!(
