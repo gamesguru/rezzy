@@ -1377,9 +1377,9 @@ impl EventContent for Value {
 /// (`rust/src/room_versions.rs`): versions 1-10 inherit `false`, only v11
 /// (and everything derived from it, e.g. v12) sets it `true`. Handles
 /// dotted identifiers like `"12.1"` by comparing the leading major version.
-/// Malformed/unparseable input is treated as pre-v11 (i.e. not strict),
-/// matching the "warn, don't hard-fail" default used for unrecognized input
-/// elsewhere in this validator.
+/// Malformed/unparseable input is treated as pre-v11 (i.e. not strict) for
+/// this byte-limit decision, but callers may still reject an unsupported
+/// `room_version` before reaching this helper.
 fn room_version_is_v11_or_later(room_version: &str) -> bool {
     room_version
         .split('.')
