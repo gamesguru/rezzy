@@ -334,7 +334,8 @@ pub fn check_auth<
 }
 
 /// Check whether `event` is authorized given the room state at its `prev_events`,
-/// additionally validating `auth_events` rules (2.1–2.4) against an optional [`EventProvider`].
+/// additionally validating `auth_events` rules (2.1–2.4) against an optional
+/// [`crate::basespec::rezzy_types::EventProvider`].
 ///
 /// # Errors
 ///
