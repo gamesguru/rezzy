@@ -109,11 +109,11 @@ mimalloc = { version = "0.1.52", optional = true }
 # Note: pulled in only by the `cli` feature (not part of `default`), so this
 # does not affect the library's rust-version = "1.75" MSRV. openssl >=0.10.79
 # requires rustc 1.80+, so building with `--features cli` needs rustc 1.80+.
-# No upper bound: the 1.80.0 CLI-feature CI job (rust.yml) directly tests
-# that later patch releases don't raise the floor further.
-native-tls = { version = ">=0.2.11", optional = true, default-features = false }
-openssl = { version = ">=0.10.64", optional = true, default-features = false }
-openssl-sys = { version = ">=0.9.101", optional = true, default-features = false }
+# Bound to the current semver-major/minor lines to avoid unexpected breaking
+# releases or MSRV bumps for downstream `cli` consumers.
+native-tls = { version = ">=0.2.11, <0.3", optional = true, default-features = false }
+openssl = { version = ">=0.10.64, <0.11", optional = true, default-features = false }
+openssl-sys = { version = ">=0.9.101, <0.10", optional = true, default-features = false }
 roaring = "0.10" # compatible with the Rust 1.75 MSRV
 ruma-common = { version = "0.19.0", optional = true }
 ruma-events = { version = "0.34.0", optional = true }

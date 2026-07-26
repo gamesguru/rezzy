@@ -3015,13 +3015,14 @@ fn test_types_validate_syntactic() {
         ev.validate_syntactic("10").is_ok(),
         "pre-v11 rooms only warn on oversized event_id, never hard-fail"
     );
-    assert!(
-        ev.validate_syntactic("12.1").is_err(),
-        "v12.1 must be treated as >= v11 (dotted version identifiers)"
+    assert_eq!(
+        ev.validate_syntactic("12"),
+        Err("event_id exceeds maximum allowed length of 255 bytes")
     );
-    assert!(
-        ev.validate_syntactic("not-a-version").is_err(),
-        "invalid room_version strings must be rejected"
+    assert_eq!(ev.validate_syntactic("12.1"), Err("unsupported room_version"));
+    assert_eq!(
+        ev.validate_syntactic("not-a-version"),
+        Err("unsupported room_version")
     );
     ev.event_id = "$valid_event_id:example.com".to_string();
     assert!(ev.validate_syntactic("11").is_ok());
