@@ -1459,6 +1459,9 @@ impl<Id, C> LeanEvent<Id, C> {
         Id: core::fmt::Display,
         C: EventContent,
     {
+        if StateResVersion::from_room_version(room_version).is_none() {
+            return Err("unsupported room_version");
+        }
         if self.prev_events.len() > 20 {
             return Err("prev_events exceeds maximum allowed length of 20");
         }
@@ -1481,7 +1484,7 @@ impl<Id, C> LeanEvent<Id, C> {
             }
         }
         let id_str = alloc::format!("{}", self.event_id);
-        if !id_str.is_empty() && !id_str.starts_with('$') {
+        if id_str.is_empty() || !id_str.starts_with('$') {
             return Err("event_id must start with '$'");
         }
         if !is_valid_mxid(&self.sender) {
@@ -1502,8 +1505,13 @@ impl<Id, C> LeanEvent<Id, C> {
                         "m.room.create content.additional_creators must be an array of valid MXID strings",
                     );
                 }
-            } else if self.content.get_creator().is_none() {
-                return Err("m.room.create content must have a 'creator' property");
+            } else {
+                let Some(creator) = self.content.get_creator() else {
+                    return Err("m.room.create content must have a 'creator' property");
+                };
+                if !is_valid_mxid(creator) {
+                    return Err("m.room.create content.creator must be a valid MXID string");
+                }
             }
         }
         if self.depth > MAX_SAFE_JSON_INTEGER {
@@ -1772,21 +1780,49 @@ impl<'de> Deserialize<'de> for LeanEvent<String, Value> {
         let mut content = value.get(FIELD_CONTENT).cloned().unwrap_or(Value::Null);
 
         if event_type == M_ROOM_REDACTION {
-            if let Some(redacts) = value.get(FIELD_REDACTS).and_then(|v| v.as_str()) {
-                match &mut content {
-                    Value::Object(obj) => {
-                        obj.entry(String::from(FIELD_REDACTS))
-                            .or_insert_with(|| Value::String(String::from(redacts)));
+            let top_level_redacts = match value.get(FIELD_REDACTS) {
+                Some(redacts) => Some(redacts.as_str().ok_or_else(|| {
+                    serde::de::Error::custom("m.room.redaction redacts must be a string")
+                })?),
+                None => None,
+            };
+
+            match &mut content {
+                Value::Object(obj) => {
+                    if let Some(existing_redacts) = obj.get(FIELD_REDACTS) {
+                        let existing_redacts = existing_redacts.as_str().ok_or_else(|| {
+                            serde::de::Error::custom(
+                                "m.room.redaction content.redacts must be a string",
+                            )
+                        })?;
+                        if let Some(top_level_redacts) = top_level_redacts {
+                            if existing_redacts != top_level_redacts {
+                                return Err(serde::de::Error::custom(
+                                    "m.room.redaction redacts mismatch between top-level field and content",
+                                ));
+                            }
+                        }
+                    } else if let Some(top_level_redacts) = top_level_redacts {
+                        obj.insert(
+                            String::from(FIELD_REDACTS),
+                            Value::String(String::from(top_level_redacts)),
+                        );
                     }
-                    Value::Null => {
+                }
+                Value::Null => {
+                    if let Some(top_level_redacts) = top_level_redacts {
                         let mut obj = serde_json::Map::new();
                         obj.insert(
                             String::from(FIELD_REDACTS),
-                            Value::String(String::from(redacts)),
+                            Value::String(String::from(top_level_redacts)),
                         );
                         content = Value::Object(obj);
                     }
-                    _ => {}
+                }
+                _ => {
+                    return Err(serde::de::Error::custom(
+                        "m.room.redaction content must be an object or null",
+                    ));
                 }
             }
         }
@@ -1805,10 +1841,12 @@ impl<'de> Deserialize<'de> for LeanEvent<String, Value> {
 
         let prev_events = parse_string_array(FIELD_PREV_EVENTS);
         let auth_events = parse_string_array(FIELD_AUTH_EVENTS);
-        let depth = value
-            .get(FIELD_DEPTH)
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+        let depth = match value.get(FIELD_DEPTH) {
+            Some(depth) => depth
+                .as_u64()
+                .ok_or_else(|| serde::de::Error::custom("invalid depth value"))?,
+            None => 0,
+        };
 
         let rejected = value
             .get(FIELD_REJECTED)

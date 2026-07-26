@@ -2918,6 +2918,7 @@ fn test_types_kahn_sort_result_methods() {
 #[test]
 fn test_types_validate_syntactic() {
     let mut ev: LeanEvent = LeanEvent {
+        event_id: "$valid_event_id:example.com".to_string(),
         event_type: "m.room.message".to_string(),
         sender: "@alice:example.com".to_string(),
         ..Default::default()
@@ -2940,6 +2941,11 @@ fn test_types_validate_syntactic() {
     // Test event_id format validation (must start with '$' if non-empty)
     ev.auth_events = vec![];
     ev.event_id = "invalid_no_dollar".to_string();
+    assert_eq!(
+        ev.validate_syntactic("11"),
+        Err("event_id must start with '$'")
+    );
+    ev.event_id = String::new();
     assert_eq!(
         ev.validate_syntactic("11"),
         Err("event_id must start with '$'")
@@ -3013,8 +3019,8 @@ fn test_types_validate_syntactic() {
         "v12.1 must be treated as >= v11 (dotted version identifiers)"
     );
     assert!(
-        ev.validate_syntactic("not-a-version").is_ok(),
-        "malformed room_version defaults to non-strict (warn, don't hard-fail)"
+        ev.validate_syntactic("not-a-version").is_err(),
+        "invalid room_version strings must be rejected"
     );
     ev.event_id = "$valid_event_id:example.com".to_string();
     assert!(ev.validate_syntactic("11").is_ok());
@@ -3036,6 +3042,7 @@ fn test_types_validate_syntactic() {
 #[test]
 fn test_types_validate_syntactic_create_rules() {
     let mut ev: LeanEvent = LeanEvent {
+        event_id: "$valid_event_id:example.com".to_string(),
         event_type: "m.room.create".to_string(),
         sender: "@alice:example.com".to_string(),
         ..Default::default()
@@ -3060,6 +3067,11 @@ fn test_types_validate_syntactic_create_rules() {
     assert_eq!(
         ev.validate_syntactic("11"),
         Err("m.room.create content must have a 'creator' property")
+    );
+    ev.content = serde_json::json!({ "creator": "not-a-mxid" });
+    assert_eq!(
+        ev.validate_syntactic("11"),
+        Err("m.room.create content.creator must be a valid MXID string")
     );
     ev.content = serde_json::json!({ "creator": "@alice:example.com" });
     assert!(ev.validate_syntactic("11").is_ok());
@@ -3256,6 +3268,26 @@ fn test_types_deserialize_power_level_variants() {
     );
     let ev4: LeanEvent = serde_json::from_str(&json_large).unwrap();
     assert_eq!(ev4.power_level, rezzy::auth::MAX_POWER_LEVEL_JSON);
+}
+
+#[test]
+fn test_types_deserialize_depth_and_redaction_validation() {
+    let json_negative_depth =
+        r#"{"event_id":"$1","type":"m.room.message","origin_server_ts":1,"depth":-1}"#;
+    assert!(serde_json::from_str::<LeanEvent>(json_negative_depth).is_err());
+
+    let json_fractional_depth =
+        r#"{"event_id":"$1","type":"m.room.message","origin_server_ts":1,"depth":1.5}"#;
+    assert!(serde_json::from_str::<LeanEvent>(json_fractional_depth).is_err());
+
+    let json_redaction_mismatch = r#"{
+        "event_id": "$redact",
+        "type": "m.room.redaction",
+        "sender": "@alice:example.com",
+        "content": {"redacts": "$different:example.com"},
+        "redacts": "$target:example.com"
+    }"#;
+    assert!(serde_json::from_str::<LeanEvent>(json_redaction_mismatch).is_err());
 }
 
 #[test]
