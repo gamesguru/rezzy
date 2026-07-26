@@ -4311,7 +4311,7 @@ fn test_domain_parsing_helpers() {
 }
 
 #[test]
-fn test_rule_1_2_create_invalid_sender_domain() {
+fn test_rule_1_2_create_invalid_sender_mxid() {
     let state = RoomState::new();
     let create_ev = make_event(
         "$c",
@@ -4322,7 +4322,7 @@ fn test_rule_1_2_create_invalid_sender_domain() {
     );
     let res = check_auth(&create_ev, &state, StateResVersion::V2, None);
     assert!(
-        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("sender domain is invalid"))
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("valid MXID"))
     );
 }
 
