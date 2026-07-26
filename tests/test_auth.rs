@@ -724,7 +724,7 @@ fn test_iterative_auth_chain() {
 fn test_auth_chain_rejects_unauthorized() {
     let events = utils::parse_jsonl_events(
         r#"
-{"event_id":"$create","type":"m.room.create","state_key":"","sender":"@alice:x.com","depth":0,"origin_server_ts":1000,"content":{},"prev_events":[],"auth_events":[]}
+{"event_id":"$create","type":"m.room.create","state_key":"","sender":"@alice:x.com","depth":0,"origin_server_ts":1000,"content":{"room_version":"12"},"prev_events":[],"auth_events":[]}
 {"event_id":"$alice_join","type":"m.room.member","state_key":"@alice:x.com","sender":"@alice:x.com","depth":1,"origin_server_ts":1001,"content":{"membership":"join"},"prev_events":["$create"],"auth_events":[]}
 {"event_id":"$pl","type":"m.room.power_levels","state_key":"","sender":"@alice:x.com","depth":2,"origin_server_ts":1002,"content":{"ban":50,"users":{"@alice:x.com":100}},"prev_events":["$alice_join"],"auth_events":["$alice_join"]}
 {"event_id":"$ban_bob","type":"m.room.member","state_key":"@bob:x.com","sender":"@alice:x.com","depth":3,"origin_server_ts":1003,"content":{"membership":"ban"},"prev_events":["$pl"],"auth_events":["$alice_join","$pl"]}
