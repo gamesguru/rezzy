@@ -3289,6 +3289,25 @@ fn test_types_deserialize_depth_and_redaction_validation() {
         "redacts": "$target:example.com"
     }"#;
     assert!(serde_json::from_str::<LeanEvent>(json_redaction_mismatch).is_err());
+
+    let json_redaction_null_content = r#"{
+        "event_id": "$redact",
+        "type": "m.room.redaction",
+        "sender": "@alice:example.com",
+        "content": null,
+        "redacts": "$target:example.com"
+    }"#;
+    let ev: LeanEvent = serde_json::from_str(json_redaction_null_content).unwrap();
+    assert_eq!(ev.get_redacts(), Some("$target:example.com"));
+
+    let json_redaction_non_object_content = r#"{
+        "event_id": "$redact",
+        "type": "m.room.redaction",
+        "sender": "@alice:example.com",
+        "content": "invalid",
+        "redacts": "$target:example.com"
+    }"#;
+    assert!(serde_json::from_str::<LeanEvent>(json_redaction_non_object_content).is_err());
 }
 
 #[test]
