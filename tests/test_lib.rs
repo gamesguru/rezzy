@@ -5051,7 +5051,7 @@ fn test_parsed_event_try_new() {
     assert!(rezzy::ParsedEvent::try_new(&invalid).is_err());
 }
 
-// ── Coverage: EventContent::get_room_version (line 811-814) ─────────
+// ── Coverage: EventContent default accessors ────────────────────────
 
 #[test]
 fn test_event_content_get_room_version() {
@@ -5119,6 +5119,16 @@ fn test_event_content_get_room_version() {
 
     // Verify the default trait implementation returns None
     assert_eq!(CustomContent.get_room_version(), None);
+    assert_eq!(CustomContent.get_redacts(), None);
+
+    let lean = LeanEvent::<String, CustomContent> {
+        event_id: "$c".into(),
+        event_type: "m.room.redaction".into(),
+        sender: "@a:x".into(),
+        content: CustomContent,
+        ..Default::default()
+    };
+    assert_eq!(lean.get_redacts(), None);
 }
 
 // ── Coverage: LeanEvent inherent methods ────────────────────────────
