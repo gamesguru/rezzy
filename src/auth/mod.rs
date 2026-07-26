@@ -406,7 +406,7 @@ pub fn check_auth_with_context<
         // Rule 1.2: Check sender MXID validity for m.room.create
         if !is_valid_mxid(event.sender()) {
             return Err(AuthError::InvalidSyntax(
-                "m.room.create sender domain is invalid".into(),
+                "m.room.create sender must be a valid MXID".into(),
             ));
         }
         // Create events are always authorized if they're first
@@ -492,16 +492,20 @@ pub fn check_auth_with_context<
 
         // Rule 2.4 (V1–V11): auth_events must contain m.room.create
         if !version.is_v2_1_plus() {
-            if let Some(create_ev) = state.get_event(M_ROOM_CREATE, "") {
-                if !event
-                    .auth_events()
-                    .iter()
-                    .any(|id| id == create_ev.event_id())
-                {
-                    return Err(AuthError::InvalidSyntax(
-                        "auth_events must contain m.room.create in room versions 1-11".into(),
-                    ));
-                }
+            let Some(create_ev) = state.get_event(M_ROOM_CREATE, "") else {
+                return Err(AuthError::InvalidSyntax(
+                    "missing m.room.create in room state (cannot validate auth_events for v1-v11)"
+                        .into(),
+                ));
+            };
+            if !event
+                .auth_events()
+                .iter()
+                .any(|id| id == create_ev.event_id())
+            {
+                return Err(AuthError::InvalidSyntax(
+                    "auth_events must contain m.room.create in room versions 1-11".into(),
+                ));
             }
         }
 
