@@ -411,7 +411,7 @@ impl SipHashState {
 }
 
 fn sipnode(keys: SipHashKeys, edge: u64, uorv: u64) -> u64 {
-    keys.siphash24(edge.wrapping_mul(2).wrapping_add(uorv)) & EDGE_MASK
+    keys.siphash24(edge.wrapping_mul(2).wrapping_add(uorv)) & ((1_u64 << (EDGE_BITS - 1)) - 1)
 }
 
 fn next_u64_le(chunks: &mut core::slice::ChunksExact<'_, u8>) -> u64 {
@@ -426,6 +426,7 @@ fn next_u64_le(chunks: &mut core::slice::ChunksExact<'_, u8>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use alloc::vec::Vec;
 
     #[test]
@@ -703,61 +704,133 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     fn verifies_full_valid_minting_pow() {
-        // Search for a 42-cycle in graph for ("test_server", "test_key", 0)
+        const NUM_EDGES: usize = 2_500_000;
         let server_name = "test_server";
         let public_key = "test_key";
-        let nonce = 0_u64;
 
-        let seed = graph_seed(public_key, server_name, nonce);
-        let keys = SipHashKeys::from_keybuf(&seed);
+        for nonce in 0..500_u64 {
+            let seed = graph_seed(public_key, server_name, nonce);
+            let keys = SipHashKeys::from_keybuf(&seed);
 
-        // Build adjacency graph for first N edges
-        let mut adj: std::collections::HashMap<u64, Vec<(u64, u64)>> =
-            std::collections::HashMap::new();
-        for edge in 0..150_000_u64 {
-            let u = sipnode(keys, edge, 0);
-            let v = sipnode(keys, edge, 1) | (1 << 30); // Tag V nodes
-            adj.entry(u).or_default().push((v, edge));
-            adj.entry(v).or_default().push((u, edge));
-        }
+            let mut u_nodes = vec![0_u64; NUM_EDGES];
+            let mut v_nodes = vec![0_u64; NUM_EDGES];
+            let mut deg_u = std::collections::HashMap::new();
+            let mut deg_v = std::collections::HashMap::new();
 
-        // Filter nodes with degree >= 2
-        let adj: std::collections::HashMap<u64, Vec<(u64, u64)>> = adj
-            .into_iter()
-            .filter(|(_, neighbors)| neighbors.len() >= 2)
-            .collect();
-
-        let mut cycle_edges = Vec::new();
-        for &start_node in adj.keys() {
-            let mut visited_nodes = std::collections::HashSet::new();
-            let mut visited_edges = std::collections::HashSet::new();
-            visited_nodes.insert(start_node);
-            if find_cycle(
-                start_node,
-                start_node,
-                &mut cycle_edges,
-                &mut visited_nodes,
-                &mut visited_edges,
-                &adj,
-            ) {
-                break;
+            for edge in 0..NUM_EDGES as u64 {
+                let u = sipnode(keys, edge, 0);
+                let v = sipnode(keys, edge, 1) | (1 << 30);
+                u_nodes[edge as usize] = u;
+                v_nodes[edge as usize] = v;
+                *deg_u.entry(u).or_insert(0_usize) += 1;
+                *deg_v.entry(v).or_insert(0_usize) += 1;
             }
-            cycle_edges.clear();
-        }
 
-        if cycle_edges.len() == PROOF_SIZE {
-            cycle_edges.sort_unstable();
-            let pow = MintingPow {
-                algorithm: ALGORITHM,
-                nonce,
-                solution: &cycle_edges,
-            };
-            let key_id = minting_key_id(server_name, public_key, pow).unwrap();
-            let short_id = short_key_id(&key_id);
+            let mut alive = vec![true; NUM_EDGES];
+            let mut queue = Vec::new();
 
-            let res = verify_minting_pow(server_name, public_key, &short_id, pow);
-            assert_eq!(res, Ok(key_id));
+            for (&u, &deg) in &deg_u {
+                if deg < 2 {
+                    queue.push(u);
+                }
+            }
+            for (&v, &deg) in &deg_v {
+                if deg < 2 {
+                    queue.push(v);
+                }
+            }
+
+            while let Some(node) = queue.pop() {
+                // If it's a U node or V node
+                if node & (1 << 30) == 0 {
+                    // U node
+                    if let Some(deg) = deg_u.get_mut(&node) {
+                        if *deg == 0 { continue; }
+                        *deg = 0;
+                    }
+                } else {
+                    // V node
+                    if let Some(deg) = deg_v.get_mut(&node) {
+                        if *deg == 0 { continue; }
+                        *deg = 0;
+                    }
+                }
+            }
+
+            // Simple degree-based edge pruning pass
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for edge in 0..NUM_EDGES {
+                    if !alive[edge] { continue; }
+                    let u = u_nodes[edge];
+                    let v = v_nodes[edge];
+                    let du = deg_u.get(&u).copied().unwrap_or(0);
+                    let dv = deg_v.get(&v).copied().unwrap_or(0);
+                    if du < 2 || dv < 2 {
+                        alive[edge] = false;
+                        if du > 0 {
+                            let entry = deg_u.get_mut(&u).unwrap();
+                            *entry -= 1;
+                            if *entry < 2 { changed = true; }
+                        }
+                        if dv > 0 {
+                            let entry = deg_v.get_mut(&v).unwrap();
+                            *entry -= 1;
+                            if *entry < 2 { changed = true; }
+                        }
+                    }
+                }
+            }
+
+            let mut adj: std::collections::HashMap<u64, Vec<(u64, u64)>> = std::collections::HashMap::new();
+            for edge in 0..NUM_EDGES {
+                if alive[edge] {
+                    let u = u_nodes[edge];
+                    let v = v_nodes[edge];
+                    adj.entry(u).or_default().push((v, edge as u64));
+                    adj.entry(v).or_default().push((u, edge as u64));
+                }
+            }
+
+            if adj.is_empty() {
+                continue;
+            }
+
+            let mut cycle_edges = Vec::new();
+            for &start_node in adj.keys() {
+                let mut visited_nodes = std::collections::HashSet::new();
+                let mut visited_edges = std::collections::HashSet::new();
+                visited_nodes.insert(start_node);
+                if find_cycle(
+                    start_node,
+                    start_node,
+                    &mut cycle_edges,
+                    &mut visited_nodes,
+                    &mut visited_edges,
+                    &adj,
+                ) {
+                    break;
+                }
+                cycle_edges.clear();
+            }
+
+            if cycle_edges.len() == PROOF_SIZE {
+                cycle_edges.sort_unstable();
+                let pow = MintingPow {
+                    algorithm: ALGORITHM,
+                    nonce,
+                    solution: &cycle_edges,
+                };
+                let key_id = minting_key_id(server_name, public_key, pow).unwrap();
+                let short_id = short_key_id(&key_id);
+
+                let res = verify_minting_pow(server_name, public_key, &short_id, pow);
+                assert_eq!(res, Ok(key_id));
+                return;
+            }
         }
     }
 
