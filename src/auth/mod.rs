@@ -404,7 +404,9 @@ pub fn check_auth_with_context<
             return Err(AuthError::CreateWithPrevEvents);
         }
         // Rule 1.2: Check sender MXID domain validity for m.room.create
-        if crate::basespec::rezzy_types::extract_domain(event.sender()).is_none() {
+        if crate::basespec::rezzy_types::extract_domain(event.sender())
+            .is_none_or(str::is_empty)
+        {
             return Err(AuthError::InvalidSyntax(
                 "m.room.create sender domain is invalid".into(),
             ));
