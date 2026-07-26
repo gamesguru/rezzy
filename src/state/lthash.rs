@@ -599,6 +599,19 @@ mod tests {
     }
 
     #[test]
+    fn test_lthash_boundary_multibyte_truncation_rounds_back_to_char_boundary() {
+        // Force the truncation point to land inside a 4-byte UTF-8 character so
+        // the loop has to back up more than once before it reaches a boundary.
+        let over_max = alloc::format!("{}🚀", "a".repeat(65533));
+        let seed_over = LtHash::seed(&over_max, "", &"$1");
+        let seed_exact = LtHash::seed(&"a".repeat(65533), "", &"$1");
+        assert_eq!(
+            seed_over, seed_exact,
+            "truncate_to_u16_limit should back up to the previous char boundary"
+        );
+    }
+
+    #[test]
     fn test_lthash_cryptographic_uniformity_and_avalanche() {
         let seed1 = LtHash::seed("m.room.message", "", &"$1");
         let seed2 = LtHash::seed("m.room.message", "", &"$2");
