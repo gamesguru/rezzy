@@ -20,7 +20,6 @@ use base64::{
     Engine as _,
 };
 use sha2::{Digest as Sha2Digest, Sha256};
-use sha3::Sha3_256;
 
 pub use super::gf64::mul as gf64_mul;
 
@@ -120,7 +119,7 @@ impl ElementHash {
             return Err(AlgebraicError::InvalidBase64);
         }
         let digest = match format {
-            EventIdFormat::Legacy => Sha3_256::digest(event_id.as_bytes()).to_vec(),
+            EventIdFormat::Legacy => Sha256::digest(event_id.as_bytes()).to_vec(),
             EventIdFormat::V3 => STANDARD_NO_PAD
                 .decode(encoded)
                 .map_err(|_| AlgebraicError::InvalidBase64)?,
