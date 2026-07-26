@@ -237,7 +237,7 @@ fn verify_cycle_uvs(uvs: &[u64; 2 * PROOF_SIZE]) -> Result<(), VerifyError> {
         n = n
             .checked_add(1)
             .expect("cycle length cannot exceed proof size");
-        if i == 0 {
+        if n > PROOF_SIZE || i == 0 {
             break;
         }
     }
@@ -701,6 +701,27 @@ mod tests {
         uvs[2 * (PROOF_SIZE - 1) + 1] = (PROOF_SIZE as u64) - 1;
 
         assert_eq!(verify_cycle_uvs(&uvs), Ok(()));
+    }
+
+    #[test]
+    fn verify_cycle_uvs_rejects_short_cycle() {
+        let mut uvs = [0_u64; 2 * PROOF_SIZE];
+        // 4-edge cycle: (10,20) -> (30,20) -> (30,40) -> (10,40) -> (10,20)
+        uvs[0] = 10;
+        uvs[1] = 20;
+        uvs[2] = 30;
+        uvs[3] = 20;
+        uvs[4] = 30;
+        uvs[5] = 40;
+        uvs[6] = 10;
+        uvs[7] = 40;
+
+        for k in 4..PROOF_SIZE {
+            uvs[2 * k] = (100 + k) as u64;
+            uvs[2 * k + 1] = (200 + k) as u64;
+        }
+
+        assert_eq!(verify_cycle_uvs(&uvs), Err(VerifyError::ShortCycle));
     }
 
     const TEST_PUBLIC_KEY: &str = "CTYtwUD318oD9bK6+eH+j3ZvomWtDoPMrQaXnEaIVrM34JJMfArWxtemeoeMNwbuIw4lnix6sKAjW5CW0BMD4Z8cs+vGznqWyH5i2krbetj5ClOFH2TllrXgAPuLcQp4qtMCANwaE/KSMomw3LOyyxo29djzPFu7VRRaAAvWGC66dAYiT9KH1JyxgwVjcChe+glZVEQIvjBiaklVjGdTqOZWpNiSNnQSYJsAIsCwpWAuWQ1S0UaYP4WKEQlsX5L6O8PChppEBl07OJnZv1QA1FvC1Uwxv0s13EUfSr4ojhtREZ2u+AGIS2reZLCc2ucGUQ9ZHI73aZSYulsGrgJZoKbOEjZvvM2WJkSHuNLGO14ll2t2XoLJ3BxTuFBFcsKXHAKi9VFk14BOMKFvboMfPS/glIlXbbUbQkTc3z2YdApSavhQxuIXDmctTx5ioj8eprWsHmrT3vwZSAkRW+bfNHRVWzjS0FvOYsfqxuxvJiM2iwLSHqgs8wPskLTOQwJoWjYBPjWDGlfLHXGJ5e8qXCQOAVQ+LthGTtrYHmCjlMyKi1BpIiHAm2tNI2yUmSaDJ9xhnt6Ve/QI2VRJfocZzRlZyaOHkEBpSKjjxm7GjXV2QmO7UROVVd7IKIZVeCTiG9jhfJ2VTbaXaYqVZRS3yFsKTtwyF5yW5FssQRV7JORKvecHGIMuPcSS+e0TSC+IMTHWK2hC1o+GMdwjpp0NNQCCL144tpVsb2a00kVSdkfcBeCKcXUPHrwYXki7ywd7GYgwVmj6HCo0ZrDAhnmsFse+I3VAhBikzCgZkzWaAFwA1nlwtrK42j2PaPLGS8r6qJSMFQ5R6kZNv8fnZT8F8ccCZuihpT43+SivwCQBMCKgQBinynrX/eGvVmTREv4BtLboWYbnwK9dLteR9y9GiPBHtGqsLzUAZ7KHmjRiEMtFJgXZlC2ygZov80SIZqJ/b8d8DKMGa25RrSzo1EMdoKGe8/NEiqKBdsM7aCjrrEC9SnuNtUre7QugoD5bcsXFSY+HaBqGse4fQbTdHnipZPwPLS2zLZyuoIivJKjBfaQZV0DfGlSHzR705QT3Ivh6F41Lpa7hsnDci6mfwIbnMMxcDLrsxkFhMWik6AjLYyuATVxBYiFrJhFRMx/FPh36SDXEDr9OrOM2jsIdYfKu2yVQAFxC1Ijez5iQfGqTUMVn";
