@@ -3790,6 +3790,25 @@ fn test_pl_missing_create_event_returns_error() {
     assert!(msg.contains("m.room.create"));
 }
 
+#[test]
+fn test_auth_missing_create_event_in_v2_room_state_with_context() {
+    let state = RoomState::new();
+    let provider: rezzy::HashMap<String, LeanEvent> = rezzy::HashMap::new();
+    let event = make_event(
+        "$pl",
+        "m.room.power_levels",
+        Some(""),
+        "@admin:example.com",
+        json!({}),
+    );
+
+    let result =
+        check_auth_with_context(&event, &state, StateResVersion::V2, None, Some(&provider));
+    assert!(
+        matches!(result, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("missing m.room.create in room state"))
+    );
+}
+
 /// Rule 10.2 (V12): `events` map with non-integer value → reject.
 #[test]
 fn test_pl_v12_events_map_non_integer_rejected() {
@@ -4321,9 +4340,7 @@ fn test_rule_1_2_create_invalid_sender_mxid() {
         json!({"room_version": "10"}),
     );
     let res = check_auth(&create_ev, &state, StateResVersion::V2, None);
-    assert!(
-        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("valid MXID"))
-    );
+    assert!(matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("valid MXID")));
 }
 
 #[test]
