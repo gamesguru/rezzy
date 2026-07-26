@@ -587,7 +587,7 @@ impl<Id: EventId, C: EventContent> EventLike for LeanEvent<Id, C> {
 ///
 /// // Usage — zero boilerplate, one JSON parse:
 /// let event = rezzy::ParsedEvent::new(&pdu);
-/// rezzy::auth::check_auth(&event, &state, version, None, None)?;
+/// rezzy::auth::check_auth(&event, &state, version, None)?;
 /// ```
 pub trait RawEvent {
     /// The event ID type (e.g. `OwnedEventId`, `String`).
