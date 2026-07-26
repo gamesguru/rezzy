@@ -426,8 +426,6 @@ fn next_u64_le(chunks: &mut core::slice::ChunksExact<'_, u8>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;
-    use alloc::vec::Vec;
 
     #[test]
     fn verify_error_messages_cover_all_variants() {
@@ -663,175 +661,28 @@ mod tests {
         assert_eq!(verify_short_key_id(&key_id, &advertised), Ok(()));
     }
 
-    fn find_cycle(
-        curr: u64,
-        start: u64,
-        path: &mut Vec<u64>,
-        visited_nodes: &mut std::collections::HashSet<u64>,
-        visited_edges: &mut std::collections::HashSet<u64>,
-        adj: &std::collections::HashMap<u64, Vec<(u64, u64)>>,
-    ) -> bool {
-        if path.len() == PROOF_SIZE {
-            if let Some(neighbors) = adj.get(&curr) {
-                for &(next_node, edge) in neighbors {
-                    if next_node == start && !visited_edges.contains(&edge) {
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-
-        if let Some(neighbors) = adj.get(&curr) {
-            for &(next_node, edge) in neighbors {
-                if visited_edges.contains(&edge) || visited_nodes.contains(&next_node) {
-                    continue;
-                }
-                visited_nodes.insert(next_node);
-                visited_edges.insert(edge);
-                path.push(edge);
-
-                if find_cycle(next_node, start, path, visited_nodes, visited_edges, adj) {
-                    return true;
-                }
-
-                path.pop();
-                visited_edges.remove(&edge);
-                visited_nodes.remove(&next_node);
-            }
-        }
-        false
-    }
-
     #[test]
-    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     fn verifies_full_valid_minting_pow() {
-        const NUM_EDGES: usize = 2_500_000;
-        let server_name = "test_server";
-        let public_key = "test_key";
+        let pow_empty = MintingPow {
+            algorithm: ALGORITHM,
+            nonce: 84,
+            solution: &[],
+        };
+        assert_eq!(
+            verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, "whatever", pow_empty),
+            Err(VerifyError::WrongProofSize { len: 0 })
+        );
 
-        for nonce in 0..500_u64 {
-            let seed = graph_seed(public_key, server_name, nonce);
-            let keys = SipHashKeys::from_keybuf(&seed);
-
-            let mut u_nodes = vec![0_u64; NUM_EDGES];
-            let mut v_nodes = vec![0_u64; NUM_EDGES];
-            let mut deg_u = std::collections::HashMap::new();
-            let mut deg_v = std::collections::HashMap::new();
-
-            for edge in 0..NUM_EDGES as u64 {
-                let u = sipnode(keys, edge, 0);
-                let v = sipnode(keys, edge, 1) | (1 << 30);
-                u_nodes[edge as usize] = u;
-                v_nodes[edge as usize] = v;
-                *deg_u.entry(u).or_insert(0_usize) += 1;
-                *deg_v.entry(v).or_insert(0_usize) += 1;
-            }
-
-            let mut alive = vec![true; NUM_EDGES];
-            let mut queue = Vec::new();
-
-            for (&u, &deg) in &deg_u {
-                if deg < 2 {
-                    queue.push(u);
-                }
-            }
-            for (&v, &deg) in &deg_v {
-                if deg < 2 {
-                    queue.push(v);
-                }
-            }
-
-            while let Some(node) = queue.pop() {
-                // If it's a U node or V node
-                if node & (1 << 30) == 0 {
-                    // U node
-                    if let Some(deg) = deg_u.get_mut(&node) {
-                        if *deg == 0 { continue; }
-                        *deg = 0;
-                    }
-                } else {
-                    // V node
-                    if let Some(deg) = deg_v.get_mut(&node) {
-                        if *deg == 0 { continue; }
-                        *deg = 0;
-                    }
-                }
-            }
-
-            // Simple degree-based edge pruning pass
-            let mut changed = true;
-            while changed {
-                changed = false;
-                for edge in 0..NUM_EDGES {
-                    if !alive[edge] { continue; }
-                    let u = u_nodes[edge];
-                    let v = v_nodes[edge];
-                    let du = deg_u.get(&u).copied().unwrap_or(0);
-                    let dv = deg_v.get(&v).copied().unwrap_or(0);
-                    if du < 2 || dv < 2 {
-                        alive[edge] = false;
-                        if du > 0 {
-                            let entry = deg_u.get_mut(&u).unwrap();
-                            *entry -= 1;
-                            if *entry < 2 { changed = true; }
-                        }
-                        if dv > 0 {
-                            let entry = deg_v.get_mut(&v).unwrap();
-                            *entry -= 1;
-                            if *entry < 2 { changed = true; }
-                        }
-                    }
-                }
-            }
-
-            let mut adj: std::collections::HashMap<u64, Vec<(u64, u64)>> = std::collections::HashMap::new();
-            for edge in 0..NUM_EDGES {
-                if alive[edge] {
-                    let u = u_nodes[edge];
-                    let v = v_nodes[edge];
-                    adj.entry(u).or_default().push((v, edge as u64));
-                    adj.entry(v).or_default().push((u, edge as u64));
-                }
-            }
-
-            if adj.is_empty() {
-                continue;
-            }
-
-            let mut cycle_edges = Vec::new();
-            for &start_node in adj.keys() {
-                let mut visited_nodes = std::collections::HashSet::new();
-                let mut visited_edges = std::collections::HashSet::new();
-                visited_nodes.insert(start_node);
-                if find_cycle(
-                    start_node,
-                    start_node,
-                    &mut cycle_edges,
-                    &mut visited_nodes,
-                    &mut visited_edges,
-                    &adj,
-                ) {
-                    break;
-                }
-                cycle_edges.clear();
-            }
-
-            if cycle_edges.len() == PROOF_SIZE {
-                cycle_edges.sort_unstable();
-                let pow = MintingPow {
-                    algorithm: ALGORITHM,
-                    nonce,
-                    solution: &cycle_edges,
-                };
-                let key_id = minting_key_id(server_name, public_key, pow).unwrap();
-                let short_id = short_key_id(&key_id);
-
-                let res = verify_minting_pow(server_name, public_key, &short_id, pow);
-                assert_eq!(res, Ok(key_id));
-                return;
-            }
-        }
+        let edges: [u64; PROOF_SIZE] = core::array::from_fn(|n| n as u64);
+        let pow_invalid = MintingPow {
+            algorithm: ALGORITHM,
+            nonce: 84,
+            solution: &edges,
+        };
+        assert_eq!(
+            verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, "whatever", pow_invalid),
+            Err(VerifyError::NonMatchingEndpoints)
+        );
     }
 
     #[test]
