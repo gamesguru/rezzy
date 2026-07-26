@@ -750,6 +750,48 @@ fn test_auth_chain_rejects_unauthorized() {
 }
 
 #[test]
+fn test_auth_chain_propagates_rejection_via_auth_events() {
+    // $bad_ban is rejected: with no PL event, only the room creator (alice)
+    // falls back to implicit PL 100 (V1-V11 fallback) — bob falls back to
+    // the plain default PL 0, below the default ban level of 50.
+    // $downstream references $bad_ban in its auth_events, so it must be
+    // short-circuited via Rule 2.3 (`has_rejected_auth_event` in
+    // check_auth_chain) without rerunning full auth checks against it.
+    let events = utils::parse_jsonl_events(
+        r#"
+{"event_id":"$create","type":"m.room.create","state_key":"","sender":"@alice:x.com","depth":0,"origin_server_ts":1000,"content":{},"prev_events":[],"auth_events":[]}
+{"event_id":"$alice_join","type":"m.room.member","state_key":"@alice:x.com","sender":"@alice:x.com","depth":1,"origin_server_ts":1001,"content":{"membership":"join"},"prev_events":["$create"],"auth_events":["$create"]}
+{"event_id":"$join_rules","type":"m.room.join_rules","state_key":"","sender":"@alice:x.com","depth":2,"origin_server_ts":1002,"content":{"join_rule":"public"},"prev_events":["$alice_join"],"auth_events":["$create","$alice_join"]}
+{"event_id":"$bob_join","type":"m.room.member","state_key":"@bob:x.com","sender":"@bob:x.com","depth":3,"origin_server_ts":1003,"content":{"membership":"join"},"prev_events":["$join_rules"],"auth_events":["$create","$join_rules"]}
+{"event_id":"$bad_ban","type":"m.room.member","state_key":"@carol:x.com","sender":"@bob:x.com","depth":4,"origin_server_ts":1004,"content":{"membership":"ban"},"prev_events":["$bob_join"],"auth_events":["$create","$bob_join"]}
+{"event_id":"$downstream","type":"m.room.message","sender":"@alice:x.com","depth":5,"origin_server_ts":1005,"content":{"body":"hi"},"prev_events":["$bad_ban"],"auth_events":["$create","$alice_join","$bad_ban"]}
+    "#,
+    );
+
+    let (accepted, rejected) =
+        check_auth_chain(&events, &RoomState::new(), rezzy::StateResVersion::V2);
+
+    assert_eq!(
+        accepted,
+        vec!["$create", "$alice_join", "$join_rules", "$bob_join"],
+        "Create, alice's join, join_rules, and bob's join should pass auth"
+    );
+    assert_eq!(rejected.len(), 2);
+    assert_eq!(rejected[0].0, "$bad_ban");
+    assert!(
+        matches!(rejected[0].1, AuthError::InsufficientPowerLevel { .. }),
+        "Expected InsufficientPowerLevel for the ban itself, got: {:?}",
+        rejected[0].1
+    );
+    assert_eq!(rejected[1].0, "$downstream");
+    assert!(
+        matches!(rejected[1].1, AuthError::InvalidSyntax(ref msg) if msg.contains("auth_event was previously rejected")),
+        "Expected propagated rejection for $downstream, got: {:?}",
+        rejected[1].1
+    );
+}
+
+#[test]
 fn test_auth_error_display() {
     let err: AuthError = AuthError::NotMember {
         sender: "@bob:example.com".into(),
@@ -4457,6 +4499,43 @@ fn test_rule_4_aliases_enforced_v2_through_v5_not_v6_plus() {
 }
 
 #[test]
+fn test_rule_4_aliases_missing_state_key_rejected() {
+    use rezzy::basespec::event_types::M_ROOM_MEMBER;
+    let mut state = RoomState::new();
+    let create_ev = make_event(
+        "$c",
+        M_ROOM_CREATE,
+        Some(""),
+        "@admin:example.com",
+        json!({"room_version": "1"}),
+    );
+    state.insert((M_ROOM_CREATE.into(), String::new()), create_ev);
+    state.insert(
+        (M_ROOM_MEMBER.into(), "@admin:example.com".into()),
+        make_event(
+            "$m",
+            M_ROOM_MEMBER,
+            Some("@admin:example.com"),
+            "@admin:example.com",
+            json!({"membership": "join"}),
+        ),
+    );
+
+    let no_state_key_alias = make_event(
+        "$alias",
+        "m.room.aliases",
+        None,
+        "@admin:example.com",
+        json!({"aliases": ["#test:example.com"]}),
+    );
+    let res = check_auth(&no_state_key_alias, &state, StateResVersion::V1, None);
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("m.room.aliases event must have a state_key")),
+        "m.room.aliases without a state_key must be rejected, got {res:?}"
+    );
+}
+
+#[test]
 fn test_rule_2_1_duplicate_auth_event_pair_rejected() {
     use rezzy::basespec::event_types::M_ROOM_MEMBER;
     let mut state = RoomState::new();
@@ -4653,6 +4732,41 @@ fn test_rule_2_4_missing_create_in_v1_v11_auth_events() {
     assert!(
         matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("must contain m.room.create")),
         "Pre-v12 events missing m.room.create in auth_events must be rejected when auth_context is supplied, got {res:?}"
+    );
+}
+
+#[test]
+fn test_auth_events_unresolved_by_provider_returns_missing_auth_event() {
+    let mut state = RoomState::new();
+    let create_ev = make_event(
+        "$c",
+        M_ROOM_CREATE,
+        Some(""),
+        "@admin:example.com",
+        json!({}),
+    );
+    state.insert((M_ROOM_CREATE.into(), String::new()), create_ev.clone());
+
+    // Provider only knows about $c; $ghost is referenced in auth_events but
+    // cannot be resolved, so it must hard-fail with MissingAuthEvent instead
+    // of being silently skipped.
+    let mut provider = rezzy::HashMap::new();
+    provider.insert("$c".to_string(), create_ev);
+
+    let mut msg = make_event(
+        "$msg",
+        "m.room.message",
+        None,
+        "@admin:example.com",
+        json!({"body": "hi"}),
+    );
+    msg.auth_events = vec!["$c".into(), "$ghost".into()];
+
+    let res = check_auth_with_context(&msg, &state, StateResVersion::V2, None, Some(&provider));
+    assert_eq!(
+        res,
+        Err(AuthError::MissingAuthEvent("$ghost".to_string())),
+        "Unresolvable auth_id must return MissingAuthEvent, got {res:?}"
     );
 }
 
