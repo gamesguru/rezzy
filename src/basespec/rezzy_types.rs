@@ -477,6 +477,12 @@ pub trait EventLike: DagNode {
         self.content().get_room_version()
     }
 
+    /// Returns the `redacts` field (event ID being redacted) for
+    /// `m.room.redaction` events.
+    fn get_redacts(&self) -> Option<&str> {
+        self.content().get_redacts()
+    }
+
     /// Returns true if `sender` is listed in the V12+ `additional_creators` array.
     fn has_additional_creator(&self, sender: &str) -> bool {
         self.content().has_additional_creator(sender)
@@ -959,6 +965,13 @@ pub trait EventContent: Clone + core::fmt::Debug + Default {
     fn get_m_federate(&self) -> Option<bool> {
         None
     }
+    /// Returns the event ID of the event being redacted (the `redacts`
+    /// field), for `m.room.redaction` events. Moved into `content` in v11+;
+    /// pre-v11 callers are expected to surface it the same way since
+    /// `LeanEvent` has no dedicated top-level `redacts` field.
+    fn get_redacts(&self) -> Option<&str> {
+        None
+    }
     /// Specific to V12+ rooms.
     fn has_additional_creator(&self, sender: &str) -> bool;
     /// Returns `true` if `additional_creators` is absent, or present as an
@@ -1175,6 +1188,11 @@ impl EventContent for Value {
 
     fn get_m_federate(&self) -> Option<bool> {
         self.get("m.federate")?.as_bool()
+    }
+
+    fn get_redacts(&self) -> Option<&str> {
+        self.get(crate::basespec::event_types::FIELD_REDACTS)?
+            .as_str()
     }
 
     fn has_additional_creator(&self, sender: &str) -> bool {
@@ -1619,6 +1637,13 @@ impl<Id, C> LeanEvent<Id, C> {
         C: EventContent,
     {
         self.content.get_room_version()
+    }
+
+    pub fn get_redacts(&self) -> Option<&str>
+    where
+        C: EventContent,
+    {
+        self.content.get_redacts()
     }
 
     pub fn has_additional_creator(&self, sender: &str) -> bool

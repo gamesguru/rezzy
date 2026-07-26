@@ -39,7 +39,7 @@ authorization rules. Three distinct rule sets exist:
 | 8          | Event type required PL check                                                         | all      | [x]   | `get_required_power_level`                                                                           |
 | 9          | **State key starts with `@`**: must match sender                                     | all      | [x]   | Implemented via exact match check                                                                    |
 | 10         | **m.room.power_levels** validation (see below)                                       | all      | [x]   | Completed coverage                                                                                   |
-| 11 (V1–V2) | **m.room.redaction**: PL ≥ redact level, or same domain                              | V1–V2    | [ ]   | Not checked                                                                                          |
+| 11 (V1–V2) | **m.room.redaction**: PL ≥ redact level, or same domain                              | V1–V2    | [x]   | Checked via `get_redact_power_level`/`domain_matches` in `check_auth`                                |
 | 11         | Otherwise, allow                                                                     | V3+      | [x]   | Implicit                                                                                             |
 
 <!-- markdownlint-enable MD013 -->

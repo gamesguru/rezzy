@@ -4535,6 +4535,118 @@ fn test_rule_4_aliases_missing_state_key_rejected() {
     );
 }
 
+/// Builds room state (v1 by default) with a creator and a joined `@bob:domain1.com`.
+fn rule_11_base_state(room_version: &str) -> RoomState {
+    use rezzy::basespec::event_types::M_ROOM_MEMBER;
+    let mut state = RoomState::new();
+    state.insert(
+        (M_ROOM_CREATE.into(), String::new()),
+        make_event(
+            "$c",
+            M_ROOM_CREATE,
+            Some(""),
+            "@admin:domain1.com",
+            json!({"room_version": room_version}),
+        ),
+    );
+    state.insert(
+        (M_ROOM_MEMBER.into(), "@bob:domain1.com".into()),
+        make_event(
+            "$bob_join",
+            M_ROOM_MEMBER,
+            Some("@bob:domain1.com"),
+            "@bob:domain1.com",
+            json!({"membership": "join"}),
+        ),
+    );
+    state
+}
+
+#[test]
+fn test_rule_11_redaction_insufficient_pl_different_domain_rejected() {
+    let state = rule_11_base_state("1");
+    // Bob has no explicit PL (default 0, below the default redact level of
+    // 50), and the redacted event is on a different domain.
+    let redaction = make_event(
+        "$redact:domain1.com",
+        "m.room.redaction",
+        None,
+        "@bob:domain1.com",
+        json!({"redacts": "$target:domain2.com"}),
+    );
+    let res = check_auth(&redaction, &state, StateResVersion::V1, None);
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("m.room.redaction requires sender PL")),
+        "Redaction with insufficient PL and a different domain must be rejected, got {res:?}"
+    );
+}
+
+#[test]
+fn test_rule_11_redaction_insufficient_pl_same_domain_allowed() {
+    let state = rule_11_base_state("1");
+    // Same domain as the redacted event allows it despite insufficient PL.
+    let redaction = make_event(
+        "$redact:domain1.com",
+        "m.room.redaction",
+        None,
+        "@bob:domain1.com",
+        json!({"redacts": "$target:domain1.com"}),
+    );
+    let res = check_auth(&redaction, &state, StateResVersion::V1, None);
+    assert!(
+        res.is_ok(),
+        "Redaction of an event on the same domain must be allowed, got {res:?}"
+    );
+}
+
+#[test]
+fn test_rule_11_redaction_sufficient_pl_different_domain_allowed() {
+    use rezzy::basespec::event_types::M_ROOM_POWER_LEVELS;
+    let mut state = rule_11_base_state("1");
+    state.insert(
+        (M_ROOM_POWER_LEVELS.into(), String::new()),
+        make_event(
+            "$pl",
+            M_ROOM_POWER_LEVELS,
+            Some(""),
+            "@admin:domain1.com",
+            json!({"redact": 50, "users": {"@bob:domain1.com": 50}}),
+        ),
+    );
+    let redaction = make_event(
+        "$redact:domain1.com",
+        "m.room.redaction",
+        None,
+        "@bob:domain1.com",
+        json!({"redacts": "$target:domain2.com"}),
+    );
+    let res = check_auth(&redaction, &state, StateResVersion::V1, None);
+    assert!(
+        res.is_ok(),
+        "Redaction with sender PL >= redact level must be allowed regardless of domain, got {res:?}"
+    );
+}
+
+#[test]
+fn test_rule_11_redaction_not_enforced_v3_plus() {
+    let state = rule_11_base_state("3");
+    // Same conditions that would be rejected under v1-v2 (insufficient PL,
+    // different domain) must not be rejected by Rule 11 in v3+, since the
+    // rule was removed starting v3.
+    let redaction = make_event(
+        "$redact:domain1.com",
+        "m.room.redaction",
+        None,
+        "@bob:domain1.com",
+        json!({"redacts": "$target:domain2.com"}),
+    );
+    let res = check_auth(&redaction, &state, StateResVersion::V2, None);
+    assert!(
+        !matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("m.room.redaction requires sender PL")),
+        "Rule 11 must not apply in v3+, got {res:?}"
+    );
+}
+
 #[test]
 fn test_rule_2_1_duplicate_auth_event_pair_rejected() {
     use rezzy::basespec::event_types::M_ROOM_MEMBER;

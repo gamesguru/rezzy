@@ -1,9 +1,5 @@
 Open items (see docs/spec_audit.md for full compliance matrix)
 
-Auth rules:
-- Rule 11 (V1-V2): m.room.redaction PL >= redact level, or same-domain check.
-  Not implemented (spec_audit.md still lists this as "Not checked").
-
 MSC0501 (PinSketch gossip reconciliation):
 - Homeserver HTTP route integration (/_matrix/federation/v1/reconcile/...)
   is explicitly out of scope for rezzy; downstream homeservers (Synapse,

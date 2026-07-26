@@ -28,8 +28,8 @@ use crate::basespec::event_types::{
     DEFAULT_PL_BAN, DEFAULT_PL_INVITE, DEFAULT_PL_KICK, DEFAULT_PL_REDACT, FIELD_MEMBERSHIP,
     FIELD_SIGNED, FIELD_THIRD_PARTY_INVITE, FIELD_TOKEN, MEM_BAN, MEM_INVITE, MEM_JOIN, MEM_KNOCK,
     MEM_LEAVE, M_ROOM_CREATE, M_ROOM_JOIN_RULES, M_ROOM_MEMBER, M_ROOM_POWER_LEVELS,
-    M_ROOM_THIRD_PARTY_INVITE, RULE_INVITE, RULE_KNOCK, RULE_KNOCK_RESTRICTED, RULE_PUBLIC,
-    RULE_RESTRICTED,
+    M_ROOM_REDACTION, M_ROOM_THIRD_PARTY_INVITE, RULE_INVITE, RULE_KNOCK, RULE_KNOCK_RESTRICTED,
+    RULE_PUBLIC, RULE_RESTRICTED,
 };
 use crate::basespec::rezzy_types::{is_valid_mxid, EventLike, LeanEvent, StateResVersion};
 
@@ -446,6 +446,35 @@ pub fn check_auth_with_context<
             if !crate::basespec::rezzy_types::domain_matches(state_key, event.sender()) {
                 return Err(AuthError::InvalidSyntax(
                     "m.room.aliases state_key domain must match sender domain".into(),
+                ));
+            }
+        }
+    }
+
+    // Rule 11 (V1–V2): m.room.redaction — allow if sender PL >= redact
+    // level, or if the redaction event and the event it redacts share a
+    // domain; otherwise reject. Removed starting v3 (v3-auth-rules.txt has
+    // no equivalent rule; spec_audit.md notes this as "removes
+    // m.room.redaction auth rule"). Room version is read the same way as
+    // Rule 4 above, from the m.room.create event's content, not the
+    // collapsed `StateResVersion` enum.
+    if event_type == M_ROOM_REDACTION {
+        let room_version = state
+            .get_event(M_ROOM_CREATE, "")
+            .and_then(|create_ev| create_ev.content().get_room_version())
+            .unwrap_or("1");
+        if matches!(room_version, "1" | "2") {
+            let sender_pl = user::get_sender_power_level(event.sender(), state, version);
+            let redact_pl = get_redact_power_level(state);
+            let same_domain = event.get_redacts().is_some_and(|target| {
+                crate::basespec::rezzy_types::domain_matches(
+                    target,
+                    &alloc::format!("{}", event.event_id()),
+                )
+            });
+            if sender_pl < redact_pl && !same_domain {
+                return Err(AuthError::InvalidSyntax(
+                    "m.room.redaction requires sender PL >= redact level, or same domain as the redacted event".into(),
                 ));
             }
         }
