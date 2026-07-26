@@ -60,6 +60,72 @@ fn report(name: &str, iterations: u32, elapsed: Duration) {
     println!("{name}: {millis:.6} ms/op ({iterations} iterations)");
 }
 
+fn benchmark_pinsketch_toggle(capacity: usize, element_count: usize) {
+    let mut generator = Xorshift128::new(0x7f4a_7c15_9e37_79b9);
+    let values: Vec<u64> = (0..element_count).map(|_| generator.next() | 1).collect();
+    let elapsed = measure(10, || {
+        let mut sketch = SyndromeSketch::new(capacity).expect("benchmark capacity is valid");
+        for value in &values {
+            sketch
+                .toggle(*value)
+                .expect("benchmark identifiers are valid");
+        }
+        black_box(sketch);
+    });
+    report(
+        &format!("algebraic/toggle/{capacity}x{element_count}"),
+        10,
+        elapsed,
+    );
+}
+
+fn benchmark_pinsketch_subtract(capacity: usize, element_count: usize) {
+    let mut generator = Xorshift128::new(0x1357_9bdf_2468_ace0);
+    let left_values: Vec<u64> = (0..element_count).map(|_| generator.next() | 1).collect();
+    let right_values: Vec<u64> = (0..element_count).map(|_| generator.next() | 1).collect();
+    let mut left = SyndromeSketch::new(capacity).expect("benchmark capacity is valid");
+    let mut right = SyndromeSketch::new(capacity).expect("benchmark capacity is valid");
+    for value in &left_values {
+        left.toggle(*value)
+            .expect("benchmark identifiers are valid");
+    }
+    for value in &right_values {
+        right
+            .toggle(*value)
+            .expect("benchmark identifiers are valid");
+    }
+    let elapsed = measure(100, || {
+        let residual = left.subtract(&right).expect("benchmark capacities match");
+        black_box(residual);
+    });
+    report(
+        &format!("algebraic/subtract/{capacity}x{element_count}"),
+        100,
+        elapsed,
+    );
+}
+
+fn benchmark_pinsketch_decode(capacity: usize, element_count: usize) {
+    let mut generator = Xorshift128::new(0x0ddc_0ffe_e15e_d00d);
+    let mut sketch = SyndromeSketch::new(capacity).expect("benchmark capacity is valid");
+    for _ in 0..element_count {
+        sketch
+            .toggle(generator.next() | 1)
+            .expect("benchmark identifiers are valid");
+    }
+    let encoded = sketch.encode();
+    let elapsed = measure(100, || {
+        let decoded =
+            SyndromeSketch::decode(capacity, &encoded).expect("benchmark decode is valid");
+        let _ = black_box(decoded.decode_elements(element_count.min(capacity)));
+    });
+    report(
+        &format!("algebraic/decode/{capacity}x{element_count}"),
+        100,
+        elapsed,
+    );
+}
+
 fn benchmark_scale_workload(
     base_count: usize,
     local_extra_count: usize,
@@ -125,6 +191,18 @@ fn main() {
         ));
     });
     report("gf64 multiply", 1_000_000, elapsed);
+
+    benchmark_pinsketch_toggle(8, 4);
+    benchmark_pinsketch_toggle(32, 16);
+    benchmark_pinsketch_toggle(64, 32);
+
+    benchmark_pinsketch_subtract(8, 4);
+    benchmark_pinsketch_subtract(32, 16);
+    benchmark_pinsketch_subtract(64, 32);
+
+    benchmark_pinsketch_decode(8, 4);
+    benchmark_pinsketch_decode(32, 16);
+    benchmark_pinsketch_decode(64, 32);
 
     for count in [100, 1_000, 10_000] {
         let elapsed = measure(10, || {

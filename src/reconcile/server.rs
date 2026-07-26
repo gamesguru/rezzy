@@ -19,6 +19,127 @@ use super::{
     RoomAccumulator,
 };
 
+/// Read-only helper over a pre-sorted `h64` index.
+///
+/// This keeps bucket extraction cheap and explicit without forcing callers into
+/// a heavier storage abstraction.
+#[derive(Debug, Clone, Copy)]
+pub struct H64Index<'a> {
+    sorted_h64: &'a [u64],
+}
+
+impl<'a> H64Index<'a> {
+    /// Creates a view over a pre-sorted `h64` slice.
+    #[must_use]
+    pub const fn new(sorted_h64: &'a [u64]) -> Self {
+        Self { sorted_h64 }
+    }
+
+    fn bounds(request: &BucketRequest) -> Result<(u64, u64), AlgebraicError> {
+        crate::reconcile::triage::validate_bucket_requests(core::slice::from_ref(request))?;
+
+        let shift = 64_u8.saturating_sub(request.depth);
+        let start_h64 = if shift == 64 {
+            0
+        } else {
+            u64::from(request.prefix) << shift
+        };
+        let end_h64_inclusive = if shift == 64 {
+            u64::MAX
+        } else {
+            start_h64 | (1_u64 << shift).wrapping_sub(1)
+        };
+
+        Ok((start_h64, end_h64_inclusive))
+    }
+
+    /// Returns the half-open slice range covered by one bucket request.
+    ///
+    /// # Errors
+    /// Returns an error when the request is malformed.
+    pub fn bucket_range(
+        &self,
+        request: &BucketRequest,
+    ) -> Result<core::ops::Range<usize>, AlgebraicError> {
+        let (start_h64, end_h64_inclusive) = Self::bounds(request)?;
+        let start_idx = self.sorted_h64.partition_point(|&x| x < start_h64);
+        let end_idx = self.sorted_h64.partition_point(|&x| x <= end_h64_inclusive);
+        Ok(start_idx..end_idx)
+    }
+
+    /// Returns the `h64` slice covered by one bucket request.
+    ///
+    /// # Errors
+    /// Returns an error when the request is malformed.
+    pub fn bucket_slice(&self, request: &BucketRequest) -> Result<&'a [u64], AlgebraicError> {
+        let range = self.bucket_range(request)?;
+        Ok(&self.sorted_h64[range])
+    }
+}
+
+/// Reusable reconciliation view over one room's current frame and `h64` index.
+///
+/// This is a convenience layer for callers that repeatedly query the same room
+/// state: it avoids threading the graph, anchors, and sorted index separately
+/// through every call site.
+#[derive(Debug, Clone, Copy)]
+pub struct ReconciliationContext<'a, Id: EventId, G: ForwardGraph<Id>> {
+    graph: &'a G,
+    frame_anchors: &'a [Id],
+    h64_index: H64Index<'a>,
+}
+
+impl<'a, Id: EventId, G: ForwardGraph<Id>> ReconciliationContext<'a, Id, G> {
+    /// Creates a reusable context for one room/frame snapshot.
+    #[must_use]
+    pub const fn new(graph: &'a G, frame_anchors: &'a [Id], sorted_h64: &'a [u64]) -> Self {
+        Self {
+            graph,
+            frame_anchors,
+            h64_index: H64Index::new(sorted_h64),
+        }
+    }
+
+    /// Returns the negotiated frame digest for this room snapshot.
+    ///
+    /// # Errors
+    /// Returns an error if any frame event IDs violate format rules or element
+    /// hashing limits.
+    pub fn frame_digest(&self) -> Result<RoomAccumulator, AlgebraicError> {
+        compute_frame_digest(self.graph, self.frame_anchors)
+    }
+
+    /// Returns the `h64` range covered by one bucket request.
+    ///
+    /// # Errors
+    /// Returns an error when the request is malformed.
+    pub fn bucket_range(
+        &self,
+        request: &BucketRequest,
+    ) -> Result<core::ops::Range<usize>, AlgebraicError> {
+        self.h64_index.bucket_range(request)
+    }
+
+    /// Returns the `h64` slice covered by one bucket request.
+    ///
+    /// # Errors
+    /// Returns an error when the request is malformed.
+    pub fn bucket_slice(&self, request: &BucketRequest) -> Result<&'a [u64], AlgebraicError> {
+        self.h64_index.bucket_slice(request)
+    }
+
+    /// Constructs bucket sketches over the room's sorted `h64` index.
+    ///
+    /// # Errors
+    /// Returns an error if any sketches exceed capacity limits or if requests are invalid.
+    pub fn bucket_sketches(
+        &self,
+        requests: &[BucketRequest],
+    ) -> Result<Vec<SyndromeSketch>, AlgebraicError> {
+        build_bucket_sketches(self.h64_index.sorted_h64, requests)
+    }
+}
+
 /// Abstraction for forward traversal through the room DAG.
 ///
 /// Matrix homeservers typically traverse backwards via `prev_events`.
@@ -130,32 +251,14 @@ pub fn build_bucket_sketches(
     requests: &[BucketRequest],
 ) -> Result<Vec<SyndromeSketch>, AlgebraicError> {
     crate::reconcile::triage::validate_bucket_requests(requests)?;
+    let index = H64Index::new(sorted_h64);
 
     let mut sketches = Vec::with_capacity(requests.len());
 
     for request in requests {
         let mut sketch = SyndromeSketch::new(request.capacity)?;
-
-        let shift = 64_u8.saturating_sub(request.depth);
-        // NOTE: this prefix bounds calculation implicitly assumes big-endian semantics
-        // (meaning the `request.prefix` bits align with the most significant bits of the h64 values).
-        // Since `h64` is consistently treated as an integer and sorted numerically, this aligns with
-        // the client's tree traversal.
-        let start_h64 = if shift == 64 {
-            0
-        } else {
-            u64::from(request.prefix) << shift
-        };
-        let end_h64_inclusive = if shift == 64 {
-            u64::MAX
-        } else {
-            start_h64 | (1_u64 << shift).wrapping_sub(1)
-        };
-
-        let start_idx = sorted_h64.partition_point(|&x| x < start_h64);
-        let end_idx = sorted_h64.partition_point(|&x| x <= end_h64_inclusive);
-
-        for &h64 in &sorted_h64[start_idx..end_idx] {
+        // The pre-sorted index makes the bucket's contents a contiguous slice.
+        for &h64 in index.bucket_slice(request)? {
             sketch.toggle(h64)?;
         }
 
@@ -383,6 +486,90 @@ mod tests {
         let roots = sketches[0].clone().decode_elements(4).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0], h1.h64);
+    }
+
+    #[test]
+    fn test_h64_index_bucket_slice() {
+        use crate::reconcile::triage::BucketRequest;
+
+        let sorted_h64 = vec![
+            0x0000_0001_0000_0001,
+            0x0000_0001_0000_0002,
+            0x0000_0002_0000_0001,
+            0x0000_0003_0000_0001,
+        ];
+        let index = H64Index::new(&sorted_h64);
+        let request = BucketRequest {
+            depth: 32,
+            prefix: 1,
+            capacity: 4,
+        };
+
+        let slice = index.bucket_slice(&request).unwrap();
+        assert_eq!(slice, &[0x0000_0001_0000_0001, 0x0000_0001_0000_0002]);
+    }
+
+    #[test]
+    fn test_h64_index_bucket_range() {
+        use crate::reconcile::triage::BucketRequest;
+
+        let sorted_h64 = vec![
+            0x0000_0001_0000_0001,
+            0x0000_0001_0000_0002,
+            0x0000_0002_0000_0001,
+            0x0000_0003_0000_0001,
+        ];
+        let index = H64Index::new(&sorted_h64);
+        let request = BucketRequest {
+            depth: 32,
+            prefix: 1,
+            capacity: 4,
+        };
+
+        let range = index.bucket_range(&request).unwrap();
+        assert_eq!(range, 0..2);
+    }
+
+    #[test]
+    fn test_reconciliation_context_delegates_room_lookups() {
+        use crate::reconcile::triage::BucketRequest;
+
+        let mut graph = MockGraph::new();
+        graph.add_edge("$anchor", "$child");
+        graph.add_edge("$child", "$grandchild");
+
+        let child = ElementHash::from_matrix_event_id("$child", EventIdFormat::Legacy).unwrap();
+        let grandchild =
+            ElementHash::from_matrix_event_id("$grandchild", EventIdFormat::Legacy).unwrap();
+        let mut sorted_h64 = vec![grandchild.h64, child.h64];
+        sorted_h64.sort_unstable();
+        let anchors = [id("$anchor")];
+
+        let context = ReconciliationContext::new(&graph, &anchors, &sorted_h64);
+        let digest = context.frame_digest().unwrap();
+
+        let mut expected = RoomAccumulator::new();
+        expected.insert(child).unwrap();
+        expected.insert(grandchild).unwrap();
+        assert_eq!(digest.digest(), expected.digest());
+        assert_eq!(digest.known_event_count(), 2);
+
+        let request = BucketRequest {
+            depth: 0,
+            prefix: 0,
+            capacity: 4,
+        };
+        let range = context.bucket_range(&request).unwrap();
+        assert_eq!(range, 0..2);
+        let slice = context.bucket_slice(&request).unwrap();
+        assert_eq!(slice, sorted_h64.as_slice());
+        let sketches = context.bucket_sketches(&[request]).unwrap();
+        assert_eq!(sketches.len(), 1);
+        let mut roots = sketches[0].clone().decode_elements(4).unwrap();
+        roots.sort_unstable();
+        let mut expected_roots = sorted_h64.clone();
+        expected_roots.sort_unstable();
+        assert_eq!(roots, expected_roots);
     }
 
     #[test]
