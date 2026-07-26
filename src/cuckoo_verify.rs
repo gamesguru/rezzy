@@ -424,6 +424,7 @@ fn next_u64_le(chunks: &mut core::slice::ChunksExact<'_, u8>) -> u64 {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -696,6 +697,72 @@ mod tests {
         assert_eq!(
             verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, "whatever", pow_matching),
             Err(VerifyError::DeadEnd)
+        );
+    }
+
+    #[test]
+    fn verify_minting_pow_returns_key_id_on_success() {
+        // Genuine 42-cycle mined offline for (TEST_PUBLIC_KEY, "nutra.tk", nonce 3).
+        let solution: [u64; PROOF_SIZE] = [
+            721_297,
+            9_513_298,
+            27_540_167,
+            29_552_787,
+            35_452_767,
+            44_271_093,
+            49_305_956,
+            53_087_052,
+            54_202_483,
+            56_178_377,
+            58_042_779,
+            60_432_276,
+            64_973_509,
+            66_003_936,
+            67_900_759,
+            73_919_907,
+            76_802_455,
+            86_858_463,
+            101_376_335,
+            106_888_118,
+            109_124_655,
+            109_681_439,
+            110_954_208,
+            128_693_198,
+            130_012_434,
+            147_508_739,
+            156_825_434,
+            175_013_018,
+            184_113_046,
+            197_116_101,
+            197_550_463,
+            213_286_076,
+            218_210_692,
+            222_739_466,
+            225_422_231,
+            225_577_405,
+            230_201_870,
+            247_481_907,
+            253_448_206,
+            262_629_872,
+            266_080_043,
+            266_673_992,
+        ];
+        let pow = MintingPow {
+            algorithm: ALGORITHM,
+            nonce: 3,
+            solution: &solution,
+        };
+
+        let key_id = minting_key_id("nutra.tk", TEST_PUBLIC_KEY, pow).unwrap();
+        let short = short_key_id(&key_id);
+
+        assert_eq!(
+            verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, &short, pow),
+            Ok(key_id)
+        );
+        assert_eq!(
+            verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, "wrong-short-key-id", pow),
+            Err(VerifyError::ShortKeyIdMismatch)
         );
     }
 
