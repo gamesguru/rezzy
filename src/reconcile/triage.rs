@@ -87,7 +87,7 @@ pub fn estimate_delta(
 
 /// Parses and independently decodes concatenated residual bucket sketches.
 ///
-/// Requests must be strictly ordered by ascending bucket ID. Each requested
+/// Requests are validated in canonical key-space range order. Each requested
 /// sketch is serialized as little-endian syndrome coordinates with no length
 /// prefix; the request capacities define the boundaries.
 ///
@@ -167,36 +167,21 @@ pub fn decode_bucket_sketches(
 ///
 /// # Errors
 /// Returns an error if any capacity or bound constraint is violated, or if the requests
-/// overlap/are incorrectly ordered.
+/// overlap.
 pub fn validate_bucket_requests(requests: &[BucketRequest]) -> Result<(), AlgebraicError> {
     let mut total_capacity = 0_usize;
-    let mut previous_end_inclusive: Option<u64> = None;
+    let mut previous_end = 0_u64;
     for request in requests {
         if request.capacity == 0 || request.capacity > MAX_BUCKET_SKETCH_CAPACITY {
             return Err(AlgebraicError::InvalidSketchCapacity);
         }
-        if request.depth >= 32 || request.prefix >= (1_u32 << request.depth) {
+        if request.depth > 32 {
             return Err(AlgebraicError::InvalidBucketIndex);
         }
 
-        let shift = 64_u8.saturating_sub(request.depth);
-        let start = if shift == 64 {
-            0
-        } else {
-            u64::from(request.prefix) << shift
-        };
-        let end_inclusive = if shift == 64 {
-            u64::MAX
-        } else {
-            start | (1_u64 << shift).wrapping_sub(1)
-        };
-
-        if let Some(prev_end) = previous_end_inclusive {
-            if start <= prev_end {
-                return Err(AlgebraicError::InvalidBucketIndex);
-            }
+        if request.depth < 32 && request.prefix >= (1_u32 << request.depth) {
+            return Err(AlgebraicError::InvalidBucketIndex);
         }
-        previous_end_inclusive = Some(end_inclusive);
 
         total_capacity = total_capacity
             .checked_add(request.capacity)
@@ -204,6 +189,17 @@ pub fn validate_bucket_requests(requests: &[BucketRequest]) -> Result<(), Algebr
         if total_capacity > MAX_BUCKETED_SKETCH_CAPACITY {
             return Err(AlgebraicError::InvalidSketchCapacity);
         }
+
+        let shift = 32_u8.saturating_sub(request.depth);
+        let start = u64::from(request.prefix) << shift;
+        let end = start
+            .checked_add(1_u64 << shift)
+            .ok_or(AlgebraicError::InvalidBucketIndex)?;
+
+        if start < previous_end {
+            return Err(AlgebraicError::InvalidBucketIndex);
+        }
+        previous_end = end;
     }
     Ok(())
 }
@@ -240,7 +236,7 @@ mod tests {
         ])
         .is_err());
 
-        // Unordered ranges
+        // Same-depth out-of-order ranges are rejected.
         assert!(validate_bucket_requests(&[
             BucketRequest {
                 depth: 1,
@@ -255,7 +251,7 @@ mod tests {
         ])
         .is_err());
 
-        // Disjoint and ordered
+        // Same-depth disjoint ranges in canonical order are valid.
         assert!(validate_bucket_requests(&[
             BucketRequest {
                 depth: 1,
@@ -269,6 +265,21 @@ mod tests {
             }
         ])
         .is_ok());
+
+        // Nested ranges remain invalid in any order.
+        assert!(validate_bucket_requests(&[
+            BucketRequest {
+                depth: 0,
+                prefix: 0,
+                capacity: 4
+            },
+            BucketRequest {
+                depth: 1,
+                prefix: 0,
+                capacity: 4
+            },
+        ])
+        .is_err());
     }
 
     #[test]
@@ -371,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn bucket_decoder_rejects_order_and_length_mismatches() {
+    fn bucket_decoder_rejects_length_mismatches_and_nested_overlaps() {
         let unordered = [
             BucketRequest {
                 depth: 8,
@@ -386,6 +397,23 @@ mod tests {
         ];
         assert_eq!(
             decode_bucket_sketches(&[0; 16], &unordered),
+            Err(AlgebraicError::InvalidBucketIndex)
+        );
+
+        let nested = [
+            BucketRequest {
+                depth: 0,
+                prefix: 0,
+                capacity: 1,
+            },
+            BucketRequest {
+                depth: 1,
+                prefix: 0,
+                capacity: 1,
+            },
+        ];
+        assert_eq!(
+            decode_bucket_sketches(&[0; 16], &nested),
             Err(AlgebraicError::InvalidBucketIndex)
         );
         assert_eq!(
