@@ -326,8 +326,7 @@ fn base64url_no_pad(bytes: &[u8]) -> String {
             out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
             out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
         }
-        [] => {}
-        _ => unreachable!("chunks_exact remainder length is less than 3"),
+        _ => {}
     }
 
     out
@@ -663,6 +662,46 @@ mod tests {
         assert_eq!(verify_short_key_id(&key_id, &advertised), Ok(()));
     }
 
+    fn find_cycle(
+        curr: u64,
+        start: u64,
+        path: &mut Vec<u64>,
+        visited_nodes: &mut std::collections::HashSet<u64>,
+        visited_edges: &mut std::collections::HashSet<u64>,
+        adj: &std::collections::HashMap<u64, Vec<(u64, u64)>>,
+    ) -> bool {
+        if path.len() == PROOF_SIZE {
+            if let Some(neighbors) = adj.get(&curr) {
+                for &(next_node, edge) in neighbors {
+                    if next_node == start && !visited_edges.contains(&edge) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        if let Some(neighbors) = adj.get(&curr) {
+            for &(next_node, edge) in neighbors {
+                if visited_edges.contains(&edge) || visited_nodes.contains(&next_node) {
+                    continue;
+                }
+                visited_nodes.insert(next_node);
+                visited_edges.insert(edge);
+                path.push(edge);
+
+                if find_cycle(next_node, start, path, visited_nodes, visited_edges, adj) {
+                    return true;
+                }
+
+                path.pop();
+                visited_edges.remove(&edge);
+                visited_nodes.remove(&next_node);
+            }
+        }
+        false
+    }
+
     #[test]
     fn verifies_full_valid_minting_pow() {
         // Search for a 42-cycle in graph for ("test_server", "test_key", 0)
@@ -674,8 +713,9 @@ mod tests {
         let keys = SipHashKeys::from_keybuf(&seed);
 
         // Build adjacency graph for first N edges
-        let mut adj: std::collections::HashMap<u64, Vec<(u64, u64)>> = std::collections::HashMap::new();
-        for edge in 0..150000_u64 {
+        let mut adj: std::collections::HashMap<u64, Vec<(u64, u64)>> =
+            std::collections::HashMap::new();
+        for edge in 0..150_000_u64 {
             let u = sipnode(keys, edge, 0);
             let v = sipnode(keys, edge, 1) | (1 << 30); // Tag V nodes
             adj.entry(u).or_default().push((v, edge));
@@ -687,49 +727,6 @@ mod tests {
             .into_iter()
             .filter(|(_, neighbors)| neighbors.len() >= 2)
             .collect();
-
-        fn find_cycle(
-            curr: u64,
-            start: u64,
-            path: &mut Vec<u64>,
-            visited_nodes: &mut std::collections::HashSet<u64>,
-            visited_edges: &mut std::collections::HashSet<u64>,
-            adj: &std::collections::HashMap<u64, Vec<(u64, u64)>>,
-        ) -> bool {
-            if path.len() == PROOF_SIZE {
-                if let Some(neighbors) = adj.get(&curr) {
-                    for &(next_node, edge) in neighbors {
-                        if next_node == start && !visited_edges.contains(&edge) {
-                            return true;
-                        }
-                    }
-                }
-                return false;
-            }
-
-            if let Some(neighbors) = adj.get(&curr) {
-                for &(next_node, edge) in neighbors {
-                    if visited_edges.contains(&edge) {
-                        continue;
-                    }
-                    if visited_nodes.contains(&next_node) {
-                        continue;
-                    }
-                    visited_nodes.insert(next_node);
-                    visited_edges.insert(edge);
-                    path.push(edge);
-
-                    if find_cycle(next_node, start, path, visited_nodes, visited_edges, adj) {
-                        return true;
-                    }
-
-                    path.pop();
-                    visited_edges.remove(&edge);
-                    visited_nodes.remove(&next_node);
-                }
-            }
-            false
-        }
 
         let mut cycle_edges = Vec::new();
         for &start_node in adj.keys() {
