@@ -3019,7 +3019,10 @@ fn test_types_validate_syntactic() {
         ev.validate_syntactic("12"),
         Err("event_id exceeds maximum allowed length of 255 bytes")
     );
-    assert_eq!(ev.validate_syntactic("12.1"), Err("unsupported room_version"));
+    assert_eq!(
+        ev.validate_syntactic("12.1"),
+        Err("event_id exceeds maximum allowed length of 255 bytes")
+    );
     assert_eq!(
         ev.validate_syntactic("not-a-version"),
         Err("unsupported room_version")
