@@ -35,9 +35,7 @@ impl<'a> H64Index<'a> {
         Self { sorted_h64 }
     }
 
-    fn bounds(request: &BucketRequest) -> Result<(u64, u64), AlgebraicError> {
-        crate::reconcile::triage::validate_bucket_requests(core::slice::from_ref(request))?;
-
+    fn bounds_unchecked(request: &BucketRequest) -> (u64, u64) {
         let shift = 64_u8.saturating_sub(request.depth);
         let start_h64 = if shift == 64 {
             0
@@ -50,7 +48,14 @@ impl<'a> H64Index<'a> {
             start_h64 | (1_u64 << shift).wrapping_sub(1)
         };
 
-        Ok((start_h64, end_h64_inclusive))
+        (start_h64, end_h64_inclusive)
+    }
+
+    fn bucket_range_unchecked(&self, request: &BucketRequest) -> core::ops::Range<usize> {
+        let (start_h64, end_h64_inclusive) = Self::bounds_unchecked(request);
+        let start_idx = self.sorted_h64.partition_point(|&x| x < start_h64);
+        let end_idx = self.sorted_h64.partition_point(|&x| x <= end_h64_inclusive);
+        start_idx..end_idx
     }
 
     /// Returns the half-open slice range covered by one bucket request.
@@ -61,10 +66,8 @@ impl<'a> H64Index<'a> {
         &self,
         request: &BucketRequest,
     ) -> Result<core::ops::Range<usize>, AlgebraicError> {
-        let (start_h64, end_h64_inclusive) = Self::bounds(request)?;
-        let start_idx = self.sorted_h64.partition_point(|&x| x < start_h64);
-        let end_idx = self.sorted_h64.partition_point(|&x| x <= end_h64_inclusive);
-        Ok(start_idx..end_idx)
+        crate::reconcile::triage::validate_bucket_requests(core::slice::from_ref(request))?;
+        Ok(self.bucket_range_unchecked(request))
     }
 
     /// Returns the `h64` slice covered by one bucket request.
@@ -72,8 +75,14 @@ impl<'a> H64Index<'a> {
     /// # Errors
     /// Returns an error when the request is malformed.
     pub fn bucket_slice(&self, request: &BucketRequest) -> Result<&'a [u64], AlgebraicError> {
-        let range = self.bucket_range(request)?;
+        crate::reconcile::triage::validate_bucket_requests(core::slice::from_ref(request))?;
+        let range = self.bucket_range_unchecked(request);
         Ok(&self.sorted_h64[range])
+    }
+
+    fn bucket_slice_unchecked(&self, request: &BucketRequest) -> &'a [u64] {
+        let range = self.bucket_range_unchecked(request);
+        &self.sorted_h64[range]
     }
 }
 
@@ -258,7 +267,7 @@ pub fn build_bucket_sketches(
     for request in requests {
         let mut sketch = SyndromeSketch::new(request.capacity)?;
         // The pre-sorted index makes the bucket's contents a contiguous slice.
-        for &h64 in index.bucket_slice(request)? {
+        for &h64 in index.bucket_slice_unchecked(request) {
             sketch.toggle(h64)?;
         }
 
