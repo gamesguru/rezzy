@@ -14,7 +14,7 @@
 
 use crate::utils::{compute_state_hash, epoch_days_to_ymd, resolve_parent_states, SharedStateMap};
 use crate::{Args, OutputFormat};
-use rezzy::{LeanEvent, StateResVersion};
+use rezzy::{resolved_state_entries, LeanEvent, StateResVersion};
 use std::collections::HashMap;
 
 pub struct FormattingContext<'a> {
@@ -312,24 +312,16 @@ pub fn format_summary_output(ctx: &FormattingContext) -> serde_json::Value {
 }
 
 fn format_resolve_state_output(ctx: &FormattingContext) -> serde_json::Value {
-    let mut resolved_state: Vec<serde_json::Value> = ctx
-        .final_state_map
-        .iter()
-        .map(|((typ, sk), eid)| {
+    let resolved_state: Vec<serde_json::Value> = resolved_state_entries(ctx.final_state_map)
+        .into_iter()
+        .map(|entry| {
             serde_json::json!({
-                "type": typ,
-                "state_key": sk,
-                "event_id": eid,
+                "type": entry.event_type,
+                "state_key": entry.state_key,
+                "event_id": entry.event_id,
             })
         })
         .collect();
-    resolved_state.sort_by(|a, b| {
-        let ta = a["type"].as_str().unwrap_or("");
-        let tb = b["type"].as_str().unwrap_or("");
-        let sa = a["state_key"].as_str().unwrap_or("");
-        let sb = b["state_key"].as_str().unwrap_or("");
-        ta.cmp(tb).then(sa.cmp(sb))
-    });
 
     serde_json::json!({
         "status": "success",
