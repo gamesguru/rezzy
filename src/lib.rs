@@ -78,6 +78,9 @@ pub mod basespec;
 pub mod cuckoo_verify;
 pub mod merkle;
 pub mod reconcile;
+pub mod resolve_state {
+    pub use crate::resolve::*;
+}
 pub mod resolve;
 pub mod state;
 
