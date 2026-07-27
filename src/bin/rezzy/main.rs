@@ -75,6 +75,8 @@ pub enum OutputFormat {
     Default,
     Deltas,
     Federation,
+    #[value(alias = "resolve_state")]
+    ResolveState,
     Summary,
     Timeline,
 }

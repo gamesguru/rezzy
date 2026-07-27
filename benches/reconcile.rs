@@ -274,7 +274,9 @@ fn main() {
     let elapsed = measure(1, || benchmark_scale_workload(100_000, 5_000, 4_000));
     report("scale/100000 +5000/-4000", 1, elapsed);
 
-    // Test 3: Huge Room
+    // Test 3: Huge Rooms
+    let elapsed = measure(1, || benchmark_scale_workload(1_000_000, 10_000, 9_000));
+    report("scale/1000000 +5000/-4000", 1, elapsed);
     let elapsed = measure(1, || benchmark_scale_workload(10_000_000, 500_000, 400_000));
     report("scale/10000000 +500000/-400000", 1, elapsed);
 
