@@ -60,6 +60,14 @@ fn report(name: &str, iterations: u32, elapsed: Duration) {
     println!("{name}: {millis:.6} ms/op ({iterations} iterations)");
 }
 
+fn report_split(name: &str, setup: Duration, algo: Duration) {
+    println!(
+        "{name}: (setup: {:.6} ms, algo: {:.6} ms)",
+        setup.as_secs_f64() * 1e3,
+        algo.as_secs_f64() * 1e3
+    );
+}
+
 fn benchmark_pinsketch_toggle(capacity: usize, element_count: usize) {
     let mut generator = Xorshift128::new(0x7f4a_7c15_9e37_79b9);
     let values: Vec<u64> = (0..element_count).map(|_| generator.next() | 1).collect();
@@ -130,8 +138,10 @@ fn benchmark_scale_workload(
     base_count: usize,
     local_extra_count: usize,
     remote_extra_count: usize,
-) {
+) -> (Duration, Duration) {
     let mut generator = Xorshift128::new(0x243f_6a88_85a3_08d3);
+
+    let setup_start = Instant::now();
     let base: Vec<_> = (0..base_count).map(|_| generator.hash()).collect();
     let local_extra: Vec<_> = (0..local_extra_count).map(|_| generator.hash()).collect();
     let remote_extra: Vec<_> = (0..remote_extra_count).map(|_| generator.hash()).collect();
@@ -179,7 +189,24 @@ fn benchmark_scale_workload(
         local.accumulator().residual(remote.accumulator()),
         expected_residual
     );
-    black_box((local, remote));
+
+    let setup_elapsed = setup_start.elapsed();
+
+    let client = ReconciliationClient::default();
+    let remote_digest = RemoteDigest {
+        digest: remote.accumulator().digest(),
+        known_event_count: remote.accumulator().known_event_count(),
+        strata: *remote.strata(),
+        frame_matches: true,
+        has_unknown_extremity: false,
+    };
+
+    let algo_start = Instant::now();
+    let action = client.select_action(&local, remote_digest, 0);
+    black_box(action);
+    let algo_elapsed = algo_start.elapsed();
+
+    (setup_elapsed, algo_elapsed)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -267,18 +294,22 @@ fn main() {
     report("triage/parse bucket sketch", 1_000, elapsed);
 
     // Test 1: Medium Sized Room
-    let elapsed = measure(1, || benchmark_scale_workload(50_000, 2_100, 1_900));
-    report("scale/50000 +2100/-1900", 1, elapsed);
+    let (setup_elapsed, algo_elapsed) = benchmark_scale_workload(50_000, 2_100, 1_900);
+    report_split("scale/50000 +2100/-1900", setup_elapsed, algo_elapsed);
 
     // Test 2: Large Room
-    let elapsed = measure(1, || benchmark_scale_workload(100_000, 5_000, 4_000));
-    report("scale/100000 +5000/-4000", 1, elapsed);
+    let (setup_elapsed, algo_elapsed) = benchmark_scale_workload(100_000, 5_000, 4_000);
+    report_split("scale/100000 +5000/-4000", setup_elapsed, algo_elapsed);
 
     // Test 3: Huge Rooms
-    let elapsed = measure(1, || benchmark_scale_workload(1_000_000, 10_000, 9_000));
-    report("scale/1000000 +5000/-4000", 1, elapsed);
-    let elapsed = measure(1, || benchmark_scale_workload(10_000_000, 500_000, 400_000));
-    report("scale/10000000 +500000/-400000", 1, elapsed);
+    let (setup_elapsed, algo_elapsed) = benchmark_scale_workload(1_000_000, 10_000, 9_000);
+    report_split("scale/1000000 +10000/-9000", setup_elapsed, algo_elapsed);
+    let (setup_elapsed, algo_elapsed) = benchmark_scale_workload(10_000_000, 500_000, 400_000);
+    report_split(
+        "scale/10000000 +500000/-400000",
+        setup_elapsed,
+        algo_elapsed,
+    );
 
     // -------------------------------------------------------------------------
     // Extraction sweep: confirms O(log N + Δ) scaling of build_bucket_sketches.
