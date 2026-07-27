@@ -44,14 +44,15 @@ fn matrix_hash_derived_event_ids_use_decoded_digest32() {
 }
 
 #[test]
-fn legacy_ids_are_sha256_derived_and_stable() {
-    let first =
+fn legacy_ids_use_the_full_sha256_digest() {
+    let digest = [
+        0xa2, 0xd4, 0x1f, 0x14, 0x4e, 0x8e, 0xcf, 0x9f, 0xf5, 0x00, 0x4f, 0xe8, 0xcb, 0xc6, 0x01,
+        0xb4, 0x39, 0xe4, 0x51, 0x7c, 0x1a, 0x05, 0xf0, 0x8f, 0x47, 0x17, 0x54, 0xd4, 0x63, 0x0d,
+        0x70, 0xc8,
+    ];
+    let hash =
         ElementHash::from_matrix_event_id("$opaque:example.org", EventIdFormat::Legacy).unwrap();
-    let second =
-        ElementHash::from_matrix_event_id("$opaque:example.org", EventIdFormat::Legacy).unwrap();
-    assert_eq!(first, second);
-    assert_eq!(first.h128, 0xa2d4_1f14_4e8e_cf9f_f500_4fe8_cbc6_01b4);
-    assert_eq!(first.h64, 0xa2d4_1f14_4e8e_cf9f);
+    assert_eq!(hash, ElementHash::from_digest32(digest));
 }
 
 #[test]

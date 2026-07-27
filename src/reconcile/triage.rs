@@ -269,12 +269,12 @@ mod tests {
         // Nested ranges remain invalid in any order.
         assert!(validate_bucket_requests(&[
             BucketRequest {
-                depth: 0,
+                depth: 1,
                 prefix: 0,
                 capacity: 4
             },
             BucketRequest {
-                depth: 1,
+                depth: 0,
                 prefix: 0,
                 capacity: 4
             },
