@@ -151,7 +151,7 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> Redacti
         "10" => 10,
         // v12 inherits v11's redaction rules verbatim (v12.txt includes the
         // v11-redactions spec fragment rather than defining its own).
-        "11" | "12" => 11,
+        "11" | "12" | "12.1" => 11,
         _ => return RedactionRule::None,
     };
     match event_type {
