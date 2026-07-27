@@ -103,7 +103,7 @@ hashbrown = { version = "0.15", default-features = false, features = [
     "inline-more",
 ] }
 idna_adapter = { version = ">=1.0, <1.2", optional = true, default-features = false }
-imbl = { version = ">=3.0, <5.0", default-features = false, features = ["serde"] }
+imbl = { version = "3.0", default-features = false, features = ["serde"] }
 insta = { version = "1.47.2", optional = true }
 mimalloc = { version = "0.1.52", optional = true }
 # Note: pulled in only by the `cli` feature (not part of `default`), so this
@@ -125,8 +125,8 @@ serde = { version = "1.0", default-features = false, features = [
     "derive",
 ] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
-sha2 = { version = ">=0.10, <0.12", default-features = false }
-sha3 = { version = ">=0.10, <0.12", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10", default-features = false }
 test-log = { version = "0.2.20", optional = true }
 ureq = { version = "2.9", optional = true, default-features = false, features = [
     "json",
