@@ -349,12 +349,11 @@ impl<'a> SketchBuilder<'a> {
         // Stack stores: (depth, prefix, capacity, absolute_range)
         let mut stack = Vec::with_capacity(initial_requests.len());
 
+        crate::reconcile::triage::validate_bucket_requests(initial_requests)?;
+
         // 1. Initial O(log N) localization for incoming requests
         for req in initial_requests {
-            if req.depth > MAX_DEPTH {
-                return Err(AlgebraicError::InvalidBucketIndex);
-            }
-            let range = self.index.bucket_range_unchecked(req);
+            let range = self.index.bucket_range(req)?;
             stack.push((req.depth, req.prefix, req.capacity, range));
         }
 
