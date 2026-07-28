@@ -3,7 +3,7 @@
 #[cfg(all(target_arch = "x86_64", has_avx512_support))]
 use core::arch::x86_64::{
     __m512i, _mm512_and_si512, _mm512_bsrli_epi128, _mm512_clmulepi64_epi128, _mm512_set_epi64,
-    _mm512_slli_epi64, _mm512_store_si512, _mm512_xor_si512,
+    _mm512_slli_epi64, _mm512_srli_epi64, _mm512_store_si512, _mm512_xor_si512,
 };
 
 #[cfg(all(target_arch = "x86_64", has_avx512_support))]
@@ -128,6 +128,20 @@ unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
     reduced = _mm512_xor_si512(reduced, _mm512_slli_epi64::<3>(high));
     reduced = _mm512_xor_si512(reduced, _mm512_slli_epi64::<4>(high));
 
+    // `high << 1/3/4` can themselves carry past bit 63 (whenever `high`'s top
+    // nibble is set), and `_mm512_slli_epi64` truncates those bits instead of
+    // carrying them into a wider lane. Fold that second-order overflow back
+    // through `REDUCTION` before masking, mirroring the scalar `mul_pclmul`
+    // reduction loop above.
+    let overflow = _mm512_xor_si512(
+        _mm512_xor_si512(_mm512_srli_epi64::<63>(high), _mm512_srli_epi64::<61>(high)),
+        _mm512_srli_epi64::<60>(high),
+    );
+    let mut correction = _mm512_xor_si512(overflow, _mm512_slli_epi64::<1>(overflow));
+    correction = _mm512_xor_si512(correction, _mm512_slli_epi64::<3>(overflow));
+    correction = _mm512_xor_si512(correction, _mm512_slli_epi64::<4>(overflow));
+    reduced = _mm512_xor_si512(reduced, correction);
+
     let low_mask = _mm512_set_epi64(0, -1, 0, -1, 0, -1, 0, -1);
     _mm512_and_si512(reduced, low_mask)
 }
@@ -199,8 +213,8 @@ mod tests {
 
     #[test]
     fn test_evaluators_match_scalar() {
-        let term = 0x8000000000000000;
-        let source: Vec<u64> = (0..20).map(|i| i as u64 * 0x123456789abcdef).collect();
+        let term = 0x8000_0000_0000_0000;
+        let source: Vec<u64> = (0..20_u64).map(|i| i * 0x0123_4567_89ab_cdef).collect();
         let mut expected = alloc::vec![0u64; 20];
         ScalarEvaluator::poly_mac(term, &source, &mut expected);
 
@@ -222,6 +236,84 @@ mod tests {
                 let mut target_avx = alloc::vec![0u64; 20];
                 Avx512Evaluator::poly_mac(term, &source, &mut target_avx);
                 assert_eq!(target_avx, expected, "Avx512Evaluator results mismatch");
+            }
+        }
+    }
+
+    /// Regression test for a missing second-order field reduction in
+    /// `gf64_mul_x4_avx512`: the first XOR-fold of `high << {1,3,4}` can
+    /// itself carry past bit 63 whenever `high`'s top nibble is set, and
+    /// `_mm512_slli_epi64` truncates rather than carries those bits. That
+    /// dropped carry produced wrong products (and, transitively, wrong
+    /// `PinSketch` syndromes / bogus `DecodeFailure`s) on any host where the
+    /// AVX-512 backend was actually selected. `0..20` sequential inputs, as
+    /// used by `test_evaluators_match_scalar` above, don't happen to trigger
+    /// it, so this test drives many random and top-nibble-heavy operands
+    /// directly through `gf64_mul_x4_avx512` and checks each lane against
+    /// the known-correct scalar `mul_bitwise` reference.
+    #[cfg(all(target_arch = "x86_64", has_avx512_support))]
+    #[test]
+    fn avx512_mul_matches_scalar_for_high_bit_heavy_operands() {
+        use core::arch::x86_64::{_mm512_set_epi64, _mm512_store_si512};
+
+        if !(std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("vpclmulqdq"))
+        {
+            return;
+        }
+
+        // Fixed patterns known to set the top nibble of the carry-less
+        // product's high half, which is exactly what the dropped
+        // second-order reduction mishandled.
+        let fixed: &[u64] = &[
+            0,
+            1,
+            u64::MAX,
+            1_u64 << 63,
+            0x8000_0000_0000_0001,
+            0xF000_0000_0000_0000,
+            0xFFFF_FFFF_0000_0000,
+        ];
+
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let random: alloc::vec::Vec<u64> = (0..512).map(|_| next()).collect();
+
+        let operands: alloc::vec::Vec<u64> = fixed.iter().copied().chain(random).collect();
+
+        for &a in &operands {
+            for &b in &operands
+                .iter()
+                .step_by(37)
+                .copied()
+                .collect::<alloc::vec::Vec<_>>()
+            {
+                let expected = crate::reconcile::gf64::mul_bitwise(a, b);
+
+                // SAFETY: gated on the same runtime feature checks used by
+                // `get_evaluator_internal`; a single-lane call is sufficient
+                // to exercise the reduction logic.
+                let actual = unsafe {
+                    let av = i64::from_ne_bytes(a.to_ne_bytes());
+                    let bv = i64::from_ne_bytes(b.to_ne_bytes());
+                    let va = _mm512_set_epi64(0, av, 0, av, 0, av, 0, av);
+                    let vb = _mm512_set_epi64(0, bv, 0, bv, 0, bv, 0, bv);
+                    let result = gf64_mul_x4_avx512(va, vb);
+                    let mut out = AlignedArray([0u64; 8]);
+                    _mm512_store_si512(core::ptr::addr_of_mut!(out).cast(), result);
+                    out.0[0]
+                };
+
+                assert_eq!(
+                    actual, expected,
+                    "gf64_mul_x4_avx512({a:#x}, {b:#x}) mismatch"
+                );
             }
         }
     }
