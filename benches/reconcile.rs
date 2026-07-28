@@ -505,7 +505,6 @@ fn main() {
             };
 
             let elapsed = measure(iterations, || {
-                let mut recovered = 0_usize;
                 let mut all_remote_sk = Vec::with_capacity(requests.len());
                 let mut all_local_sk = Vec::with_capacity(requests.len());
 
@@ -516,7 +515,7 @@ fn main() {
                         .extend(build_bucket_sketches(black_box(&local_sorted), chunk).unwrap());
                 }
 
-                recovered = all_remote_sk
+                let recovered: usize = all_remote_sk
                     .into_par_iter()
                     .zip(all_local_sk.into_par_iter())
                     .map(|(mut rs, ls)| {
