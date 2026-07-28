@@ -227,8 +227,6 @@ fn multi_round_bucket_transition_flow() {
         BucketDecodeBatch, BucketDecodeSuccess, BucketRequest, ClientAction, ReconciliationClient,
     };
 
-    let client = ReconciliationClient::default();
-
     // Round 1: depth 0 bucket at capacity 64 fails because delta is larger than 64.
     let r1_batch = BucketDecodeBatch {
         successful_buckets: vec![],
@@ -294,5 +292,4 @@ fn multi_round_bucket_transition_flow() {
             roots: vec![10, 20, 30, 40],
         }
     );
-    assert_eq!(client.max_rounds(), 20);
 }

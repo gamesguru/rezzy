@@ -301,9 +301,10 @@ fn main() {
             capacity: 64,
         },
     ];
+    let mut batches = vec![batch; 10_000];
     let elapsed = measure(10_000, || {
         let _ = black_box(ReconciliationClient::transition_bucket_batch(
-            black_box(batch.clone()),
+            black_box(batches.pop().unwrap()),
             black_box(&previous),
             black_box(vec![]),
             black_box(Some(100)),

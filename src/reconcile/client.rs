@@ -60,8 +60,10 @@ impl Default for ReconciliationClient {
         Self {
             max_sketch_capacity: MAX_LOCAL_SKETCH_DECODE_CAPACITY,
             max_rounds: MAX_RECONCILIATION_ROUNDS,
-            gate_threshold: u64::try_from(MAX_RECONCILIATION_ROUNDS * MAX_BUCKETED_SKETCH_CAPACITY)
-                .ok(),
+            gate_threshold: u64::try_from(
+                MAX_RECONCILIATION_ROUNDS.saturating_mul(MAX_BUCKETED_SKETCH_CAPACITY),
+            )
+            .ok(),
         }
     }
 }
@@ -79,8 +81,10 @@ impl ReconciliationClient {
         Ok(Self {
             max_sketch_capacity,
             max_rounds: MAX_RECONCILIATION_ROUNDS,
-            gate_threshold: u64::try_from(MAX_RECONCILIATION_ROUNDS * MAX_BUCKETED_SKETCH_CAPACITY)
-                .ok(),
+            gate_threshold: u64::try_from(
+                MAX_RECONCILIATION_ROUNDS.saturating_mul(MAX_BUCKETED_SKETCH_CAPACITY),
+            )
+            .ok(),
         })
     }
 
