@@ -359,7 +359,7 @@ fn main() {
     // given prefix on average (10M / 2^24), so each bucket extract touches
     // ~BUCKET_CAP planted elements — isolating cost to Δ, not N.
     //
-    // Capacities are capped at 64 per bucket (MAX_BUCKET_SKETCH_CAPACITY).
+    // Capacities are capped at 32 per bucket (MAX_BUCKET_SKETCH_CAPACITY).
     // Multiple buckets are used for larger Δ to stay within the limit.
     // -------------------------------------------------------------------------
     println!("\n--- build_bucket_sketches extraction sweep (N=10M, varying Δ) ---");
@@ -369,16 +369,16 @@ fn main() {
         const HIGH_SHIFT: u32 = 40_u32;
         // Bottom HIGH_SHIFT bits mask — avoids `(1_u64 << 40) - 1` form.
         const LOW_MASK: u64 = u64::MAX >> 24_u32;
-        const BUCKET_CAP: usize = 64; // MAX_BUCKET_SKETCH_CAPACITY per bucket
+        const BUCKET_CAP: usize = 32; // MAX_BUCKET_SKETCH_CAPACITY per bucket
         const BASE_PREFIX: u32 = 0x00_10_00; // arbitrary 24-bit starting prefix
 
         let n: usize = 10_000_000;
 
         let mut gen = Xorshift128::new(0xdead_beef_cafe_babe);
 
-        // 1, 8, 64 buckets → Δ ≈ 64, 512, 4096 extracted elements.
-        // Aggregate capacity: n_buckets × 64 ≤ 4096 = MAX_BUCKETED_SKETCH_CAPACITY.
-        for n_buckets in [1_usize, 8, 64] {
+        // 2, 16, 128 buckets → Δ ≈ 64, 512, 4096 extracted elements.
+        // Aggregate capacity: n_buckets × 32 ≤ 4096 = MAX_BUCKETED_SKETCH_CAPACITY.
+        for n_buckets in [2_usize, 16, 128] {
             let delta = n_buckets.saturating_mul(BUCKET_CAP);
             // Consecutive depth-24 prefixes: each covers a disjoint h64 range.
             let prefixes: Vec<u32> = (0..n_buckets)
@@ -440,15 +440,15 @@ fn main() {
         const DEPTH: u8 = 24;
         const HIGH_SHIFT: u32 = 40_u32;
         const LOW_MASK: u64 = u64::MAX >> 24_u32;
-        const BUCKET_CAP: usize = 64;
+        const BUCKET_CAP: usize = 32;
         const BASE_PREFIX: u32 = 0x00_10_00;
 
         for (n, n_buckets) in [
-            (10_000_usize, 1_usize),
-            (100_000, 8),
-            (1_000_000, 64),
-            (10_000_000, 64),
-            (10_000_000, 1562),
+            (10_000_usize, 2_usize),
+            (100_000, 16),
+            (1_000_000, 128),
+            (10_000_000, 128),
+            (10_000_000, 3124),
         ] {
             let delta = n_buckets.saturating_mul(BUCKET_CAP);
             let mut gen = Xorshift128::new(0x1234_5678_abcd_ef00 ^ delta as u64);

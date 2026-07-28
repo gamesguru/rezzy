@@ -12,7 +12,7 @@ use super::{pinsketch, AlgebraicError, SyndromeSketch, STRATA_COUNT, STRATUM_CAP
 /// Maximum sum of capacities in one bucketed sketch request.
 pub const MAX_BUCKETED_SKETCH_CAPACITY: usize = 4_096;
 /// Maximum extraction capacity assigned to one bucket.
-pub const MAX_BUCKET_SKETCH_CAPACITY: usize = 64;
+pub const MAX_BUCKET_SKETCH_CAPACITY: usize = 32;
 
 /// One localized sketch request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
