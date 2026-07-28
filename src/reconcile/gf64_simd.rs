@@ -57,16 +57,24 @@ impl Gf64Evaluator for Avx512Evaluator {
                 // For simplicity and to ensure correctness, we manually set them.
                 // (In a heavily optimized pass, we could use AVX-512 gather or shuffle).
                 let s0 = _mm512_set_epi64(
-                    0, i64::from_ne_bytes((*s_ptr.add(3)).to_ne_bytes()),
-                    0, i64::from_ne_bytes((*s_ptr.add(2)).to_ne_bytes()),
-                    0, i64::from_ne_bytes((*s_ptr.add(1)).to_ne_bytes()),
-                    0, i64::from_ne_bytes((*s_ptr.add(0)).to_ne_bytes()),
+                    0,
+                    i64::from_ne_bytes((*s_ptr.add(3)).to_ne_bytes()),
+                    0,
+                    i64::from_ne_bytes((*s_ptr.add(2)).to_ne_bytes()),
+                    0,
+                    i64::from_ne_bytes((*s_ptr.add(1)).to_ne_bytes()),
+                    0,
+                    i64::from_ne_bytes((*s_ptr.add(0)).to_ne_bytes()),
                 );
                 let s1 = _mm512_set_epi64(
-                    0, i64::from_ne_bytes((*s_ptr.add(7)).to_ne_bytes()),
-                    0, i64::from_ne_bytes((*s_ptr.add(6)).to_ne_bytes()),
-                    0, i64::from_ne_bytes((*s_ptr.add(5)).to_ne_bytes()),
-                    0, i64::from_ne_bytes((*s_ptr.add(4)).to_ne_bytes()),
+                    0,
+                    i64::from_ne_bytes((*s_ptr.add(7)).to_ne_bytes()),
+                    0,
+                    i64::from_ne_bytes((*s_ptr.add(6)).to_ne_bytes()),
+                    0,
+                    i64::from_ne_bytes((*s_ptr.add(5)).to_ne_bytes()),
+                    0,
+                    i64::from_ne_bytes((*s_ptr.add(4)).to_ne_bytes()),
                 );
 
                 // Multiply
