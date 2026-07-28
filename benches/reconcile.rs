@@ -506,23 +506,27 @@ fn main() {
 
             let elapsed = measure(iterations, || {
                 let mut recovered = 0_usize;
+                let mut all_remote_sk = Vec::with_capacity(requests.len());
+                let mut all_local_sk = Vec::with_capacity(requests.len());
+
                 for chunk in requests.chunks(64) {
-                    let remote_sk =
-                        build_bucket_sketches(black_box(&remote_sorted), chunk).unwrap();
-                    let local_sk = build_bucket_sketches(black_box(&local_sorted), chunk).unwrap();
-                    let chunk_recovered: usize = remote_sk
-                        .into_par_iter()
-                        .zip(local_sk.into_par_iter())
-                        .map(|(mut rs, ls)| {
-                            rs.xor(&ls).unwrap();
-                            match rs.decode_elements(rs.capacity()) {
-                                Ok(roots) => roots.len(),
-                                Err(_) => 0,
-                            }
-                        })
-                        .sum();
-                    recovered = recovered.saturating_add(chunk_recovered);
+                    all_remote_sk
+                        .extend(build_bucket_sketches(black_box(&remote_sorted), chunk).unwrap());
+                    all_local_sk
+                        .extend(build_bucket_sketches(black_box(&local_sorted), chunk).unwrap());
                 }
+
+                recovered = all_remote_sk
+                    .into_par_iter()
+                    .zip(all_local_sk.into_par_iter())
+                    .map(|(mut rs, ls)| {
+                        rs.xor(&ls).unwrap();
+                        match rs.decode_elements(rs.capacity()) {
+                            Ok(roots) => roots.len(),
+                            Err(_) => 0,
+                        }
+                    })
+                    .sum();
                 black_box(recovered);
             });
             report(
