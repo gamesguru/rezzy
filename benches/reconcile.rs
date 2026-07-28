@@ -446,6 +446,7 @@ fn main() {
             (100_000, 8),
             (1_000_000, 64),
             (10_000_000, 64),
+            (10_000_000, 1562),
         ] {
             let delta = n_buckets.saturating_mul(BUCKET_CAP);
             let mut gen = Xorshift128::new(0x1234_5678_abcd_ef00 ^ delta as u64);
@@ -495,22 +496,23 @@ fn main() {
                 requests.len(),
             );
 
-            let iterations: u32 = match n {
-                0..=10_000 => 100,
-                10_001..=100_000 => 30,
-                100_001..=1_000_000 => 10,
-                _ => 3,
+            let iterations: u32 = match n_buckets {
+                1..=8 => 30,
+                9..=64 => 3,
+                _ => 1,
             };
 
             let elapsed = measure(iterations, || {
-                let remote_sk =
-                    build_bucket_sketches(black_box(&remote_sorted), &requests).unwrap();
-                let local_sk = build_bucket_sketches(black_box(&local_sorted), &requests).unwrap();
                 let mut recovered = 0_usize;
-                for (mut rs, ls) in remote_sk.into_iter().zip(local_sk) {
-                    rs.xor(&ls).unwrap();
-                    if let Ok(roots) = rs.decode_elements(rs.capacity()) {
-                        recovered = recovered.saturating_add(roots.len());
+                for chunk in requests.chunks(64) {
+                    let remote_sk =
+                        build_bucket_sketches(black_box(&remote_sorted), chunk).unwrap();
+                    let local_sk = build_bucket_sketches(black_box(&local_sorted), chunk).unwrap();
+                    for (mut rs, ls) in remote_sk.into_iter().zip(local_sk) {
+                        rs.xor(&ls).unwrap();
+                        if let Ok(roots) = rs.decode_elements(rs.capacity()) {
+                            recovered = recovered.saturating_add(roots.len());
+                        }
                     }
                 }
                 black_box(recovered);
