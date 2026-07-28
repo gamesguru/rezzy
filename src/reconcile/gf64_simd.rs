@@ -175,7 +175,6 @@ pub fn get_evaluator() -> EvaluatorBackend {
 #[cfg(not(tarpaulin_include))]
 fn get_evaluator_internal() -> EvaluatorBackend {
     #[cfg(has_avx512_support)]
-    #[cfg_attr(coverage_nightly, coverage(off))]
     {
         if std::is_x86_feature_detected!("avx512f")
             && std::is_x86_feature_detected!("avx512bw")
@@ -215,7 +214,6 @@ mod tests {
         }
 
         #[cfg(all(target_arch = "x86_64", has_avx512_support))]
-        #[cfg_attr(coverage_nightly, coverage(off))]
         {
             if std::is_x86_feature_detected!("avx512f")
                 && std::is_x86_feature_detected!("avx512bw")
