@@ -220,3 +220,79 @@ fn accumulator_residual_is_the_digest_xor() {
     right.insert(second).unwrap();
     assert_eq!(left.residual(right), first.h128 ^ second.h128);
 }
+
+#[test]
+fn multi_round_bucket_transition_flow() {
+    use rezzy::{
+        BucketDecodeBatch, BucketDecodeSuccess, BucketRequest, ClientAction, ReconciliationClient,
+    };
+
+    let client = ReconciliationClient::default();
+
+    // Round 1: depth 0 bucket at capacity 64 fails because delta is larger than 64.
+    let r1_batch = BucketDecodeBatch {
+        successful_buckets: vec![],
+        failed_buckets: vec![(0, 0)],
+    };
+    let r1_previous = vec![BucketRequest {
+        depth: 0,
+        prefix: 0,
+        capacity: 64,
+    }];
+
+    // Transitioning Round 1 bisects (0,0) into depth 1 prefixes: (1, 0) and (1, 1)
+    let action = ReconciliationClient::transition_bucket_batch(
+        r1_batch,
+        &r1_previous,
+        vec![],
+        Some(100),
+        4096,
+    );
+
+    let ClientAction::BucketSketches {
+        requests: r2_requests,
+        accumulated_roots: r2_roots,
+    } = action
+    else {
+        panic!("Expected BucketSketches action for Round 2");
+    };
+
+    assert_eq!(r2_requests.len(), 2);
+    assert_eq!(r2_requests[0].depth, 1);
+    assert_eq!(r2_requests[0].prefix, 0);
+    assert_eq!(r2_requests[1].depth, 1);
+    assert_eq!(r2_requests[1].prefix, 1);
+
+    // Round 2: both child buckets succeed and decode their respective roots.
+    let r2_batch = BucketDecodeBatch {
+        successful_buckets: vec![
+            BucketDecodeSuccess {
+                depth: 1,
+                prefix: 0,
+                roots: vec![10, 20],
+            },
+            BucketDecodeSuccess {
+                depth: 1,
+                prefix: 1,
+                roots: vec![30, 40],
+            },
+        ],
+        failed_buckets: vec![],
+    };
+
+    let final_action = ReconciliationClient::transition_bucket_batch(
+        r2_batch,
+        &r2_requests,
+        r2_roots,
+        Some(100),
+        4096,
+    );
+
+    assert_eq!(
+        final_action,
+        ClientAction::ResolveRoots {
+            roots: vec![10, 20, 30, 40],
+        }
+    );
+    assert_eq!(client.max_rounds(), 20);
+}

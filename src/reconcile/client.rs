@@ -11,13 +11,19 @@ use super::triage::{
 };
 use super::{AlgebraicError, ElementHash, SyndromeSketch, MAX_LOCAL_SKETCH_DECODE_CAPACITY};
 
-/// Maximum number of rounds allowed for a single reconciliation exchange.
+/// Baseline policy limit for maximum reconciliation rounds in a single exchange.
+///
+/// Paired with [`MAX_BUCKETED_SKETCH_CAPACITY`], the default 20-round limit yields a
+/// default operating point of ~82,000 differing elements before falling back to
+/// extremity-based frame diffing under default client policy.
 pub const MAX_RECONCILIATION_ROUNDS: usize = 20;
 
 /// Requester policy for one MSC0501 reconciliation exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReconciliationClient {
     max_sketch_capacity: usize,
+    max_rounds: usize,
+    gate_threshold: Option<u64>,
 }
 
 /// Information learned from the responder's room digest.
@@ -53,6 +59,9 @@ impl Default for ReconciliationClient {
     fn default() -> Self {
         Self {
             max_sketch_capacity: MAX_LOCAL_SKETCH_DECODE_CAPACITY,
+            max_rounds: MAX_RECONCILIATION_ROUNDS,
+            gate_threshold: u64::try_from(MAX_RECONCILIATION_ROUNDS * MAX_BUCKETED_SKETCH_CAPACITY)
+                .ok(),
         }
     }
 }
@@ -69,7 +78,48 @@ impl ReconciliationClient {
         }
         Ok(Self {
             max_sketch_capacity,
+            max_rounds: MAX_RECONCILIATION_ROUNDS,
+            gate_threshold: u64::try_from(MAX_RECONCILIATION_ROUNDS * MAX_BUCKETED_SKETCH_CAPACITY)
+                .ok(),
         })
+    }
+
+    /// Sets a custom maximum round count for the reconciliation client,
+    /// adjusting the gate threshold accordingly.
+    #[must_use]
+    pub fn with_max_rounds(mut self, max_rounds: usize) -> Self {
+        self.max_rounds = max_rounds;
+        self.gate_threshold =
+            u64::try_from(max_rounds.saturating_mul(MAX_BUCKETED_SKETCH_CAPACITY)).ok();
+        self
+    }
+
+    /// Sets an explicit gate threshold on the maximum estimated delta.
+    /// Pass `None` to disable delta gating entirely for large syncs.
+    #[must_use]
+    pub fn with_gate_threshold(mut self, threshold: Option<u64>) -> Self {
+        self.gate_threshold = threshold;
+        self
+    }
+
+    /// Disables the delta gate threshold entirely, allowing set reconciliation to proceed
+    /// for arbitrarily large set differences.
+    #[must_use]
+    pub fn allow_unlimited_delta(mut self) -> Self {
+        self.gate_threshold = None;
+        self
+    }
+
+    /// Returns the maximum allowed rounds.
+    #[must_use]
+    pub fn max_rounds(self) -> usize {
+        self.max_rounds
+    }
+
+    /// Returns the gate threshold, if active.
+    #[must_use]
+    pub fn gate_threshold(self) -> Option<u64> {
+        self.gate_threshold
     }
 
     /// Selects the next protocol action from local and remote level-0 state.
@@ -105,11 +155,10 @@ impl ReconciliationClient {
                 Err(_) => return ClientAction::ExtremityDiff,
             };
 
-        let gate_threshold =
-            u64::try_from(MAX_RECONCILIATION_ROUNDS * MAX_BUCKETED_SKETCH_CAPACITY)
-                .unwrap_or(u64::MAX);
-        if estimated_delta > gate_threshold {
-            return ClientAction::ExtremityDiff;
+        if let Some(threshold) = self.gate_threshold {
+            if estimated_delta > threshold {
+                return ClientAction::ExtremityDiff;
+            }
         }
 
         let provisioned = u64::try_from(concurrency_headroom)

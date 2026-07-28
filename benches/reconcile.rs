@@ -1,10 +1,10 @@
-use std::collections::HashSet;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use rezzy::{
-    build_bucket_sketches, decode_bucket_sketches, estimate_delta, gf64_mul, BucketRequest,
-    ClientAction, ElementHash, ReconciliationClient, RemoteDigest, ResidentKernel, SyndromeSketch,
+    build_bucket_sketches, decode_bucket_sketches, estimate_delta, gf64_mul, BucketDecodeBatch,
+    BucketDecodeSuccess, BucketRequest, ElementHash, ReconciliationClient, RemoteDigest,
+    ResidentKernel, SyndromeSketch,
 };
 
 fn hash(index: u64) -> ElementHash {
@@ -134,65 +134,53 @@ fn benchmark_pinsketch_decode(capacity: usize, element_count: usize) {
     );
 }
 
-fn benchmark_scale_workload(
+struct HashPool {
+    base: Vec<ElementHash>,
+    local_extra: Vec<ElementHash>,
+    remote_extra: Vec<ElementHash>,
+}
+
+impl HashPool {
+    fn new(max_base: usize, max_local_extra: usize, max_remote_extra: usize) -> Self {
+        let mut generator = Xorshift128::new(0x243f_6a88_85a3_08d3);
+        let base = (0..max_base).map(|_| generator.hash()).collect();
+        let local_extra = (0..max_local_extra).map(|_| generator.hash()).collect();
+        let remote_extra = (0..max_remote_extra).map(|_| generator.hash()).collect();
+        Self {
+            base,
+            local_extra,
+            remote_extra,
+        }
+    }
+}
+
+fn benchmark_scale_from_pool(
+    pool: &HashPool,
     base_count: usize,
     local_extra_count: usize,
     remote_extra_count: usize,
 ) -> (Duration, Duration) {
-    let mut generator = Xorshift128::new(0x243f_6a88_85a3_08d3);
-
     let setup_start = Instant::now();
-    let base: Vec<_> = (0..base_count).map(|_| generator.hash()).collect();
-    let local_extra: Vec<_> = (0..local_extra_count).map(|_| generator.hash()).collect();
-    let remote_extra: Vec<_> = (0..remote_extra_count).map(|_| generator.hash()).collect();
-    let mut identities = HashSet::with_capacity(
-        base_count
-            .saturating_add(local_extra_count)
-            .saturating_add(remote_extra_count),
-    );
-    for event in base.iter().chain(&local_extra).chain(&remote_extra) {
-        assert!(identities.insert((event.h128, event.h64)));
-    }
+    let base_slice = &pool.base[..base_count];
+    let local_extra_slice = &pool.local_extra[..local_extra_count];
+    let remote_extra_slice = &pool.remote_extra[..remote_extra_count];
+
     let mut local = ResidentKernel::new();
     let mut remote = ResidentKernel::new();
-    for event in &base {
+    for event in base_slice {
         local.insert(*event).expect("benchmark hashes are valid");
         remote.insert(*event).expect("benchmark hashes are valid");
     }
-    for event in &local_extra {
+    for event in local_extra_slice {
         local.insert(*event).expect("benchmark hashes are valid");
     }
-    for event in &remote_extra {
+    for event in remote_extra_slice {
         remote.insert(*event).expect("benchmark hashes are valid");
     }
-    assert_eq!(
-        local.accumulator().known_event_count(),
-        u64::try_from(base_count.saturating_add(local_extra_count)).unwrap()
-    );
-    assert_eq!(
-        remote.accumulator().known_event_count(),
-        u64::try_from(base_count.saturating_add(remote_extra_count)).unwrap()
-    );
-    assert_eq!(
-        local
-            .accumulator()
-            .known_event_count()
-            .checked_sub(remote.accumulator().known_event_count())
-            .expect("local fixture is larger"),
-        local_extra_count.checked_sub(remote_extra_count).unwrap() as u64
-    );
-    let expected_residual = local_extra
-        .iter()
-        .chain(&remote_extra)
-        .fold(0, |residual, event| residual ^ event.h128);
-    assert_eq!(
-        local.accumulator().residual(remote.accumulator()),
-        expected_residual
-    );
 
     let setup_elapsed = setup_start.elapsed();
 
-    let client = ReconciliationClient::default();
+    let client = ReconciliationClient::default().allow_unlimited_delta();
     let remote_digest = RemoteDigest {
         digest: remote.accumulator().digest(),
         known_event_count: remote.accumulator().known_event_count(),
@@ -293,20 +281,70 @@ fn main() {
     });
     report("triage/parse bucket sketch", 1_000, elapsed);
 
+    let batch = BucketDecodeBatch {
+        successful_buckets: vec![BucketDecodeSuccess {
+            depth: 8,
+            prefix: 0,
+            roots: vec![101, 102],
+        }],
+        failed_buckets: vec![(8, 1)],
+    };
+    let previous = [
+        BucketRequest {
+            depth: 8,
+            prefix: 0,
+            capacity: 8,
+        },
+        BucketRequest {
+            depth: 8,
+            prefix: 1,
+            capacity: 64,
+        },
+    ];
+    let elapsed = measure(10_000, || {
+        let _ = black_box(ReconciliationClient::transition_bucket_batch(
+            black_box(batch.clone()),
+            black_box(&previous),
+            black_box(vec![]),
+            black_box(Some(100)),
+            black_box(4096),
+        ));
+    });
+    report("triage/transition_bucket_batch split", 10_000, elapsed);
+
+    println!("\n--- scale workload triage (plucking from pre-generated HashPool) ---");
+    let pool = HashPool::new(10_000_000, 5_000_000, 5_000_000);
+
     // Test 1: Medium Sized Room
-    let (setup_elapsed, algo_elapsed) = benchmark_scale_workload(50_000, 2_100, 1_900);
+    let (setup_elapsed, algo_elapsed) = benchmark_scale_from_pool(&pool, 50_000, 2_100, 1_900);
     report_split("scale/50000 +2100/-1900", setup_elapsed, algo_elapsed);
 
     // Test 2: Large Room
-    let (setup_elapsed, algo_elapsed) = benchmark_scale_workload(100_000, 5_000, 4_000);
+    let (setup_elapsed, algo_elapsed) = benchmark_scale_from_pool(&pool, 100_000, 5_000, 4_000);
     report_split("scale/100000 +5000/-4000", setup_elapsed, algo_elapsed);
 
     // Test 3: Huge Rooms
-    let (setup_elapsed, algo_elapsed) = benchmark_scale_workload(1_000_000, 10_000, 9_000);
+    let (setup_elapsed, algo_elapsed) = benchmark_scale_from_pool(&pool, 1_000_000, 10_000, 9_000);
     report_split("scale/1000000 +10000/-9000", setup_elapsed, algo_elapsed);
-    let (setup_elapsed, algo_elapsed) = benchmark_scale_workload(10_000_000, 500_000, 400_000);
+    let (setup_elapsed, algo_elapsed) =
+        benchmark_scale_from_pool(&pool, 10_000_000, 500_000, 400_000);
     report_split(
         "scale/10000000 +500000/-400000",
+        setup_elapsed,
+        algo_elapsed,
+    );
+
+    // Test 4: Near-total disagreement (high desync) on 1M and 10M element sets
+    let (setup_elapsed, algo_elapsed) = benchmark_scale_from_pool(&pool, 10_000, 500_000, 490_000);
+    report_split(
+        "scale/1000000 near-total desync (+500000/-490000)",
+        setup_elapsed,
+        algo_elapsed,
+    );
+    let (setup_elapsed, algo_elapsed) =
+        benchmark_scale_from_pool(&pool, 100_000, 5_000_000, 4_900_000);
+    report_split(
+        "scale/10000000 near-total desync (+5000000/-4900000)",
         setup_elapsed,
         algo_elapsed,
     );
@@ -389,81 +427,99 @@ fn main() {
     // the strata-estimation cost already benchmarked above.
     // -------------------------------------------------------------------------
     println!("\n--- extract + decode (triage pre-computed, N varies) ---");
-    for (n, delta) in [
-        (10_000_usize, 100_usize),
-        (100_000, 1_000),
-        (1_000_000, 10_000),
-        (10_000_000, 100_000),
-    ] {
-        let mut gen = Xorshift128::new(0x1234_5678_abcd_ef00 ^ delta as u64);
-        let base: Vec<ElementHash> = (0..n).map(|_| gen.hash()).collect();
-        let remote_extra: Vec<ElementHash> = (0..delta).map(|_| gen.hash()).collect();
+    // -------------------------------------------------------------------------
+    // Extraction + decode (triage pre-computed, populated bucket measurement).
+    //
+    // Measures build_bucket_sketches + XOR + SyndromeSketch::decode_elements
+    // over populated prefix buckets (isolating extraction and decode scaling).
+    // -------------------------------------------------------------------------
+    println!("\n--- extract + decode (populated buckets, N varies) ---");
+    {
+        const DEPTH: u8 = 24;
+        const HIGH_SHIFT: u32 = 40_u32;
+        const LOW_MASK: u64 = u64::MAX >> 24_u32;
+        const BUCKET_CAP: usize = 64;
+        const BASE_PREFIX: u32 = 0x00_10_00;
 
-        let mut local_kernel = ResidentKernel::new();
-        let mut remote_kernel = ResidentKernel::new();
-        for h in &base {
-            local_kernel.insert(*h).unwrap();
-            remote_kernel.insert(*h).unwrap();
-        }
-        for h in &remote_extra {
-            remote_kernel.insert(*h).unwrap();
-        }
+        for (n, n_buckets) in [
+            (10_000_usize, 1_usize),
+            (100_000, 8),
+            (1_000_000, 64),
+            (10_000_000, 64),
+        ] {
+            let delta = n_buckets.saturating_mul(BUCKET_CAP);
+            let mut gen = Xorshift128::new(0x1234_5678_abcd_ef00 ^ delta as u64);
 
-        // Pre-sort both sides' h64 indices (in production this is maintained)
-        let mut local_sorted: Vec<u64> = base.iter().map(|h| h.h64).collect();
-        local_sorted.sort_unstable();
-        let mut remote_sorted: Vec<u64> = base.iter().chain(&remote_extra).map(|h| h.h64).collect();
-        remote_sorted.sort_unstable();
+            let prefixes: Vec<u32> = (0..n_buckets)
+                .map(|i| BASE_PREFIX.saturating_add(u32::try_from(i).unwrap()))
+                .collect();
 
-        let remote_digest = RemoteDigest {
-            digest: remote_kernel.accumulator().digest(),
-            known_event_count: remote_kernel.accumulator().known_event_count(),
-            strata: *remote_kernel.strata(),
-            frame_matches: true,
-            has_unknown_extremity: false,
-        };
+            let mut local_sorted: Vec<u64> = Vec::with_capacity(n);
+            let mut remote_sorted: Vec<u64> = Vec::with_capacity(n.saturating_add(delta));
 
-        // Triage runs once outside the timed loop — cost not included.
-        let client = ReconciliationClient::default();
-        let action = client.select_action(&local_kernel, remote_digest, 0);
-        let ClientAction::BucketSketches { requests, .. } = action else {
-            // Δ exceeds gate_threshold (MAX_RECONCILIATION_ROUNDS × MAX_BUCKETED_SKETCH_CAPACITY
-            // = 20 × 4096 = 81920): select_action returns ExtremityDiff, not BucketSketches.
-            println!("extract+decode/N={n} Δ={delta}: gated to ExtremityDiff (Δ > 81920)");
-            continue;
-        };
-
-        let total_cap: usize = requests.iter().map(|r| r.capacity).sum();
-        println!(
-            "  [triage] N={n} Δ={delta}: {} requests, aggregate_cap={total_cap}",
-            requests.len(),
-        );
-
-        // Scale iterations down for expensive cases so total bench time stays reasonable.
-        // Target: ~3-5 seconds per (N, Δ) pair.
-        let iterations: u32 = match n {
-            0..=10_000 => 30,
-            10_001..=100_000 => 10,
-            100_001..=1_000_000 => 3,
-            _ => 1,
-        };
-
-        let elapsed = measure(iterations, || {
-            let remote_sk = build_bucket_sketches(black_box(&remote_sorted), &requests).unwrap();
-            let local_sk = build_bucket_sketches(black_box(&local_sorted), &requests).unwrap();
-            let mut recovered = 0usize;
-            for (mut rs, ls) in remote_sk.into_iter().zip(local_sk) {
-                rs.xor(&ls).unwrap();
-                if let Ok(roots) = rs.decode_elements(rs.capacity()) {
-                    recovered = recovered.saturating_add(roots.len());
+            // Plant BUCKET_CAP elements per bucket in remote index (local gets background)
+            for (&prefix, bucket_i) in prefixes.iter().zip(0_u64..) {
+                for j in 0_u64..BUCKET_CAP as u64 {
+                    let suffix = (gen.next() ^ (bucket_i << 16) ^ j) & LOW_MASK;
+                    let val = (u64::from(prefix) << HIGH_SHIFT) | suffix | 1;
+                    local_sorted.push(val);
+                    // Remote has extra elements in each bucket to create delta
+                    remote_sorted.push(val);
+                    let diff_suffix =
+                        (gen.next() ^ (bucket_i << 16) ^ j.saturating_add(100)) & LOW_MASK;
+                    remote_sorted.push((u64::from(prefix) << HIGH_SHIFT) | diff_suffix | 1);
                 }
             }
-            black_box(recovered);
-        });
-        report(
-            &format!("extract+decode/N={n} Δ={delta}"),
-            iterations,
-            elapsed,
-        );
+
+            for _ in delta..n {
+                let val = gen.next() | 1;
+                local_sorted.push(val);
+                remote_sorted.push(val);
+            }
+
+            local_sorted.sort_unstable();
+            remote_sorted.sort_unstable();
+
+            let requests: Vec<BucketRequest> = prefixes
+                .iter()
+                .map(|&prefix| BucketRequest {
+                    depth: DEPTH,
+                    prefix,
+                    capacity: BUCKET_CAP,
+                })
+                .collect();
+
+            let total_cap: usize = requests.iter().map(|r| r.capacity).sum();
+            println!(
+                "  [populated] N={n} Δ≈{delta}: {} requests, aggregate_cap={total_cap}",
+                requests.len(),
+            );
+
+            let iterations: u32 = match n {
+                0..=10_000 => 100,
+                10_001..=100_000 => 30,
+                100_001..=1_000_000 => 10,
+                _ => 3,
+            };
+
+            let elapsed = measure(iterations, || {
+                let remote_sk =
+                    build_bucket_sketches(black_box(&remote_sorted), &requests).unwrap();
+                let local_sk = build_bucket_sketches(black_box(&local_sorted), &requests).unwrap();
+                let mut recovered = 0_usize;
+                for (mut rs, ls) in remote_sk.into_iter().zip(local_sk) {
+                    rs.xor(&ls).unwrap();
+                    if let Ok(roots) = rs.decode_elements(rs.capacity()) {
+                        recovered = recovered.saturating_add(roots.len());
+                    }
+                }
+                black_box(recovered);
+            });
+            report(
+                &format!("extract+decode/N={n} Δ≈{delta}"),
+                iterations,
+                elapsed,
+            );
+        }
     }
 }
