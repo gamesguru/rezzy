@@ -34,7 +34,6 @@ pub struct Avx512Evaluator;
 
 #[cfg(target_arch = "x86_64")]
 impl Gf64Evaluator for Avx512Evaluator {
-    #[allow(clippy::incompatible_msrv)]
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
         assert_eq!(source.len(), target.len());
         let mut i = 0;
@@ -106,7 +105,6 @@ impl Gf64Evaluator for Avx512Evaluator {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
-#[allow(clippy::incompatible_msrv)]
 // SAFETY: Only called by `Avx512Evaluator::poly_mac` which enforces CPU feature constraints.
 unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
     let product = _mm512_clmulepi64_epi128(a, b, 0x00);
