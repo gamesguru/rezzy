@@ -1,6 +1,7 @@
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_avx512_support)");
     println!("cargo:rustc-check-cfg=cfg(has_res_submodule)");
+    println!("cargo:rustc-check-cfg=cfg(tarpaulin_include)");
     // Used to gate tests that depend on the res submodule
     if std::fs::read_dir("res").is_ok_and(|mut d| d.next().is_some()) {
         println!("cargo:rustc-cfg=has_res_submodule");
