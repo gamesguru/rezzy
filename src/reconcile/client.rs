@@ -386,6 +386,18 @@ mod tests {
     }
 
     #[test]
+    fn tests_client_builder_methods_and_accessors() {
+        let client = ReconciliationClient::default()
+            .with_max_rounds(42)
+            .with_gate_threshold(Some(999));
+        assert_eq!(client.max_rounds(), 42);
+        assert_eq!(client.gate_threshold(), Some(999));
+
+        let client = client.allow_unlimited_delta();
+        assert_eq!(client.gate_threshold(), None);
+    }
+
+    #[test]
     fn selects_short_circuit_extremity_and_sketch_paths() {
         let local = accumulator(&[hash(1, 1), hash(2, 2)]);
         let client = ReconciliationClient::default();
