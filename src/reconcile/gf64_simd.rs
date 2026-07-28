@@ -34,7 +34,7 @@ pub struct Avx512Evaluator;
 
 #[cfg(target_arch = "x86_64")]
 impl Gf64Evaluator for Avx512Evaluator {
-    #[allow(clippy::incompatible_msrv, clippy::cast_possible_wrap)]
+    #[allow(clippy::incompatible_msrv)]
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
         assert_eq!(source.len(), target.len());
         let mut i = 0;
@@ -43,7 +43,7 @@ impl Gf64Evaluator for Avx512Evaluator {
         // SAFETY: The `get_evaluator` dispatcher ensures this function is only called on CPUs with `avx512f` and `vpclmulqdq` support.
         unsafe {
             // Broadcast the scalar term to all lanes. We only need it in the lower 64 bits of each 128-bit lane.
-            let t = term as i64;
+            let t = i64::from_ne_bytes(term.to_ne_bytes());
             let term_vec = _mm512_set_epi64(0, t, 0, t, 0, t, 0, t);
 
             // Process chunks of 8
@@ -58,24 +58,16 @@ impl Gf64Evaluator for Avx512Evaluator {
                 // For simplicity and to ensure correctness, we manually set them.
                 // (In a heavily optimized pass, we could use AVX-512 gather or shuffle).
                 let s0 = _mm512_set_epi64(
-                    0,
-                    *s_ptr.add(3) as i64,
-                    0,
-                    *s_ptr.add(2) as i64,
-                    0,
-                    *s_ptr.add(1) as i64,
-                    0,
-                    *s_ptr.add(0) as i64,
+                    0, i64::from_ne_bytes((*s_ptr.add(3)).to_ne_bytes()),
+                    0, i64::from_ne_bytes((*s_ptr.add(2)).to_ne_bytes()),
+                    0, i64::from_ne_bytes((*s_ptr.add(1)).to_ne_bytes()),
+                    0, i64::from_ne_bytes((*s_ptr.add(0)).to_ne_bytes()),
                 );
                 let s1 = _mm512_set_epi64(
-                    0,
-                    *s_ptr.add(7) as i64,
-                    0,
-                    *s_ptr.add(6) as i64,
-                    0,
-                    *s_ptr.add(5) as i64,
-                    0,
-                    *s_ptr.add(4) as i64,
+                    0, i64::from_ne_bytes((*s_ptr.add(7)).to_ne_bytes()),
+                    0, i64::from_ne_bytes((*s_ptr.add(6)).to_ne_bytes()),
+                    0, i64::from_ne_bytes((*s_ptr.add(5)).to_ne_bytes()),
+                    0, i64::from_ne_bytes((*s_ptr.add(4)).to_ne_bytes()),
                 );
 
                 // Multiply
