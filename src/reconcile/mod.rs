@@ -17,6 +17,7 @@
 pub mod algebraic;
 pub mod client;
 pub mod gf64;
+pub mod gf64_simd;
 mod pinsketch;
 pub mod resident;
 pub mod server;
