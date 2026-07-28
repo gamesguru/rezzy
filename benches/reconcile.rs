@@ -1,6 +1,7 @@
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
+use rayon::prelude::*;
 use rezzy::{
     build_bucket_sketches, decode_bucket_sketches, estimate_delta, gf64_mul, BucketDecodeBatch,
     BucketDecodeSuccess, BucketRequest, ElementHash, ReconciliationClient, RemoteDigest,
@@ -509,12 +510,18 @@ fn main() {
                     let remote_sk =
                         build_bucket_sketches(black_box(&remote_sorted), chunk).unwrap();
                     let local_sk = build_bucket_sketches(black_box(&local_sorted), chunk).unwrap();
-                    for (mut rs, ls) in remote_sk.into_iter().zip(local_sk) {
-                        rs.xor(&ls).unwrap();
-                        if let Ok(roots) = rs.decode_elements(rs.capacity()) {
-                            recovered = recovered.saturating_add(roots.len());
-                        }
-                    }
+                    let chunk_recovered: usize = remote_sk
+                        .into_par_iter()
+                        .zip(local_sk.into_par_iter())
+                        .map(|(mut rs, ls)| {
+                            rs.xor(&ls).unwrap();
+                            match rs.decode_elements(rs.capacity()) {
+                                Ok(roots) => roots.len(),
+                                Err(_) => 0,
+                            }
+                        })
+                        .sum();
+                    recovered = recovered.saturating_add(chunk_recovered);
                 }
                 black_box(recovered);
             });

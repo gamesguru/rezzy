@@ -134,6 +134,7 @@ ureq = { version = "2.9", optional = true, default-features = false, features = 
 ] }
 
 [dev-dependencies]
+rayon = "1.10.0"
 similar = "2.7.0"
 
 [[bench]]

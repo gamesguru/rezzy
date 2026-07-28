@@ -1193,6 +1193,7 @@ dependencies = [
  "native-tls",
  "openssl",
  "openssl-sys",
+ "rayon",
  "roaring",
  "ruma-common",
  "ruma-events",
