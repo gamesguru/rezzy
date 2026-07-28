@@ -35,26 +35,41 @@ impl<'a> H64Index<'a> {
         Self { sorted_h64 }
     }
 
-    fn bounds_unchecked(request: &BucketRequest) -> (u64, u64) {
-        let shift = 64_u8.saturating_sub(request.depth);
-        let start_h64 = if shift == 64 {
-            0
-        } else {
-            u64::from(request.prefix) << shift
-        };
-        let end_h64_inclusive = if shift == 64 {
+    fn bounds_unchecked(request: &BucketRequest) -> core::ops::Range<u128> {
+        let depth = u32::from(request.depth);
+        let shift = 64_u32.saturating_sub(depth);
+
+        // Canonicalize the prefix so extra bits cannot leak into the bucket
+        let prefix_mask = if depth == 64 {
             u64::MAX
         } else {
-            start_h64 | (1_u64 << shift).wrapping_sub(1)
+            (1u64.wrapping_shl(depth)).wrapping_sub(1)
+        };
+        let prefix = u64::from(request.prefix) & prefix_mask;
+
+        let start = u128::from(prefix) << shift;
+        let end = if depth == 64 {
+            start.saturating_add(1)
+        } else {
+            start.saturating_add(1u128 << shift)
         };
 
-        (start_h64, end_h64_inclusive)
+        start..end
     }
 
     fn bucket_range_unchecked(&self, request: &BucketRequest) -> core::ops::Range<usize> {
-        let (start_h64, end_h64_inclusive) = Self::bounds_unchecked(request);
-        let start_idx = self.sorted_h64.partition_point(|&x| x < start_h64);
-        let end_idx = self.sorted_h64.partition_point(|&x| x <= end_h64_inclusive);
+        if request.depth == 0 {
+            return 0..self.sorted_h64.len();
+        }
+
+        let bounds = Self::bounds_unchecked(request);
+        let start_idx = self
+            .sorted_h64
+            .partition_point(|&x| u128::from(x) < bounds.start);
+        let end_idx = start_idx.saturating_add(
+            self.sorted_h64[start_idx..].partition_point(|&x| u128::from(x) < bounds.end),
+        );
+
         start_idx..end_idx
     }
 
@@ -275,6 +290,94 @@ pub fn build_bucket_sketches(
     }
 
     Ok(sketches)
+}
+
+// =========================================================================
+// Sketch Builder and Budget Planner Logic
+// =========================================================================
+
+/// Represents the outcome of attempting to build a sketch for a node slice.
+#[derive(Debug)]
+pub enum SketchResult {
+    /// Successfully built the sketch. The slice size was within capacity.
+    Success(SyndromeSketch),
+    /// The node is too dense. Returns the two subranges to process next.
+    Split {
+        left_range: core::ops::Range<usize>,
+        right_range: core::ops::Range<usize>,
+    },
+    /// Total estimated work exceeds policy budgets.
+    FallbackToRangeSync,
+}
+
+/// A builder that evaluates capacity limits before paying the O(S) cost to build a sketch.
+#[derive(Debug, Clone, Copy)]
+pub struct SketchBuilder {
+    /// The maximum number of elements a sketch can realistically hold/decode.
+    pub capacity: usize,
+    /// The absolute maximum elements we are willing to process algebraically before giving up.
+    pub hard_fallback_threshold: usize,
+}
+
+impl SketchBuilder {
+    #[must_use]
+    pub const fn new(capacity: usize, hard_fallback_threshold: usize) -> Self {
+        Self {
+            capacity,
+            hard_fallback_threshold,
+        }
+    }
+
+    /// Takes an *existing* slice and instantly bisects it without rescanning the full index.
+    /// Returns the Left and Right sub-ranges relative to the slice provided.
+    #[must_use]
+    pub fn split_range(
+        entries: &[u64],
+        depth: u8,
+    ) -> Option<(core::ops::Range<usize>, core::ops::Range<usize>)> {
+        if depth >= 64 {
+            return None;
+        }
+        // Isolate the exact bit at `depth` that determines the split
+        let mid = entries
+            .partition_point(|&h| ((h >> (63_u32.saturating_sub(u32::from(depth)))) & 1) == 0);
+        Some((0..mid, mid..entries.len()))
+    }
+
+    /// Processes a node requested by the Planner.
+    /// `node_slice` should be the $O(\log N)$ zero-allocation slice returned by the index.
+    ///
+    /// # Errors
+    /// Returns an error if sketch creation fails algebraically.
+    pub fn build_node(
+        &self,
+        node_slice: &[u64],
+        depth: u8,
+    ) -> Result<SketchResult, AlgebraicError> {
+        let slice_len = node_slice.len();
+
+        // 1. Hard Protocol Check: Fallback if we are in absurd territory.
+        if slice_len > self.hard_fallback_threshold {
+            return Ok(SketchResult::FallbackToRangeSync);
+        }
+
+        // 2. Capacity Check: Split if the slice is too dense for the sketch capacity.
+        if slice_len > self.capacity && depth < 64 {
+            if let Some((left, right)) = Self::split_range(node_slice, depth) {
+                return Ok(SketchResult::Split {
+                    left_range: left,
+                    right_range: right,
+                });
+            }
+        }
+
+        let mut sketch = SyndromeSketch::new(self.capacity)?;
+        for &h64 in node_slice {
+            sketch.toggle(h64)?;
+        }
+
+        Ok(SketchResult::Success(sketch))
+    }
 }
 
 #[cfg(test)]
