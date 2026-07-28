@@ -171,6 +171,8 @@ pub fn get_evaluator() -> EvaluatorBackend {
 }
 
 #[cfg(target_arch = "x86_64")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(not(tarpaulin_include))]
 fn get_evaluator_internal() -> EvaluatorBackend {
     #[cfg(has_avx512_support)]
     #[cfg_attr(coverage_nightly, coverage(off))]
@@ -190,6 +192,8 @@ fn get_evaluator_internal() -> EvaluatorBackend {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(not(tarpaulin_include))]
 mod tests {
     use super::*;
     use alloc::vec::Vec;
