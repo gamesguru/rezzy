@@ -187,3 +187,38 @@ fn get_evaluator_internal() -> EvaluatorBackend {
         EvaluatorBackend::Scalar
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::vec::Vec;
+
+    #[test]
+    fn test_evaluators_match_scalar() {
+        let term = 0x8000000000000000;
+        let source: Vec<u64> = (0..20).map(|i| i as u64 * 0x123456789abcdef).collect();
+        let mut expected = alloc::vec![0u64; 20];
+        ScalarEvaluator::poly_mac(term, &source, &mut expected);
+
+        #[cfg(target_arch = "x86_64")]
+        {
+            if std::is_x86_feature_detected!("pclmulqdq") {
+                let mut target_sse = alloc::vec![0u64; 20];
+                SseEvaluator::poly_mac(term, &source, &mut target_sse);
+                assert_eq!(target_sse, expected, "SseEvaluator results mismatch");
+            }
+        }
+
+        #[cfg(all(target_arch = "x86_64", has_avx512_support))]
+        {
+            if std::is_x86_feature_detected!("avx512f")
+                && std::is_x86_feature_detected!("avx512bw")
+                && std::is_x86_feature_detected!("vpclmulqdq")
+            {
+                let mut target_avx = alloc::vec![0u64; 20];
+                Avx512Evaluator::poly_mac(term, &source, &mut target_avx);
+                assert_eq!(target_avx, expected, "Avx512Evaluator results mismatch");
+            }
+        }
+    }
+}
