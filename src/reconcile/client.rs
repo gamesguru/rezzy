@@ -174,16 +174,37 @@ impl ReconciliationClient {
                     .and_then(|capacity| capacity.checked_add(4))
                     .and_then(|capacity| capacity.checked_add(headroom))
             });
-        let capacity = provisioned
+        let target_capacity = provisioned
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(usize::MAX);
 
+        let mut depth = 0_u8;
+        let mut buckets = 1_usize;
+
+        while buckets * 32 < target_capacity && depth < 6 {
+            depth += 1;
+            buckets *= 2;
+        }
+
+        let per_bucket =
+            ((target_capacity + buckets - 1) / buckets).clamp(4, MAX_BUCKET_SKETCH_CAPACITY);
+        let total_capacity = buckets.saturating_mul(per_bucket);
+
+        if buckets > 64 || total_capacity > crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY {
+            return ClientAction::ExtremityDiff;
+        }
+
+        let mut requests = alloc::vec::Vec::with_capacity(buckets);
+        for prefix in 0..(buckets as u32) {
+            requests.push(BucketRequest {
+                depth,
+                prefix,
+                capacity: per_bucket,
+            });
+        }
+
         ClientAction::BucketSketches {
-            requests: alloc::vec![BucketRequest {
-                depth: 0,
-                prefix: 0,
-                capacity: capacity.clamp(4, MAX_BUCKET_SKETCH_CAPACITY),
-            }],
+            requests,
             accumulated_roots: alloc::vec![],
         }
     }
@@ -413,6 +434,13 @@ mod tests {
     fn caps_large_and_two_sided_differences_for_localization() {
         let client = ReconciliationClient::new(16).unwrap();
         let local = accumulator(&[hash(1, 1)]);
+        let expected_requests = (0..64)
+            .map(|prefix| BucketRequest {
+                depth: 6,
+                prefix,
+                capacity: 24,
+            })
+            .collect();
         assert_eq!(
             client.select_action(
                 &local,
@@ -426,11 +454,7 @@ mod tests {
                 0,
             ),
             ClientAction::BucketSketches {
-                requests: vec![BucketRequest {
-                    depth: 0,
-                    prefix: 0,
-                    capacity: 64,
-                }],
+                requests: expected_requests,
                 accumulated_roots: vec![],
             }
         );
