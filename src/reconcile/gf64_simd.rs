@@ -1,11 +1,13 @@
 #![allow(unsafe_code)]
-#![allow(clippy::cast_possible_wrap, clippy::incompatible_msrv, clippy::arithmetic_side_effects, clippy::cast_ptr_alignment, clippy::undocumented_unsafe_blocks)]
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
     __m512i, _mm512_and_si512, _mm512_bsrli_epi128, _mm512_clmulepi64_epi128, _mm512_set_epi64,
-    _mm512_slli_epi64, _mm512_storeu_si512, _mm512_xor_si512,
+    _mm512_slli_epi64, _mm512_store_si512, _mm512_xor_si512,
 };
+
+#[repr(align(64))]
+struct AlignedArray([u64; 8]);
 
 /// Evaluates polynomial roots in parallel blocks of 8.
 pub trait Gf64Evaluator {
@@ -32,18 +34,21 @@ pub struct Avx512Evaluator;
 
 #[cfg(target_arch = "x86_64")]
 impl Gf64Evaluator for Avx512Evaluator {
+    #[allow(clippy::incompatible_msrv, clippy::cast_possible_wrap)]
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
         assert_eq!(source.len(), target.len());
         let mut i = 0;
         let len = source.len();
 
+        // SAFETY: The `get_evaluator` dispatcher ensures this function is only called on CPUs with `avx512f` and `vpclmulqdq` support.
         unsafe {
             // Broadcast the scalar term to all lanes. We only need it in the lower 64 bits of each 128-bit lane.
             let t = term as i64;
             let term_vec = _mm512_set_epi64(0, t, 0, t, 0, t, 0, t);
 
             // Process chunks of 8
-            while i + 8 <= len {
+            let chunk_limit = len.saturating_sub(7);
+            while i < chunk_limit {
                 // Load 8 coefficients from source (unaligned)
                 let s_ptr = source.as_ptr().add(i);
                 // We need to unpack 8 contiguous 64-bit values into two 512-bit registers,
@@ -77,26 +82,26 @@ impl Gf64Evaluator for Avx512Evaluator {
                 let p0 = gf64_mul_x4_avx512(term_vec, s0);
                 let p1 = gf64_mul_x4_avx512(term_vec, s1);
 
-                // We need to XOR the results back into target.
-                // The results are in the lower 64 bits of each 128-bit lane.
-                // Let's extract them manually to avoid unaligned store complexity with the 0 gaps.
-                let mut tmp0 = [0u64; 8];
-                let mut tmp1 = [0u64; 8];
-                _mm512_storeu_si512(tmp0.as_mut_ptr().cast::<__m512i>(), p0);
-                _mm512_storeu_si512(tmp1.as_mut_ptr().cast::<__m512i>(), p1);
+                let mut tmp0 = AlignedArray([0u64; 8]);
+                let mut tmp1 = AlignedArray([0u64; 8]);
+                let tmp0_ptr = core::ptr::addr_of_mut!(tmp0).cast::<__m512i>();
+                let tmp1_ptr = core::ptr::addr_of_mut!(tmp1).cast::<__m512i>();
+
+                _mm512_store_si512(tmp0_ptr, p0);
+                _mm512_store_si512(tmp1_ptr, p1);
 
                 let t_ptr = target.as_mut_ptr().add(i);
-                *t_ptr.add(0) ^= tmp0[0];
-                *t_ptr.add(1) ^= tmp0[2];
-                *t_ptr.add(2) ^= tmp0[4];
-                *t_ptr.add(3) ^= tmp0[6];
+                *t_ptr.add(0) ^= tmp0.0[0];
+                *t_ptr.add(1) ^= tmp0.0[2];
+                *t_ptr.add(2) ^= tmp0.0[4];
+                *t_ptr.add(3) ^= tmp0.0[6];
 
-                *t_ptr.add(4) ^= tmp1[0];
-                *t_ptr.add(5) ^= tmp1[2];
-                *t_ptr.add(6) ^= tmp1[4];
-                *t_ptr.add(7) ^= tmp1[6];
+                *t_ptr.add(4) ^= tmp1.0[0];
+                *t_ptr.add(5) ^= tmp1.0[2];
+                *t_ptr.add(6) ^= tmp1.0[4];
+                *t_ptr.add(7) ^= tmp1.0[6];
 
-                i += 8;
+                i = i.checked_add(8).expect("i cannot overflow len");
             }
         }
 
@@ -109,6 +114,8 @@ impl Gf64Evaluator for Avx512Evaluator {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
+#[allow(clippy::incompatible_msrv)]
+// SAFETY: Only called by `Avx512Evaluator::poly_mac` which enforces CPU feature constraints.
 unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
     let product = _mm512_clmulepi64_epi128(a, b, 0x00);
     let high = _mm512_bsrli_epi128::<8>(product);
