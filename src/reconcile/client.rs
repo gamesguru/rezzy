@@ -181,13 +181,14 @@ impl ReconciliationClient {
         let mut depth = 0_u8;
         let mut buckets = 1_usize;
 
-        while buckets * 32 < target_capacity && depth < 6 {
-            depth += 1;
-            buckets *= 2;
+        while buckets.saturating_mul(32) < target_capacity && depth < 6 {
+            depth = depth.saturating_add(1);
+            buckets = buckets.saturating_mul(2);
         }
 
-        let per_bucket =
-            ((target_capacity + buckets - 1) / buckets).clamp(4, MAX_BUCKET_SKETCH_CAPACITY);
+        let per_bucket = target_capacity
+            .div_ceil(buckets)
+            .clamp(4, MAX_BUCKET_SKETCH_CAPACITY);
         let total_capacity = buckets.saturating_mul(per_bucket);
 
         if buckets > 64 || total_capacity > crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY {
@@ -195,7 +196,8 @@ impl ReconciliationClient {
         }
 
         let mut requests = alloc::vec::Vec::with_capacity(buckets);
-        for prefix in 0..(buckets as u32) {
+        let max_prefix = u32::try_from(buckets).unwrap_or(0);
+        for prefix in 0..max_prefix {
             requests.push(BucketRequest {
                 depth,
                 prefix,
