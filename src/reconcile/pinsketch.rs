@@ -146,6 +146,7 @@ fn poly_mod(modulus: &[u64], value: &mut Polynomial) -> Option<()> {
             let evaluator = crate::reconcile::gf64_simd::get_evaluator();
 
             match evaluator {
+                #[cfg(all(target_arch = "x86_64", has_avx512_support))]
                 crate::reconcile::gf64_simd::EvaluatorBackend::Avx512 => {
                     crate::reconcile::gf64_simd::Avx512Evaluator::poly_mac(term, source, target);
                 }
@@ -178,6 +179,7 @@ fn poly_div(mut dividend: Polynomial, divisor: &[u64]) -> Option<Polynomial> {
             let evaluator = crate::reconcile::gf64_simd::get_evaluator();
 
             match evaluator {
+                #[cfg(all(target_arch = "x86_64", has_avx512_support))]
                 crate::reconcile::gf64_simd::EvaluatorBackend::Avx512 => {
                     crate::reconcile::gf64_simd::Avx512Evaluator::poly_mac(term, source, target);
                 }

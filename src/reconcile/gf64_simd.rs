@@ -1,11 +1,12 @@
 #![allow(unsafe_code)]
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", has_avx512_support))]
 use core::arch::x86_64::{
     __m512i, _mm512_and_si512, _mm512_bsrli_epi128, _mm512_clmulepi64_epi128, _mm512_set_epi64,
     _mm512_slli_epi64, _mm512_store_si512, _mm512_xor_si512,
 };
 
+#[cfg(all(target_arch = "x86_64", has_avx512_support))]
 #[repr(align(64))]
 struct AlignedArray([u64; 8]);
 
@@ -28,12 +29,13 @@ impl Gf64Evaluator for ScalarEvaluator {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", has_avx512_support))]
 #[derive(Clone, Copy)]
 pub struct Avx512Evaluator;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", has_avx512_support))]
 impl Gf64Evaluator for Avx512Evaluator {
+    #[allow(clippy::incompatible_msrv)]
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
         assert_eq!(source.len(), target.len());
         let mut i = 0;
@@ -111,8 +113,9 @@ impl Gf64Evaluator for Avx512Evaluator {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", has_avx512_support))]
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
+#[allow(clippy::incompatible_msrv)]
 // SAFETY: Only called by `Avx512Evaluator::poly_mac` which enforces CPU feature constraints.
 unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
     let product = _mm512_clmulepi64_epi128(a, b, 0x00);
@@ -147,7 +150,7 @@ pub enum EvaluatorBackend {
     Scalar,
     #[cfg(target_arch = "x86_64")]
     Sse,
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", has_avx512_support))]
     Avx512,
 }
 
@@ -156,21 +159,28 @@ pub fn get_evaluator() -> EvaluatorBackend {
     {
         use std::sync::OnceLock;
         static BACKEND: OnceLock<EvaluatorBackend> = OnceLock::new();
-        *BACKEND.get_or_init(|| {
-            if std::is_x86_feature_detected!("avx512f")
-                && std::is_x86_feature_detected!("avx512bw")
-                && std::is_x86_feature_detected!("vpclmulqdq")
-            {
-                EvaluatorBackend::Avx512
-            } else if std::is_x86_feature_detected!("pclmulqdq") {
-                EvaluatorBackend::Sse
-            } else {
-                EvaluatorBackend::Scalar
-            }
-        })
+        *BACKEND.get_or_init(get_evaluator_internal)
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
+        EvaluatorBackend::Scalar
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn get_evaluator_internal() -> EvaluatorBackend {
+    #[cfg(has_avx512_support)]
+    {
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("vpclmulqdq")
+        {
+            return EvaluatorBackend::Avx512;
+        }
+    }
+    if std::is_x86_feature_detected!("pclmulqdq") {
+        EvaluatorBackend::Sse
+    } else {
         EvaluatorBackend::Scalar
     }
 }
