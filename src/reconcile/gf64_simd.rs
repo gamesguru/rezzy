@@ -36,6 +36,7 @@ pub struct Avx512Evaluator;
 #[cfg(all(target_arch = "x86_64", has_avx512_support))]
 impl Gf64Evaluator for Avx512Evaluator {
     #[allow(clippy::incompatible_msrv)]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
         assert_eq!(source.len(), target.len());
         let mut i = 0;
@@ -116,6 +117,7 @@ impl Gf64Evaluator for Avx512Evaluator {
 #[cfg(all(target_arch = "x86_64", has_avx512_support))]
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
 #[allow(clippy::incompatible_msrv)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 // SAFETY: Only called by `Avx512Evaluator::poly_mac` which enforces CPU feature constraints.
 unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
     let product = _mm512_clmulepi64_epi128(a, b, 0x00);
@@ -136,6 +138,7 @@ pub struct SseEvaluator;
 
 #[cfg(target_arch = "x86_64")]
 impl Gf64Evaluator for SseEvaluator {
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
         // We could manually unroll PCLMULQDQ here, but for now we fallback to standard multiply.
         // The standard `mul` function is already hardware accelerated with PCLMULQDQ.
