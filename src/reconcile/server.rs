@@ -812,4 +812,127 @@ mod tests {
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0], h1.h64);
     }
+
+    #[test]
+    fn test_sketch_builder_split_range() {
+        // Elements sorted by h64
+        // bit 63 is the highest bit (MAX_DEPTH = 64)
+        // For depth 0, we split on bit 63.
+        let entries = [
+            0x0000_0000_0000_0000,
+            0x7FFF_FFFF_FFFF_FFFF,
+            0x8000_0000_0000_0000,
+            0xFFFF_FFFF_FFFF_FFFF,
+        ];
+
+        // Depth 0 -> splits on bit 63 (the MSB)
+        let (left, right) = SketchBuilder::split_range(&entries, 0).unwrap();
+        assert_eq!(left, 0..2);
+        assert_eq!(right, 2..4);
+
+        // Depth 64 -> returns None (exceeds MAX_DEPTH)
+        assert_eq!(SketchBuilder::split_range(&entries, 64), None);
+    }
+
+    #[test]
+    fn test_sketch_builder_build_success_no_split() {
+        use crate::reconcile::triage::BucketRequest;
+        let sorted_h64 = vec![0x1000_0000_0000_0000, 0x2000_0000_0000_0000];
+        let index = H64Index::new(&sorted_h64);
+
+        let policy = SketchPolicy {
+            max_aggregate_work: 1000,
+            hard_fallback_threshold: 1000,
+        };
+
+        let builder = SketchBuilder::new(&index, policy);
+        let requests = [BucketRequest {
+            depth: 0,
+            prefix: 0,
+            capacity: 10,
+        }];
+
+        let result = builder.build(&requests).unwrap();
+        if let SketchResult::Success(sketches) = result {
+            assert_eq!(sketches.len(), 1);
+        } else {
+            panic!("Expected Success");
+        }
+    }
+
+    #[test]
+    fn test_sketch_builder_build_success_with_split() {
+        use crate::reconcile::triage::BucketRequest;
+        // Two elements, capacity 1. This should trigger a split.
+        // Elements differ on the highest bit (bit 63)
+        let sorted_h64 = vec![0x0000_0000_0000_0001, 0x8000_0000_0000_0002];
+        let index = H64Index::new(&sorted_h64);
+
+        let policy = SketchPolicy {
+            max_aggregate_work: 1000,
+            hard_fallback_threshold: 1000,
+        };
+
+        let builder = SketchBuilder::new(&index, policy);
+        let requests = [BucketRequest {
+            depth: 0,
+            prefix: 0,
+            capacity: 1, // smaller than slice length (2)
+        }];
+
+        let result = builder.build(&requests).unwrap();
+        if let SketchResult::Success(sketches) = result {
+            // It splits into two buckets, both fit under capacity 1
+            assert_eq!(sketches.len(), 2);
+        } else {
+            panic!("Expected Success, got Fallback");
+        }
+    }
+
+    #[test]
+    fn test_sketch_builder_build_hard_fallback() {
+        use crate::reconcile::triage::BucketRequest;
+        let sorted_h64 = vec![1, 2, 3];
+        let index = H64Index::new(&sorted_h64);
+
+        let policy = SketchPolicy {
+            max_aggregate_work: 1000,
+            hard_fallback_threshold: 2, // 3 > 2, triggers hard fallback
+        };
+
+        let builder = SketchBuilder::new(&index, policy);
+        let requests = [BucketRequest {
+            depth: 0,
+            prefix: 0,
+            capacity: 1,
+        }];
+
+        let result = builder.build(&requests).unwrap();
+        assert!(matches!(result, SketchResult::FallbackToRangeSync));
+    }
+
+    #[test]
+    fn test_sketch_builder_build_budget_exhausted() {
+        use crate::reconcile::triage::BucketRequest;
+        // Two elements, capacity 1, will split.
+        // Splitting creates two slices of length 1.
+        // Aggregate work will be 1 + 1 = 2.
+        let sorted_h64 = vec![0x0000_0000_0000_0001, 0x8000_0000_0000_0002];
+        let index = H64Index::new(&sorted_h64);
+
+        let policy = SketchPolicy {
+            max_aggregate_work: 1, // Budget of 1 will be exhausted since 2 work is needed
+            hard_fallback_threshold: 1000,
+        };
+
+        let builder = SketchBuilder::new(&index, policy);
+        let requests = [BucketRequest {
+            depth: 0,
+            prefix: 0,
+            capacity: 1,
+        }];
+
+        let result = builder.build(&requests).unwrap();
+        assert!(matches!(result, SketchResult::FallbackToRangeSync));
+    }
 }
