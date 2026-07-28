@@ -2,7 +2,7 @@
 name = "rezzy"
 version = "0.5.2"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.75"
 resolver = "2"
 autobins = false
 authors = ["Shane Jaroch <chown_tee@proton.me>"]
@@ -43,7 +43,7 @@ exclude = [
 [package.metadata.cargo-machete]
 ignored = [
     # Direct optional anchors for transitive CLI dependency versions that still
-    # parse and build on the Rust 1.89 MSRV.
+    # parse and build on the Rust 1.75 MSRV.
     "idna_adapter",
     "native-tls",
     "openssl",
@@ -107,7 +107,7 @@ imbl = { version = "3.0", default-features = false, features = ["serde"] }
 insta = { version = "1.47.2", optional = true }
 mimalloc = { version = "0.1.52", optional = true }
 # Note: pulled in only by the `cli` feature (not part of `default`), so this
-# does not affect the library's rust-version = "1.89" MSRV. openssl >=0.10.79
+# does not affect the library's rust-version = "1.75" MSRV. openssl >=0.10.79
 # requires rustc 1.80+, so building with `--features cli` needs rustc 1.80+.
 # Bound to the current semver-major/minor lines to avoid unexpected breaking
 # releases or MSRV bumps for downstream `cli` consumers.
