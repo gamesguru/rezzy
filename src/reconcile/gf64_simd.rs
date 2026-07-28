@@ -1,4 +1,5 @@
 #![allow(unsafe_code)]
+#![allow(clippy::cast_possible_wrap, clippy::incompatible_msrv, clippy::arithmetic_side_effects, clippy::cast_ptr_alignment, clippy::undocumented_unsafe_blocks)]
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
@@ -52,16 +53,24 @@ impl Gf64Evaluator for Avx512Evaluator {
                 // For simplicity and to ensure correctness, we manually set them.
                 // (In a heavily optimized pass, we could use AVX-512 gather or shuffle).
                 let s0 = _mm512_set_epi64(
-                    0, *s_ptr.add(3) as i64,
-                    0, *s_ptr.add(2) as i64,
-                    0, *s_ptr.add(1) as i64,
-                    0, *s_ptr.add(0) as i64,
+                    0,
+                    *s_ptr.add(3) as i64,
+                    0,
+                    *s_ptr.add(2) as i64,
+                    0,
+                    *s_ptr.add(1) as i64,
+                    0,
+                    *s_ptr.add(0) as i64,
                 );
                 let s1 = _mm512_set_epi64(
-                    0, *s_ptr.add(7) as i64,
-                    0, *s_ptr.add(6) as i64,
-                    0, *s_ptr.add(5) as i64,
-                    0, *s_ptr.add(4) as i64,
+                    0,
+                    *s_ptr.add(7) as i64,
+                    0,
+                    *s_ptr.add(6) as i64,
+                    0,
+                    *s_ptr.add(5) as i64,
+                    0,
+                    *s_ptr.add(4) as i64,
                 );
 
                 // Multiply
@@ -73,15 +82,15 @@ impl Gf64Evaluator for Avx512Evaluator {
                 // Let's extract them manually to avoid unaligned store complexity with the 0 gaps.
                 let mut tmp0 = [0u64; 8];
                 let mut tmp1 = [0u64; 8];
-                _mm512_storeu_si512(tmp0.as_mut_ptr() as *mut __m512i, p0);
-                _mm512_storeu_si512(tmp1.as_mut_ptr() as *mut __m512i, p1);
+                _mm512_storeu_si512(tmp0.as_mut_ptr().cast::<__m512i>(), p0);
+                _mm512_storeu_si512(tmp1.as_mut_ptr().cast::<__m512i>(), p1);
 
                 let t_ptr = target.as_mut_ptr().add(i);
                 *t_ptr.add(0) ^= tmp0[0];
                 *t_ptr.add(1) ^= tmp0[2];
                 *t_ptr.add(2) ^= tmp0[4];
                 *t_ptr.add(3) ^= tmp0[6];
-                
+
                 *t_ptr.add(4) ^= tmp1[0];
                 *t_ptr.add(5) ^= tmp1[2];
                 *t_ptr.add(6) ^= tmp1[4];
@@ -103,18 +112,13 @@ impl Gf64Evaluator for Avx512Evaluator {
 unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
     let product = _mm512_clmulepi64_epi128(a, b, 0x00);
     let high = _mm512_bsrli_epi128::<8>(product);
-    
+
     let mut reduced = _mm512_xor_si512(product, high);
     reduced = _mm512_xor_si512(reduced, _mm512_slli_epi64::<1>(high));
     reduced = _mm512_xor_si512(reduced, _mm512_slli_epi64::<3>(high));
     reduced = _mm512_xor_si512(reduced, _mm512_slli_epi64::<4>(high));
-    
-    let low_mask = _mm512_set_epi64(
-        0, -1,
-        0, -1,
-        0, -1,
-        0, -1,
-    );
+
+    let low_mask = _mm512_set_epi64(0, -1, 0, -1, 0, -1, 0, -1);
     _mm512_and_si512(reduced, low_mask)
 }
 
