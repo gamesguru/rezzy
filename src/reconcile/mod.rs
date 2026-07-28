@@ -22,6 +22,8 @@ pub mod resident;
 pub mod server;
 pub mod triage;
 
+pub const MAX_DEPTH: u8 = 64;
+
 pub use algebraic::{
     gf64_mul, verify_residual, AlgebraicError, ElementHash, EventIdFormat, RoomAccumulator,
     SyndromeSketch, MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_SKETCH_CAPACITY,

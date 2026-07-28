@@ -19,6 +19,9 @@ use super::{
     RoomAccumulator,
 };
 
+/// The maximum depth for a bucket request in the H64 trie.
+use super::MAX_DEPTH;
+
 /// Read-only helper over a pre-sorted `h64` index.
 ///
 /// This keeps bucket extraction cheap and explicit without forcing callers into
@@ -37,7 +40,7 @@ impl<'a> H64Index<'a> {
 
     fn bounds_unchecked(request: &BucketRequest) -> core::ops::Range<u128> {
         let depth = u32::from(request.depth);
-        let shift = 64_u32.saturating_sub(depth);
+        let shift = u32::from(MAX_DEPTH).saturating_sub(depth);
 
         // A u128 safely handles (1 << 64) - 1, which cleanly downcasts to u64::MAX
         let prefix_mask = u64::try_from((1_u128 << depth).saturating_sub(1)).unwrap_or(u64::MAX);
@@ -322,11 +325,11 @@ impl<'a> SketchBuilder<'a> {
         entries: &[u64],
         depth: u8,
     ) -> Option<(core::ops::Range<usize>, core::ops::Range<usize>)> {
-        if depth >= 64 {
+        if depth >= MAX_DEPTH {
             return None;
         }
         // Isolate the exact bit at `depth` that determines the split
-        let bit_idx = 63_u32.saturating_sub(u32::from(depth));
+        let bit_idx = u32::from(MAX_DEPTH - 1).saturating_sub(u32::from(depth));
         let mid = entries.partition_point(|&h| ((h >> bit_idx) & 1) == 0);
         Some((0..mid, mid..entries.len()))
     }
@@ -348,6 +351,9 @@ impl<'a> SketchBuilder<'a> {
 
         // 1. Initial O(log N) localization for incoming requests
         for req in initial_requests {
+            if req.depth > MAX_DEPTH {
+                return Err(AlgebraicError::InvalidBucketIndex);
+            }
             let range = self.index.bucket_range_unchecked(req);
             stack.push((req.depth, req.prefix, req.capacity, range));
         }
@@ -361,15 +367,9 @@ impl<'a> SketchBuilder<'a> {
                 return Ok(SketchResult::FallbackToRangeSync);
             }
 
-            // Cumulative budget guard.
-            total_work = total_work.saturating_add(slice_len);
-            if total_work > self.policy.max_aggregate_work {
-                return Ok(SketchResult::FallbackToRangeSync);
-            }
-
             // Split if the slice overflows capacity and can still be routed.
             // Note: capacity here is the number of elements the sketch can hold.
-            if slice_len > capacity && depth < 64 {
+            if slice_len > capacity && depth < MAX_DEPTH {
                 let slice = &self.index.sorted_h64[range.clone()];
 
                 if let Some((left_sub, right_sub)) = Self::split_range(slice, depth) {
@@ -391,6 +391,12 @@ impl<'a> SketchBuilder<'a> {
             }
 
             // Terminal Node Execution: Pay the O(S) cost to build the sketch.
+            // Cumulative budget guard is evaluated here so we don't double-spend on split nodes.
+            total_work = total_work.saturating_add(slice_len);
+            if total_work > self.policy.max_aggregate_work {
+                return Ok(SketchResult::FallbackToRangeSync);
+            }
+
             let mut sketch = SyndromeSketch::new(capacity)?;
             for &h64 in &self.index.sorted_h64[range] {
                 sketch.toggle(h64)?;
