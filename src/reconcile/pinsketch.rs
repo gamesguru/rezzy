@@ -7,6 +7,8 @@
 
 use alloc::{vec, vec::Vec};
 
+use crate::reconcile::gf64_simd::Gf64Evaluator;
+
 use super::algebraic::{gf64_mul, AlgebraicError};
 
 type Polynomial = Vec<u64>;
@@ -139,8 +141,20 @@ fn poly_mod(modulus: &[u64], value: &mut Polynomial) -> Option<()> {
         let term = value.pop()?;
         if term != 0 {
             let offset = value.len().checked_sub(modulus_degree)?;
-            for (index, coefficient) in modulus[..modulus_degree].iter().copied().enumerate() {
-                value[offset.checked_add(index)?] ^= gf64_mul(term, coefficient);
+            let target = &mut value[offset..offset + modulus_degree];
+            let source = &modulus[..modulus_degree];
+            let evaluator = crate::reconcile::gf64_simd::get_evaluator();
+            
+            match evaluator {
+                crate::reconcile::gf64_simd::EvaluatorBackend::Avx512 => {
+                    crate::reconcile::gf64_simd::Avx512Evaluator::poly_mac(term, source, target);
+                }
+                crate::reconcile::gf64_simd::EvaluatorBackend::Sse => {
+                    crate::reconcile::gf64_simd::SseEvaluator::poly_mac(term, source, target);
+                }
+                crate::reconcile::gf64_simd::EvaluatorBackend::Scalar => {
+                    crate::reconcile::gf64_simd::ScalarEvaluator::poly_mac(term, source, target);
+                }
             }
         }
     }
@@ -159,8 +173,20 @@ fn poly_div(mut dividend: Polynomial, divisor: &[u64]) -> Option<Polynomial> {
         let position = dividend.len().checked_sub(divisor_degree)?;
         quotient[position] = term;
         if term != 0 {
-            for (index, coefficient) in divisor[..divisor_degree].iter().copied().enumerate() {
-                dividend[position.checked_add(index)?] ^= gf64_mul(term, coefficient);
+            let target = &mut dividend[position..position + divisor_degree];
+            let source = &divisor[..divisor_degree];
+            let evaluator = crate::reconcile::gf64_simd::get_evaluator();
+            
+            match evaluator {
+                crate::reconcile::gf64_simd::EvaluatorBackend::Avx512 => {
+                    crate::reconcile::gf64_simd::Avx512Evaluator::poly_mac(term, source, target);
+                }
+                crate::reconcile::gf64_simd::EvaluatorBackend::Sse => {
+                    crate::reconcile::gf64_simd::SseEvaluator::poly_mac(term, source, target);
+                }
+                crate::reconcile::gf64_simd::EvaluatorBackend::Scalar => {
+                    crate::reconcile::gf64_simd::ScalarEvaluator::poly_mac(term, source, target);
+                }
             }
         }
     }

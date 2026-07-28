@@ -1,28 +1,27 @@
 #![allow(unsafe_code)]
 
 #[cfg(target_arch = "x86_64")]
-use core::arch::x86_64::*;
+use core::arch::x86_64::{
+    __m512i, _mm512_and_si512, _mm512_bsrli_epi128, _mm512_clmulepi64_epi128, _mm512_set_epi64,
+    _mm512_slli_epi64, _mm512_storeu_si512, _mm512_xor_si512,
+};
 
 /// Evaluates polynomial roots in parallel blocks of 8.
 pub trait Gf64Evaluator {
-    /// Multiplies 8 Galois field elements by 8 roots simultaneously.
-    fn eval_roots_x8(poly: &[u64], roots: &[u64; 8]) -> [u64; 8];
+    /// Multiplies a constant `term` by all coefficients in `source`,
+    /// and XOR-adds the results into the corresponding positions in `target`.
+    /// `source` and `target` must have the same length.
+    fn poly_mac(term: u64, source: &[u64], target: &mut [u64]);
 }
 
 #[derive(Clone, Copy)]
 pub struct ScalarEvaluator;
 
 impl Gf64Evaluator for ScalarEvaluator {
-    fn eval_roots_x8(poly: &[u64], roots: &[u64; 8]) -> [u64; 8] {
-        let mut results = [0u64; 8];
-        for i in 0..8 {
-            let mut eval = 0u64;
-            for &c in poly.iter().rev() {
-                eval = crate::reconcile::gf64::mul(eval, roots[i]) ^ c;
-            }
-            results[i] = eval;
+    fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
+        for (i, &coefficient) in source.iter().enumerate() {
+            target[i] ^= crate::reconcile::gf64::mul(term, coefficient);
         }
-        results
     }
 }
 
@@ -32,50 +31,69 @@ pub struct Avx512Evaluator;
 
 #[cfg(target_arch = "x86_64")]
 impl Gf64Evaluator for Avx512Evaluator {
-    fn eval_roots_x8(poly: &[u64], roots: &[u64; 8]) -> [u64; 8] {
+    fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
+        assert_eq!(source.len(), target.len());
+        let mut i = 0;
+        let len = source.len();
+
         unsafe {
-            // Load the 8 roots into two 512-bit registers (4 roots each, in the lower 64 bits of 128-bit lanes)
-            let r0 = _mm512_set_epi64(
-                0, roots[3] as i64,
-                0, roots[2] as i64,
-                0, roots[1] as i64,
-                0, roots[0] as i64,
-            );
-            let r1 = _mm512_set_epi64(
-                0, roots[7] as i64,
-                0, roots[6] as i64,
-                0, roots[5] as i64,
-                0, roots[4] as i64,
-            );
+            // Broadcast the scalar term to all lanes. We only need it in the lower 64 bits of each 128-bit lane.
+            let t = term as i64;
+            let term_vec = _mm512_set_epi64(0, t, 0, t, 0, t, 0, t);
 
-            let c_highest = poly[poly.len() - 1] as i64;
-            let mut eval0 = _mm512_set_epi64(0, c_highest, 0, c_highest, 0, c_highest, 0, c_highest);
-            let mut eval1 = _mm512_set_epi64(0, c_highest, 0, c_highest, 0, c_highest, 0, c_highest);
+            // Process chunks of 8
+            while i + 8 <= len {
+                // Load 8 coefficients from source (unaligned)
+                let s_ptr = source.as_ptr().add(i);
+                // We need to unpack 8 contiguous 64-bit values into two 512-bit registers,
+                // placing each 64-bit value into the lower half of a 128-bit lane.
+                // Since they are contiguous in memory, we can't just do a single 512-bit load.
+                // We could load them scalar, or use shuffle/unpack instructions.
+                // For simplicity and to ensure correctness, we manually set them.
+                // (In a heavily optimized pass, we could use AVX-512 gather or shuffle).
+                let s0 = _mm512_set_epi64(
+                    0, *s_ptr.add(3) as i64,
+                    0, *s_ptr.add(2) as i64,
+                    0, *s_ptr.add(1) as i64,
+                    0, *s_ptr.add(0) as i64,
+                );
+                let s1 = _mm512_set_epi64(
+                    0, *s_ptr.add(7) as i64,
+                    0, *s_ptr.add(6) as i64,
+                    0, *s_ptr.add(5) as i64,
+                    0, *s_ptr.add(4) as i64,
+                );
 
-            for &c in poly.iter().rev().skip(1) {
-                eval0 = gf64_mul_x4_avx512(eval0, r0);
-                eval1 = gf64_mul_x4_avx512(eval1, r1);
+                // Multiply
+                let p0 = gf64_mul_x4_avx512(term_vec, s0);
+                let p1 = gf64_mul_x4_avx512(term_vec, s1);
+
+                // We need to XOR the results back into target.
+                // The results are in the lower 64 bits of each 128-bit lane.
+                // Let's extract them manually to avoid unaligned store complexity with the 0 gaps.
+                let mut tmp0 = [0u64; 8];
+                let mut tmp1 = [0u64; 8];
+                _mm512_storeu_si512(tmp0.as_mut_ptr() as *mut __m512i, p0);
+                _mm512_storeu_si512(tmp1.as_mut_ptr() as *mut __m512i, p1);
+
+                let t_ptr = target.as_mut_ptr().add(i);
+                *t_ptr.add(0) ^= tmp0[0];
+                *t_ptr.add(1) ^= tmp0[2];
+                *t_ptr.add(2) ^= tmp0[4];
+                *t_ptr.add(3) ^= tmp0[6];
                 
-                let c_vec = _mm512_set_epi64(0, c as i64, 0, c as i64, 0, c as i64, 0, c as i64);
-                eval0 = _mm512_xor_si512(eval0, c_vec);
-                eval1 = _mm512_xor_si512(eval1, c_vec);
+                *t_ptr.add(4) ^= tmp1[0];
+                *t_ptr.add(5) ^= tmp1[2];
+                *t_ptr.add(6) ^= tmp1[4];
+                *t_ptr.add(7) ^= tmp1[6];
+
+                i += 8;
             }
+        }
 
-            let mut results = [0u64; 8];
-            let mut tmp = [0u64; 8];
-            _mm512_storeu_si512(tmp.as_mut_ptr() as *mut __m512i, eval0);
-            results[0] = tmp[0];
-            results[1] = tmp[2];
-            results[2] = tmp[4];
-            results[3] = tmp[6];
-            
-            _mm512_storeu_si512(tmp.as_mut_ptr() as *mut __m512i, eval1);
-            results[4] = tmp[0];
-            results[5] = tmp[2];
-            results[6] = tmp[4];
-            results[7] = tmp[6];
-
-            results
+        // Handle remainder
+        for idx in i..len {
+            target[idx] ^= crate::reconcile::gf64::mul(term, source[idx]);
         }
     }
 }
@@ -106,16 +124,12 @@ pub struct SseEvaluator;
 
 #[cfg(target_arch = "x86_64")]
 impl Gf64Evaluator for SseEvaluator {
-    fn eval_roots_x8(poly: &[u64], roots: &[u64; 8]) -> [u64; 8] {
-        let mut results = [0u64; 8];
-        for i in 0..8 {
-            let mut eval = 0u64;
-            for &c in poly.iter().rev() {
-                eval = crate::reconcile::gf64::mul(eval, roots[i]) ^ c;
-            }
-            results[i] = eval;
+    fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
+        // We could manually unroll PCLMULQDQ here, but for now we fallback to standard multiply.
+        // The standard `mul` function is already hardware accelerated with PCLMULQDQ.
+        for (i, &coefficient) in source.iter().enumerate() {
+            target[i] ^= crate::reconcile::gf64::mul(term, coefficient);
         }
-        results
     }
 }
 
@@ -134,9 +148,9 @@ pub fn get_evaluator() -> EvaluatorBackend {
         use std::sync::OnceLock;
         static BACKEND: OnceLock<EvaluatorBackend> = OnceLock::new();
         *BACKEND.get_or_init(|| {
-            if std::is_x86_feature_detected!("avx512f") 
+            if std::is_x86_feature_detected!("avx512f")
                 && std::is_x86_feature_detected!("avx512bw")
-                && std::is_x86_feature_detected!("vpclmulqdq") 
+                && std::is_x86_feature_detected!("vpclmulqdq")
             {
                 EvaluatorBackend::Avx512
             } else if std::is_x86_feature_detected!("pclmulqdq") {
