@@ -39,20 +39,15 @@ impl<'a> H64Index<'a> {
         let depth = u32::from(request.depth);
         let shift = 64_u32.saturating_sub(depth);
 
-        // Canonicalize the prefix so extra bits cannot leak into the bucket
-        let prefix_mask = if depth == 64 {
-            u64::MAX
-        } else {
-            (1u64.wrapping_shl(depth)).wrapping_sub(1)
-        };
+        // A u128 safely handles (1 << 64) - 1, which cleanly downcasts to u64::MAX
+        let prefix_mask = u64::try_from((1_u128 << depth).saturating_sub(1)).unwrap_or(u64::MAX);
         let prefix = u64::from(request.prefix) & prefix_mask;
 
         let start = u128::from(prefix) << shift;
-        let end = if depth == 64 {
-            start.saturating_add(1)
-        } else {
-            start.saturating_add(1u128 << shift)
-        };
+
+        // If depth == 64, shift == 0, and (1_u128 << 0) == 1.
+        // The math naturally collapses without a branch!
+        let end = start.saturating_add(1_u128 << shift);
 
         start..end
     }
@@ -296,36 +291,28 @@ pub fn build_bucket_sketches(
 // Sketch Builder and Budget Planner Logic
 // =========================================================================
 
-/// Represents the outcome of attempting to build a sketch for a node slice.
-#[derive(Debug)]
-pub enum SketchResult {
-    /// Successfully built the sketch. The slice size was within capacity.
-    Success(SyndromeSketch),
-    /// The node is too dense. Returns the two subranges to process next.
-    Split {
-        left_range: core::ops::Range<usize>,
-        right_range: core::ops::Range<usize>,
-    },
-    /// Total estimated work exceeds policy budgets.
-    FallbackToRangeSync,
-}
-
-/// A builder that evaluates capacity limits before paying the O(S) cost to build a sketch.
-#[derive(Debug, Clone, Copy)]
-pub struct SketchBuilder {
-    /// The maximum number of elements a sketch can realistically hold/decode.
-    pub capacity: usize,
-    /// The absolute maximum elements we are willing to process algebraically before giving up.
+pub struct SketchPolicy {
+    /// Maximum total elements to process across all returned sketches.
+    pub max_aggregate_work: usize,
+    /// The absolute ceiling where a single slice proves the difference is pathological.
     pub hard_fallback_threshold: usize,
 }
 
-impl SketchBuilder {
+pub enum SketchResult {
+    Success(Vec<SyndromeSketch>),
+    FallbackToRangeSync,
+}
+
+/// A builder that iteratively evaluates capacity limits before paying the O(S) cost to build sketches.
+pub struct SketchBuilder<'a> {
+    index: &'a H64Index<'a>,
+    policy: SketchPolicy,
+}
+
+impl<'a> SketchBuilder<'a> {
     #[must_use]
-    pub const fn new(capacity: usize, hard_fallback_threshold: usize) -> Self {
-        Self {
-            capacity,
-            hard_fallback_threshold,
-        }
+    pub const fn new(index: &'a H64Index<'a>, policy: SketchPolicy) -> Self {
+        Self { index, policy }
     }
 
     /// Takes an *existing* slice and instantly bisects it without rescanning the full index.
@@ -339,44 +326,81 @@ impl SketchBuilder {
             return None;
         }
         // Isolate the exact bit at `depth` that determines the split
-        let mid = entries
-            .partition_point(|&h| ((h >> (63_u32.saturating_sub(u32::from(depth)))) & 1) == 0);
+        let bit_idx = 63_u32.saturating_sub(u32::from(depth));
+        let mid = entries.partition_point(|&h| ((h >> bit_idx) & 1) == 0);
         Some((0..mid, mid..entries.len()))
     }
 
-    /// Processes a node requested by the Planner.
-    /// `node_slice` should be the $O(\log N)$ zero-allocation slice returned by the index.
+    /// Processes incoming requests, iteratively splitting oversized buckets
+    /// while enforcing total work budgets.
     ///
     /// # Errors
     /// Returns an error if sketch creation fails algebraically.
-    pub fn build_node(
+    pub fn build(
         &self,
-        node_slice: &[u64],
-        depth: u8,
+        initial_requests: &[BucketRequest],
     ) -> Result<SketchResult, AlgebraicError> {
-        let slice_len = node_slice.len();
+        let mut sketches = Vec::new();
+        let mut total_work: usize = 0;
 
-        // 1. Hard Protocol Check: Fallback if we are in absurd territory.
-        if slice_len > self.hard_fallback_threshold {
-            return Ok(SketchResult::FallbackToRangeSync);
+        // Stack stores: (depth, prefix, capacity, absolute_range)
+        let mut stack = Vec::with_capacity(initial_requests.len());
+
+        // 1. Initial O(log N) localization for incoming requests
+        for req in initial_requests {
+            let range = self.index.bucket_range_unchecked(req);
+            stack.push((req.depth, req.prefix, req.capacity, range));
         }
 
-        // 2. Capacity Check: Split if the slice is too dense for the sketch capacity.
-        if slice_len > self.capacity && depth < 64 {
-            if let Some((left, right)) = Self::split_range(node_slice, depth) {
-                return Ok(SketchResult::Split {
-                    left_range: left,
-                    right_range: right,
-                });
+        // 2. Iterative execution and splitting
+        while let Some((depth, prefix, capacity, range)) = stack.pop() {
+            let slice_len = range.len();
+
+            // Hard protocol check: Fallback if we hit absurd structural divergence.
+            if slice_len > self.policy.hard_fallback_threshold {
+                return Ok(SketchResult::FallbackToRangeSync);
             }
+
+            // Cumulative budget guard.
+            total_work = total_work.saturating_add(slice_len);
+            if total_work > self.policy.max_aggregate_work {
+                return Ok(SketchResult::FallbackToRangeSync);
+            }
+
+            // Split if the slice overflows capacity and can still be routed.
+            // Note: capacity here is the number of elements the sketch can hold.
+            if slice_len > capacity && depth < 64 {
+                let slice = &self.index.sorted_h64[range.clone()];
+
+                if let Some((left_sub, right_sub)) = Self::split_range(slice, depth) {
+                    // Translate the localized 0..mid bounds back to absolute index bounds.
+                    let left_abs = (range.start.saturating_add(left_sub.start))
+                        ..(range.start.saturating_add(left_sub.end));
+                    let right_abs = (range.start.saturating_add(right_sub.start))
+                        ..(range.start.saturating_add(right_sub.end));
+
+                    // Calculate child prefixes based on MSB routing.
+                    let left_prefix = prefix << 1;
+                    let right_prefix = (prefix << 1) | 1;
+
+                    // Push children to stack (right first, so left pops first)
+                    stack.push((depth.saturating_add(1), right_prefix, capacity, right_abs));
+                    stack.push((depth.saturating_add(1), left_prefix, capacity, left_abs));
+                    continue;
+                }
+            }
+
+            // Terminal Node Execution: Pay the O(S) cost to build the sketch.
+            let mut sketch = SyndromeSketch::new(capacity)?;
+            for &h64 in &self.index.sorted_h64[range] {
+                sketch.toggle(h64)?;
+            }
+            // For now, we discard the bucket index metadata and just return sketches,
+            // as build_bucket_sketches normally returns Vec<SyndromeSketch>.
+            sketches.push(sketch);
         }
 
-        let mut sketch = SyndromeSketch::new(self.capacity)?;
-        for &h64 in node_slice {
-            sketch.toggle(h64)?;
-        }
-
-        Ok(SketchResult::Success(sketch))
+        Ok(SketchResult::Success(sketches))
     }
 }
 
