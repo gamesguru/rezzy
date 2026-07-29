@@ -3,7 +3,10 @@ use std::hint::black_box;
 use std::mem::size_of;
 use std::time::{Duration, Instant};
 
-use rezzy::{ForwardReachabilityIndex, HashMap, HashSet, LeanEvent, RangePrefilterReachability};
+use rezzy::{
+    ForwardReachabilityIndex, HashMap, HashSet, LeanEvent, RangePrefilterReachability,
+    SegmentTraversalMode,
+};
 
 fn report_phases(name: &str, phases: &[(&str, Duration)]) {
     let parts = phases
@@ -43,6 +46,13 @@ fn report_labeled_comparison(
     println!(
         "{name}: {first_label}={first_ms:.6} ms/query (1 iters, {first_ms:.6} ms total), {second_label}={second_ms:.6} ms/query (1 iters, {second_ms:.6} ms total), {second_label}_speedup={speedup:.2}x"
     );
+}
+
+fn segment_mode_label(mode: SegmentTraversalMode) -> &'static str {
+    match mode {
+        SegmentTraversalMode::PlainRangePruned => "plain",
+        SegmentTraversalMode::SegmentJumps => "jump",
+    }
 }
 
 struct Xorshift128 {
@@ -321,10 +331,11 @@ fn slice_indices(indices: &[usize], start: usize, count: usize) -> Vec<usize> {
 fn benchmark_low_memory_case(
     fixture: &DagFixture,
     case: &ReachabilityCase,
-) -> (Duration, Duration, Duration, usize) {
+) -> (Duration, Duration, Duration, usize, SegmentTraversalMode) {
     let index_build_start = Instant::now();
     let index = RangePrefilterReachability::build(&fixture.graph);
     let index_build_elapsed = index_build_start.elapsed();
+    let mode = index.segment_mode();
 
     let index_query_start = Instant::now();
     let mut index_hits = Vec::new();
@@ -348,6 +359,7 @@ fn benchmark_low_memory_case(
         index_query_elapsed,
         bfs_query_elapsed,
         index_hits.len(),
+        mode,
     )
 }
 
@@ -602,7 +614,16 @@ fn benchmark_branchy_forward_reachability(
 fn benchmark_branchy_range_prefilter_reachability(
     node_count: usize,
     seed_count: usize,
-) -> (Duration, Duration, Duration, Duration, Duration, u32, usize) {
+) -> (
+    Duration,
+    Duration,
+    Duration,
+    Duration,
+    Duration,
+    u32,
+    usize,
+    SegmentTraversalMode,
+) {
     let fixture_start = Instant::now();
     let branchy = BranchyDag::new(node_count, seed_count);
     let fixture_elapsed = fixture_start.elapsed();
@@ -610,6 +631,7 @@ fn benchmark_branchy_range_prefilter_reachability(
     let index_build_start = Instant::now();
     let index = RangePrefilterReachability::build(&branchy.graph);
     let index_build_elapsed = index_build_start.elapsed();
+    let mode = index.segment_mode();
 
     let bfs_build_start = Instant::now();
     let children = branchy.children_by_parent();
@@ -640,6 +662,7 @@ fn benchmark_branchy_range_prefilter_reachability(
         bfs_query_elapsed,
         iterations,
         index_hits.len(),
+        mode,
     )
 }
 
@@ -684,9 +707,10 @@ fn run_branchy_low_memory_suite() {
             bfs_query_elapsed,
             iterations,
             hits,
+            mode,
         ) = benchmark_branchy_range_prefilter_reachability(node_count, seed_count);
         report_phases(
-            &format!("resolve/range-prefilter/{node_count}"),
+            &format!("resolve/range-prefilter/{node_count} mode={}", segment_mode_label(mode)),
             &[
                 ("fixture", fixture_elapsed),
                 ("index_build", index_build_elapsed),
@@ -727,10 +751,14 @@ fn run_topology_query_matrix() {
         local_hit.iterations = if node_count <= 50_000 { 10 } else { 3 };
 
         for case in [no_hit, local_hit] {
-            let (setup_elapsed, index_elapsed, bfs_elapsed, hits) =
+            let (setup_elapsed, index_elapsed, bfs_elapsed, hits, mode) =
                 benchmark_low_memory_case(&interleaved, &case);
             report_phases(
-                &format!("resolve/{}/{node_count}", case.label),
+                &format!(
+                    "resolve/{}/{node_count} mode={}",
+                    case.label,
+                    segment_mode_label(mode)
+                ),
                 &[("index_build", setup_elapsed)],
             );
             report_comparison(
@@ -772,10 +800,14 @@ fn run_topology_query_matrix() {
         scattered.iterations = iters;
 
         for case in [shallow_hit, deep_hit, scattered] {
-            let (setup_elapsed, index_elapsed, bfs_elapsed, hits) =
+            let (setup_elapsed, index_elapsed, bfs_elapsed, hits, mode) =
                 benchmark_low_memory_case(&layered, &case);
             report_phases(
-                &format!("resolve/{}/{node_count}", case.label),
+                &format!(
+                    "resolve/{}/{node_count} mode={}",
+                    case.label,
+                    segment_mode_label(mode)
+                ),
                 &[("index_build", setup_elapsed)],
             );
             report_comparison(

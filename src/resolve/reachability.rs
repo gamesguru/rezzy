@@ -252,6 +252,32 @@ struct Segment {
     tail: u32,
 }
 
+/// Coarse build-time summary used to decide whether segment jumps are worth it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentStats {
+    node_count: usize,
+    segment_count: usize,
+    singleton_segment_count: usize,
+    long_segment_node_count: usize,
+    max_segment_length: usize,
+}
+
+impl SegmentStats {
+    /// Returns `true` when segment jumps are likely to amortize their setup cost.
+    #[must_use]
+    pub const fn should_jump(self) -> bool {
+        self.max_segment_length >= 4
+            && self.long_segment_node_count.saturating_mul(2) >= self.node_count
+    }
+}
+
+/// How the low-memory reachability accelerator traverses segments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentTraversalMode {
+    PlainRangePruned,
+    SegmentJumps,
+}
+
 #[derive(Debug, Clone)]
 pub struct RangePrefilterReachability<Id> {
     id_to_index: HashMap<Id, u32>,
@@ -260,6 +286,8 @@ pub struct RangePrefilterReachability<Id> {
     segments: Vec<Segment>,
     node_segment: Vec<u32>,
     node_segment_offset: Vec<u32>,
+    segment_stats: SegmentStats,
+    segment_mode: SegmentTraversalMode,
 }
 
 fn collect_topology<Id, C, S>(
@@ -369,10 +397,13 @@ fn build_descendant_ranges(children_by_index: &[Vec<u32>]) -> Vec<(u32, u32)> {
 fn build_segments(
     children_by_index: &[Vec<u32>],
     in_degree_by_index: &[usize],
-) -> (Vec<Segment>, Vec<u32>, Vec<u32>) {
+) -> (Vec<Segment>, Vec<u32>, Vec<u32>, SegmentStats) {
     let mut node_segment = vec![u32::MAX; children_by_index.len()];
     let mut node_segment_offset = vec![0_u32; children_by_index.len()];
     let mut segments = Vec::new();
+    let mut singleton_segment_count = 0_usize;
+    let mut long_segment_node_count = 0_usize;
+    let mut max_segment_length = 0_usize;
     for idx in 0..children_by_index.len() {
         if node_segment[idx] != u32::MAX {
             continue;
@@ -398,12 +429,28 @@ fn build_segments(
             current = next;
         }
 
+        let segment_length = usize::try_from(offset).expect("segment length fits usize");
+        if segment_length == 1 {
+            singleton_segment_count = singleton_segment_count.saturating_add(1);
+        }
+        if segment_length >= 4 {
+            long_segment_node_count = long_segment_node_count.saturating_add(segment_length);
+        }
+        max_segment_length = max_segment_length.max(segment_length);
         segments.push(Segment {
             tail: u32::try_from(current).expect("graph too large for segment tail"),
         });
     }
 
-    (segments, node_segment, node_segment_offset)
+    let segment_stats = SegmentStats {
+        node_count: children_by_index.len(),
+        segment_count: segments.len(),
+        singleton_segment_count,
+        long_segment_node_count,
+        max_segment_length,
+    };
+
+    (segments, node_segment, node_segment_offset, segment_stats)
 }
 
 impl<Id> RangePrefilterReachability<Id>
@@ -427,8 +474,13 @@ where
         let (children_by_index, in_degree_by_index) =
             build_indexed_children(topo.len(), children, &id_to_index);
         let descendant_ranges = build_descendant_ranges(&children_by_index);
-        let (segments, node_segment, node_segment_offset) =
+        let (segments, node_segment, node_segment_offset, segment_stats) =
             build_segments(&children_by_index, &in_degree_by_index);
+        let segment_mode = if segment_stats.should_jump() {
+            SegmentTraversalMode::SegmentJumps
+        } else {
+            SegmentTraversalMode::PlainRangePruned
+        };
 
         Self {
             id_to_index,
@@ -437,7 +489,21 @@ where
             segments,
             node_segment,
             node_segment_offset,
+            segment_stats,
+            segment_mode,
         }
+    }
+
+    /// Returns the build-time segment summary used by the adaptive traversal chooser.
+    #[must_use]
+    pub const fn segment_stats(&self) -> SegmentStats {
+        self.segment_stats
+    }
+
+    /// Returns the traversal mode selected for this snapshot.
+    #[must_use]
+    pub const fn segment_mode(&self) -> SegmentTraversalMode {
+        self.segment_mode
     }
 
     fn reaches_index(&self, from_idx: u32, to_idx: u32) -> bool {
@@ -477,6 +543,89 @@ where
         false
     }
 
+    fn filter_reachable_plain<'a, S, C>(&self, seeds: S, candidates: C) -> Vec<usize>
+    where
+        S: IntoIterator<Item = &'a Id>,
+        C: IntoIterator<Item = &'a Id>,
+        Id: 'a,
+    {
+        let mut reachable = vec![false; self.children_by_index.len()];
+        let mut candidate_positions: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut remaining_candidates = BTreeSet::new();
+        let mut candidate_count = 0_usize;
+        let mut known_candidate_count = 0_usize;
+        for (idx, candidate) in candidates.into_iter().enumerate() {
+            candidate_count = idx.saturating_add(1);
+            let Some(&candidate_idx) = self.id_to_index.get(candidate) else {
+                continue;
+            };
+            candidate_positions
+                .entry(candidate_idx)
+                .or_default()
+                .push(idx);
+            remaining_candidates.insert(candidate_idx);
+            known_candidate_count = known_candidate_count.saturating_add(1);
+        }
+
+        if candidate_count == 0 || known_candidate_count == 0 {
+            return Vec::new();
+        }
+
+        let mut results = vec![false; candidate_count];
+        let mut queue = VecDeque::new();
+        for seed in seeds {
+            let Some(&idx) = self.id_to_index.get(seed) else {
+                continue;
+            };
+            if !reachable[idx as usize] {
+                reachable[idx as usize] = true;
+                queue.push_back(idx);
+            }
+        }
+
+        let mut remaining_known_candidates = known_candidate_count;
+        while let Some(curr) = queue.pop_front() {
+            if let Some(positions) = candidate_positions.get(&curr) {
+                for &position in positions {
+                    if results[position] {
+                        continue;
+                    }
+                    results[position] = true;
+                    remaining_known_candidates = remaining_known_candidates.saturating_sub(1);
+                }
+                remaining_candidates.remove(&curr);
+            }
+
+            if remaining_known_candidates == 0 {
+                break;
+            }
+
+            for &child in &self.children_by_index[curr as usize] {
+                if reachable[child as usize] {
+                    continue;
+                }
+
+                let (min_descendant, max_descendant) = self.descendant_ranges[child as usize];
+                if remaining_candidates
+                    .range(min_descendant..=max_descendant)
+                    .next()
+                    .is_none()
+                {
+                    continue;
+                }
+
+                reachable[child as usize] = true;
+                queue.push_back(child);
+            }
+        }
+
+        results
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, found)| found.then_some(idx))
+            .collect()
+    }
+
     /// Returns the descendants of a seed set as candidate indices.
     ///
     /// This is exact but uses only adjacency plus lightweight descendant
@@ -492,6 +641,10 @@ where
         C: IntoIterator<Item = &'a Id>,
         Id: 'a,
     {
+        if matches!(self.segment_mode, SegmentTraversalMode::PlainRangePruned) {
+            return self.filter_reachable_plain(seeds, candidates);
+        }
+
         let mut reachable = vec![false; self.children_by_index.len()];
         let mut candidate_positions_by_segment: Vec<Vec<(u32, u32, usize)>> =
             vec![Vec::new(); self.segments.len()];
@@ -806,5 +959,55 @@ mod tests {
         let seeds = [&a];
         let candidates = [&a, &missing, &b];
         assert_eq!(index.filter_reachable(seeds, candidates), vec![0, 2]);
+    }
+
+    #[test]
+    fn range_prefilter_chooses_segment_jumps_for_chain_topology() {
+        let mut graph: HashMap<String, LeanEvent<String>> = HashMap::new();
+        let nodes = ["A", "B", "C", "D", "E"];
+        for (idx, node) in nodes.iter().enumerate() {
+            let auth_events = if idx == 0 {
+                Vec::new()
+            } else {
+                vec![String::from(nodes[idx - 1])]
+            };
+            graph.insert(
+                String::from(*node),
+                LeanEvent {
+                    event_id: String::from(*node),
+                    auth_events,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let index = RangePrefilterReachability::build(&graph);
+        assert_eq!(index.segment_mode(), SegmentTraversalMode::SegmentJumps);
+        assert!(index.segment_stats().should_jump());
+    }
+
+    #[test]
+    fn range_prefilter_disables_segment_jumps_for_branchy_topology() {
+        let mut graph: HashMap<String, LeanEvent<String>> = HashMap::new();
+        for node in ["A", "B", "C", "D"] {
+            graph.insert(
+                String::from(node),
+                LeanEvent {
+                    event_id: String::from(node),
+                    auth_events: match node {
+                        "A" => Vec::new(),
+                        "B" => vec![String::from("A")],
+                        "C" => vec![String::from("A")],
+                        "D" => vec![String::from("B"), String::from("C")],
+                        _ => Vec::new(),
+                    },
+                    ..Default::default()
+                },
+            );
+        }
+
+        let index = RangePrefilterReachability::build(&graph);
+        assert_eq!(index.segment_mode(), SegmentTraversalMode::PlainRangePruned);
+        assert!(!index.segment_stats().should_jump());
     }
 }
