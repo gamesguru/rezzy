@@ -278,6 +278,38 @@ pub enum SegmentTraversalMode {
     SegmentJumps,
 }
 
+/// Per-query traversal choice for the low-memory reachability accelerator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TraversalMode {
+    PlainIndexedBfs,
+    RangePruned,
+    SegmentJumps,
+}
+
+struct CandidateQuery {
+    candidate_count: usize,
+    known_candidate_position_count: usize,
+    candidate_positions: HashMap<u32, Vec<usize>>,
+    remaining_candidates: BTreeSet<u32>,
+    min_candidate_index: Option<u32>,
+    max_candidate_index: Option<u32>,
+}
+
+impl CandidateQuery {
+    fn span(&self, node_count: usize) -> usize {
+        self.min_candidate_index
+            .zip(self.max_candidate_index)
+            .map_or(node_count, |(min, max)| {
+                usize::try_from(max.saturating_sub(min).saturating_add(1))
+                    .expect("candidate span fits usize")
+            })
+    }
+
+    fn unique_count(&self) -> usize {
+        self.remaining_candidates.len()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RangePrefilterReachability<Id> {
     id_to_index: HashMap<Id, u32>,
@@ -506,54 +538,40 @@ where
         self.segment_mode
     }
 
-    fn reaches_index(&self, from_idx: u32, to_idx: u32) -> bool {
-        if from_idx == to_idx {
-            return true;
+    fn select_traversal_mode(&self, candidates: &CandidateQuery) -> TraversalMode {
+        if candidates.candidate_count == 0 || candidates.known_candidate_position_count == 0 {
+            return TraversalMode::PlainIndexedBfs;
         }
 
-        let (min_descendant, max_descendant) = self.descendant_ranges[from_idx as usize];
-        if to_idx < min_descendant || to_idx > max_descendant {
-            return false;
+        let node_count = self.children_by_index.len().max(1);
+        let span = candidates.span(node_count);
+        let narrow_span = span.saturating_mul(4) <= node_count;
+        let broad_span = span.saturating_mul(2) > node_count;
+        let unique_candidate_count = candidates.unique_count();
+        let selective = unique_candidate_count.saturating_mul(50) <= node_count;
+        let jump_selective = unique_candidate_count.saturating_mul(20) <= node_count;
+
+        if self.segment_mode == SegmentTraversalMode::SegmentJumps && jump_selective && narrow_span
+        {
+            TraversalMode::SegmentJumps
+        } else if selective && narrow_span && !broad_span {
+            TraversalMode::RangePruned
+        } else {
+            TraversalMode::PlainIndexedBfs
         }
-
-        let mut visited = vec![false; self.children_by_index.len()];
-        let mut queue = VecDeque::new();
-        visited[from_idx as usize] = true;
-        queue.push_back(from_idx);
-
-        while let Some(curr) = queue.pop_front() {
-            for &child in &self.children_by_index[curr as usize] {
-                if child == to_idx {
-                    return true;
-                }
-                if child > to_idx {
-                    continue;
-                }
-                let (child_min, child_max) = self.descendant_ranges[child as usize];
-                if to_idx < child_min || to_idx > child_max {
-                    continue;
-                }
-                if !visited[child as usize] {
-                    visited[child as usize] = true;
-                    queue.push_back(child);
-                }
-            }
-        }
-
-        false
     }
 
-    fn filter_reachable_plain<'a, S, C>(&self, seeds: S, candidates: C) -> Vec<usize>
+    fn collect_candidates<'a, C>(&self, candidates: C) -> CandidateQuery
     where
-        S: IntoIterator<Item = &'a Id>,
         C: IntoIterator<Item = &'a Id>,
         Id: 'a,
     {
-        let mut reachable = vec![false; self.children_by_index.len()];
         let mut candidate_positions: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut remaining_candidates = BTreeSet::new();
         let mut candidate_count = 0_usize;
         let mut known_candidate_count = 0_usize;
+        let mut min_candidate_index = None;
+        let mut max_candidate_index = None;
         for (idx, candidate) in candidates.into_iter().enumerate() {
             candidate_count = idx.saturating_add(1);
             let Some(&candidate_idx) = self.id_to_index.get(candidate) else {
@@ -565,13 +583,27 @@ where
                 .push(idx);
             remaining_candidates.insert(candidate_idx);
             known_candidate_count = known_candidate_count.saturating_add(1);
+            min_candidate_index =
+                Some(min_candidate_index.map_or(candidate_idx, |min: u32| min.min(candidate_idx)));
+            max_candidate_index =
+                Some(max_candidate_index.map_or(candidate_idx, |max: u32| max.max(candidate_idx)));
         }
 
-        if candidate_count == 0 || known_candidate_count == 0 {
-            return Vec::new();
+        CandidateQuery {
+            candidate_count,
+            known_candidate_position_count: known_candidate_count,
+            candidate_positions,
+            remaining_candidates,
+            min_candidate_index,
+            max_candidate_index,
         }
+    }
 
-        let mut results = vec![false; candidate_count];
+    fn seed_queue<'a, S>(&self, seeds: S, reachable: &mut [bool]) -> VecDeque<u32>
+    where
+        S: IntoIterator<Item = &'a Id>,
+        Id: 'a,
+    {
         let mut queue = VecDeque::new();
         for seed in seeds {
             let Some(&idx) = self.id_to_index.get(seed) else {
@@ -582,10 +614,78 @@ where
                 queue.push_back(idx);
             }
         }
+        queue
+    }
 
-        let mut remaining_known_candidates = known_candidate_count;
+    fn filter_reachable_numeric_bfs_with_candidates<'a, S>(
+        &self,
+        seeds: S,
+        candidates: &CandidateQuery,
+    ) -> Vec<usize>
+    where
+        S: IntoIterator<Item = &'a Id>,
+        Id: 'a,
+    {
+        if candidates.candidate_count == 0 || candidates.known_candidate_position_count == 0 {
+            return Vec::new();
+        }
+
+        let mut results = vec![false; candidates.candidate_count];
+        let mut reachable = vec![false; self.children_by_index.len()];
+        let mut queue = self.seed_queue(seeds, &mut reachable);
+        let mut remaining_known_candidates = candidates.known_candidate_position_count;
+
         while let Some(curr) = queue.pop_front() {
-            if let Some(positions) = candidate_positions.get(&curr) {
+            if let Some(positions) = candidates.candidate_positions.get(&curr) {
+                for &position in positions {
+                    if results[position] {
+                        continue;
+                    }
+                    results[position] = true;
+                    remaining_known_candidates = remaining_known_candidates.saturating_sub(1);
+                }
+            }
+
+            if remaining_known_candidates == 0 {
+                break;
+            }
+
+            for &child in &self.children_by_index[curr as usize] {
+                if reachable[child as usize] {
+                    continue;
+                }
+                reachable[child as usize] = true;
+                queue.push_back(child);
+            }
+        }
+
+        results
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, found)| found.then_some(idx))
+            .collect()
+    }
+
+    fn filter_reachable_range_pruned_with_candidates<'a, S>(
+        &self,
+        seeds: S,
+        candidates: &CandidateQuery,
+    ) -> Vec<usize>
+    where
+        S: IntoIterator<Item = &'a Id>,
+        Id: 'a,
+    {
+        if candidates.candidate_count == 0 || candidates.known_candidate_position_count == 0 {
+            return Vec::new();
+        }
+
+        let mut results = vec![false; candidates.candidate_count];
+        let mut reachable = vec![false; self.children_by_index.len()];
+        let mut queue = self.seed_queue(seeds, &mut reachable);
+        let mut remaining_known_candidates = candidates.known_candidate_position_count;
+        let mut remaining_candidates = candidates.remaining_candidates.clone();
+        while let Some(curr) = queue.pop_front() {
+            if let Some(positions) = candidates.candidate_positions.get(&curr) {
                 for &position in positions {
                     if results[position] {
                         continue;
@@ -626,69 +726,48 @@ where
             .collect()
     }
 
-    /// Returns the descendants of a seed set as candidate indices.
-    ///
-    /// This is exact but uses only adjacency plus lightweight descendant
-    /// ranges, so it avoids storing the full transitive closure.
-    ///
-    /// # Panics
-    /// Panics if the graph exceeds the topological index space used by the
-    /// internal bounds checks.
-    #[must_use]
-    pub fn filter_reachable<'a, S, C>(&self, seeds: S, candidates: C) -> Vec<usize>
+    fn filter_reachable_segment_jumps<'a, S>(
+        &self,
+        seeds: S,
+        candidates: &CandidateQuery,
+    ) -> Vec<usize>
     where
         S: IntoIterator<Item = &'a Id>,
-        C: IntoIterator<Item = &'a Id>,
         Id: 'a,
     {
-        if matches!(self.segment_mode, SegmentTraversalMode::PlainRangePruned) {
-            return self.filter_reachable_plain(seeds, candidates);
+        if candidates.candidate_count == 0 || candidates.known_candidate_position_count == 0 {
+            return Vec::new();
         }
 
         let mut reachable = vec![false; self.children_by_index.len()];
         let mut candidate_positions_by_segment: Vec<Vec<(u32, u32, usize)>> =
             vec![Vec::new(); self.segments.len()];
-        let mut remaining_candidates = BTreeSet::new();
-        let mut candidate_count = 0_usize;
-        let mut known_candidate_count = 0_usize;
-        for (idx, candidate) in candidates.into_iter().enumerate() {
-            candidate_count = idx.saturating_add(1);
-            let Some(&candidate_idx) = self.id_to_index.get(candidate) else {
-                continue;
-            };
+        for (&candidate_idx, positions) in &candidates.candidate_positions {
             let segment_id = self.node_segment[candidate_idx as usize] as usize;
             let segment_offset = self.node_segment_offset[candidate_idx as usize];
-            candidate_positions_by_segment[segment_id].push((segment_offset, candidate_idx, idx));
-            remaining_candidates.insert(candidate_idx);
-            known_candidate_count = known_candidate_count.saturating_add(1);
-        }
-
-        if candidate_count == 0 || known_candidate_count == 0 {
-            return Vec::new();
+            for &position in positions {
+                candidate_positions_by_segment[segment_id].push((
+                    segment_offset,
+                    candidate_idx,
+                    position,
+                ));
+            }
         }
 
         for segment_candidates in &mut candidate_positions_by_segment {
             segment_candidates.sort_unstable_by_key(|(offset, _, _)| *offset);
         }
 
-        let mut results = vec![false; candidate_count];
-        let mut queue = VecDeque::new();
-        for seed in seeds {
-            let Some(&idx) = self.id_to_index.get(seed) else {
-                continue;
-            };
-            if !reachable[idx as usize] {
-                reachable[idx as usize] = true;
-                queue.push_back(idx);
-            }
-        }
-
-        let mut remaining_known_candidates = known_candidate_count;
+        let mut results = vec![false; candidates.candidate_count];
+        let mut queue = self.seed_queue(seeds, &mut reachable);
+        let mut remaining_known_candidates = candidates.known_candidate_position_count;
+        let mut remaining_candidates = candidates.remaining_candidates.clone();
         let mut segment_covered_from = vec![usize::MAX; self.segments.len()];
         let mut segment_expanded = vec![false; self.segments.len()];
         while let Some(curr) = queue.pop_front() {
             let segment_id = self.node_segment[curr as usize] as usize;
-            let segment_start = self.node_segment_offset[curr as usize] as usize;
+            let segment_start = usize::try_from(self.node_segment_offset[curr as usize])
+                .expect("segment offset fits usize");
             let previous_start = segment_covered_from[segment_id];
             let effective_start = match previous_start {
                 usize::MAX => segment_start,
@@ -749,6 +828,92 @@ where
             .filter_map(|(idx, found)| found.then_some(idx))
             .collect()
     }
+
+    fn reaches_index(&self, from_idx: u32, to_idx: u32) -> bool {
+        if from_idx == to_idx {
+            return true;
+        }
+
+        let (min_descendant, max_descendant) = self.descendant_ranges[from_idx as usize];
+        if to_idx < min_descendant || to_idx > max_descendant {
+            return false;
+        }
+
+        let mut visited = vec![false; self.children_by_index.len()];
+        let mut queue = VecDeque::new();
+        visited[from_idx as usize] = true;
+        queue.push_back(from_idx);
+
+        while let Some(curr) = queue.pop_front() {
+            for &child in &self.children_by_index[curr as usize] {
+                if child == to_idx {
+                    return true;
+                }
+                if child > to_idx {
+                    continue;
+                }
+                let (child_min, child_max) = self.descendant_ranges[child as usize];
+                if to_idx < child_min || to_idx > child_max {
+                    continue;
+                }
+                if !visited[child as usize] {
+                    visited[child as usize] = true;
+                    queue.push_back(child);
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Returns the descendants of a seed set as candidate indices.
+    ///
+    /// This is exact but uses only adjacency plus lightweight descendant
+    /// ranges, so it avoids storing the full transitive closure.
+    ///
+    /// # Panics
+    /// Panics if the graph exceeds the topological index space used by the
+    /// internal bounds checks.
+    #[must_use]
+    pub fn filter_reachable<'a, S, C>(&self, seeds: S, candidates: C) -> Vec<usize>
+    where
+        S: IntoIterator<Item = &'a Id>,
+        C: IntoIterator<Item = &'a Id>,
+        Id: 'a,
+    {
+        self.filter_reachable_with_mode(seeds, candidates).0
+    }
+
+    /// Returns the reachable candidate positions and the traversal mode used.
+    ///
+    /// The chosen mode is a per-query adaptive decision:
+    /// - `PlainIndexedBfs` for broad candidate sets
+    /// - `RangePruned` for selective, non-jumpable queries
+    /// - `SegmentJumps` for selective queries on compressible segment graphs
+    #[must_use]
+    pub fn filter_reachable_with_mode<'a, S, C>(
+        &self,
+        seeds: S,
+        candidates: C,
+    ) -> (Vec<usize>, TraversalMode)
+    where
+        S: IntoIterator<Item = &'a Id>,
+        C: IntoIterator<Item = &'a Id>,
+        Id: 'a,
+    {
+        let candidates = self.collect_candidates(candidates);
+        let mode = self.select_traversal_mode(&candidates);
+        let hits = match mode {
+            TraversalMode::PlainIndexedBfs => {
+                self.filter_reachable_numeric_bfs_with_candidates(seeds, &candidates)
+            }
+            TraversalMode::RangePruned => {
+                self.filter_reachable_range_pruned_with_candidates(seeds, &candidates)
+            }
+            TraversalMode::SegmentJumps => self.filter_reachable_segment_jumps(seeds, &candidates),
+        };
+        (hits, mode)
+    }
 }
 
 impl<Id> Reachability for RangePrefilterReachability<Id>
@@ -802,10 +967,71 @@ mod tests {
     use super::*;
     use crate::basespec::rezzy_types::LeanEvent;
     use crate::HashMap;
+    use alloc::format;
     use alloc::string::String;
     use alloc::vec;
 
     struct Dummy;
+
+    fn build_chain_graph(node_count: usize) -> HashMap<String, LeanEvent<String>> {
+        let mut graph = HashMap::with_capacity(node_count);
+        let mut previous = None;
+        for idx in 0..node_count {
+            let event_id = format!("chain-{idx:04}");
+            let auth_events = previous.iter().cloned().collect();
+            graph.insert(
+                event_id.clone(),
+                LeanEvent {
+                    event_id: event_id.clone(),
+                    auth_events,
+                    ..Default::default()
+                },
+            );
+            previous = Some(event_id);
+        }
+        graph
+    }
+
+    fn build_layered_graph(
+        node_count: usize,
+        layer_width: usize,
+    ) -> HashMap<String, LeanEvent<String>> {
+        let layer_count = node_count.div_ceil(layer_width);
+        let mut graph = HashMap::with_capacity(node_count);
+        let mut previous_layer: Vec<String> = Vec::new();
+        for layer in 0..layer_count {
+            let remaining = node_count.saturating_sub(graph.len());
+            let current_width = remaining.min(layer_width);
+            let mut current_layer = Vec::with_capacity(current_width);
+            for pos in 0..current_width {
+                let idx = graph.len();
+                let event_id = format!("layer-{layer:04}-{pos:04}");
+                let auth_events = if previous_layer.is_empty() {
+                    Vec::new()
+                } else {
+                    let first = previous_layer[pos % previous_layer.len()].clone();
+                    let second = previous_layer[(pos + 1) % previous_layer.len()].clone();
+                    if first == second {
+                        vec![first]
+                    } else {
+                        vec![first, second]
+                    }
+                };
+                graph.insert(
+                    event_id.clone(),
+                    LeanEvent {
+                        event_id: event_id.clone(),
+                        auth_events,
+                        ..Default::default()
+                    },
+                );
+                current_layer.push(event_id);
+                debug_assert!(idx < node_count);
+            }
+            previous_layer = current_layer;
+        }
+        graph
+    }
 
     impl Reachability for Dummy {
         type Id = u32;
@@ -1009,5 +1235,44 @@ mod tests {
         let index = RangePrefilterReachability::build(&graph);
         assert_eq!(index.segment_mode(), SegmentTraversalMode::PlainRangePruned);
         assert!(!index.segment_stats().should_jump());
+    }
+
+    #[test]
+    fn range_prefilter_selects_plain_indexed_bfs_for_broad_queries() {
+        let graph = build_chain_graph(100);
+        let index = RangePrefilterReachability::build(&graph);
+        let seeds = [String::from("chain-0000")];
+        let candidates = (0..100)
+            .map(|idx| format!("chain-{idx:04}"))
+            .collect::<Vec<_>>();
+
+        let (_, mode) = index.filter_reachable_with_mode(seeds.iter(), candidates.iter());
+        assert_eq!(mode, TraversalMode::PlainIndexedBfs);
+    }
+
+    #[test]
+    fn range_prefilter_selects_range_pruned_for_selective_layered_queries() {
+        let graph = build_layered_graph(100, 10);
+        let index = RangePrefilterReachability::build(&graph);
+        let seeds = [String::from("layer-0000-0000")];
+        let candidates = [
+            String::from("layer-0001-0000"),
+            String::from("layer-0001-0001"),
+        ];
+
+        let (_, mode) = index.filter_reachable_with_mode(seeds.iter(), candidates.iter());
+        assert_eq!(mode, TraversalMode::RangePruned);
+    }
+
+    #[test]
+    fn range_prefilter_selects_segment_jumps_for_selective_chain_queries() {
+        let graph = build_chain_graph(100);
+        let index = RangePrefilterReachability::build(&graph);
+        assert_eq!(index.segment_mode(), SegmentTraversalMode::SegmentJumps);
+        let seeds = [String::from("chain-0000")];
+        let candidates = [String::from("chain-0048"), String::from("chain-0049")];
+
+        let (_, mode) = index.filter_reachable_with_mode(seeds.iter(), candidates.iter());
+        assert_eq!(mode, TraversalMode::SegmentJumps);
     }
 }

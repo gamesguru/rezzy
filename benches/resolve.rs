@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use rezzy::{
     ForwardReachabilityIndex, HashMap, HashSet, LeanEvent, RangePrefilterReachability,
-    SegmentTraversalMode,
+    TraversalMode,
 };
 
 fn report_phases(name: &str, phases: &[(&str, Duration)]) {
@@ -48,10 +48,11 @@ fn report_labeled_comparison(
     );
 }
 
-fn segment_mode_label(mode: SegmentTraversalMode) -> &'static str {
+fn traversal_mode_label(mode: TraversalMode) -> &'static str {
     match mode {
-        SegmentTraversalMode::PlainRangePruned => "plain",
-        SegmentTraversalMode::SegmentJumps => "jump",
+        TraversalMode::PlainIndexedBfs => "plain",
+        TraversalMode::RangePruned => "range",
+        TraversalMode::SegmentJumps => "jump",
     }
 }
 
@@ -331,16 +332,19 @@ fn slice_indices(indices: &[usize], start: usize, count: usize) -> Vec<usize> {
 fn benchmark_low_memory_case(
     fixture: &DagFixture,
     case: &ReachabilityCase,
-) -> (Duration, Duration, Duration, usize, SegmentTraversalMode) {
+) -> (Duration, Duration, Duration, usize, TraversalMode) {
     let index_build_start = Instant::now();
     let index = RangePrefilterReachability::build(&fixture.graph);
     let index_build_elapsed = index_build_start.elapsed();
-    let mode = index.segment_mode();
 
     let index_query_start = Instant::now();
     let mut index_hits = Vec::new();
+    let mut mode = TraversalMode::PlainIndexedBfs;
     for _ in 0..case.iterations {
-        index_hits = index.filter_reachable(case.seeds.iter(), case.candidates.iter());
+        let (hits, query_mode) =
+            index.filter_reachable_with_mode(case.seeds.iter(), case.candidates.iter());
+        index_hits = hits;
+        mode = query_mode;
     }
     let index_query_elapsed = index_query_start.elapsed();
 
@@ -622,7 +626,7 @@ fn benchmark_branchy_range_prefilter_reachability(
     Duration,
     u32,
     usize,
-    SegmentTraversalMode,
+    TraversalMode,
 ) {
     let fixture_start = Instant::now();
     let branchy = BranchyDag::new(node_count, seed_count);
@@ -631,8 +635,6 @@ fn benchmark_branchy_range_prefilter_reachability(
     let index_build_start = Instant::now();
     let index = RangePrefilterReachability::build(&branchy.graph);
     let index_build_elapsed = index_build_start.elapsed();
-    let mode = index.segment_mode();
-
     let bfs_build_start = Instant::now();
     let children = branchy.children_by_parent();
     let bfs_build_elapsed = bfs_build_start.elapsed();
@@ -640,8 +642,12 @@ fn benchmark_branchy_range_prefilter_reachability(
     let iterations = if node_count <= 50_000 { 10 } else { 3 };
     let index_query_start = Instant::now();
     let mut index_hits = Vec::new();
+    let mut mode = TraversalMode::PlainIndexedBfs;
     for _ in 0..iterations {
-        index_hits = index.filter_reachable(branchy.seeds.iter(), branchy.candidates.iter());
+        let (hits, query_mode) =
+            index.filter_reachable_with_mode(branchy.seeds.iter(), branchy.candidates.iter());
+        index_hits = hits;
+        mode = query_mode;
     }
     let index_query_elapsed = index_query_start.elapsed();
 
@@ -710,7 +716,10 @@ fn run_branchy_low_memory_suite() {
             mode,
         ) = benchmark_branchy_range_prefilter_reachability(node_count, seed_count);
         report_phases(
-            &format!("resolve/range-prefilter/{node_count} mode={}", segment_mode_label(mode)),
+            &format!(
+                "resolve/range-prefilter/{node_count} mode={}",
+                traversal_mode_label(mode)
+            ),
             &[
                 ("fixture", fixture_elapsed),
                 ("index_build", index_build_elapsed),
@@ -757,7 +766,7 @@ fn run_topology_query_matrix() {
                 &format!(
                     "resolve/{}/{node_count} mode={}",
                     case.label,
-                    segment_mode_label(mode)
+                    traversal_mode_label(mode)
                 ),
                 &[("index_build", setup_elapsed)],
             );
@@ -806,7 +815,7 @@ fn run_topology_query_matrix() {
                 &format!(
                     "resolve/{}/{node_count} mode={}",
                     case.label,
-                    segment_mode_label(mode)
+                    traversal_mode_label(mode)
                 ),
                 &[("index_build", setup_elapsed)],
             );
