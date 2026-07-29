@@ -19,7 +19,10 @@ use super::{
     RoomAccumulator,
 };
 
-/// The maximum depth for a bucket request in the H64 trie.
+/// Internal width for the H64 trie/index used to map requests to ranges.
+///
+/// The protocol request-depth cap is enforced separately at depth <= 32 by
+/// `triage::validate_bucket_requests`.
 use super::MAX_DEPTH;
 
 /// Read-only helper over a pre-sorted `h64` index.
@@ -48,8 +51,8 @@ impl<'a> H64Index<'a> {
 
         let start = u128::from(prefix) << shift;
 
-        // If depth == 64, shift == 0, and (1_u128 << 0) == 1.
-        // The math naturally collapses without a branch!
+        // When depth reaches the internal trie width, the shift collapses to 0.
+        // Request validation still caps protocol depth at 32.
         let end = start.saturating_add(1_u128 << shift);
 
         start..end

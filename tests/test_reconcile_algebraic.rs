@@ -184,6 +184,10 @@ fn algebraic_wire_and_capacity_errors_are_rejected() {
         SyndromeSketch::new(MAX_SKETCH_CAPACITY + 1),
         Err(AlgebraicError::InvalidSketchCapacity)
     );
+    assert_eq!(
+        SyndromeSketch::new(MAX_SKETCH_CAPACITY).unwrap().capacity(),
+        MAX_SKETCH_CAPACITY
+    );
     let sketch = SyndromeSketch::new(2).unwrap();
     assert_eq!(sketch.coordinates(), [0, 0]);
     assert_eq!(

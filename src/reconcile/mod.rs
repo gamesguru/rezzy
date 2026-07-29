@@ -23,6 +23,10 @@ pub mod resident;
 pub mod server;
 pub mod triage;
 
+/// Internal H64 trie width used to materialize bucket ranges.
+///
+/// This is not the protocol request-depth cap; request validation enforces
+/// depth <= 32 in `triage::validate_bucket_requests`.
 pub const MAX_DEPTH: u8 = 64;
 
 pub use algebraic::{
@@ -38,3 +42,9 @@ pub use triage::{
     decode_bucket_sketches, estimate_delta, BucketDecodeBatch, BucketDecodeSuccess, BucketRequest,
     MAX_BUCKETED_SKETCH_CAPACITY,
 };
+
+const _: [(); 32] = [(); MAX_SKETCH_CAPACITY];
+const _: [(); 32] = [(); resident::STRATA_COUNT];
+const _: [(); 8] = [(); resident::STRATUM_CAPACITY];
+const _: [(); 32] = [(); triage::MAX_BUCKET_SKETCH_CAPACITY];
+const _: [(); 4_096] = [(); triage::MAX_BUCKETED_SKETCH_CAPACITY];
