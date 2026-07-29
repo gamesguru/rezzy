@@ -8,7 +8,7 @@
 //! considered, preventing unrelated auth chain history from influencing
 //! the outcome.
 
-use super::ForwardReachabilityIndex;
+use super::RangePrefilterReachability;
 use crate::basespec::rezzy_types::LeanEvent;
 use crate::HashMap;
 use alloc::collections::BTreeSet;
@@ -98,9 +98,9 @@ where
         }
     }
 
-    // Forward-reachability fast path: precompute descendant bitmaps once, then
-    // filter the entire candidate set in a single pass.
-    let reachability = ForwardReachabilityIndex::build(auth_graph);
+    // Forward-reachability fast path: build a compact exact accelerator once,
+    // then filter the entire candidate set in a single pass.
+    let reachability = RangePrefilterReachability::build(auth_graph);
     let candidate_ids: Vec<&Id> = auth_graph.keys().collect();
     let forward_indices =
         reachability.filter_reachable(conflicted_set.iter(), candidate_ids.iter().copied());

@@ -2,18 +2,30 @@ use std::collections::VecDeque;
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
-use rezzy::{ForwardReachabilityIndex, HashMap, HashSet, LeanEvent};
-
-fn report(name: &str, iterations: u32, elapsed: Duration) {
-    let millis = elapsed.as_secs_f64() * 1e3 / f64::from(iterations);
-    println!("{name}: {millis:.6} ms/op ({iterations} iterations)");
-}
+use rezzy::{ForwardReachabilityIndex, HashMap, HashSet, LeanEvent, RangePrefilterReachability};
 
 fn report_split(name: &str, setup: Duration, algo: Duration) {
     println!(
         "{name}: (setup: {:.6} ms, algo: {:.6} ms)",
         setup.as_secs_f64() * 1e3,
         algo.as_secs_f64() * 1e3
+    );
+}
+
+fn report_comparison(
+    name: &str,
+    index_iterations: u32,
+    index_elapsed: Duration,
+    bfs_iterations: u32,
+    bfs_elapsed: Duration,
+) {
+    let index_ms = index_elapsed.as_secs_f64() * 1e3;
+    let bfs_ms = bfs_elapsed.as_secs_f64() * 1e3;
+    let index_avg = index_ms / f64::from(index_iterations);
+    let bfs_avg = bfs_ms / f64::from(bfs_iterations);
+    let speedup = bfs_avg / index_avg;
+    println!(
+        "{name}: index={index_avg:.6} ms/query ({index_iterations} iters, {index_ms:.6} ms total), bfs={bfs_avg:.6} ms/query ({bfs_iterations} iters, {bfs_ms:.6} ms total), speedup={speedup:.2}x"
     );
 }
 
@@ -98,26 +110,29 @@ impl BranchyDag {
             candidates: ordered_ids,
         }
     }
+
+    fn children_by_parent(&self) -> HashMap<String, Vec<String>> {
+        let mut children: HashMap<String, Vec<String>> = HashMap::with_capacity(self.graph.len());
+        for (id, event) in &self.graph {
+            for parent in &event.auth_events {
+                if self.graph.contains_key(parent) {
+                    children.entry(parent.clone()).or_default().push(id.clone());
+                }
+            }
+        }
+        children
+    }
 }
 
 fn branchy_forward_reachable_bfs(
-    graph: &HashMap<String, LeanEvent<String>>,
+    children: &HashMap<String, Vec<String>>,
     seeds: &[String],
     candidates: &[String],
 ) -> Vec<usize> {
-    let mut children: HashMap<String, Vec<String>> = HashMap::with_capacity(graph.len());
-    for (id, event) in graph {
-        for parent in &event.auth_events {
-            if graph.contains_key(parent) {
-                children.entry(parent.clone()).or_default().push(id.clone());
-            }
-        }
-    }
-
-    let mut reachable = HashSet::with_capacity(graph.len());
+    let mut reachable = HashSet::with_capacity(children.len().saturating_add(candidates.len()));
     let mut queue = VecDeque::with_capacity(seeds.len());
     for seed in seeds {
-        if graph.contains_key(seed) && reachable.insert(seed.clone()) {
+        if reachable.insert(seed.clone()) {
             queue.push_back(seed.clone());
         }
     }
@@ -142,47 +157,108 @@ fn branchy_forward_reachable_bfs(
 fn benchmark_branchy_forward_reachability(
     node_count: usize,
     seed_count: usize,
-) -> (Duration, Duration, Duration, usize) {
+) -> (Duration, Duration, Duration, u32, usize) {
     let setup_start = Instant::now();
     let branchy = BranchyDag::new(node_count, seed_count);
     let setup_elapsed = setup_start.elapsed();
 
     let index = ForwardReachabilityIndex::build(&branchy.graph);
-    let index_iterations = if node_count <= 50_000 { 10 } else { 3 };
+    let iterations = if node_count <= 50_000 { 10 } else { 3 };
     let index_start = Instant::now();
     let mut index_hits = Vec::new();
-    for _ in 0..index_iterations {
+    for _ in 0..iterations {
         index_hits = index.filter_reachable(branchy.seeds.iter(), branchy.candidates.iter());
     }
     let index_elapsed = index_start.elapsed();
 
-    let bfs_iterations = if node_count <= 50_000 { 5 } else { 1 };
+    let children = branchy.children_by_parent();
     let bfs_start = Instant::now();
     let mut bfs_hits = Vec::new();
-    for _ in 0..bfs_iterations {
-        bfs_hits =
-            branchy_forward_reachable_bfs(&branchy.graph, &branchy.seeds, &branchy.candidates);
+    for _ in 0..iterations {
+        bfs_hits = branchy_forward_reachable_bfs(&children, &branchy.seeds, &branchy.candidates);
     }
     let bfs_elapsed = bfs_start.elapsed();
 
     assert_eq!(index_hits, bfs_hits);
     black_box((&index_hits, &bfs_hits));
-    (setup_elapsed, index_elapsed, bfs_elapsed, index_hits.len())
+    (
+        setup_elapsed,
+        index_elapsed,
+        bfs_elapsed,
+        iterations,
+        index_hits.len(),
+    )
+}
+
+fn benchmark_branchy_range_prefilter_reachability(
+    node_count: usize,
+    seed_count: usize,
+) -> (Duration, Duration, Duration, u32, usize) {
+    let setup_start = Instant::now();
+    let branchy = BranchyDag::new(node_count, seed_count);
+    let setup_elapsed = setup_start.elapsed();
+
+    let index = RangePrefilterReachability::build(&branchy.graph);
+    let iterations = if node_count <= 50_000 { 10 } else { 3 };
+    let index_start = Instant::now();
+    let mut index_hits = Vec::new();
+    for _ in 0..iterations {
+        index_hits = index.filter_reachable(branchy.seeds.iter(), branchy.candidates.iter());
+    }
+    let index_elapsed = index_start.elapsed();
+
+    let children = branchy.children_by_parent();
+    let bfs_start = Instant::now();
+    let mut bfs_hits = Vec::new();
+    for _ in 0..iterations {
+        bfs_hits = branchy_forward_reachable_bfs(&children, &branchy.seeds, &branchy.candidates);
+    }
+    let bfs_elapsed = bfs_start.elapsed();
+
+    assert_eq!(index_hits, bfs_hits);
+    black_box((&index_hits, &bfs_hits));
+    (
+        setup_elapsed,
+        index_elapsed,
+        bfs_elapsed,
+        iterations,
+        index_hits.len(),
+    )
 }
 
 fn main() {
     println!("\n--- branchy forward-reachability benchmark ---");
     for (node_count, seed_count) in [(25_000, 64), (100_000, 128), (250_000, 256)] {
-        let (setup_elapsed, index_elapsed, bfs_elapsed, hits) =
+        let (setup_elapsed, index_elapsed, bfs_elapsed, iterations, hits) =
             benchmark_branchy_forward_reachability(node_count, seed_count);
         report_split(
             &format!("resolve/reachability index setup/{node_count}"),
             setup_elapsed,
             index_elapsed,
         );
-        report(
-            &format!("resolve/reachability bfs query/{node_count} hits={hits}"),
-            1,
+        report_comparison(
+            &format!("resolve/reachability compare/{node_count} hits={hits}"),
+            iterations,
+            index_elapsed,
+            iterations,
+            bfs_elapsed,
+        );
+    }
+
+    println!("\n--- branchy low-memory reachability benchmark ---");
+    for (node_count, seed_count) in [(25_000, 64), (100_000, 128), (250_000, 256)] {
+        let (setup_elapsed, index_elapsed, bfs_elapsed, iterations, hits) =
+            benchmark_branchy_range_prefilter_reachability(node_count, seed_count);
+        report_split(
+            &format!("resolve/range-prefilter setup/{node_count}"),
+            setup_elapsed,
+            index_elapsed,
+        );
+        report_comparison(
+            &format!("resolve/range-prefilter compare/{node_count} hits={hits}"),
+            iterations,
+            index_elapsed,
+            iterations,
             bfs_elapsed,
         );
     }

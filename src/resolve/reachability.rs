@@ -6,6 +6,7 @@
 
 use crate::basespec::rezzy_types::LeanEvent;
 use crate::HashMap;
+use alloc::collections::VecDeque;
 use alloc::vec;
 use alloc::vec::Vec;
 use roaring::RoaringBitmap;
@@ -240,6 +241,228 @@ where
     }
 }
 
+/// Low-memory exact reachability accelerator over a topologically ordered DAG snapshot.
+///
+/// This stores adjacency plus a coarse descendant interval per node, avoiding the
+/// quadratic closure footprint of [`ForwardReachabilityIndex`]. Queries stay exact
+/// by pruning obviously impossible branches and falling back to bounded BFS over
+/// the stored adjacency.
+#[derive(Debug, Clone)]
+pub struct RangePrefilterReachability<Id> {
+    id_to_index: HashMap<Id, u32>,
+    children_by_index: Vec<Vec<u32>>,
+    descendant_ranges: Vec<(u32, u32)>,
+}
+
+impl<Id> RangePrefilterReachability<Id>
+where
+    Id: crate::basespec::rezzy_types::EventId + Ord,
+{
+    /// Builds the low-memory reachability index from a DAG snapshot.
+    ///
+    /// The input graph must be acyclic with edges expressed through
+    /// `auth_events`.
+    ///
+    /// # Panics
+    /// Panics if the input graph is internally inconsistent or contains a
+    /// cycle that prevents the topological build from completing.
+    #[must_use]
+    pub fn build<C: Clone, S: core::hash::BuildHasher>(
+        graph: &HashMap<Id, LeanEvent<Id, C>, S>,
+    ) -> Self {
+        let mut in_degree: HashMap<&Id, usize> = HashMap::new();
+        let mut children: HashMap<&Id, Vec<&Id>> = HashMap::new();
+
+        for (id, ev) in graph {
+            in_degree.entry(id).or_insert(0);
+            for auth_id in &ev.auth_events {
+                if graph.contains_key(auth_id) {
+                    children.entry(auth_id).or_default().push(id);
+                    let degree = in_degree.entry(id).or_insert(0);
+                    *degree = degree.saturating_add(1);
+                }
+            }
+        }
+
+        let mut queue: Vec<&Id> = in_degree
+            .iter()
+            .filter_map(|(id, &deg)| (deg == 0).then_some(*id))
+            .collect();
+        queue.sort_unstable();
+
+        let mut topo = Vec::with_capacity(graph.len());
+        let mut head = 0_usize;
+        while head < queue.len() {
+            let id = queue[head];
+            head = head.saturating_add(1);
+            topo.push(id);
+            if let Some(children) = children.get(id) {
+                for child in children {
+                    let degree = in_degree.get_mut(child).unwrap();
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        queue.push(child);
+                    }
+                }
+            }
+        }
+
+        debug_assert_eq!(
+            topo.len(),
+            graph.len(),
+            "forward reachability graph must be acyclic"
+        );
+
+        let mut id_to_index = HashMap::with_capacity(topo.len());
+        for (idx, &id) in topo.iter().enumerate() {
+            let idx = u32::try_from(idx).expect("graph too large for index space");
+            id_to_index.insert(id.clone(), idx);
+        }
+
+        let mut children_by_index = vec![Vec::<u32>::new(); topo.len()];
+        for (parent_id, child_ids) in children {
+            let Some(&parent_idx) = id_to_index.get(parent_id) else {
+                continue;
+            };
+            let parent_slot = &mut children_by_index[parent_idx as usize];
+            for child_id in child_ids {
+                if let Some(&child_idx) = id_to_index.get(child_id) {
+                    parent_slot.push(child_idx);
+                }
+            }
+        }
+
+        let mut descendant_ranges = vec![(0_u32, 0_u32); topo.len()];
+        for idx in (0..topo.len()).rev() {
+            let idx_u32 = u32::try_from(idx).expect("graph too large for index space");
+            let mut min_idx = idx_u32;
+            let mut max_idx = idx_u32;
+            for &child_idx in &children_by_index[idx] {
+                let (child_min, child_max) = descendant_ranges[child_idx as usize];
+                min_idx = min_idx.min(child_min);
+                max_idx = max_idx.max(child_max);
+            }
+            descendant_ranges[idx] = (min_idx, max_idx);
+        }
+
+        Self {
+            id_to_index,
+            children_by_index,
+            descendant_ranges,
+        }
+    }
+
+    fn reaches_index(&self, from_idx: u32, to_idx: u32) -> bool {
+        if from_idx == to_idx {
+            return true;
+        }
+
+        let (min_descendant, max_descendant) = self.descendant_ranges[from_idx as usize];
+        if to_idx < min_descendant || to_idx > max_descendant {
+            return false;
+        }
+
+        let mut visited = vec![false; self.children_by_index.len()];
+        let mut queue = VecDeque::new();
+        visited[from_idx as usize] = true;
+        queue.push_back(from_idx);
+
+        while let Some(curr) = queue.pop_front() {
+            for &child in &self.children_by_index[curr as usize] {
+                if child == to_idx {
+                    return true;
+                }
+                if child > to_idx {
+                    continue;
+                }
+                let (child_min, child_max) = self.descendant_ranges[child as usize];
+                if to_idx < child_min || to_idx > child_max {
+                    continue;
+                }
+                if !visited[child as usize] {
+                    visited[child as usize] = true;
+                    queue.push_back(child);
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Returns the descendants of a seed set as candidate indices.
+    ///
+    /// This is exact but uses only adjacency plus lightweight descendant
+    /// ranges, so it avoids storing the full transitive closure.
+    ///
+    /// # Panics
+    /// Panics if the graph exceeds the topological index space used by the
+    /// internal bounds checks.
+    #[must_use]
+    pub fn filter_reachable<'a, S, C>(&self, seeds: S, candidates: C) -> Vec<usize>
+    where
+        S: IntoIterator<Item = &'a Id>,
+        C: IntoIterator<Item = &'a Id>,
+        Id: 'a,
+    {
+        let mut reachable = vec![false; self.children_by_index.len()];
+        let mut queue = VecDeque::new();
+        for seed in seeds {
+            let Some(&idx) = self.id_to_index.get(seed) else {
+                continue;
+            };
+            if !reachable[idx as usize] {
+                reachable[idx as usize] = true;
+                queue.push_back(idx);
+            }
+        }
+
+        while let Some(curr) = queue.pop_front() {
+            for &child in &self.children_by_index[curr as usize] {
+                if !reachable[child as usize] {
+                    reachable[child as usize] = true;
+                    queue.push_back(child);
+                }
+            }
+        }
+
+        candidates
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, candidate)| {
+                self.id_to_index
+                    .get(candidate)
+                    .copied()
+                    .filter(|candidate_idx| {
+                        reachable[usize::try_from(*candidate_idx)
+                            .expect("graph too large for topological index space")]
+                    })
+                    .map(|_| idx)
+            })
+            .collect()
+    }
+}
+
+impl<Id> Reachability for RangePrefilterReachability<Id>
+where
+    Id: crate::basespec::rezzy_types::EventId + Ord,
+{
+    type Id = Id;
+
+    fn reaches(&self, from: &Self::Id, to: &Self::Id) -> Reach {
+        let Some(&from_idx) = self.id_to_index.get(from) else {
+            return Reach::Unknown;
+        };
+        let Some(&to_idx) = self.id_to_index.get(to) else {
+            return Reach::Unknown;
+        };
+        if self.reaches_index(from_idx, to_idx) {
+            Reach::Yes
+        } else {
+            Reach::No
+        }
+    }
+}
+
 impl<Id> Reachability for ForwardReachabilityIndex<Id>
 where
     Id: crate::basespec::rezzy_types::EventId + Ord,
@@ -345,6 +568,50 @@ mod tests {
         );
 
         let index = ForwardReachabilityIndex::build(&graph);
+
+        assert_eq!(index.reaches(&a, &c), Reach::Yes);
+        assert_eq!(index.reaches(&c, &a), Reach::No);
+        assert_eq!(index.reaches(&a, &a), Reach::Yes);
+        assert_eq!(index.reaches(&a, &missing), Reach::Unknown);
+
+        let seeds = [&a];
+        let candidates = [&a, &b, &c];
+        assert_eq!(index.filter_reachable(seeds, candidates), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn range_prefilter_reachability_matches_exact_descendants() {
+        let mut graph: HashMap<String, LeanEvent<String>> = HashMap::new();
+        let a = String::from("A");
+        let b = String::from("B");
+        let c = String::from("C");
+        let missing = String::from("missing");
+        graph.insert(
+            a.clone(),
+            LeanEvent {
+                event_id: a.clone(),
+                auth_events: vec![],
+                ..Default::default()
+            },
+        );
+        graph.insert(
+            b.clone(),
+            LeanEvent {
+                event_id: b.clone(),
+                auth_events: vec![a.clone()],
+                ..Default::default()
+            },
+        );
+        graph.insert(
+            c.clone(),
+            LeanEvent {
+                event_id: c.clone(),
+                auth_events: vec![b.clone()],
+                ..Default::default()
+            },
+        );
+
+        let index = RangePrefilterReachability::build(&graph);
 
         assert_eq!(index.reaches(&a, &c), Reach::Yes);
         assert_eq!(index.reaches(&c, &a), Reach::No);
