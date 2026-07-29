@@ -11,6 +11,7 @@ use super::triage::{
     SATURATED_DELTA_ESTIMATE,
 };
 use super::{AlgebraicError, ElementHash, SyndromeSketch, MAX_LOCAL_SKETCH_DECODE_CAPACITY};
+use alloc::collections::VecDeque;
 
 /// Baseline policy limit for maximum reconciliation rounds in a single exchange.
 ///
@@ -56,6 +57,224 @@ pub enum ClientAction {
     },
     /// All requested buckets decoded and are ready for host-side resolution.
     ResolveRoots { roots: alloc::vec::Vec<u64> },
+}
+
+/// Stateful bucket exchange planner that carries deferred frontier nodes across rounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BucketExchange {
+    pending: VecDeque<BucketRequest>,
+    accumulated_roots: alloc::vec::Vec<u64>,
+    rounds_emitted: usize,
+    max_rounds: usize,
+    max_buckets_per_round: usize,
+    max_aggregate_capacity: usize,
+    max_pending_requests: usize,
+}
+
+impl BucketExchange {
+    /// Creates a new pending-queue planner with the default round and wire caps.
+    #[must_use]
+    pub fn new(
+        accumulated_roots: alloc::vec::Vec<u64>,
+        max_rounds: usize,
+        max_buckets_per_round: usize,
+        max_aggregate_capacity: usize,
+    ) -> Self {
+        Self {
+            pending: VecDeque::new(),
+            accumulated_roots,
+            rounds_emitted: 0,
+            max_rounds,
+            max_buckets_per_round,
+            max_aggregate_capacity,
+            max_pending_requests: max_rounds.saturating_mul(max_buckets_per_round),
+        }
+    }
+
+    /// Returns the accumulated roots carried through the exchange so far.
+    #[must_use]
+    pub fn accumulated_roots(&self) -> &[u64] {
+        &self.accumulated_roots
+    }
+
+    /// Returns the number of request rounds emitted from the pending frontier.
+    #[must_use]
+    pub fn rounds_emitted(&self) -> usize {
+        self.rounds_emitted
+    }
+
+    /// Returns the number of deferred frontier nodes waiting to be scheduled.
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn drain_pending_round(&mut self) -> Result<VecDeque<BucketRequest>, ClientAction> {
+        if self.rounds_emitted >= self.max_rounds {
+            return Err(ClientAction::ExtremityDiff);
+        }
+
+        let mut total = 0_usize;
+        let mut requests = VecDeque::with_capacity(self.max_buckets_per_round);
+        while let Some(candidate) = self.pending.front().copied() {
+            if requests.len() >= self.max_buckets_per_round {
+                break;
+            }
+            let Some(next_total) = total.checked_add(candidate.capacity) else {
+                return Err(ClientAction::ExtremityDiff);
+            };
+            if next_total > self.max_aggregate_capacity {
+                break;
+            }
+            total = next_total;
+            self.pending.pop_front();
+            requests.push_back(candidate);
+        }
+
+        if requests.is_empty() {
+            return Err(ClientAction::ExtremityDiff);
+        }
+
+        self.rounds_emitted = self.rounds_emitted.saturating_add(1);
+        Ok(requests)
+    }
+
+    /// Advances the exchange by ingesting one decoded bucket batch and emitting the next round.
+    ///
+    /// The planner keeps deferred children in a pending frontier rather than aborting when a
+    /// single round hits the per-round bucket cap.
+    #[must_use]
+    pub fn advance(
+        &mut self,
+        batch: BucketDecodeBatch,
+        previous_requests: &[BucketRequest],
+        global_estimate: Option<u64>,
+    ) -> ClientAction {
+        let BucketDecodeBatch {
+            successful_buckets,
+            failed_buckets,
+        } = batch;
+
+        let had_failures = !failed_buckets.is_empty();
+
+        for success in successful_buckets {
+            self.accumulated_roots.extend(success.roots);
+        }
+
+        let Ok(resolved_count) = u64::try_from(self.accumulated_roots.len()) else {
+            return ClientAction::ExtremityDiff;
+        };
+        let unaccounted = global_estimate.unwrap_or(0).saturating_sub(resolved_count);
+        let Ok(failed_count) = u64::try_from(failed_buckets.len()) else {
+            return ClientAction::ExtremityDiff;
+        };
+        let share = if failed_count == 0 {
+            0
+        } else {
+            unaccounted.checked_div(failed_count).unwrap_or(0)
+        };
+
+        for (depth, prefix) in failed_buckets {
+            let Some(previous) = previous_requests
+                .iter()
+                .find(|request| request.prefix == prefix && request.depth == depth)
+            else {
+                return ClientAction::ExtremityDiff;
+            };
+            let Ok(next_requests) = retry_or_split_bucket(previous, share) else {
+                return ClientAction::ExtremityDiff;
+            };
+            self.pending.extend(next_requests);
+            if self.pending.len() > self.max_pending_requests {
+                return ClientAction::ExtremityDiff;
+            }
+        }
+
+        if !had_failures && self.pending.is_empty() {
+            return ClientAction::ResolveRoots {
+                roots: self.accumulated_roots.clone(),
+            };
+        }
+
+        let Ok(requests) = self.drain_pending_round() else {
+            return ClientAction::ExtremityDiff;
+        };
+
+        ClientAction::BucketSketches {
+            requests: requests.into_iter().collect(),
+            accumulated_roots: self.accumulated_roots.clone(),
+        }
+    }
+}
+
+fn retry_or_split_bucket(
+    previous: &BucketRequest,
+    share: u64,
+) -> Result<VecDeque<BucketRequest>, ClientAction> {
+    let mut requests = VecDeque::new();
+
+    if previous.capacity < MAX_BUCKET_SKETCH_CAPACITY {
+        let Some(floor) = previous.capacity.checked_add(1) else {
+            return Err(ClientAction::ExtremityDiff);
+        };
+        let Ok(floor_u64) = u64::try_from(floor) else {
+            return Err(ClientAction::ExtremityDiff);
+        };
+        let target = share.max(floor_u64);
+        let provisioned = target
+            .checked_add(target / 2)
+            .and_then(|value| value.checked_add(target % 2))
+            .and_then(|value| value.checked_add(4));
+        let capacity = provisioned
+            .and_then(|value| usize::try_from(value).ok())
+            .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY));
+        let Some(capacity) = capacity else {
+            return Err(ClientAction::ExtremityDiff);
+        };
+        requests.push_back(BucketRequest {
+            depth: previous.depth,
+            prefix: previous.prefix,
+            capacity,
+        });
+        return Ok(requests);
+    }
+
+    if previous.depth >= 31 {
+        return Err(ClientAction::ExtremityDiff);
+    }
+
+    let floor = 4_usize;
+    let Ok(floor_u64) = u64::try_from(floor) else {
+        return Err(ClientAction::ExtremityDiff);
+    };
+    let target = (share / 2).max(floor_u64);
+    let provisioned = target
+        .checked_add(target / 2)
+        .and_then(|value| value.checked_add(target % 2))
+        .and_then(|value| value.checked_add(4));
+    let capacity = provisioned
+        .and_then(|value| usize::try_from(value).ok())
+        .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY));
+    let Some(capacity) = capacity else {
+        return Err(ClientAction::ExtremityDiff);
+    };
+
+    let Some(next_depth) = previous.depth.checked_add(1) else {
+        return Err(ClientAction::ExtremityDiff);
+    };
+
+    requests.push_back(BucketRequest {
+        depth: next_depth,
+        prefix: previous.prefix << 1,
+        capacity,
+    });
+    requests.push_back(BucketRequest {
+        depth: next_depth,
+        prefix: (previous.prefix << 1) | 1,
+        capacity,
+    });
+
+    Ok(requests)
 }
 
 impl Default for ReconciliationClient {
@@ -714,6 +933,77 @@ mod tests {
             ),
             ClientAction::ExtremityDiff
         );
+    }
+
+    #[test]
+    fn bucket_exchange_carries_pending_frontier_across_rounds() {
+        let mut exchange = BucketExchange::new(
+            vec![],
+            MAX_RECONCILIATION_ROUNDS,
+            MAX_BUCKETS_PER_ROUND,
+            MAX_BUCKETED_SKETCH_CAPACITY,
+        );
+
+        let mut previous_requests = alloc::vec::Vec::with_capacity(65);
+        let mut failed_buckets = alloc::vec::Vec::with_capacity(65);
+        for prefix in 0..65_u32 {
+            failed_buckets.push((0, prefix));
+            previous_requests.push(BucketRequest {
+                depth: 0,
+                prefix,
+                capacity: MAX_BUCKET_SKETCH_CAPACITY,
+            });
+        }
+
+        let first = exchange.advance(
+            BucketDecodeBatch {
+                successful_buckets: vec![],
+                failed_buckets,
+            },
+            &previous_requests,
+            Some(10_000),
+        );
+        let ClientAction::BucketSketches {
+            requests: second_requests,
+            accumulated_roots,
+        } = first
+        else {
+            panic!("expected queued bucket requests");
+        };
+        assert!(accumulated_roots.is_empty());
+        assert_eq!(second_requests.len(), MAX_BUCKETS_PER_ROUND);
+        assert_eq!(exchange.pending_len(), 2);
+        assert_eq!(exchange.rounds_emitted(), 1);
+
+        let second = exchange.advance(
+            BucketDecodeBatch {
+                successful_buckets: vec![],
+                failed_buckets: vec![],
+            },
+            &second_requests,
+            Some(10_000),
+        );
+        let ClientAction::BucketSketches {
+            requests: third_requests,
+            accumulated_roots,
+        } = second
+        else {
+            panic!("expected pending frontier to drain on next round");
+        };
+        assert!(accumulated_roots.is_empty());
+        assert_eq!(third_requests.len(), 2);
+        assert_eq!(exchange.pending_len(), 0);
+        assert_eq!(exchange.rounds_emitted(), 2);
+
+        let final_action = exchange.advance(
+            BucketDecodeBatch {
+                successful_buckets: vec![],
+                failed_buckets: vec![],
+            },
+            &third_requests,
+            Some(10_000),
+        );
+        assert_eq!(final_action, ClientAction::ResolveRoots { roots: vec![] });
     }
 
     #[test]

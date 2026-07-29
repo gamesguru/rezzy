@@ -4,8 +4,9 @@ use std::time::{Duration, Instant};
 use rayon::prelude::*;
 use rezzy::{
     build_bucket_sketches, decode_bucket_sketches, estimate_delta, gf64_mul, BucketDecodeBatch,
-    BucketDecodeSuccess, BucketRequest, ElementHash, ReconciliationClient, RemoteDigest,
-    ResidentKernel, SyndromeSketch, MAX_SKETCH_CAPACITY,
+    BucketDecodeSuccess, BucketExchange, BucketRequest, ClientAction, ElementHash,
+    ReconciliationClient, RemoteDigest, ResidentKernel, SyndromeSketch,
+    MAX_BUCKETED_SKETCH_CAPACITY, MAX_BUCKETS_PER_ROUND, MAX_SKETCH_CAPACITY,
 };
 
 fn hash(index: u64) -> ElementHash {
@@ -64,6 +65,21 @@ fn report(name: &str, iterations: u32, elapsed: Duration) {
 fn report_split(name: &str, setup: Duration, algo: Duration) {
     println!(
         "{name}: (setup: {:.6} ms, algo: {:.6} ms)",
+        setup.as_secs_f64() * 1e3,
+        algo.as_secs_f64() * 1e3
+    );
+}
+
+fn report_exchange(
+    name: &str,
+    setup: Duration,
+    algo: Duration,
+    rounds: usize,
+    requests: usize,
+    roots: usize,
+) {
+    println!(
+        "{name}: (setup: {:.6} ms, algo: {:.6} ms, rounds: {rounds}, requests: {requests}, roots: {roots})",
         setup.as_secs_f64() * 1e3,
         algo.as_secs_f64() * 1e3
     );
@@ -199,6 +215,130 @@ fn benchmark_scale_from_pool(
 }
 
 #[allow(clippy::too_many_lines)]
+fn benchmark_bucket_exchange_from_pool(
+    pool: &HashPool,
+    base_count: usize,
+    local_extra_count: usize,
+    remote_extra_count: usize,
+) -> (Duration, Duration, usize, usize, usize) {
+    let setup_start = Instant::now();
+    let base_slice = &pool.base[..base_count];
+    let local_extra_slice = &pool.local_extra[..local_extra_count];
+    let remote_extra_slice = &pool.remote_extra[..remote_extra_count];
+
+    let mut local = ResidentKernel::new();
+    let mut remote = ResidentKernel::new();
+    let local_h64_capacity = base_count.saturating_add(local_extra_count);
+    let remote_h64_capacity = base_count.saturating_add(remote_extra_count);
+    let mut local_h64 = Vec::with_capacity(local_h64_capacity);
+    let mut remote_h64 = Vec::with_capacity(remote_h64_capacity);
+    for event in base_slice {
+        local.insert(*event).expect("benchmark hashes are valid");
+        remote.insert(*event).expect("benchmark hashes are valid");
+        local_h64.push(event.h64);
+        remote_h64.push(event.h64);
+    }
+    for event in local_extra_slice {
+        local.insert(*event).expect("benchmark hashes are valid");
+        local_h64.push(event.h64);
+    }
+    for event in remote_extra_slice {
+        remote.insert(*event).expect("benchmark hashes are valid");
+        remote_h64.push(event.h64);
+    }
+    local_h64.sort_unstable();
+    remote_h64.sort_unstable();
+
+    let setup_elapsed = setup_start.elapsed();
+    let remote_digest = RemoteDigest {
+        digest: remote.accumulator().digest(),
+        known_event_count: remote.accumulator().known_event_count(),
+        strata: *remote.strata(),
+        frame_matches: true,
+        has_unknown_extremity: false,
+    };
+    let estimated_delta = estimate_delta(local.strata(), remote.strata())
+        .ok()
+        .flatten();
+    let client = ReconciliationClient::default().allow_unlimited_delta();
+    let initial_action = client.select_action(&local, remote_digest, 0);
+
+    let algo_start = Instant::now();
+    let ClientAction::BucketSketches {
+        requests: mut current_requests,
+        accumulated_roots,
+    } = initial_action
+    else {
+        black_box(initial_action);
+        let algo_elapsed = algo_start.elapsed();
+        return (setup_elapsed, algo_elapsed, 0, 0, 0);
+    };
+
+    let mut exchange = BucketExchange::new(
+        accumulated_roots,
+        rezzy::client::MAX_RECONCILIATION_ROUNDS,
+        MAX_BUCKETS_PER_ROUND,
+        MAX_BUCKETED_SKETCH_CAPACITY,
+    );
+    let mut rounds = 0_usize;
+    let mut requests_emitted = current_requests.len();
+    let mut resolved_roots = 0_usize;
+
+    loop {
+        rounds = rounds.saturating_add(1);
+        let remote_sketches = build_bucket_sketches(&remote_h64, &current_requests).unwrap();
+        let local_sketches = build_bucket_sketches(&local_h64, &current_requests).unwrap();
+        let mut batch = BucketDecodeBatch {
+            successful_buckets: Vec::with_capacity(current_requests.len()),
+            failed_buckets: Vec::new(),
+        };
+
+        for ((mut remote_sketch, local_sketch), request) in remote_sketches
+            .into_iter()
+            .zip(local_sketches)
+            .zip(current_requests.iter())
+        {
+            remote_sketch.xor(&local_sketch).unwrap();
+            match remote_sketch.decode_elements(request.capacity) {
+                Ok(roots) => batch.successful_buckets.push(BucketDecodeSuccess {
+                    depth: request.depth,
+                    prefix: request.prefix,
+                    roots,
+                }),
+                Err(_) => batch.failed_buckets.push((request.depth, request.prefix)),
+            }
+        }
+
+        match exchange.advance(batch, &current_requests, estimated_delta) {
+            ClientAction::BucketSketches {
+                requests,
+                accumulated_roots,
+            } => {
+                requests_emitted = requests_emitted.saturating_add(requests.len());
+                resolved_roots = accumulated_roots.len();
+                current_requests = requests;
+            }
+            ClientAction::ResolveRoots { roots } => {
+                resolved_roots = roots.len();
+                black_box(roots);
+                break;
+            }
+            ClientAction::ExtremityDiff | ClientAction::Synchronized => break,
+        }
+    }
+
+    let algo_elapsed = algo_start.elapsed();
+    black_box((rounds, requests_emitted, resolved_roots));
+    (
+        setup_elapsed,
+        algo_elapsed,
+        rounds,
+        requests_emitted,
+        resolved_roots,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
 fn main() {
     let elapsed = measure(1_000_000, || {
         black_box(gf64_mul(
@@ -324,6 +464,16 @@ fn main() {
     // Test 2: Large Room
     let (setup_elapsed, algo_elapsed) = benchmark_scale_from_pool(&pool, 100_000, 5_000, 4_000);
     report_split("scale/100000 +5000/-4000", setup_elapsed, algo_elapsed);
+    let (setup_elapsed, algo_elapsed, rounds, requests, roots) =
+        benchmark_bucket_exchange_from_pool(&pool, 100_000, 5_000, 4_000);
+    report_exchange(
+        "exchange/100000 +5000/-4000",
+        setup_elapsed,
+        algo_elapsed,
+        rounds,
+        requests,
+        roots,
+    );
 
     // Test 3: Huge Rooms
     let (setup_elapsed, algo_elapsed) = benchmark_scale_from_pool(&pool, 1_000_000, 10_000, 9_000);
