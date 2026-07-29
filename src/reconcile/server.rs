@@ -374,6 +374,7 @@ impl<'a> SketchBuilder<'a> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use alloc::collections::BTreeMap;
@@ -890,6 +891,61 @@ mod tests {
 
         let result = builder.build(&requests).unwrap();
         assert!(matches!(result, SketchResult::FallbackToRangeSync));
+    }
+
+    #[test]
+    fn test_sketch_builder_build_falls_back_on_aggregate_work_limit() {
+        use crate::reconcile::triage::BucketRequest;
+
+        let sorted_h64 = vec![0x1000_0000_0000_0000, 0x9000_0000_0000_0000];
+        let index = H64Index::new(&sorted_h64);
+
+        let policy = SketchPolicy {
+            max_aggregate_work: 1,
+            hard_fallback_threshold: 1000,
+        };
+
+        let builder = SketchBuilder::new(&index, policy);
+        let requests = [
+            BucketRequest {
+                depth: 1,
+                prefix: 0,
+                capacity: 1,
+            },
+            BucketRequest {
+                depth: 1,
+                prefix: 1,
+                capacity: 1,
+            },
+        ];
+
+        let result = builder.build(&requests).unwrap();
+        assert!(matches!(result, SketchResult::FallbackToRangeSync));
+    }
+
+    #[test]
+    fn test_sketch_builder_build_propagates_bucket_materialization_errors() {
+        use crate::reconcile::triage::BucketRequest;
+
+        let sorted_h64 = vec![0, 0x1000_0000_0000_0000];
+        let index = H64Index::new(&sorted_h64);
+
+        let policy = SketchPolicy {
+            max_aggregate_work: 1000,
+            hard_fallback_threshold: 1000,
+        };
+
+        let builder = SketchBuilder::new(&index, policy);
+        let requests = [BucketRequest {
+            depth: 0,
+            prefix: 0,
+            capacity: 2,
+        }];
+
+        assert_eq!(
+            builder.build(&requests),
+            Err(AlgebraicError::ZeroShortIdentifier)
+        );
     }
 
     #[test]
