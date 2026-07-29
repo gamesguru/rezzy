@@ -141,6 +141,11 @@ similar = "2.7.0"
 name = "reconcile"
 harness = false
 
+[[bench]]
+name = "resolve"
+path = "benches/resolve.rs"
+harness = false
+
 [[test]]
 name = "test_snapshots"
 path = "tests/test_snapshots.rs"

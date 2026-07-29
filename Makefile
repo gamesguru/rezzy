@@ -93,7 +93,7 @@ endif
 
 .PHONY: rust/bench
 rust/bench: ##H Run reconciliation benchmarks
-	$(CARGO) bench --bench reconcile
+	$(CARGO) bench --profile release
 
 .PHONY: rust/coverage
 rust/coverage: ##H Run code coverage and generate HTML report
