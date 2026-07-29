@@ -150,6 +150,7 @@ fn poly_mod(modulus: &[u64], value: &mut Polynomial) -> Option<()> {
                 crate::reconcile::gf64_simd::EvaluatorBackend::Avx512 => {
                     crate::reconcile::gf64_simd::Avx512Evaluator::poly_mac(term, source, target);
                 }
+                #[cfg(target_arch = "x86_64")]
                 crate::reconcile::gf64_simd::EvaluatorBackend::Sse => {
                     crate::reconcile::gf64_simd::SseEvaluator::poly_mac(term, source, target);
                 }
@@ -183,6 +184,7 @@ fn poly_div(mut dividend: Polynomial, divisor: &[u64]) -> Option<Polynomial> {
                 crate::reconcile::gf64_simd::EvaluatorBackend::Avx512 => {
                     crate::reconcile::gf64_simd::Avx512Evaluator::poly_mac(term, source, target);
                 }
+                #[cfg(target_arch = "x86_64")]
                 crate::reconcile::gf64_simd::EvaluatorBackend::Sse => {
                     crate::reconcile::gf64_simd::SseEvaluator::poly_mac(term, source, target);
                 }

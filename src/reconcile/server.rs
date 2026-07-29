@@ -934,4 +934,30 @@ mod tests {
         let result = builder.build(&requests).unwrap();
         assert!(matches!(result, SketchResult::FallbackToRangeSync));
     }
+
+    #[test]
+    fn test_sketch_builder_build_rejects_malformed_request_before_localization() {
+        use crate::reconcile::triage::BucketRequest;
+        let sorted_h64 = vec![0x1000_0000_0000_0000, 0x2000_0000_0000_0000];
+        let index = H64Index::new(&sorted_h64);
+
+        let policy = SketchPolicy {
+            max_aggregate_work: 1000,
+            hard_fallback_threshold: 1000,
+        };
+
+        let builder = SketchBuilder::new(&index, policy);
+        // Zero capacity is rejected by `validate_bucket_requests` before any
+        // range localization is attempted.
+        let requests = [BucketRequest {
+            depth: 0,
+            prefix: 0,
+            capacity: 0,
+        }];
+
+        assert!(matches!(
+            builder.build(&requests),
+            Err(AlgebraicError::InvalidSketchCapacity)
+        ));
+    }
 }

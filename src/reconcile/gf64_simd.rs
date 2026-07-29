@@ -154,11 +154,10 @@ pub struct SseEvaluator;
 impl Gf64Evaluator for SseEvaluator {
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
-        // We could manually unroll PCLMULQDQ here, but for now we fallback to standard multiply.
-        // The standard `mul` function is already hardware accelerated with PCLMULQDQ.
-        for (i, &coefficient) in source.iter().enumerate() {
-            target[i] ^= crate::reconcile::gf64::mul(term, coefficient);
-        }
+        // We could manually unroll PCLMULQDQ here, but for now we fall back to
+        // `ScalarEvaluator`, whose per-coefficient multiply is already
+        // hardware-accelerated with PCLMULQDQ via `gf64::mul`.
+        ScalarEvaluator::poly_mac(term, source, target);
     }
 }
 
@@ -186,7 +185,6 @@ pub fn get_evaluator() -> EvaluatorBackend {
 
 #[cfg(target_arch = "x86_64")]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[cfg(not(tarpaulin_include))]
 fn get_evaluator_internal() -> EvaluatorBackend {
     #[cfg(has_avx512_support)]
     {
