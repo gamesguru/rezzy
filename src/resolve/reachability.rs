@@ -4,7 +4,11 @@
 //! policy. It defines only the query result type and the minimal trait that a
 //! drop-in accelerator must satisfy.
 
+use crate::basespec::rezzy_types::LeanEvent;
+use crate::HashMap;
+use alloc::vec;
 use alloc::vec::Vec;
+use roaring::RoaringBitmap;
 
 /// Tri-state reachability answer.
 ///
@@ -93,6 +97,170 @@ pub trait Reachability {
                     .then_some(idx)
             })
             .collect()
+    }
+}
+
+/// Forward reachability accelerator over a topologically ordered DAG snapshot.
+///
+/// The index stores, for each node, the transitive closure of its descendants
+/// as a compressed bitmap. This makes repeated "which candidates are
+/// forward-reachable from these seeds?" queries fast: seed closures are `ORed`
+/// once, then candidate membership is a bitmap lookup.
+#[derive(Debug, Clone)]
+pub struct ForwardReachabilityIndex<Id> {
+    id_to_index: HashMap<Id, u32>,
+    descendant_bitmaps: Vec<RoaringBitmap>,
+}
+
+impl<Id> ForwardReachabilityIndex<Id>
+where
+    Id: crate::basespec::rezzy_types::EventId + Ord,
+{
+    /// Builds the forward reachability index from a DAG snapshot.
+    ///
+    /// The input graph must be acyclic with edges expressed through
+    /// `auth_events`.
+    ///
+    /// # Panics
+    /// Panics if the input graph is internally inconsistent or contains a
+    /// cycle that prevents the topological build from completing.
+    #[must_use]
+    pub fn build<C: Clone, S: core::hash::BuildHasher>(
+        graph: &HashMap<Id, LeanEvent<Id, C>, S>,
+    ) -> Self {
+        let mut in_degree: HashMap<&Id, usize> = HashMap::new();
+        let mut children: HashMap<&Id, Vec<&Id>> = HashMap::new();
+
+        for (id, ev) in graph {
+            in_degree.entry(id).or_insert(0);
+            for auth_id in &ev.auth_events {
+                if graph.contains_key(auth_id) {
+                    children.entry(auth_id).or_default().push(id);
+                    let degree = in_degree.entry(id).or_insert(0);
+                    *degree = degree.saturating_add(1);
+                }
+            }
+        }
+
+        let mut queue: Vec<&Id> = in_degree
+            .iter()
+            .filter_map(|(id, &deg)| (deg == 0).then_some(*id))
+            .collect();
+        queue.sort_unstable();
+
+        let mut topo = Vec::with_capacity(graph.len());
+        let mut head = 0_usize;
+        while head < queue.len() {
+            let id = queue[head];
+            head = head.saturating_add(1);
+            topo.push(id);
+            if let Some(children) = children.get(id) {
+                for child in children {
+                    let degree = in_degree.get_mut(child).unwrap();
+                    *degree = degree.saturating_sub(1);
+                    if *degree == 0 {
+                        queue.push(child);
+                    }
+                }
+            }
+        }
+
+        debug_assert_eq!(
+            topo.len(),
+            graph.len(),
+            "forward reachability graph must be acyclic"
+        );
+
+        let mut id_to_index = HashMap::with_capacity(topo.len());
+        for (idx, &id) in topo.iter().enumerate() {
+            let idx = u32::try_from(idx).expect("graph too large for roaring bitmap index");
+            id_to_index.insert(id.clone(), idx);
+        }
+
+        let mut children_by_index = vec![Vec::<u32>::new(); topo.len()];
+        for (parent_id, child_ids) in children {
+            let Some(&parent_idx) = id_to_index.get(parent_id) else {
+                continue;
+            };
+            let parent_slot = &mut children_by_index[parent_idx as usize];
+            for child_id in child_ids {
+                if let Some(&child_idx) = id_to_index.get(child_id) {
+                    parent_slot.push(child_idx);
+                }
+            }
+        }
+
+        let mut descendant_bitmaps = vec![RoaringBitmap::new(); topo.len()];
+        for idx in (0..topo.len()).rev() {
+            let mut bitmap = RoaringBitmap::new();
+            bitmap.insert(u32::try_from(idx).expect("graph too large for roaring bitmap index"));
+            for &child_idx in &children_by_index[idx] {
+                bitmap |= &descendant_bitmaps[child_idx as usize];
+            }
+            descendant_bitmaps[idx] = bitmap;
+        }
+
+        Self {
+            id_to_index,
+            descendant_bitmaps,
+        }
+    }
+
+    /// Returns the descendants of a seed set as candidate indices.
+    ///
+    /// Callers must interpret the returned indices relative to the candidate
+    /// iteration order they provided.
+    #[must_use]
+    pub fn filter_reachable<'a, S, C>(&self, seeds: S, candidates: C) -> Vec<usize>
+    where
+        S: IntoIterator<Item = &'a Id>,
+        C: IntoIterator<Item = &'a Id>,
+        Id: 'a,
+    {
+        let mut reachable = RoaringBitmap::new();
+        for seed in seeds {
+            let Some(&idx) = self.id_to_index.get(seed) else {
+                continue;
+            };
+            reachable.insert(idx);
+            reachable |= &self.descendant_bitmaps[idx as usize];
+        }
+
+        candidates
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, candidate)| {
+                self.id_to_index
+                    .get(candidate)
+                    .copied()
+                    .filter(|candidate_idx| reachable.contains(*candidate_idx))
+                    .map(|_| idx)
+            })
+            .collect()
+    }
+}
+
+impl<Id> Reachability for ForwardReachabilityIndex<Id>
+where
+    Id: crate::basespec::rezzy_types::EventId + Ord,
+{
+    type Id = Id;
+
+    fn reaches(&self, from: &Self::Id, to: &Self::Id) -> Reach {
+        let Some(&from_idx) = self.id_to_index.get(from) else {
+            return Reach::Unknown;
+        };
+        let Some(&to_idx) = self.id_to_index.get(to) else {
+            return Reach::Unknown;
+        };
+        if from_idx == to_idx {
+            return Reach::Yes;
+        }
+        if self.descendant_bitmaps[from_idx as usize].contains(to_idx) {
+            Reach::Yes
+        } else {
+            Reach::No
+        }
     }
 }
 
