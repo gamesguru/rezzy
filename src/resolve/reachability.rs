@@ -6,7 +6,7 @@
 
 use crate::basespec::rezzy_types::LeanEvent;
 use crate::HashMap;
-use alloc::collections::VecDeque;
+use alloc::collections::{BTreeSet, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 use roaring::RoaringBitmap;
@@ -405,6 +405,25 @@ where
         Id: 'a,
     {
         let mut reachable = vec![false; self.children_by_index.len()];
+        let mut candidate_positions: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut remaining_candidates = BTreeSet::new();
+        let mut candidate_count = 0_usize;
+        for (idx, candidate) in candidates.into_iter().enumerate() {
+            candidate_count = idx.saturating_add(1);
+            let Some(&candidate_idx) = self.id_to_index.get(candidate) else {
+                continue;
+            };
+            candidate_positions
+                .entry(candidate_idx)
+                .or_default()
+                .push(idx);
+            remaining_candidates.insert(candidate_idx);
+        }
+
+        if candidate_count == 0 {
+            return Vec::new();
+        }
+
         let mut queue = VecDeque::new();
         for seed in seeds {
             let Some(&idx) = self.id_to_index.get(seed) else {
@@ -417,27 +436,48 @@ where
         }
 
         while let Some(curr) = queue.pop_front() {
-            for &child in &self.children_by_index[curr as usize] {
-                if !reachable[child as usize] {
-                    reachable[child as usize] = true;
-                    queue.push_back(child);
+            if candidate_positions.contains_key(&curr) {
+                remaining_candidates.remove(&curr);
+                if remaining_candidates.is_empty() {
+                    break;
                 }
+            }
+
+            for &child in &self.children_by_index[curr as usize] {
+                if reachable[child as usize] {
+                    continue;
+                }
+
+                let (min_descendant, max_descendant) = self.descendant_ranges[child as usize];
+                if remaining_candidates
+                    .range(min_descendant..=max_descendant)
+                    .next()
+                    .is_none()
+                {
+                    continue;
+                }
+
+                reachable[child as usize] = true;
+                queue.push_back(child);
             }
         }
 
-        candidates
-            .into_iter()
+        let mut results = vec![false; candidate_count];
+        for (candidate_idx, positions) in candidate_positions {
+            if !reachable[usize::try_from(candidate_idx)
+                .expect("graph too large for topological index space")]
+            {
+                continue;
+            }
+            for position in positions {
+                results[position] = true;
+            }
+        }
+
+        results
+            .iter()
             .enumerate()
-            .filter_map(|(idx, candidate)| {
-                self.id_to_index
-                    .get(candidate)
-                    .copied()
-                    .filter(|candidate_idx| {
-                        reachable[usize::try_from(*candidate_idx)
-                            .expect("graph too large for topological index space")]
-                    })
-                    .map(|_| idx)
-            })
+            .filter_map(|(idx, found)| found.then_some(idx))
             .collect()
     }
 }
