@@ -417,32 +417,64 @@ fn benchmark_repeated_seed_cache(
 }
 
 fn benchmark_candidate_sweep(fixture: &DagFixture, seeds: &[String], candidate_sizes: &[usize]) {
+    let Some(chain0) = fixture.chains.first() else {
+        return;
+    };
+    let Some(chain1) = fixture.chains.get(1) else {
+        return;
+    };
+
     for &candidate_size in candidate_sizes {
-        let candidates: Vec<String> = fixture
-            .ordered_ids
+        let reachable_candidates: Vec<String> = chain0
             .iter()
+            .copied()
             .take(candidate_size)
-            .cloned()
+            .map(|idx| fixture.ordered_ids[idx].clone())
+            .collect();
+        let unreachable_candidates: Vec<String> = chain1
+            .iter()
+            .copied()
+            .take(candidate_size)
+            .map(|idx| fixture.ordered_ids[idx].clone())
+            .collect();
+        let mixed_candidates: Vec<String> = chain0
+            .iter()
+            .copied()
+            .take(candidate_size.saturating_sub(candidate_size / 4))
+            .map(|idx| fixture.ordered_ids[idx].clone())
+            .chain(
+                chain1
+                    .iter()
+                    .copied()
+                    .take(candidate_size / 4)
+                    .map(|idx| fixture.ordered_ids[idx].clone()),
+            )
             .collect();
 
-        let full_start = Instant::now();
-        let full_hits = branchy_forward_reachable_bfs(&fixture.children, seeds, &candidates);
-        let full_elapsed = full_start.elapsed();
+        for (regime, candidates) in [
+            ("reachable", reachable_candidates),
+            ("unreachable", unreachable_candidates),
+            ("mixed", mixed_candidates),
+        ] {
+            let full_start = Instant::now();
+            let full_hits = branchy_forward_reachable_bfs(&fixture.children, seeds, &candidates);
+            let full_elapsed = full_start.elapsed();
 
-        let aware_start = Instant::now();
-        let aware_hits =
-            branchy_forward_reachable_until_candidates(&fixture.children, seeds, &candidates);
-        let aware_elapsed = aware_start.elapsed();
+            let aware_start = Instant::now();
+            let aware_hits =
+                branchy_forward_reachable_until_candidates(&fixture.children, seeds, &candidates);
+            let aware_elapsed = aware_start.elapsed();
 
-        assert_eq!(full_hits, aware_hits);
-        black_box((&full_hits, &aware_hits));
-        report_labeled_comparison(
-            &format!("resolve/candidate-sweep/{candidate_size}"),
-            "full_bfs",
-            full_elapsed,
-            "candidate_aware",
-            aware_elapsed,
-        );
+            assert_eq!(full_hits, aware_hits);
+            black_box((&full_hits, &aware_hits));
+            report_labeled_comparison(
+                &format!("resolve/candidate-sweep/{regime}/{candidate_size}"),
+                "full_bfs",
+                full_elapsed,
+                "candidate_aware",
+                aware_elapsed,
+            );
+        }
     }
 }
 
@@ -823,12 +855,14 @@ fn run_repeated_seed_cache_suite() {
 }
 
 fn run_candidate_sweep_suite() {
-    println!("\n--- candidate-size sweep (candidate-aware vs full bfs) ---");
-    let fixture = DagFixture::layered_for_nodes(100_000, 512, 4);
+    println!(
+        "\n--- candidate-size sweep (reachable vs unreachable mixes; candidate-aware vs full bfs) ---"
+    );
+    let fixture = DagFixture::interleaved_chains(100_000, 8);
     let seeds = fixture
-        .layers
+        .chains
         .first()
-        .map(|layer| prefix_indices(layer, 8))
+        .map(|chain| prefix_indices(chain, 8))
         .unwrap_or_default()
         .into_iter()
         .map(|idx| fixture.ordered_ids[idx].clone())
