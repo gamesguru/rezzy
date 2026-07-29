@@ -124,6 +124,189 @@ impl BranchyDag {
     }
 }
 
+struct DagFixture {
+    graph: HashMap<String, LeanEvent<String>>,
+    children: HashMap<String, Vec<String>>,
+    ordered_ids: Vec<String>,
+    chains: Vec<Vec<usize>>,
+    layers: Vec<Vec<usize>>,
+}
+
+impl DagFixture {
+    fn interleaved_chains(node_count: usize, chain_count: usize) -> Self {
+        let mut graph = HashMap::with_capacity(node_count);
+        let mut ordered_ids: Vec<String> = Vec::with_capacity(node_count);
+        let mut chains = vec![Vec::new(); chain_count];
+        let mut tails = vec![None::<String>; chain_count];
+
+        while ordered_ids.len() < node_count {
+            for chain_idx in 0..chain_count {
+                if ordered_ids.len() >= node_count {
+                    break;
+                }
+                let idx = ordered_ids.len();
+                let event_id = format!("$c{chain_idx:02x}_{idx:08x}");
+                let mut auth_events = Vec::with_capacity(1);
+
+                if let Some(parent) = tails[chain_idx].clone() {
+                    auth_events.push(parent);
+                }
+
+                graph.insert(
+                    event_id.clone(),
+                    LeanEvent {
+                        event_id: event_id.clone(),
+                        auth_events,
+                        depth: u64::try_from(idx).expect("benchmark graph fits u64"),
+                        ..Default::default()
+                    },
+                );
+                ordered_ids.push(event_id.clone());
+                chains[chain_idx].push(idx);
+                tails[chain_idx] = Some(event_id);
+            }
+        }
+
+        let children = build_children_map(&graph);
+        Self {
+            graph,
+            children,
+            ordered_ids,
+            chains,
+            layers: Vec::new(),
+        }
+    }
+
+    fn layered(layer_count: usize, layer_width: usize, fanout: usize) -> Self {
+        let node_count = layer_count.saturating_mul(layer_width);
+        let mut graph = HashMap::with_capacity(node_count);
+        let mut ordered_ids: Vec<String> = Vec::with_capacity(node_count);
+        let mut layers = Vec::with_capacity(layer_count);
+        let mut previous_layer_ids: Vec<String> = Vec::new();
+
+        for layer in 0..layer_count {
+            let mut current_layer = Vec::with_capacity(layer_width);
+            for pos in 0..layer_width {
+                let idx = ordered_ids.len();
+                let event_id = format!("$l{layer:04x}_{pos:08x}");
+                let mut auth_events = Vec::with_capacity(fanout);
+
+                if layer > 0 {
+                    for parent_id in previous_layer_ids.iter().cycle().skip(pos).take(fanout) {
+                        let parent_id = parent_id.clone();
+                        if !auth_events.contains(&parent_id) {
+                            auth_events.push(parent_id);
+                        }
+                    }
+                }
+
+                graph.insert(
+                    event_id.clone(),
+                    LeanEvent {
+                        event_id: event_id.clone(),
+                        auth_events,
+                        depth: u64::try_from(idx).expect("benchmark graph fits u64"),
+                        ..Default::default()
+                    },
+                );
+                ordered_ids.push(event_id.clone());
+                current_layer.push(idx);
+            }
+            previous_layer_ids = current_layer
+                .iter()
+                .map(|&idx| ordered_ids[idx].clone())
+                .collect();
+            layers.push(current_layer);
+        }
+
+        let children = build_children_map(&graph);
+        Self {
+            graph,
+            children,
+            ordered_ids,
+            chains: Vec::new(),
+            layers,
+        }
+    }
+}
+
+fn build_children_map(graph: &HashMap<String, LeanEvent<String>>) -> HashMap<String, Vec<String>> {
+    let mut children: HashMap<String, Vec<String>> = HashMap::with_capacity(graph.len());
+    for (id, event) in graph {
+        for parent in &event.auth_events {
+            if graph.contains_key(parent) {
+                children.entry(parent.clone()).or_default().push(id.clone());
+            }
+        }
+    }
+    children
+}
+
+struct ReachabilityCase {
+    label: &'static str,
+    seeds: Vec<String>,
+    candidates: Vec<String>,
+    iterations: u32,
+}
+
+impl ReachabilityCase {
+    fn by_indices(
+        label: &'static str,
+        fixture: &DagFixture,
+        seeds: &[usize],
+        candidates: &[usize],
+    ) -> Self {
+        Self {
+            label,
+            seeds: seeds
+                .iter()
+                .map(|&idx| fixture.ordered_ids[idx].clone())
+                .collect(),
+            candidates: candidates
+                .iter()
+                .map(|&idx| fixture.ordered_ids[idx].clone())
+                .collect(),
+            iterations: 3,
+        }
+    }
+}
+
+fn prefix_indices(indices: &[usize], count: usize) -> Vec<usize> {
+    indices.iter().copied().take(count).collect()
+}
+
+fn slice_indices(indices: &[usize], start: usize, count: usize) -> Vec<usize> {
+    indices.iter().copied().skip(start).take(count).collect()
+}
+
+fn benchmark_low_memory_case(
+    fixture: &DagFixture,
+    case: &ReachabilityCase,
+) -> (Duration, Duration, Duration, usize) {
+    let setup_start = Instant::now();
+    let index = RangePrefilterReachability::build(&fixture.graph);
+    let setup_elapsed = setup_start.elapsed();
+
+    let index_start = Instant::now();
+    let mut index_hits = Vec::new();
+    for _ in 0..case.iterations {
+        index_hits = index.filter_reachable(case.seeds.iter(), case.candidates.iter());
+    }
+    let index_elapsed = index_start.elapsed();
+
+    let bfs_start = Instant::now();
+    let mut bfs_hits = Vec::new();
+    for _ in 0..case.iterations {
+        bfs_hits = branchy_forward_reachable_bfs(&fixture.children, &case.seeds, &case.candidates);
+    }
+    let bfs_elapsed = bfs_start.elapsed();
+
+    assert_eq!(index_hits, bfs_hits, "{} must match bfs", case.label);
+    black_box((&index_hits, &bfs_hits));
+
+    (setup_elapsed, index_elapsed, bfs_elapsed, index_hits.len())
+}
+
 fn branchy_forward_reachable_bfs(
     children: &HashMap<String, Vec<String>>,
     seeds: &[String],
@@ -226,7 +409,7 @@ fn benchmark_branchy_range_prefilter_reachability(
     )
 }
 
-fn main() {
+fn run_branchy_exact_suite() {
     println!("\n--- branchy forward-reachability benchmark ---");
     for (node_count, seed_count) in [(25_000, 64), (100_000, 128), (250_000, 256)] {
         let (setup_elapsed, index_elapsed, bfs_elapsed, iterations, hits) =
@@ -244,7 +427,9 @@ fn main() {
             bfs_elapsed,
         );
     }
+}
 
+fn run_branchy_low_memory_suite() {
     println!("\n--- branchy low-memory reachability benchmark ---");
     for (node_count, seed_count) in [(25_000, 64), (100_000, 128), (250_000, 256)] {
         let (setup_elapsed, index_elapsed, bfs_elapsed, iterations, hits) =
@@ -262,4 +447,96 @@ fn main() {
             bfs_elapsed,
         );
     }
+}
+
+fn run_topology_query_matrix() {
+    println!("\n--- topology/query matrix (range-prefilter vs prebuilt bfs) ---");
+    for node_count in [25_000, 100_000] {
+        let interleaved = DagFixture::interleaved_chains(node_count, 8);
+        let chain0 = &interleaved.chains[0];
+        let chain1 = &interleaved.chains[1];
+        let mut no_hit = ReachabilityCase::by_indices(
+            "interleaved/no-hit",
+            &interleaved,
+            &prefix_indices(chain0, 4),
+            &prefix_indices(chain1, 256),
+        );
+        no_hit.iterations = if node_count <= 50_000 { 10 } else { 3 };
+        let mut local_hit = ReachabilityCase::by_indices(
+            "interleaved/local-hit",
+            &interleaved,
+            &slice_indices(&interleaved.chains[0], 64, 4),
+            &slice_indices(&interleaved.chains[0], 60, 256),
+        );
+        local_hit.iterations = if node_count <= 50_000 { 10 } else { 3 };
+
+        for case in [no_hit, local_hit] {
+            let (setup_elapsed, index_elapsed, bfs_elapsed, hits) =
+                benchmark_low_memory_case(&interleaved, &case);
+            report_split(
+                &format!("resolve/{}/{node_count} setup", case.label),
+                setup_elapsed,
+                index_elapsed,
+            );
+            report_comparison(
+                &format!("resolve/{}/{node_count} hits={hits}", case.label),
+                case.iterations,
+                index_elapsed,
+                case.iterations,
+                bfs_elapsed,
+            );
+        }
+
+        let layered = DagFixture::layered(200, 512, 4);
+        let layer0 = &layered.layers[0];
+        let mut shallow_hit = ReachabilityCase::by_indices(
+            "layered/shallow-hit",
+            &layered,
+            &prefix_indices(layer0, 4),
+            &prefix_indices(&layered.layers[1], 256),
+        );
+        shallow_hit.iterations = if node_count <= 50_000 { 10 } else { 3 };
+        let mut deep_hit = ReachabilityCase::by_indices(
+            "layered/deep-hit",
+            &layered,
+            &prefix_indices(layer0, 4),
+            &prefix_indices(
+                layered.layers.last().expect("layered graph has layers"),
+                256,
+            ),
+        );
+        let scattered_candidates: Vec<usize> = (0..layered.ordered_ids.len()).step_by(32).collect();
+        let mut scattered = ReachabilityCase::by_indices(
+            "layered/scattered",
+            &layered,
+            &prefix_indices(layer0, 4),
+            &scattered_candidates,
+        );
+        let iters = if node_count <= 50_000 { 10 } else { 3 };
+        deep_hit.iterations = iters;
+        scattered.iterations = iters;
+
+        for case in [shallow_hit, deep_hit, scattered] {
+            let (setup_elapsed, index_elapsed, bfs_elapsed, hits) =
+                benchmark_low_memory_case(&layered, &case);
+            report_split(
+                &format!("resolve/{}/{node_count} setup", case.label),
+                setup_elapsed,
+                index_elapsed,
+            );
+            report_comparison(
+                &format!("resolve/{}/{node_count} hits={hits}", case.label),
+                case.iterations,
+                index_elapsed,
+                case.iterations,
+                bfs_elapsed,
+            );
+        }
+    }
+}
+
+fn main() {
+    run_branchy_exact_suite();
+    run_branchy_low_memory_suite();
+    run_topology_query_matrix();
 }
