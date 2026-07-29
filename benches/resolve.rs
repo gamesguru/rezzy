@@ -30,6 +30,21 @@ fn report_comparison(
     );
 }
 
+fn report_labeled_comparison(
+    name: &str,
+    first_label: &str,
+    first_elapsed: Duration,
+    second_label: &str,
+    second_elapsed: Duration,
+) {
+    let first_ms = first_elapsed.as_secs_f64() * 1e3;
+    let second_ms = second_elapsed.as_secs_f64() * 1e3;
+    let speedup = first_ms / second_ms;
+    println!(
+        "{name}: {first_label}={first_ms:.6} ms/query (1 iters, {first_ms:.6} ms total), {second_label}={second_ms:.6} ms/query (1 iters, {second_ms:.6} ms total), {second_label}_speedup={speedup:.2}x"
+    );
+}
+
 struct Xorshift128 {
     state: [u64; 2],
 }
@@ -421,11 +436,11 @@ fn benchmark_candidate_sweep(fixture: &DagFixture, seeds: &[String], candidate_s
 
         assert_eq!(full_hits, aware_hits);
         black_box((&full_hits, &aware_hits));
-        report_comparison(
-            &format!("resolve/candidate-sweep/{candidate_size} full-vs-aware"),
-            1,
+        report_labeled_comparison(
+            &format!("resolve/candidate-sweep/{candidate_size}"),
+            "full_bfs",
             full_elapsed,
-            1,
+            "candidate_aware",
             aware_elapsed,
         );
     }
@@ -657,7 +672,9 @@ fn run_branchy_low_memory_suite() {
 }
 
 fn run_topology_query_matrix() {
-    println!("\n--- topology/query matrix (compact exact reachability vs prebuilt bfs) ---");
+    println!(
+        "\n--- topology/query matrix (compact exact reachability vs prebuilt bfs; bfs adjacency prebuilt in fixture) ---"
+    );
     for node_count in [25_000, 100_000] {
         let interleaved = DagFixture::interleaved_chains(node_count, 8);
         let chain0 = &interleaved.chains[0];
@@ -696,14 +713,14 @@ fn run_topology_query_matrix() {
         let layered = DagFixture::layered_for_nodes(node_count, 512, 4);
         let layer0 = &layered.layers[0];
         let mut shallow_hit = ReachabilityCase::by_indices(
-            "layered/shallow-hit",
+            "layered/shallow-candidates",
             &layered,
             &prefix_indices(layer0, 4),
             &prefix_indices(&layered.layers[1], 256),
         );
         shallow_hit.iterations = if node_count <= 50_000 { 10 } else { 3 };
         let mut deep_hit = ReachabilityCase::by_indices(
-            "layered/deep-hit",
+            "layered/deep-candidates",
             &layered,
             &prefix_indices(layer0, 4),
             &prefix_indices(
