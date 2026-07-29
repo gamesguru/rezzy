@@ -633,6 +633,14 @@ mod tests {
     }
 
     #[test]
+    fn client_new_rejects_invalid_sketch_capacity() {
+        assert_eq!(
+            ReconciliationClient::new(0),
+            Err(AlgebraicError::InvalidSketchCapacity)
+        );
+    }
+
+    #[test]
     fn selects_short_circuit_extremity_and_sketch_paths() {
         let local = accumulator(&[hash(1, 1), hash(2, 2)]);
         let client = ReconciliationClient::default();
@@ -975,11 +983,12 @@ mod tests {
     #[test]
     fn bucket_exchange_carries_pending_frontier_across_rounds() {
         let mut exchange = BucketExchange::new(
-            vec![],
+            vec![99],
             MAX_RECONCILIATION_ROUNDS,
             MAX_BUCKETS_PER_ROUND,
             MAX_BUCKETED_SKETCH_CAPACITY,
         );
+        assert_eq!(exchange.accumulated_roots(), &[99]);
 
         let mut previous_requests = alloc::vec::Vec::with_capacity(65);
         let mut failed_buckets = alloc::vec::Vec::with_capacity(65);
@@ -994,7 +1003,11 @@ mod tests {
 
         let first = exchange.advance(
             BucketDecodeBatch {
-                successful_buckets: vec![],
+                successful_buckets: vec![super::super::triage::BucketDecodeSuccess {
+                    depth: 0,
+                    prefix: 0,
+                    roots: vec![42],
+                }],
                 failed_buckets,
             },
             &previous_requests,
@@ -1007,7 +1020,7 @@ mod tests {
         else {
             panic!("expected queued bucket requests");
         };
-        assert!(accumulated_roots.is_empty());
+        assert_eq!(accumulated_roots, vec![99, 42]);
         assert_eq!(second_requests.len(), MAX_BUCKETS_PER_ROUND);
         assert_eq!(exchange.pending_len(), 2);
         assert_eq!(exchange.rounds_emitted(), 1);
@@ -1027,7 +1040,7 @@ mod tests {
         else {
             panic!("expected pending frontier to drain on next round");
         };
-        assert!(accumulated_roots.is_empty());
+        assert_eq!(accumulated_roots, vec![99, 42]);
         assert_eq!(third_requests.len(), 2);
         assert_eq!(exchange.pending_len(), 0);
         assert_eq!(exchange.rounds_emitted(), 2);
@@ -1040,7 +1053,60 @@ mod tests {
             &third_requests,
             Some(10_000),
         );
-        assert_eq!(final_action, ClientAction::ResolveRoots { roots: vec![] });
+        assert_eq!(
+            final_action,
+            ClientAction::ResolveRoots {
+                roots: vec![99, 42]
+            }
+        );
+    }
+
+    #[test]
+    fn bucket_exchange_stops_round_when_aggregate_cap_would_be_exceeded() {
+        let mut exchange =
+            BucketExchange::new(vec![], MAX_RECONCILIATION_ROUNDS, MAX_BUCKETS_PER_ROUND, 25);
+
+        let previous_requests = [
+            BucketRequest {
+                depth: 0,
+                prefix: 0,
+                capacity: 8,
+            },
+            BucketRequest {
+                depth: 0,
+                prefix: 1,
+                capacity: 8,
+            },
+        ];
+
+        let action = exchange.advance(
+            BucketDecodeBatch {
+                successful_buckets: vec![],
+                failed_buckets: vec![(0, 0), (0, 1)],
+            },
+            &previous_requests,
+            Some(18),
+        );
+
+        let ClientAction::BucketSketches {
+            requests,
+            accumulated_roots,
+        } = action
+        else {
+            panic!("expected a partially drained request round");
+        };
+
+        assert!(accumulated_roots.is_empty());
+        assert_eq!(
+            requests,
+            vec![BucketRequest {
+                depth: 0,
+                prefix: 0,
+                capacity: 18,
+            }]
+        );
+        assert_eq!(exchange.pending_len(), 1);
+        assert_eq!(exchange.rounds_emitted(), 1);
     }
 
     #[test]
