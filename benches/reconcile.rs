@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use rezzy::{
     build_bucket_sketches, decode_bucket_sketches, estimate_delta, gf64_mul, BucketDecodeBatch,
     BucketDecodeSuccess, BucketRequest, ElementHash, ReconciliationClient, RemoteDigest,
-    ResidentKernel, SyndromeSketch,
+    ResidentKernel, SyndromeSketch, MAX_SKETCH_CAPACITY,
 };
 
 fn hash(index: u64) -> ElementHash {
@@ -210,15 +210,15 @@ fn main() {
 
     benchmark_pinsketch_toggle(8, 4);
     benchmark_pinsketch_toggle(32, 16);
-    benchmark_pinsketch_toggle(64, 32);
+    benchmark_pinsketch_toggle(32, 32);
 
     benchmark_pinsketch_subtract(8, 4);
     benchmark_pinsketch_subtract(32, 16);
-    benchmark_pinsketch_subtract(64, 32);
+    benchmark_pinsketch_subtract(32, 32);
 
     benchmark_pinsketch_decode(8, 4);
     benchmark_pinsketch_decode(32, 16);
-    benchmark_pinsketch_decode(64, 32);
+    benchmark_pinsketch_decode(MAX_SKETCH_CAPACITY, 32);
 
     for count in [100, 1_000, 10_000] {
         let elapsed = measure(10, || {
@@ -233,7 +233,7 @@ fn main() {
         report(&format!("resident insert/{count}"), 10, elapsed);
     }
 
-    for capacity in [1, 4, 8, 16, 32, 64] {
+    for capacity in [1, 4, 8, 16, 32] {
         let mut sketch = SyndromeSketch::new(capacity).expect("benchmark capacity is valid");
         for index in 1..=capacity {
             let value = u64::try_from(index)
@@ -299,7 +299,7 @@ fn main() {
         BucketRequest {
             depth: 8,
             prefix: 1,
-            capacity: 64,
+            capacity: 32,
         },
     ];
     let mut batches = vec![batch; 10_000];
@@ -402,7 +402,7 @@ fn main() {
             }
             h64_index.sort_unstable();
 
-            // One request per bucket, all valid (capacity ≤ 64, aggregate ≤ 4096).
+            // One request per bucket, all valid (capacity ≤ 32, aggregate ≤ 4096).
             let requests: Vec<BucketRequest> = prefixes
                 .iter()
                 .map(|&prefix| BucketRequest {

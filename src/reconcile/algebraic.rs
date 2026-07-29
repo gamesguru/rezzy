@@ -24,7 +24,7 @@ use sha2::{Digest as Sha2Digest, Sha256};
 pub use super::gf64::mul as gf64_mul;
 
 /// Maximum extraction capacity for an unbucketed `algebraic_v1` sketch.
-pub const MAX_SKETCH_CAPACITY: usize = 64;
+pub const MAX_SKETCH_CAPACITY: usize = 32;
 /// Default local extraction limit for CPU-bounded sketch decoding.
 pub const MAX_LOCAL_SKETCH_DECODE_CAPACITY: usize = MAX_SKETCH_CAPACITY;
 const EVENT_HASH_ENCODED_LEN: usize = 43;
