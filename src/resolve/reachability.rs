@@ -268,6 +268,9 @@ where
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::basespec::rezzy_types::LeanEvent;
+    use crate::HashMap;
+    use alloc::string::String;
     use alloc::vec;
 
     struct Dummy;
@@ -307,5 +310,49 @@ mod tests {
         let seeds = [&1_u32, &3_u32];
         let candidates = [&2_u32, &3_u32, &4_u32];
         assert_eq!(accel.filter_reachable(seeds, candidates), vec![1]);
+    }
+
+    #[test]
+    fn forward_reachability_index_builds_and_queries_descendants() {
+        let mut graph: HashMap<String, LeanEvent<String>> = HashMap::new();
+        let a = String::from("A");
+        let b = String::from("B");
+        let c = String::from("C");
+        let missing = String::from("missing");
+        graph.insert(
+            a.clone(),
+            LeanEvent {
+                event_id: a.clone(),
+                auth_events: vec![],
+                ..Default::default()
+            },
+        );
+        graph.insert(
+            b.clone(),
+            LeanEvent {
+                event_id: b.clone(),
+                auth_events: vec![a.clone()],
+                ..Default::default()
+            },
+        );
+        graph.insert(
+            c.clone(),
+            LeanEvent {
+                event_id: c.clone(),
+                auth_events: vec![b.clone()],
+                ..Default::default()
+            },
+        );
+
+        let index = ForwardReachabilityIndex::build(&graph);
+
+        assert_eq!(index.reaches(&a, &c), Reach::Yes);
+        assert_eq!(index.reaches(&c, &a), Reach::No);
+        assert_eq!(index.reaches(&a, &a), Reach::Yes);
+        assert_eq!(index.reaches(&a, &missing), Reach::Unknown);
+
+        let seeds = [&a];
+        let candidates = [&a, &b, &c];
+        assert_eq!(index.filter_reachable(seeds, candidates), vec![0, 1, 2]);
     }
 }

@@ -856,6 +856,43 @@ mod tests {
     }
 
     #[test]
+    fn retry_or_split_bucket_retries_small_capacity_buckets() {
+        let next_requests = retry_or_split_bucket(
+            &BucketRequest {
+                depth: 8,
+                prefix: 2,
+                capacity: 8,
+            },
+            10,
+        )
+        .expect("small-capacity buckets should retry");
+
+        assert_eq!(
+            next_requests.into_iter().collect::<alloc::vec::Vec<_>>(),
+            vec![BucketRequest {
+                depth: 8,
+                prefix: 2,
+                capacity: 19,
+            }]
+        );
+    }
+
+    #[test]
+    fn retry_or_split_bucket_falls_back_on_small_capacity_overflow() {
+        assert_eq!(
+            retry_or_split_bucket(
+                &BucketRequest {
+                    depth: 8,
+                    prefix: 2,
+                    capacity: 8,
+                },
+                u64::MAX,
+            ),
+            Err(ClientAction::ExtremityDiff)
+        );
+    }
+
+    #[test]
     fn bucket_transition_falls_back_without_panicking() {
         let batch = BucketDecodeBatch {
             successful_buckets: vec![],
