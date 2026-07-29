@@ -65,10 +65,15 @@ pub trait Reachability {
 
     /// Batch filter for the common antichain-to-candidate case.
     ///
-    /// The default implementation is intentionally simple: it linearly scans
-    /// the candidates and keeps the indices of those that any seed proves
-    /// reachable. Tier 2 sealed-segment implementations can override this with
-    /// vectorized or mask-based filtering without changing the crate boundary.
+    /// The default implementation is an optimistic yes-only filter: it linearly
+    /// scans the candidates and keeps only the indices for which at least one
+    /// seed definitively proves `Reach::Yes`.
+    ///
+    /// Callers must treat omitted candidates, including `Reach::No` and
+    /// `Reach::Unknown` results, as slow-path fallbacks and send them to the
+    /// always-correct resolver.
+    ///
+    /// Override implementations must preserve that yes-only contract.
     #[must_use]
     fn filter_reachable<'a, S, C>(&self, seeds: S, candidates: C) -> Vec<usize>
     where

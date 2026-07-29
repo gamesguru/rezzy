@@ -298,6 +298,9 @@ impl ReconciliationClient {
                     Some(total) if total <= aggregate_limit => total,
                     _ => return ClientAction::ExtremityDiff,
                 };
+                if requests.len() >= MAX_BUCKETS_PER_ROUND {
+                    return ClientAction::ExtremityDiff;
+                }
                 requests.push(BucketRequest {
                     depth: previous.depth,
                     prefix,
@@ -333,6 +336,9 @@ impl ReconciliationClient {
                         Some(total) if total <= aggregate_limit => total,
                         _ => return ClientAction::ExtremityDiff,
                     };
+                    if requests.len() >= MAX_BUCKETS_PER_ROUND {
+                        return ClientAction::ExtremityDiff;
+                    }
                     requests.push(BucketRequest {
                         depth: next_depth,
                         prefix: (previous.prefix << 1) | sub,
@@ -609,6 +615,36 @@ mod tests {
                 vec![],
                 None,
                 4096,
+            ),
+            ClientAction::ExtremityDiff
+        );
+    }
+
+    #[test]
+    fn bucket_transition_falls_back_when_retry_fanout_exceeds_round_cap() {
+        let mut failed_buckets = alloc::vec::Vec::with_capacity(65);
+        let mut previous_requests = alloc::vec::Vec::with_capacity(65);
+        for prefix in 0..65_u32 {
+            failed_buckets.push((0, prefix));
+            previous_requests.push(BucketRequest {
+                depth: 0,
+                prefix,
+                capacity: MAX_BUCKET_SKETCH_CAPACITY,
+            });
+        }
+
+        let batch = BucketDecodeBatch {
+            successful_buckets: vec![],
+            failed_buckets,
+        };
+
+        assert_eq!(
+            ReconciliationClient::transition_bucket_batch(
+                batch,
+                &previous_requests,
+                vec![],
+                None,
+                MAX_BUCKETED_SKETCH_CAPACITY,
             ),
             ClientAction::ExtremityDiff
         );
