@@ -4,6 +4,8 @@
 //! policy. It defines only the query result type and the minimal trait that a
 //! drop-in accelerator must satisfy.
 
+use alloc::vec::Vec;
+
 /// Tri-state reachability answer.
 ///
 /// `Unknown` is a valid, non-error result. Callers use it to fall back to the
@@ -60,12 +62,40 @@ pub trait Reachability {
     /// - `Reach::Yes` and `Reach::No` are hard answers.
     /// - `Reach::Unknown` means "ask the slow path."
     fn reaches(&self, from: &Self::Id, to: &Self::Id) -> Reach;
+
+    /// Batch filter for the common antichain-to-candidate case.
+    ///
+    /// The default implementation is intentionally simple: it linearly scans
+    /// the candidates and keeps the indices of those that any seed proves
+    /// reachable. Tier 2 sealed-segment implementations can override this with
+    /// vectorized or mask-based filtering without changing the crate boundary.
+    #[must_use]
+    fn filter_reachable<'a, S, C>(&self, seeds: S, candidates: C) -> Vec<usize>
+    where
+        S: IntoIterator<Item = &'a Self::Id>,
+        C: IntoIterator<Item = &'a Self::Id>,
+        Self::Id: 'a,
+    {
+        let seeds: Vec<&'a Self::Id> = seeds.into_iter().collect();
+        candidates
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, candidate)| {
+                seeds
+                    .iter()
+                    .copied()
+                    .any(|seed| self.reaches(seed, candidate).is_yes())
+                    .then_some(idx)
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     struct Dummy;
 
@@ -96,5 +126,13 @@ mod tests {
         let accel = Dummy;
         assert_eq!(accel.reaches(&7, &7), Reach::Yes);
         assert_eq!(accel.reaches(&7, &8), Reach::Unknown);
+    }
+
+    #[test]
+    fn batch_filter_defaults_to_any_reachable_candidate() {
+        let accel = Dummy;
+        let seeds = [&1_u32, &3_u32];
+        let candidates = [&2_u32, &3_u32, &4_u32];
+        assert_eq!(accel.filter_reachable(seeds, candidates), vec![1]);
     }
 }
