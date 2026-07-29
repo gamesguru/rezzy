@@ -177,11 +177,8 @@ impl ReconciliationClient {
             });
         let target_capacity = provisioned
             .and_then(|value| usize::try_from(value).ok())
-            .unwrap_or(usize::MAX);
-
-        if target_capacity > crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY {
-            return ClientAction::ExtremityDiff;
-        }
+            .unwrap_or(crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY)
+            .min(crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY);
 
         let mut depth = 0_u8;
         let mut buckets = 1_usize;
@@ -572,6 +569,13 @@ mod tests {
         }
 
         let client = ReconciliationClient::default().allow_unlimited_delta();
+        let expected_requests = (0..128_u32)
+            .map(|prefix| BucketRequest {
+                depth: 7,
+                prefix,
+                capacity: MAX_BUCKET_SKETCH_CAPACITY,
+            })
+            .collect();
         assert_eq!(
             client.select_action(
                 &local,
@@ -584,7 +588,10 @@ mod tests {
                 },
                 0,
             ),
-            ClientAction::ExtremityDiff
+            ClientAction::BucketSketches {
+                requests: expected_requests,
+                accumulated_roots: vec![],
+            }
         );
     }
 
