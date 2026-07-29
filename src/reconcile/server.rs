@@ -354,7 +354,7 @@ impl<'a> SketchBuilder<'a> {
             let range = self.index.bucket_range(req)?;
             let slice_len = range.len();
 
-            if slice_len > req.capacity || slice_len > self.policy.hard_fallback_threshold {
+            if slice_len > self.policy.hard_fallback_threshold {
                 return Ok(SketchResult::FallbackToRangeSync);
             }
 
@@ -825,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sketch_builder_build_falls_back_on_oversized_slice() {
+    fn test_sketch_builder_build_materializes_large_slice_at_small_capacity() {
         use crate::reconcile::triage::BucketRequest;
         let sorted_h64 = vec![0x0000_0000_0000_0001, 0x8000_0000_0000_0002];
         let index = H64Index::new(&sorted_h64);
@@ -843,7 +843,7 @@ mod tests {
         }];
 
         let result = builder.build(&requests).unwrap();
-        assert!(matches!(result, SketchResult::FallbackToRangeSync));
+        assert!(matches!(result, SketchResult::Success(sketches) if sketches.len() == 1));
     }
 
     #[test]
@@ -942,10 +942,10 @@ mod tests {
             capacity: 2,
         }];
 
-        assert_eq!(
+        assert!(matches!(
             builder.build(&requests),
             Err(AlgebraicError::ZeroShortIdentifier)
-        );
+        ));
     }
 
     #[test]
