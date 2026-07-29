@@ -205,6 +205,7 @@ pub fn validate_bucket_requests(requests: &[BucketRequest]) -> Result<(), Algebr
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use alloc::vec;
 

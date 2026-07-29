@@ -379,6 +379,7 @@ fn find_roots_with_budget(
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

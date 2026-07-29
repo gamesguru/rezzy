@@ -1,9 +1,11 @@
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 mod utils;
 use serde_json::json;
 use std::collections::HashMap;
 extern crate alloc;
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::too_many_lines, clippy::type_complexity, clippy::similar_names)]
 mod tests {
 
