@@ -248,10 +248,18 @@ where
 /// by pruning obviously impossible branches and falling back to bounded BFS over
 /// the stored adjacency.
 #[derive(Debug, Clone)]
+struct Segment {
+    nodes: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RangePrefilterReachability<Id> {
     id_to_index: HashMap<Id, u32>,
     children_by_index: Vec<Vec<u32>>,
     descendant_ranges: Vec<(u32, u32)>,
+    segments: Vec<Segment>,
+    node_segment: Vec<u32>,
+    node_segment_offset: Vec<u32>,
 }
 
 impl<Id> RangePrefilterReachability<Id>
@@ -320,6 +328,7 @@ where
         }
 
         let mut children_by_index = vec![Vec::<u32>::new(); topo.len()];
+        let mut in_degree_by_index = vec![0_usize; topo.len()];
         for (parent_id, child_ids) in children {
             let Some(&parent_idx) = id_to_index.get(parent_id) else {
                 continue;
@@ -328,6 +337,8 @@ where
             for child_id in child_ids {
                 if let Some(&child_idx) = id_to_index.get(child_id) {
                     parent_slot.push(child_idx);
+                    in_degree_by_index[child_idx as usize] =
+                        in_degree_by_index[child_idx as usize].saturating_add(1);
                 }
             }
         }
@@ -345,10 +356,46 @@ where
             descendant_ranges[idx] = (min_idx, max_idx);
         }
 
+        let mut node_segment = vec![u32::MAX; topo.len()];
+        let mut node_segment_offset = vec![0_u32; topo.len()];
+        let mut segments = Vec::new();
+        for idx in 0..topo.len() {
+            if node_segment[idx] != u32::MAX {
+                continue;
+            }
+
+            let segment_id =
+                u32::try_from(segments.len()).expect("graph too large for segment index");
+            let mut nodes = Vec::new();
+            let mut current = idx;
+            loop {
+                let offset = u32::try_from(nodes.len()).expect("segment too long for offset");
+                node_segment[current] = segment_id;
+                node_segment_offset[current] = offset;
+                nodes.push(u32::try_from(current).expect("graph too large for segment node index"));
+
+                let children = &children_by_index[current];
+                if in_degree_by_index[current] != 1 || children.len() != 1 {
+                    break;
+                }
+
+                let next = children[0] as usize;
+                if in_degree_by_index[next] != 1 || node_segment[next] != u32::MAX {
+                    break;
+                }
+                current = next;
+            }
+
+            segments.push(Segment { nodes });
+        }
+
         Self {
             id_to_index,
             children_by_index,
             descendant_ranges,
+            segments,
+            node_segment,
+            node_segment_offset,
         }
     }
 
@@ -407,19 +454,19 @@ where
         let mut reachable = vec![false; self.children_by_index.len()];
         let mut candidate_positions: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut remaining_candidates = BTreeSet::new();
-        let mut candidate_count = 0_usize;
         for (idx, candidate) in candidates.into_iter().enumerate() {
-            candidate_count = idx.saturating_add(1);
+            let candidate_position = idx;
             let Some(&candidate_idx) = self.id_to_index.get(candidate) else {
                 continue;
             };
             candidate_positions
                 .entry(candidate_idx)
                 .or_default()
-                .push(idx);
+                .push(candidate_position);
             remaining_candidates.insert(candidate_idx);
         }
 
+        let candidate_count = candidate_positions.values().map(Vec::len).sum::<usize>();
         if candidate_count == 0 {
             return Vec::new();
         }
@@ -435,15 +482,42 @@ where
             }
         }
 
+        let mut segment_covered_from = vec![usize::MAX; self.segments.len()];
+        let mut segment_expanded = vec![false; self.segments.len()];
         while let Some(curr) = queue.pop_front() {
-            if candidate_positions.contains_key(&curr) {
-                remaining_candidates.remove(&curr);
-                if remaining_candidates.is_empty() {
-                    break;
+            let segment_id = self.node_segment[curr as usize] as usize;
+            let segment = &self.segments[segment_id];
+            let segment_start = self.node_segment_offset[curr as usize] as usize;
+            let previous_start = segment_covered_from[segment_id];
+            let effective_start = match previous_start {
+                usize::MAX => segment_start,
+                covered => covered.min(segment_start),
+            };
+            if previous_start != usize::MAX && effective_start >= previous_start {
+                continue;
+            }
+            segment_covered_from[segment_id] = effective_start;
+
+            for &node in &segment.nodes[effective_start..] {
+                reachable[node as usize] = true;
+                if candidate_positions.contains_key(&node) {
+                    remaining_candidates.remove(&node);
                 }
             }
 
-            for &child in &self.children_by_index[curr as usize] {
+            if remaining_candidates.is_empty() {
+                break;
+            }
+
+            if segment_expanded[segment_id] {
+                continue;
+            }
+            segment_expanded[segment_id] = true;
+
+            let Some(&tail_idx) = segment.nodes.last() else {
+                continue;
+            };
+            for &child in &self.children_by_index[tail_idx as usize] {
                 if reachable[child as usize] {
                     continue;
                 }
