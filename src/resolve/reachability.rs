@@ -262,6 +262,149 @@ pub struct RangePrefilterReachability<Id> {
     node_segment_offset: Vec<u32>,
 }
 
+fn collect_topology<Id, C, S>(
+    graph: &HashMap<Id, LeanEvent<Id, C>, S>,
+) -> (Vec<&Id>, HashMap<&Id, Vec<&Id>>)
+where
+    Id: crate::basespec::rezzy_types::EventId + Ord,
+    C: Clone,
+    S: core::hash::BuildHasher,
+{
+    let mut in_degree: HashMap<&Id, usize> = HashMap::new();
+    let mut children: HashMap<&Id, Vec<&Id>> = HashMap::new();
+
+    for (id, ev) in graph {
+        in_degree.entry(id).or_insert(0);
+        for auth_id in &ev.auth_events {
+            if graph.contains_key(auth_id) {
+                children.entry(auth_id).or_default().push(id);
+                let degree = in_degree.entry(id).or_insert(0);
+                *degree = degree.saturating_add(1);
+            }
+        }
+    }
+
+    let mut queue: Vec<&Id> = in_degree
+        .iter()
+        .filter_map(|(id, &deg)| (deg == 0).then_some(*id))
+        .collect();
+    queue.sort_unstable();
+
+    let mut topo = Vec::with_capacity(graph.len());
+    let mut head = 0_usize;
+    while head < queue.len() {
+        let id = queue[head];
+        head = head.saturating_add(1);
+        topo.push(id);
+        if let Some(children) = children.get(id) {
+            for child in children {
+                let degree = in_degree.get_mut(child).unwrap();
+                *degree = degree.saturating_sub(1);
+                if *degree == 0 {
+                    queue.push(child);
+                }
+            }
+        }
+    }
+
+    debug_assert_eq!(
+        topo.len(),
+        graph.len(),
+        "forward reachability graph must be acyclic"
+    );
+
+    (topo, children)
+}
+
+fn index_topology<Id: crate::basespec::rezzy_types::EventId + Ord>(
+    topo: &[&Id],
+) -> HashMap<Id, u32> {
+    let mut id_to_index = HashMap::with_capacity(topo.len());
+    for (idx, &id) in topo.iter().enumerate() {
+        let idx = u32::try_from(idx).expect("graph too large for index space");
+        id_to_index.insert(id.clone(), idx);
+    }
+    id_to_index
+}
+
+fn build_indexed_children<'a, Id: crate::basespec::rezzy_types::EventId + Ord>(
+    topo_len: usize,
+    children: HashMap<&'a Id, Vec<&'a Id>>,
+    id_to_index: &HashMap<Id, u32>,
+) -> (Vec<Vec<u32>>, Vec<usize>) {
+    let mut children_by_index = vec![Vec::<u32>::new(); topo_len];
+    let mut in_degree_by_index = vec![0_usize; topo_len];
+    for (parent_id, child_ids) in children {
+        let Some(&parent_idx) = id_to_index.get(parent_id) else {
+            continue;
+        };
+        let parent_slot = &mut children_by_index[parent_idx as usize];
+        for child_id in child_ids {
+            if let Some(&child_idx) = id_to_index.get(child_id) {
+                parent_slot.push(child_idx);
+                in_degree_by_index[child_idx as usize] =
+                    in_degree_by_index[child_idx as usize].saturating_add(1);
+            }
+        }
+    }
+    (children_by_index, in_degree_by_index)
+}
+
+fn build_descendant_ranges(children_by_index: &[Vec<u32>]) -> Vec<(u32, u32)> {
+    let mut descendant_ranges = vec![(0_u32, 0_u32); children_by_index.len()];
+    for idx in (0..children_by_index.len()).rev() {
+        let idx_u32 = u32::try_from(idx).expect("graph too large for index space");
+        let mut min_idx = idx_u32;
+        let mut max_idx = idx_u32;
+        for &child_idx in &children_by_index[idx] {
+            let (child_min, child_max) = descendant_ranges[child_idx as usize];
+            min_idx = min_idx.min(child_min);
+            max_idx = max_idx.max(child_max);
+        }
+        descendant_ranges[idx] = (min_idx, max_idx);
+    }
+    descendant_ranges
+}
+
+fn build_segments(
+    children_by_index: &[Vec<u32>],
+    in_degree_by_index: &[usize],
+) -> (Vec<Segment>, Vec<u32>, Vec<u32>) {
+    let mut node_segment = vec![u32::MAX; children_by_index.len()];
+    let mut node_segment_offset = vec![0_u32; children_by_index.len()];
+    let mut segments = Vec::new();
+    for idx in 0..children_by_index.len() {
+        if node_segment[idx] != u32::MAX {
+            continue;
+        }
+
+        let segment_id = u32::try_from(segments.len()).expect("graph too large for segment index");
+        let mut nodes = Vec::new();
+        let mut current = idx;
+        loop {
+            let offset = u32::try_from(nodes.len()).expect("segment too long for offset");
+            node_segment[current] = segment_id;
+            node_segment_offset[current] = offset;
+            nodes.push(u32::try_from(current).expect("graph too large for segment node index"));
+
+            let children = &children_by_index[current];
+            if in_degree_by_index[current] != 1 || children.len() != 1 {
+                break;
+            }
+
+            let next = children[0] as usize;
+            if in_degree_by_index[next] != 1 || node_segment[next] != u32::MAX {
+                break;
+            }
+            current = next;
+        }
+
+        segments.push(Segment { nodes });
+    }
+
+    (segments, node_segment, node_segment_offset)
+}
+
 impl<Id> RangePrefilterReachability<Id>
 where
     Id: crate::basespec::rezzy_types::EventId + Ord,
@@ -278,116 +421,13 @@ where
     pub fn build<C: Clone, S: core::hash::BuildHasher>(
         graph: &HashMap<Id, LeanEvent<Id, C>, S>,
     ) -> Self {
-        let mut in_degree: HashMap<&Id, usize> = HashMap::new();
-        let mut children: HashMap<&Id, Vec<&Id>> = HashMap::new();
-
-        for (id, ev) in graph {
-            in_degree.entry(id).or_insert(0);
-            for auth_id in &ev.auth_events {
-                if graph.contains_key(auth_id) {
-                    children.entry(auth_id).or_default().push(id);
-                    let degree = in_degree.entry(id).or_insert(0);
-                    *degree = degree.saturating_add(1);
-                }
-            }
-        }
-
-        let mut queue: Vec<&Id> = in_degree
-            .iter()
-            .filter_map(|(id, &deg)| (deg == 0).then_some(*id))
-            .collect();
-        queue.sort_unstable();
-
-        let mut topo = Vec::with_capacity(graph.len());
-        let mut head = 0_usize;
-        while head < queue.len() {
-            let id = queue[head];
-            head = head.saturating_add(1);
-            topo.push(id);
-            if let Some(children) = children.get(id) {
-                for child in children {
-                    let degree = in_degree.get_mut(child).unwrap();
-                    *degree = degree.saturating_sub(1);
-                    if *degree == 0 {
-                        queue.push(child);
-                    }
-                }
-            }
-        }
-
-        debug_assert_eq!(
-            topo.len(),
-            graph.len(),
-            "forward reachability graph must be acyclic"
-        );
-
-        let mut id_to_index = HashMap::with_capacity(topo.len());
-        for (idx, &id) in topo.iter().enumerate() {
-            let idx = u32::try_from(idx).expect("graph too large for index space");
-            id_to_index.insert(id.clone(), idx);
-        }
-
-        let mut children_by_index = vec![Vec::<u32>::new(); topo.len()];
-        let mut in_degree_by_index = vec![0_usize; topo.len()];
-        for (parent_id, child_ids) in children {
-            let Some(&parent_idx) = id_to_index.get(parent_id) else {
-                continue;
-            };
-            let parent_slot = &mut children_by_index[parent_idx as usize];
-            for child_id in child_ids {
-                if let Some(&child_idx) = id_to_index.get(child_id) {
-                    parent_slot.push(child_idx);
-                    in_degree_by_index[child_idx as usize] =
-                        in_degree_by_index[child_idx as usize].saturating_add(1);
-                }
-            }
-        }
-
-        let mut descendant_ranges = vec![(0_u32, 0_u32); topo.len()];
-        for idx in (0..topo.len()).rev() {
-            let idx_u32 = u32::try_from(idx).expect("graph too large for index space");
-            let mut min_idx = idx_u32;
-            let mut max_idx = idx_u32;
-            for &child_idx in &children_by_index[idx] {
-                let (child_min, child_max) = descendant_ranges[child_idx as usize];
-                min_idx = min_idx.min(child_min);
-                max_idx = max_idx.max(child_max);
-            }
-            descendant_ranges[idx] = (min_idx, max_idx);
-        }
-
-        let mut node_segment = vec![u32::MAX; topo.len()];
-        let mut node_segment_offset = vec![0_u32; topo.len()];
-        let mut segments = Vec::new();
-        for idx in 0..topo.len() {
-            if node_segment[idx] != u32::MAX {
-                continue;
-            }
-
-            let segment_id =
-                u32::try_from(segments.len()).expect("graph too large for segment index");
-            let mut nodes = Vec::new();
-            let mut current = idx;
-            loop {
-                let offset = u32::try_from(nodes.len()).expect("segment too long for offset");
-                node_segment[current] = segment_id;
-                node_segment_offset[current] = offset;
-                nodes.push(u32::try_from(current).expect("graph too large for segment node index"));
-
-                let children = &children_by_index[current];
-                if in_degree_by_index[current] != 1 || children.len() != 1 {
-                    break;
-                }
-
-                let next = children[0] as usize;
-                if in_degree_by_index[next] != 1 || node_segment[next] != u32::MAX {
-                    break;
-                }
-                current = next;
-            }
-
-            segments.push(Segment { nodes });
-        }
+        let (topo, children) = collect_topology(graph);
+        let id_to_index = index_topology(&topo);
+        let (children_by_index, in_degree_by_index) =
+            build_indexed_children(topo.len(), children, &id_to_index);
+        let descendant_ranges = build_descendant_ranges(&children_by_index);
+        let (segments, node_segment, node_segment_offset) =
+            build_segments(&children_by_index, &in_degree_by_index);
 
         Self {
             id_to_index,
