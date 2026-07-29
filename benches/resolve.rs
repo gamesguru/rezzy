@@ -5,12 +5,12 @@ use std::time::{Duration, Instant};
 
 use rezzy::{ForwardReachabilityIndex, HashMap, HashSet, LeanEvent, RangePrefilterReachability};
 
-fn report_split(name: &str, setup: Duration, algo: Duration) {
-    println!(
-        "{name}: (setup: {:.6} ms, algo: {:.6} ms)",
-        setup.as_secs_f64() * 1e3,
-        algo.as_secs_f64() * 1e3
-    );
+fn report_phases(name: &str, phases: &[(&str, Duration)]) {
+    let parts = phases
+        .iter()
+        .map(|(label, elapsed)| format!("{label}: {:.6} ms", elapsed.as_secs_f64() * 1e3))
+        .collect::<Vec<_>>();
+    println!("{name}: ({})", parts.join(", "));
 }
 
 fn report_comparison(
@@ -178,16 +178,18 @@ impl DagFixture {
         }
     }
 
-    fn layered(layer_count: usize, layer_width: usize, fanout: usize) -> Self {
-        let node_count = layer_count.saturating_mul(layer_width);
+    fn layered_for_nodes(node_count: usize, layer_width: usize, fanout: usize) -> Self {
+        let layer_count = node_count.div_ceil(layer_width);
         let mut graph = HashMap::with_capacity(node_count);
         let mut ordered_ids: Vec<String> = Vec::with_capacity(node_count);
         let mut layers = Vec::with_capacity(layer_count);
         let mut previous_layer_ids: Vec<String> = Vec::new();
 
         for layer in 0..layer_count {
-            let mut current_layer = Vec::with_capacity(layer_width);
-            for pos in 0..layer_width {
+            let remaining = node_count.saturating_sub(ordered_ids.len());
+            let current_width = remaining.min(layer_width);
+            let mut current_layer = Vec::with_capacity(current_width);
+            for pos in 0..current_width {
                 let idx = ordered_ids.len();
                 let event_id = format!("$l{layer:04x}_{pos:08x}");
                 let mut auth_events = Vec::with_capacity(fanout);
@@ -241,7 +243,7 @@ impl DagFixture {
             .sum()
     }
 
-    fn estimated_range_prefilter_bytes(&self) -> usize {
+    fn estimated_numeric_payload_bytes_lower_bound(&self) -> usize {
         let nodes = self.node_count();
         let edges = self.edge_count();
         nodes
@@ -305,28 +307,33 @@ fn benchmark_low_memory_case(
     fixture: &DagFixture,
     case: &ReachabilityCase,
 ) -> (Duration, Duration, Duration, usize) {
-    let setup_start = Instant::now();
+    let index_build_start = Instant::now();
     let index = RangePrefilterReachability::build(&fixture.graph);
-    let setup_elapsed = setup_start.elapsed();
+    let index_build_elapsed = index_build_start.elapsed();
 
-    let index_start = Instant::now();
+    let index_query_start = Instant::now();
     let mut index_hits = Vec::new();
     for _ in 0..case.iterations {
         index_hits = index.filter_reachable(case.seeds.iter(), case.candidates.iter());
     }
-    let index_elapsed = index_start.elapsed();
+    let index_query_elapsed = index_query_start.elapsed();
 
-    let bfs_start = Instant::now();
+    let bfs_query_start = Instant::now();
     let mut bfs_hits = Vec::new();
     for _ in 0..case.iterations {
         bfs_hits = branchy_forward_reachable_bfs(&fixture.children, &case.seeds, &case.candidates);
     }
-    let bfs_elapsed = bfs_start.elapsed();
+    let bfs_query_elapsed = bfs_query_start.elapsed();
 
     assert_eq!(index_hits, bfs_hits, "{} must match bfs", case.label);
     black_box((&index_hits, &bfs_hits));
 
-    (setup_elapsed, index_elapsed, bfs_elapsed, index_hits.len())
+    (
+        index_build_elapsed,
+        index_query_elapsed,
+        bfs_query_elapsed,
+        index_hits.len(),
+    )
 }
 
 fn cached_reachable_set(
@@ -358,7 +365,7 @@ fn benchmark_repeated_seed_cache(
     fixture: &DagFixture,
     seeds: &[String],
     candidate_batches: &[Vec<String>],
-) -> (Duration, Duration, Duration, usize) {
+) -> (Duration, Duration, Duration, usize, usize) {
     let setup_start = Instant::now();
     let cache = cached_reachable_set(&fixture.children, seeds);
     let setup_elapsed = setup_start.elapsed();
@@ -385,11 +392,16 @@ fn benchmark_repeated_seed_cache(
 
     assert_eq!(cached_hits, direct_hits);
     black_box((&cached_hits, &direct_hits));
-    (setup_elapsed, cached_elapsed, direct_elapsed, cached_hits)
+    (
+        setup_elapsed,
+        cached_elapsed,
+        direct_elapsed,
+        cache.len(),
+        cached_hits,
+    )
 }
 
 fn benchmark_candidate_sweep(fixture: &DagFixture, seeds: &[String], candidate_sizes: &[usize]) {
-    let index = RangePrefilterReachability::build(&fixture.graph);
     for &candidate_size in candidate_sizes {
         let candidates: Vec<String> = fixture
             .ordered_ids
@@ -398,22 +410,23 @@ fn benchmark_candidate_sweep(fixture: &DagFixture, seeds: &[String], candidate_s
             .cloned()
             .collect();
 
-        let index_start = Instant::now();
-        let index_hits = index.filter_reachable(seeds.iter(), candidates.iter());
-        let index_elapsed = index_start.elapsed();
+        let full_start = Instant::now();
+        let full_hits = branchy_forward_reachable_bfs(&fixture.children, seeds, &candidates);
+        let full_elapsed = full_start.elapsed();
 
-        let bfs_start = Instant::now();
-        let bfs_hits = branchy_forward_reachable_bfs(&fixture.children, seeds, &candidates);
-        let bfs_elapsed = bfs_start.elapsed();
+        let aware_start = Instant::now();
+        let aware_hits =
+            branchy_forward_reachable_until_candidates(&fixture.children, seeds, &candidates);
+        let aware_elapsed = aware_start.elapsed();
 
-        assert_eq!(index_hits, bfs_hits);
-        black_box((&index_hits, &bfs_hits));
+        assert_eq!(full_hits, aware_hits);
+        black_box((&full_hits, &aware_hits));
         report_comparison(
-            &format!("resolve/candidate-sweep/{candidate_size}"),
+            &format!("resolve/candidate-sweep/{candidate_size} full-vs-aware"),
             1,
-            index_elapsed,
+            full_elapsed,
             1,
-            bfs_elapsed,
+            aware_elapsed,
         );
     }
 }
@@ -448,37 +461,92 @@ fn branchy_forward_reachable_bfs(
         .collect()
 }
 
+fn branchy_forward_reachable_until_candidates(
+    children: &HashMap<String, Vec<String>>,
+    seeds: &[String],
+    candidates: &[String],
+) -> Vec<usize> {
+    let mut candidate_positions: HashMap<&str, usize> = HashMap::with_capacity(candidates.len());
+    for (idx, candidate) in candidates.iter().enumerate() {
+        candidate_positions.insert(candidate.as_str(), idx);
+    }
+
+    let mut found = vec![false; candidates.len()];
+    let mut remaining = candidates.len();
+    let mut reachable = HashSet::with_capacity(children.len().saturating_add(seeds.len()));
+    let mut queue = VecDeque::with_capacity(seeds.len());
+    for seed in seeds {
+        if reachable.insert(seed.clone()) {
+            queue.push_back(seed.clone());
+        }
+    }
+
+    while let Some(node) = queue.pop_front() {
+        if let Some(&candidate_idx) = candidate_positions.get(node.as_str()) {
+            if !found[candidate_idx] {
+                found[candidate_idx] = true;
+                remaining = remaining.saturating_sub(1);
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+
+        if let Some(children) = children.get(&node) {
+            for child in children {
+                if reachable.insert(child.clone()) {
+                    queue.push_back(child.clone());
+                }
+            }
+        }
+    }
+
+    found
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, found)| found.then_some(idx))
+        .collect()
+}
+
 fn benchmark_branchy_forward_reachability(
     node_count: usize,
     seed_count: usize,
-) -> (Duration, Duration, Duration, u32, usize) {
-    let setup_start = Instant::now();
+) -> (Duration, Duration, Duration, Duration, Duration, u32, usize) {
+    let fixture_start = Instant::now();
     let branchy = BranchyDag::new(node_count, seed_count);
-    let setup_elapsed = setup_start.elapsed();
+    let fixture_elapsed = fixture_start.elapsed();
 
+    let index_build_start = Instant::now();
     let index = ForwardReachabilityIndex::build(&branchy.graph);
+    let index_build_elapsed = index_build_start.elapsed();
+
+    let bfs_build_start = Instant::now();
+    let children = branchy.children_by_parent();
+    let bfs_build_elapsed = bfs_build_start.elapsed();
+
     let iterations = if node_count <= 50_000 { 10 } else { 3 };
-    let index_start = Instant::now();
+    let index_query_start = Instant::now();
     let mut index_hits = Vec::new();
     for _ in 0..iterations {
         index_hits = index.filter_reachable(branchy.seeds.iter(), branchy.candidates.iter());
     }
-    let index_elapsed = index_start.elapsed();
+    let index_query_elapsed = index_query_start.elapsed();
 
-    let children = branchy.children_by_parent();
-    let bfs_start = Instant::now();
+    let bfs_query_start = Instant::now();
     let mut bfs_hits = Vec::new();
     for _ in 0..iterations {
         bfs_hits = branchy_forward_reachable_bfs(&children, &branchy.seeds, &branchy.candidates);
     }
-    let bfs_elapsed = bfs_start.elapsed();
+    let bfs_query_elapsed = bfs_query_start.elapsed();
 
     assert_eq!(index_hits, bfs_hits);
     black_box((&index_hits, &bfs_hits));
     (
-        setup_elapsed,
-        index_elapsed,
-        bfs_elapsed,
+        fixture_elapsed,
+        index_build_elapsed,
+        bfs_build_elapsed,
+        index_query_elapsed,
+        bfs_query_elapsed,
         iterations,
         index_hits.len(),
     )
@@ -487,34 +555,42 @@ fn benchmark_branchy_forward_reachability(
 fn benchmark_branchy_range_prefilter_reachability(
     node_count: usize,
     seed_count: usize,
-) -> (Duration, Duration, Duration, u32, usize) {
-    let setup_start = Instant::now();
+) -> (Duration, Duration, Duration, Duration, Duration, u32, usize) {
+    let fixture_start = Instant::now();
     let branchy = BranchyDag::new(node_count, seed_count);
-    let setup_elapsed = setup_start.elapsed();
+    let fixture_elapsed = fixture_start.elapsed();
 
+    let index_build_start = Instant::now();
     let index = RangePrefilterReachability::build(&branchy.graph);
+    let index_build_elapsed = index_build_start.elapsed();
+
+    let bfs_build_start = Instant::now();
+    let children = branchy.children_by_parent();
+    let bfs_build_elapsed = bfs_build_start.elapsed();
+
     let iterations = if node_count <= 50_000 { 10 } else { 3 };
-    let index_start = Instant::now();
+    let index_query_start = Instant::now();
     let mut index_hits = Vec::new();
     for _ in 0..iterations {
         index_hits = index.filter_reachable(branchy.seeds.iter(), branchy.candidates.iter());
     }
-    let index_elapsed = index_start.elapsed();
+    let index_query_elapsed = index_query_start.elapsed();
 
-    let children = branchy.children_by_parent();
-    let bfs_start = Instant::now();
+    let bfs_query_start = Instant::now();
     let mut bfs_hits = Vec::new();
     for _ in 0..iterations {
         bfs_hits = branchy_forward_reachable_bfs(&children, &branchy.seeds, &branchy.candidates);
     }
-    let bfs_elapsed = bfs_start.elapsed();
+    let bfs_query_elapsed = bfs_query_start.elapsed();
 
     assert_eq!(index_hits, bfs_hits);
     black_box((&index_hits, &bfs_hits));
     (
-        setup_elapsed,
-        index_elapsed,
-        bfs_elapsed,
+        fixture_elapsed,
+        index_build_elapsed,
+        bfs_build_elapsed,
+        index_query_elapsed,
+        bfs_query_elapsed,
         iterations,
         index_hits.len(),
     )
@@ -523,19 +599,29 @@ fn benchmark_branchy_range_prefilter_reachability(
 fn run_branchy_exact_suite() {
     println!("\n--- branchy forward-reachability benchmark ---");
     for (node_count, seed_count) in [(25_000, 64), (100_000, 128), (250_000, 256)] {
-        let (setup_elapsed, index_elapsed, bfs_elapsed, iterations, hits) =
-            benchmark_branchy_forward_reachability(node_count, seed_count);
-        report_split(
-            &format!("resolve/reachability index setup/{node_count}"),
-            setup_elapsed,
-            index_elapsed,
+        let (
+            fixture_elapsed,
+            index_build_elapsed,
+            bfs_build_elapsed,
+            index_query_elapsed,
+            bfs_query_elapsed,
+            iterations,
+            hits,
+        ) = benchmark_branchy_forward_reachability(node_count, seed_count);
+        report_phases(
+            &format!("resolve/reachability exact/{node_count}"),
+            &[
+                ("fixture", fixture_elapsed),
+                ("index_build", index_build_elapsed),
+                ("bfs_build", bfs_build_elapsed),
+            ],
         );
         report_comparison(
-            &format!("resolve/reachability compare/{node_count} hits={hits}"),
+            &format!("resolve/reachability exact/{node_count} hits={hits}"),
             iterations,
-            index_elapsed,
+            index_query_elapsed,
             iterations,
-            bfs_elapsed,
+            bfs_query_elapsed,
         );
     }
 }
@@ -543,25 +629,35 @@ fn run_branchy_exact_suite() {
 fn run_branchy_low_memory_suite() {
     println!("\n--- branchy low-memory reachability benchmark ---");
     for (node_count, seed_count) in [(25_000, 64), (100_000, 128), (250_000, 256)] {
-        let (setup_elapsed, index_elapsed, bfs_elapsed, iterations, hits) =
-            benchmark_branchy_range_prefilter_reachability(node_count, seed_count);
-        report_split(
-            &format!("resolve/range-prefilter setup/{node_count}"),
-            setup_elapsed,
-            index_elapsed,
+        let (
+            fixture_elapsed,
+            index_build_elapsed,
+            bfs_build_elapsed,
+            index_query_elapsed,
+            bfs_query_elapsed,
+            iterations,
+            hits,
+        ) = benchmark_branchy_range_prefilter_reachability(node_count, seed_count);
+        report_phases(
+            &format!("resolve/range-prefilter/{node_count}"),
+            &[
+                ("fixture", fixture_elapsed),
+                ("index_build", index_build_elapsed),
+                ("bfs_build", bfs_build_elapsed),
+            ],
         );
         report_comparison(
-            &format!("resolve/range-prefilter compare/{node_count} hits={hits}"),
+            &format!("resolve/range-prefilter/{node_count} hits={hits}"),
             iterations,
-            index_elapsed,
+            index_query_elapsed,
             iterations,
-            bfs_elapsed,
+            bfs_query_elapsed,
         );
     }
 }
 
 fn run_topology_query_matrix() {
-    println!("\n--- topology/query matrix (range-prefilter vs prebuilt bfs) ---");
+    println!("\n--- topology/query matrix (compact exact reachability vs prebuilt bfs) ---");
     for node_count in [25_000, 100_000] {
         let interleaved = DagFixture::interleaved_chains(node_count, 8);
         let chain0 = &interleaved.chains[0];
@@ -584,10 +680,9 @@ fn run_topology_query_matrix() {
         for case in [no_hit, local_hit] {
             let (setup_elapsed, index_elapsed, bfs_elapsed, hits) =
                 benchmark_low_memory_case(&interleaved, &case);
-            report_split(
-                &format!("resolve/{}/{node_count} setup", case.label),
-                setup_elapsed,
-                index_elapsed,
+            report_phases(
+                &format!("resolve/{}/{node_count}", case.label),
+                &[("index_build", setup_elapsed)],
             );
             report_comparison(
                 &format!("resolve/{}/{node_count} hits={hits}", case.label),
@@ -598,7 +693,7 @@ fn run_topology_query_matrix() {
             );
         }
 
-        let layered = DagFixture::layered(200, 512, 4);
+        let layered = DagFixture::layered_for_nodes(node_count, 512, 4);
         let layer0 = &layered.layers[0];
         let mut shallow_hit = ReachabilityCase::by_indices(
             "layered/shallow-hit",
@@ -630,10 +725,9 @@ fn run_topology_query_matrix() {
         for case in [shallow_hit, deep_hit, scattered] {
             let (setup_elapsed, index_elapsed, bfs_elapsed, hits) =
                 benchmark_low_memory_case(&layered, &case);
-            report_split(
-                &format!("resolve/{}/{node_count} setup", case.label),
-                setup_elapsed,
-                index_elapsed,
+            report_phases(
+                &format!("resolve/{}/{node_count}", case.label),
+                &[("index_build", setup_elapsed)],
             );
             report_comparison(
                 &format!("resolve/{}/{node_count} hits={hits}", case.label),
@@ -650,13 +744,13 @@ fn run_topology_stats_suite() {
     println!("\n--- topology size estimates ---");
     for (name, fixture) in [
         ("interleaved", DagFixture::interleaved_chains(25_000, 8)),
-        ("layered", DagFixture::layered(200, 512, 4)),
+        ("layered", DagFixture::layered_for_nodes(25_000, 512, 4)),
     ] {
         println!(
-            "resolve/topology/{name}: nodes={}, edges={}, approx_range_prefilter_bytes={}",
+            "resolve/topology/{name}: nodes={}, edges={}, numeric_payload_bytes_lower_bound={}",
             fixture.node_count(),
             fixture.edge_count(),
-            fixture.estimated_range_prefilter_bytes(),
+            fixture.estimated_numeric_payload_bytes_lower_bound(),
         );
     }
 }
@@ -684,25 +778,36 @@ fn run_repeated_seed_cache_suite() {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let (setup_elapsed, cached_elapsed, direct_elapsed, hits) =
+    let (setup_elapsed, cached_elapsed, direct_elapsed, cache_size, hits) =
         benchmark_repeated_seed_cache(&fixture, &seeds, &candidate_batches);
-    report_split(
-        "resolve/repeated-seed cache setup",
-        setup_elapsed,
-        cached_elapsed,
+    let cached_total = setup_elapsed
+        .checked_add(cached_elapsed)
+        .expect("cached benchmark timing fits into Duration");
+    report_phases(
+        "resolve/repeated-seed cache",
+        &[("setup", setup_elapsed), ("filtering", cached_elapsed)],
     );
     report_comparison(
-        &format!("resolve/repeated-seed cache hits={hits}"),
+        &format!(
+            "resolve/repeated-seed cache filtering-only hits={hits} cache_entries={cache_size}"
+        ),
         1,
         cached_elapsed,
+        1,
+        direct_elapsed,
+    );
+    report_comparison(
+        &format!("resolve/repeated-seed cache end-to-end hits={hits} cache_entries={cache_size}"),
+        1,
+        cached_total,
         1,
         direct_elapsed,
     );
 }
 
 fn run_candidate_sweep_suite() {
-    println!("\n--- candidate-size sweep ---");
-    let fixture = DagFixture::layered(200, 512, 4);
+    println!("\n--- candidate-size sweep (candidate-aware vs full bfs) ---");
+    let fixture = DagFixture::layered_for_nodes(100_000, 512, 4);
     let seeds = fixture
         .layers
         .first()
