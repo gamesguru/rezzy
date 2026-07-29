@@ -8,6 +8,7 @@
 use super::resident::{ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
 use super::triage::{
     BucketDecodeBatch, BucketRequest, MAX_BUCKETED_SKETCH_CAPACITY, MAX_BUCKET_SKETCH_CAPACITY,
+    SATURATED_DELTA_ESTIMATE,
 };
 use super::{AlgebraicError, ElementHash, SyndromeSketch, MAX_LOCAL_SKETCH_DECODE_CAPACITY};
 
@@ -159,6 +160,10 @@ impl ReconciliationClient {
                 Ok(Some(value)) => value.max(count_delta),
                 Ok(None) | Err(_) => return ClientAction::ExtremityDiff,
             };
+
+        if estimated_delta >= SATURATED_DELTA_ESTIMATE {
+            return ClientAction::ExtremityDiff;
+        }
 
         if let Some(threshold) = self.gate_threshold {
             if estimated_delta > threshold {
@@ -569,13 +574,6 @@ mod tests {
         }
 
         let client = ReconciliationClient::default().allow_unlimited_delta();
-        let expected_requests = (0..128_u32)
-            .map(|prefix| BucketRequest {
-                depth: 7,
-                prefix,
-                capacity: MAX_BUCKET_SKETCH_CAPACITY,
-            })
-            .collect();
         assert_eq!(
             client.select_action(
                 &local,
@@ -588,10 +586,7 @@ mod tests {
                 },
                 0,
             ),
-            ClientAction::BucketSketches {
-                requests: expected_requests,
-                accumulated_roots: vec![],
-            }
+            ClientAction::ExtremityDiff
         );
     }
 
