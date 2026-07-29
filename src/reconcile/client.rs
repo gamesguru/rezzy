@@ -17,6 +17,8 @@ use super::{AlgebraicError, ElementHash, SyndromeSketch, MAX_LOCAL_SKETCH_DECODE
 /// default operating point of ~82,000 differing elements before falling back to
 /// extremity-based frame diffing under default client policy.
 pub const MAX_RECONCILIATION_ROUNDS: usize = 20;
+/// Maximum number of bucket requests emitted in one reconciliation round.
+pub const MAX_BUCKETS_PER_ROUND: usize = 128;
 
 /// Requester policy for one MSC0501 reconciliation exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,8 +157,7 @@ impl ReconciliationClient {
         let estimated_delta =
             match crate::reconcile::triage::estimate_delta(local.strata(), &remote.strata) {
                 Ok(Some(value)) => value.max(count_delta),
-                Ok(None) => count_delta,
-                Err(_) => return ClientAction::ExtremityDiff,
+                Ok(None) | Err(_) => return ClientAction::ExtremityDiff,
             };
 
         if let Some(threshold) = self.gate_threshold {
@@ -181,7 +182,7 @@ impl ReconciliationClient {
         let mut depth = 0_u8;
         let mut buckets = 1_usize;
 
-        while buckets.saturating_mul(32) < target_capacity && depth < 6 {
+        while buckets.saturating_mul(32) < target_capacity && depth < 7 {
             depth = depth.saturating_add(1);
             buckets = buckets.saturating_mul(2);
         }
@@ -191,7 +192,9 @@ impl ReconciliationClient {
             .clamp(4, MAX_BUCKET_SKETCH_CAPACITY);
         let total_capacity = buckets.saturating_mul(per_bucket);
 
-        if buckets > 64 || total_capacity > crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY {
+        if buckets > MAX_BUCKETS_PER_ROUND
+            || total_capacity > crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY
+        {
             return ClientAction::ExtremityDiff;
         }
 
