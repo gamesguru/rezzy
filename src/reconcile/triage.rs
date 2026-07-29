@@ -75,10 +75,10 @@ pub fn estimate_delta(
     }
 
     let Some(stratum) = lowest_decoded else {
-        return Ok(Some(8_u64 << 31));
+        return Ok(Some(8 * (1_u64 << 31)));
     };
     if decoded_tail == 0 && stratum != 0 {
-        return Ok(Some(8_u64 << 31));
+        return Ok(Some(8 * (1_u64 << 31)));
     }
     let shift = u32::try_from(stratum).map_err(|_| AlgebraicError::CountOverflow)?;
     // saturating_mul overflows to u64::MAX rather than silently collapsing to 0

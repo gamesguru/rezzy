@@ -179,6 +179,10 @@ impl ReconciliationClient {
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(usize::MAX);
 
+        if target_capacity > crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY {
+            return ClientAction::ExtremityDiff;
+        }
+
         let mut depth = 0_u8;
         let mut buckets = 1_usize;
 
@@ -538,6 +542,36 @@ mod tests {
         }
 
         let client = ReconciliationClient::default();
+        assert_eq!(
+            client.select_action(
+                &local,
+                RemoteDigest {
+                    digest: 1,
+                    known_event_count: 17,
+                    strata: *remote.strata(),
+                    frame_matches: true,
+                    has_unknown_extremity: false,
+                },
+                0,
+            ),
+            ClientAction::ExtremityDiff
+        );
+    }
+
+    #[test]
+    fn sparse_tail_estimator_failure_falls_back_even_without_gate() {
+        let local = ResidentKernel::new();
+        let mut remote = ResidentKernel::new();
+        for value in (1_u64..=17).step_by(2) {
+            remote
+                .insert(ElementHash {
+                    h128: u128::from(value),
+                    h64: value,
+                })
+                .unwrap();
+        }
+
+        let client = ReconciliationClient::default().allow_unlimited_delta();
         assert_eq!(
             client.select_action(
                 &local,
