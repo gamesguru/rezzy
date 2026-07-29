@@ -494,7 +494,9 @@ where
         let mut reachable = vec![false; self.children_by_index.len()];
         let mut candidate_positions: HashMap<u32, Vec<usize>> = HashMap::new();
         let mut remaining_candidates = BTreeSet::new();
+        let mut candidate_count = 0_usize;
         for (idx, candidate) in candidates.into_iter().enumerate() {
+            candidate_count = idx.saturating_add(1);
             let candidate_position = idx;
             let Some(&candidate_idx) = self.id_to_index.get(candidate) else {
                 continue;
@@ -506,7 +508,6 @@ where
             remaining_candidates.insert(candidate_idx);
         }
 
-        let candidate_count = candidate_positions.values().map(Vec::len).sum::<usize>();
         if candidate_count == 0 {
             return Vec::new();
         }
@@ -775,5 +776,34 @@ mod tests {
         let seeds = [&a];
         let candidates = [&a, &b, &c];
         assert_eq!(index.filter_reachable(seeds, candidates), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn range_prefilter_preserves_unknown_candidate_positions() {
+        let mut graph: HashMap<String, LeanEvent<String>> = HashMap::new();
+        let a = String::from("A");
+        let b = String::from("B");
+        let missing = String::from("missing");
+        graph.insert(
+            a.clone(),
+            LeanEvent {
+                event_id: a.clone(),
+                auth_events: vec![],
+                ..Default::default()
+            },
+        );
+        graph.insert(
+            b.clone(),
+            LeanEvent {
+                event_id: b.clone(),
+                auth_events: vec![a.clone()],
+                ..Default::default()
+            },
+        );
+
+        let index = RangePrefilterReachability::build(&graph);
+        let seeds = [&a];
+        let candidates = [&a, &missing, &b];
+        assert_eq!(index.filter_reachable(seeds, candidates), vec![0, 2]);
     }
 }
