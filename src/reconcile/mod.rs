@@ -23,11 +23,11 @@ pub mod resident;
 pub mod server;
 pub mod triage;
 
-/// Internal H64 trie width used to materialize bucket ranges.
+/// Internal bit width of the `h64` trie used to materialize bucket ranges.
 ///
 /// This is not the protocol request-depth cap; request validation enforces
 /// depth <= 32 in `triage::validate_bucket_requests`.
-pub const MAX_DEPTH: u8 = 64;
+pub const H64_TRIE_WIDTH: u8 = 64;
 
 pub use algebraic::{
     gf64_mul, verify_residual, AlgebraicError, ElementHash, EventIdFormat, RoomAccumulator,

@@ -23,7 +23,7 @@ use super::{
 ///
 /// The protocol request-depth cap is enforced separately at depth <= 32 by
 /// `triage::validate_bucket_requests`.
-use super::MAX_DEPTH;
+use super::H64_TRIE_WIDTH;
 
 /// Read-only helper over a pre-sorted `h64` index.
 ///
@@ -43,7 +43,7 @@ impl<'a> H64Index<'a> {
 
     fn bounds_unchecked(request: &BucketRequest) -> core::ops::Range<u128> {
         let depth = u32::from(request.depth);
-        let shift = u32::from(MAX_DEPTH).saturating_sub(depth);
+        let shift = u32::from(H64_TRIE_WIDTH).saturating_sub(depth);
 
         // A u128 safely handles (1 << 64) - 1, which cleanly downcasts to u64::MAX
         let prefix_mask = u64::try_from((1_u128 << depth).saturating_sub(1)).unwrap_or(u64::MAX);
@@ -695,8 +695,8 @@ mod tests {
         let h1 = ElementHash::from_matrix_event_id("$1", EventIdFormat::Legacy).unwrap();
         let h2 = ElementHash::from_matrix_event_id("$2", EventIdFormat::Legacy).unwrap();
 
-        let depth = 16;
-        let shift = 64 - depth;
+        let depth: u8 = 16;
+        let shift = u32::from(H64_TRIE_WIDTH) - u32::from(depth);
         let prefix = u32::try_from(h1.h64 >> shift).unwrap();
 
         let requests = [BucketRequest {

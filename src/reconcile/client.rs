@@ -525,6 +525,36 @@ mod tests {
     }
 
     #[test]
+    fn sparse_tail_estimator_failure_falls_back_to_extremity_diff() {
+        let local = ResidentKernel::new();
+        let mut remote = ResidentKernel::new();
+        for value in (1_u64..=17).step_by(2) {
+            remote
+                .insert(ElementHash {
+                    h128: u128::from(value),
+                    h64: value,
+                })
+                .unwrap();
+        }
+
+        let client = ReconciliationClient::default();
+        assert_eq!(
+            client.select_action(
+                &local,
+                RemoteDigest {
+                    digest: 1,
+                    known_event_count: 17,
+                    strata: *remote.strata(),
+                    frame_matches: true,
+                    has_unknown_extremity: false,
+                },
+                0,
+            ),
+            ClientAction::ExtremityDiff
+        );
+    }
+
+    #[test]
     fn bucket_transition_resolves_and_preserves_roots() {
         let batch = BucketDecodeBatch {
             successful_buckets: vec![super::super::triage::BucketDecodeSuccess {

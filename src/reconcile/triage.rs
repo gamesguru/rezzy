@@ -45,7 +45,8 @@ pub struct BucketDecodeBatch {
 /// `T * 2^r` estimates the complete difference. Decoding every stratum yields
 /// the exact cardinality.
 ///
-/// `None` means even the sparsest stratum exceeded its resident capacity.
+/// If even the sparsest residual stratum overflows, this falls back to the
+/// spec estimate of `8 * 2^31`.
 ///
 /// # Errors
 /// Returns an error when root finding exceeds its work budget.
@@ -74,10 +75,10 @@ pub fn estimate_delta(
     }
 
     let Some(stratum) = lowest_decoded else {
-        return Ok(None);
+        return Ok(Some(8_u64 << 31));
     };
     if decoded_tail == 0 && stratum != 0 {
-        return Ok(None);
+        return Ok(Some(8_u64 << 31));
     }
     let shift = u32::try_from(stratum).map_err(|_| AlgebraicError::CountOverflow)?;
     // saturating_mul overflows to u64::MAX rather than silently collapsing to 0
@@ -328,13 +329,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_sparse_tail_does_not_claim_large_difference_is_zero() {
+    fn empty_sparse_tail_uses_spec_fallback_estimate() {
         let local = [[0; STRATUM_CAPACITY]; STRATA_COUNT];
         let mut remote = local;
         for value in (1..=17).step_by(2) {
             toggle_stratum(&mut remote, value);
         }
-        assert_eq!(estimate_delta(&local, &remote), Ok(None));
+        assert_eq!(estimate_delta(&local, &remote), Ok(Some(8_u64 << 31)));
     }
 
     #[test]
