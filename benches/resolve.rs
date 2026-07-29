@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::hint::black_box;
+use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 use rezzy::{ForwardReachabilityIndex, HashMap, HashSet, LeanEvent, RangePrefilterReachability};
@@ -228,6 +229,27 @@ impl DagFixture {
             layers,
         }
     }
+
+    fn node_count(&self) -> usize {
+        self.ordered_ids.len()
+    }
+
+    fn edge_count(&self) -> usize {
+        self.graph
+            .values()
+            .map(|event| event.auth_events.len())
+            .sum()
+    }
+
+    fn estimated_range_prefilter_bytes(&self) -> usize {
+        let nodes = self.node_count();
+        let edges = self.edge_count();
+        nodes
+            .saturating_mul(size_of::<Vec<u32>>())
+            .saturating_add(edges.saturating_mul(size_of::<u32>()))
+            .saturating_add(nodes.saturating_mul(size_of::<(u32, u32)>()))
+            .saturating_add(nodes.saturating_mul(size_of::<u32>()))
+    }
 }
 
 fn build_children_map(graph: &HashMap<String, LeanEvent<String>>) -> HashMap<String, Vec<String>> {
@@ -305,6 +327,95 @@ fn benchmark_low_memory_case(
     black_box((&index_hits, &bfs_hits));
 
     (setup_elapsed, index_elapsed, bfs_elapsed, index_hits.len())
+}
+
+fn cached_reachable_set(
+    children: &HashMap<String, Vec<String>>,
+    seeds: &[String],
+) -> HashSet<String> {
+    let mut reachable = HashSet::with_capacity(children.len().saturating_add(seeds.len()));
+    let mut queue = VecDeque::with_capacity(seeds.len());
+    for seed in seeds {
+        if reachable.insert(seed.clone()) {
+            queue.push_back(seed.clone());
+        }
+    }
+
+    while let Some(node) = queue.pop_front() {
+        if let Some(children) = children.get(&node) {
+            for child in children {
+                if reachable.insert(child.clone()) {
+                    queue.push_back(child.clone());
+                }
+            }
+        }
+    }
+
+    reachable
+}
+
+fn benchmark_repeated_seed_cache(
+    fixture: &DagFixture,
+    seeds: &[String],
+    candidate_batches: &[Vec<String>],
+) -> (Duration, Duration, Duration, usize) {
+    let setup_start = Instant::now();
+    let cache = cached_reachable_set(&fixture.children, seeds);
+    let setup_elapsed = setup_start.elapsed();
+
+    let cached_start = Instant::now();
+    let mut cached_hits = 0_usize;
+    for batch in candidate_batches {
+        cached_hits = cached_hits.saturating_add(
+            batch
+                .iter()
+                .filter(|candidate| cache.contains(*candidate))
+                .count(),
+        );
+    }
+    let cached_elapsed = cached_start.elapsed();
+
+    let direct_start = Instant::now();
+    let mut direct_hits = 0_usize;
+    for batch in candidate_batches {
+        direct_hits = direct_hits
+            .saturating_add(branchy_forward_reachable_bfs(&fixture.children, seeds, batch).len());
+    }
+    let direct_elapsed = direct_start.elapsed();
+
+    assert_eq!(cached_hits, direct_hits);
+    black_box((&cached_hits, &direct_hits));
+    (setup_elapsed, cached_elapsed, direct_elapsed, cached_hits)
+}
+
+fn benchmark_candidate_sweep(fixture: &DagFixture, seeds: &[String], candidate_sizes: &[usize]) {
+    let index = RangePrefilterReachability::build(&fixture.graph);
+    for &candidate_size in candidate_sizes {
+        let candidates: Vec<String> = fixture
+            .ordered_ids
+            .iter()
+            .take(candidate_size)
+            .cloned()
+            .collect();
+
+        let index_start = Instant::now();
+        let index_hits = index.filter_reachable(seeds.iter(), candidates.iter());
+        let index_elapsed = index_start.elapsed();
+
+        let bfs_start = Instant::now();
+        let bfs_hits = branchy_forward_reachable_bfs(&fixture.children, seeds, &candidates);
+        let bfs_elapsed = bfs_start.elapsed();
+
+        assert_eq!(index_hits, bfs_hits);
+        black_box((&index_hits, &bfs_hits));
+        report_comparison(
+            &format!("resolve/candidate-sweep/{candidate_size}"),
+            1,
+            index_elapsed,
+            1,
+            bfs_elapsed,
+        );
+    }
 }
 
 fn branchy_forward_reachable_bfs(
@@ -535,8 +646,79 @@ fn run_topology_query_matrix() {
     }
 }
 
+fn run_topology_stats_suite() {
+    println!("\n--- topology size estimates ---");
+    for (name, fixture) in [
+        ("interleaved", DagFixture::interleaved_chains(25_000, 8)),
+        ("layered", DagFixture::layered(200, 512, 4)),
+    ] {
+        println!(
+            "resolve/topology/{name}: nodes={}, edges={}, approx_range_prefilter_bytes={}",
+            fixture.node_count(),
+            fixture.edge_count(),
+            fixture.estimated_range_prefilter_bytes(),
+        );
+    }
+}
+
+fn run_repeated_seed_cache_suite() {
+    println!("\n--- repeated-seed cache benchmark ---");
+    let fixture = DagFixture::interleaved_chains(100_000, 8);
+    let seeds = fixture
+        .chains
+        .first()
+        .map(|chain| prefix_indices(chain, 8))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|idx| fixture.ordered_ids[idx].clone())
+        .collect::<Vec<_>>();
+    let candidate_batches = (0..100)
+        .map(|offset| {
+            fixture
+                .ordered_ids
+                .iter()
+                .skip(offset)
+                .step_by(32)
+                .take(256)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let (setup_elapsed, cached_elapsed, direct_elapsed, hits) =
+        benchmark_repeated_seed_cache(&fixture, &seeds, &candidate_batches);
+    report_split(
+        "resolve/repeated-seed cache setup",
+        setup_elapsed,
+        cached_elapsed,
+    );
+    report_comparison(
+        &format!("resolve/repeated-seed cache hits={hits}"),
+        1,
+        cached_elapsed,
+        1,
+        direct_elapsed,
+    );
+}
+
+fn run_candidate_sweep_suite() {
+    println!("\n--- candidate-size sweep ---");
+    let fixture = DagFixture::layered(200, 512, 4);
+    let seeds = fixture
+        .layers
+        .first()
+        .map(|layer| prefix_indices(layer, 8))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|idx| fixture.ordered_ids[idx].clone())
+        .collect::<Vec<_>>();
+    benchmark_candidate_sweep(&fixture, &seeds, &[1, 4, 16, 64, 256, 1024]);
+}
+
 fn main() {
     run_branchy_exact_suite();
     run_branchy_low_memory_suite();
+    run_topology_stats_suite();
     run_topology_query_matrix();
+    run_repeated_seed_cache_suite();
+    run_candidate_sweep_suite();
 }
