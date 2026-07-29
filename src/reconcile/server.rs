@@ -321,22 +321,6 @@ impl<'a> SketchBuilder<'a> {
         Self { index, policy }
     }
 
-    /// Takes an *existing* slice and instantly bisects it without rescanning the full index.
-    /// Returns the Left and Right sub-ranges relative to the slice provided.
-    #[must_use]
-    pub fn split_range(
-        entries: &[u64],
-        depth: u8,
-    ) -> Option<(core::ops::Range<usize>, core::ops::Range<usize>)> {
-        if depth >= MAX_DEPTH {
-            return None;
-        }
-        // Isolate the exact bit at `depth` that determines the split
-        let bit_idx = u32::from(MAX_DEPTH - 1).saturating_sub(u32::from(depth));
-        let mid = entries.partition_point(|&h| ((h >> bit_idx) & 1) == 0);
-        Some((0..mid, mid..entries.len()))
-    }
-
     /// Processes incoming requests, rejecting oversized slices rather than
     /// splitting them server-side, while enforcing total work budgets.
     ///
@@ -775,27 +759,6 @@ mod tests {
         let roots = sketches[0].clone().decode_elements(10).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0], h1.h64);
-    }
-
-    #[test]
-    fn test_sketch_builder_split_range() {
-        // Elements sorted by h64
-        // bit 63 is the highest bit (MAX_DEPTH = 64)
-        // For depth 0, we split on bit 63.
-        let entries = [
-            0x0000_0000_0000_0000,
-            0x7FFF_FFFF_FFFF_FFFF,
-            0x8000_0000_0000_0000,
-            0xFFFF_FFFF_FFFF_FFFF,
-        ];
-
-        // Depth 0 -> splits on bit 63 (the MSB)
-        let (left, right) = SketchBuilder::split_range(&entries, 0).unwrap();
-        assert_eq!(left, 0..2);
-        assert_eq!(right, 2..4);
-
-        // Depth 64 -> returns None (exceeds MAX_DEPTH)
-        assert_eq!(SketchBuilder::split_range(&entries, 64), None);
     }
 
     #[test]
