@@ -3296,6 +3296,26 @@ fn test_types_deserialize_depth_and_redaction_validation() {
     }"#;
     assert!(serde_json::from_str::<LeanEvent>(json_redaction_mismatch).is_err());
 
+    let json_redaction_non_string_top_level_redacts = r#"{
+        "event_id": "$redact",
+        "type": "m.room.redaction",
+        "sender": "@alice:example.com",
+        "content": {},
+        "redacts": 42
+    }"#;
+    assert!(
+        serde_json::from_str::<LeanEvent>(json_redaction_non_string_top_level_redacts).is_err()
+    );
+
+    let json_redaction_non_string_content_redacts = r#"{
+        "event_id": "$redact",
+        "type": "m.room.redaction",
+        "sender": "@alice:example.com",
+        "content": {"redacts": 42},
+        "redacts": "$target:example.com"
+    }"#;
+    assert!(serde_json::from_str::<LeanEvent>(json_redaction_non_string_content_redacts).is_err());
+
     let json_redaction_null_content = r#"{
         "event_id": "$redact",
         "type": "m.room.redaction",
@@ -3305,6 +3325,15 @@ fn test_types_deserialize_depth_and_redaction_validation() {
     }"#;
     let ev: LeanEvent = serde_json::from_str(json_redaction_null_content).unwrap();
     assert_eq!(ev.get_redacts(), Some("$target:example.com"));
+
+    let json_redaction_no_redacts = r#"{
+        "event_id": "$redact",
+        "type": "m.room.redaction",
+        "sender": "@alice:example.com",
+        "content": {"reason": "cleanup"}
+    }"#;
+    let ev: LeanEvent = serde_json::from_str(json_redaction_no_redacts).unwrap();
+    assert_eq!(ev.get_redacts(), None);
 
     let json_redaction_non_object_content = r#"{
         "event_id": "$redact",
