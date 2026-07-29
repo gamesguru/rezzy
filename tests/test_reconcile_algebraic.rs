@@ -263,8 +263,10 @@ fn multi_round_bucket_transition_flow() {
     assert_eq!(r2_requests.len(), 2);
     assert_eq!(r2_requests[0].depth, 1);
     assert_eq!(r2_requests[0].prefix, 0);
+    assert_eq!(r2_requests[0].capacity, 32);
     assert_eq!(r2_requests[1].depth, 1);
     assert_eq!(r2_requests[1].prefix, 1);
+    assert_eq!(r2_requests[1].capacity, 32);
 
     // Round 2: both child buckets succeed and decode their respective roots.
     let r2_batch = BucketDecodeBatch {
