@@ -249,7 +249,7 @@ where
 /// the stored adjacency.
 #[derive(Debug, Clone)]
 struct Segment {
-    nodes: Vec<u32>,
+    tail: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -379,13 +379,12 @@ fn build_segments(
         }
 
         let segment_id = u32::try_from(segments.len()).expect("graph too large for segment index");
-        let mut nodes = Vec::new();
         let mut current = idx;
+        let mut offset = 0_u32;
         loop {
-            let offset = u32::try_from(nodes.len()).expect("segment too long for offset");
             node_segment[current] = segment_id;
             node_segment_offset[current] = offset;
-            nodes.push(u32::try_from(current).expect("graph too large for segment node index"));
+            offset = offset.saturating_add(1);
 
             let children = &children_by_index[current];
             if in_degree_by_index[current] != 1 || children.len() != 1 {
@@ -399,7 +398,9 @@ fn build_segments(
             current = next;
         }
 
-        segments.push(Segment { nodes });
+        segments.push(Segment {
+            tail: u32::try_from(current).expect("graph too large for segment tail"),
+        });
     }
 
     (segments, node_segment, node_segment_offset)
@@ -492,26 +493,32 @@ where
         Id: 'a,
     {
         let mut reachable = vec![false; self.children_by_index.len()];
-        let mut candidate_positions: HashMap<u32, Vec<usize>> = HashMap::new();
+        let mut candidate_positions_by_segment: Vec<Vec<(u32, u32, usize)>> =
+            vec![Vec::new(); self.segments.len()];
         let mut remaining_candidates = BTreeSet::new();
         let mut candidate_count = 0_usize;
+        let mut known_candidate_count = 0_usize;
         for (idx, candidate) in candidates.into_iter().enumerate() {
             candidate_count = idx.saturating_add(1);
-            let candidate_position = idx;
             let Some(&candidate_idx) = self.id_to_index.get(candidate) else {
                 continue;
             };
-            candidate_positions
-                .entry(candidate_idx)
-                .or_default()
-                .push(candidate_position);
+            let segment_id = self.node_segment[candidate_idx as usize] as usize;
+            let segment_offset = self.node_segment_offset[candidate_idx as usize];
+            candidate_positions_by_segment[segment_id].push((segment_offset, candidate_idx, idx));
             remaining_candidates.insert(candidate_idx);
+            known_candidate_count = known_candidate_count.saturating_add(1);
         }
 
-        if candidate_count == 0 {
+        if candidate_count == 0 || known_candidate_count == 0 {
             return Vec::new();
         }
 
+        for segment_candidates in &mut candidate_positions_by_segment {
+            segment_candidates.sort_unstable_by_key(|(offset, _, _)| *offset);
+        }
+
+        let mut results = vec![false; candidate_count];
         let mut queue = VecDeque::new();
         for seed in seeds {
             let Some(&idx) = self.id_to_index.get(seed) else {
@@ -523,11 +530,11 @@ where
             }
         }
 
+        let mut remaining_known_candidates = known_candidate_count;
         let mut segment_covered_from = vec![usize::MAX; self.segments.len()];
         let mut segment_expanded = vec![false; self.segments.len()];
         while let Some(curr) = queue.pop_front() {
             let segment_id = self.node_segment[curr as usize] as usize;
-            let segment = &self.segments[segment_id];
             let segment_start = self.node_segment_offset[curr as usize] as usize;
             let previous_start = segment_covered_from[segment_id];
             let effective_start = match previous_start {
@@ -539,14 +546,22 @@ where
             }
             segment_covered_from[segment_id] = effective_start;
 
-            for &node in &segment.nodes[effective_start..] {
-                reachable[node as usize] = true;
-                if candidate_positions.contains_key(&node) {
-                    remaining_candidates.remove(&node);
+            let segment_candidates = &candidate_positions_by_segment[segment_id];
+            if !segment_candidates.is_empty() {
+                let first = segment_candidates.partition_point(|(offset, _, _)| {
+                    usize::try_from(*offset).expect("segment offset fits usize") < effective_start
+                });
+                for &(_, candidate_idx, position) in &segment_candidates[first..] {
+                    if results[position] {
+                        continue;
+                    }
+                    results[position] = true;
+                    remaining_known_candidates = remaining_known_candidates.saturating_sub(1);
+                    remaining_candidates.remove(&candidate_idx);
                 }
             }
 
-            if remaining_candidates.is_empty() {
+            if remaining_known_candidates == 0 {
                 break;
             }
 
@@ -555,9 +570,7 @@ where
             }
             segment_expanded[segment_id] = true;
 
-            let Some(&tail_idx) = segment.nodes.last() else {
-                continue;
-            };
+            let tail_idx = self.segments[segment_id].tail;
             for &child in &self.children_by_index[tail_idx as usize] {
                 if reachable[child as usize] {
                     continue;
@@ -574,18 +587,6 @@ where
 
                 reachable[child as usize] = true;
                 queue.push_back(child);
-            }
-        }
-
-        let mut results = vec![false; candidate_count];
-        for (candidate_idx, positions) in candidate_positions {
-            if !reachable[usize::try_from(candidate_idx)
-                .expect("graph too large for topological index space")]
-            {
-                continue;
-            }
-            for position in positions {
-                results[position] = true;
             }
         }
 
