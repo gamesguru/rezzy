@@ -1009,8 +1009,15 @@ mod tests {
                 let auth_events = if previous_layer.is_empty() {
                     Vec::new()
                 } else {
-                    let first = previous_layer[pos % previous_layer.len()].clone();
-                    let second = previous_layer[(pos + 1) % previous_layer.len()].clone();
+                    let len = previous_layer.len();
+                    let first_idx = pos.checked_rem(len).expect("previous_layer is non-empty");
+                    let second_idx = pos
+                        .checked_add(1)
+                        .expect("pos + 1 fits in usize")
+                        .checked_rem(len)
+                        .expect("previous_layer is non-empty");
+                    let first = previous_layer[first_idx].clone();
+                    let second = previous_layer[second_idx].clone();
                     if first == second {
                         vec![first]
                     } else {
@@ -1221,9 +1228,7 @@ mod tests {
                 LeanEvent {
                     event_id: String::from(node),
                     auth_events: match node {
-                        "A" => Vec::new(),
-                        "B" => vec![String::from("A")],
-                        "C" => vec![String::from("A")],
+                        "B" | "C" => vec![String::from("A")],
                         "D" => vec![String::from("B"), String::from("C")],
                         _ => Vec::new(),
                     },
