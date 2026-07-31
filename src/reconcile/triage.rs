@@ -3,7 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-//! Phase 0 difference estimation and bucket localization for MSC0500.
+//! Phase 0 difference estimation and bucket localization for MSC4521.
 
 use alloc::vec::Vec;
 

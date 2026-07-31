@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The MSC0500 `algebraic_v1` set reconciliation profile.
+//! The MSC4521 `algebraic_v1` set reconciliation profile.
 
 use alloc::{string::String, vec, vec::Vec};
 use base64::{
@@ -67,7 +67,7 @@ pub struct ElementHash {
 }
 
 impl ElementHash {
-    /// Derives the MSC0500 profile truncations from a canonical 32-byte element digest.
+    /// Derives the MSC4521 profile truncations from a canonical 32-byte element digest.
     #[must_use]
     pub fn from_digest32(digest: [u8; 32]) -> Self {
         let mut wide = [0; 16];
@@ -90,7 +90,7 @@ impl ElementHash {
 
     /// Derives an element hash from a Matrix event ID.
     ///
-    /// This is the MSC0500 Matrix event-ID binding. The algebraic kernel itself
+    /// This is the MSC4521 Matrix event-ID binding. The algebraic kernel itself
     /// is generic over canonical 32-byte element digests.
     ///
     /// # Errors
@@ -103,7 +103,7 @@ impl ElementHash {
         Self::matrix_event_digest32(event_id, format).map(Self::from_digest32)
     }
 
-    /// Derives the MSC0500 Matrix event-ID binding digest `D(e)`.
+    /// Derives the MSC4521 Matrix event-ID binding digest `D(e)`.
     ///
     /// # Errors
     /// Returns an error when the ID has no `$` sigil, contains invalid base64,

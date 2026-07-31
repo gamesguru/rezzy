@@ -3,7 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-//! Requester-side MSC0501 reconciliation decisions and verification over MSC0500 digests.
+//! Requester-side MSC0501 reconciliation decisions and verification over MSC4521 digests.
 
 use super::resident::{ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
 use super::triage::{

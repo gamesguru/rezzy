@@ -3,7 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-//! `PinSketch` decoding over the MSC0500 GF(2^64) profile.
+//! `PinSketch` decoding over the MSC4521 GF(2^64) profile.
 
 use alloc::{vec, vec::Vec};
 
