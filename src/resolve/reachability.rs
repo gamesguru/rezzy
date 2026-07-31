@@ -394,6 +394,29 @@ impl CandidateQuery {
     }
 }
 
+/// Low-memory reachability accelerator with adaptive per-query traversal.
+///
+/// Each query picks one of [`TraversalMode::PlainIndexedBfs`],
+/// [`TraversalMode::RangePruned`], or [`TraversalMode::SegmentJumps`] based
+/// on how selective the candidate set is relative to the graph.
+///
+/// # Performance envelope: candidate set size relative to graph size
+///
+/// Every query pays an unconditional `O(|candidates|)` pass to hash each
+/// candidate ID and populate a per-node scratch array, *before* a
+/// traversal mode is even chosen. When `|C| ≪ |V|` that pass is cheap and
+/// the chosen mode prunes aggressively (6x-94x over naive BFS on
+/// interleaved/layered topologies in `benches/resolve.rs`). When `|C| ≈
+/// |V|`, that upfront pass dominates and a naive BFS-then-filter baseline
+/// can win by 2-3x, since it filters a set sized to the *reachable* nodes
+/// rather than scratch space sized to the *whole graph*. This is
+/// structural, not a bug, and no traversal-mode choice can avoid it since
+/// mode selection happens after the pass runs.
+///
+/// Not expected to matter in practice: Matrix state resolution candidate
+/// sets are the conflicted-state antichain at a DAG tip — dozens to
+/// hundreds of events, never the full timeline. `|C| ≈ |V|` is a synthetic
+/// worst case exercised by the `range-prefilter` branchy benchmark suite.
 #[derive(Debug, Clone)]
 pub struct RangePrefilterReachability<Id> {
     id_to_index: HashMap<Id, u32>,
