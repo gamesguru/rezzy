@@ -286,12 +286,69 @@ pub enum TraversalMode {
     SegmentJumps,
 }
 
+/// Positions a single node occupies in the caller-supplied candidate list.
+///
+/// Candidate lists are almost always duplicate-free, so the common case
+/// (zero or one occurrence) is stored inline and never heap-allocates; only
+/// a node that appears more than once in the candidate list falls back to a
+/// `Vec`.
+#[derive(Debug, Clone, Default)]
+enum CandidatePositions {
+    #[default]
+    None,
+    One(usize),
+    Many(Vec<usize>),
+}
+
+impl CandidatePositions {
+    const fn is_empty(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    fn push(&mut self, position: usize) {
+        *self = match core::mem::take(self) {
+            Self::None => Self::One(position),
+            Self::One(first) => Self::Many(vec![first, position]),
+            Self::Many(mut positions) => {
+                positions.push(position);
+                Self::Many(positions)
+            }
+        };
+    }
+
+    fn iter(&self) -> CandidatePositionsIter<'_> {
+        match self {
+            Self::None => CandidatePositionsIter::Empty,
+            Self::One(position) => CandidatePositionsIter::One(Some(*position)),
+            Self::Many(positions) => CandidatePositionsIter::Many(positions.iter()),
+        }
+    }
+}
+
+enum CandidatePositionsIter<'a> {
+    Empty,
+    One(Option<usize>),
+    Many(core::slice::Iter<'a, usize>),
+}
+
+impl Iterator for CandidatePositionsIter<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        match self {
+            Self::Empty => None,
+            Self::One(position) => position.take(),
+            Self::Many(iter) => iter.next().copied(),
+        }
+    }
+}
+
 struct CandidateQuery {
     candidate_count: usize,
     known_candidate_position_count: usize,
     unique_candidate_count: usize,
-    /// Indexed directly by node index; empty entries mean "not a candidate".
-    candidate_positions: Vec<Vec<usize>>,
+    /// Indexed directly by node index; `CandidatePositions::None` means "not a candidate".
+    candidate_positions: Vec<CandidatePositions>,
     min_candidate_index: Option<u32>,
     max_candidate_index: Option<u32>,
 }
@@ -310,10 +367,10 @@ impl CandidateQuery {
         self.unique_candidate_count
     }
 
-    fn positions_at(&self, node_idx: u32) -> &[usize] {
+    fn positions_at(&self, node_idx: u32) -> CandidatePositionsIter<'_> {
         self.candidate_positions
             .get(node_idx as usize)
-            .map_or(&[], Vec::as_slice)
+            .map_or(CandidatePositionsIter::Empty, CandidatePositions::iter)
     }
 
     /// Builds the sorted set of remaining candidate node indices.
@@ -592,8 +649,8 @@ where
         C: IntoIterator<Item = &'a Id>,
         Id: 'a,
     {
-        let mut candidate_positions: Vec<Vec<usize>> =
-            vec![Vec::new(); self.children_by_index.len()];
+        let mut candidate_positions: Vec<CandidatePositions> =
+            vec![CandidatePositions::None; self.children_by_index.len()];
         let mut candidate_count = 0_usize;
         let mut known_candidate_count = 0_usize;
         let mut unique_candidate_count = 0_usize;
@@ -663,7 +720,7 @@ where
         let mut remaining_known_candidates = candidates.known_candidate_position_count;
 
         while let Some(curr) = queue.pop_front() {
-            for &position in candidates.positions_at(curr) {
+            for position in candidates.positions_at(curr) {
                 if results[position] {
                     continue;
                 }
@@ -710,15 +767,16 @@ where
         let mut remaining_known_candidates = candidates.known_candidate_position_count;
         let mut remaining_candidates = candidates.remaining_candidate_set();
         while let Some(curr) = queue.pop_front() {
-            let positions = candidates.positions_at(curr);
-            if !positions.is_empty() {
-                for &position in positions {
-                    if results[position] {
-                        continue;
-                    }
-                    results[position] = true;
-                    remaining_known_candidates = remaining_known_candidates.saturating_sub(1);
+            let mut has_position = false;
+            for position in candidates.positions_at(curr) {
+                has_position = true;
+                if results[position] {
+                    continue;
                 }
+                results[position] = true;
+                remaining_known_candidates = remaining_known_candidates.saturating_sub(1);
+            }
+            if has_position {
                 remaining_candidates.remove(&curr);
             }
 
@@ -775,7 +833,7 @@ where
             let candidate_idx = u32::try_from(candidate_idx).expect("node index fits u32");
             let segment_id = self.node_segment[candidate_idx as usize] as usize;
             let segment_offset = self.node_segment_offset[candidate_idx as usize];
-            for &position in positions {
+            for position in positions.iter() {
                 candidate_positions_by_segment[segment_id].push((
                     segment_offset,
                     candidate_idx,
