@@ -358,8 +358,9 @@ impl CandidateQuery {
         self.min_candidate_index
             .zip(self.max_candidate_index)
             .map_or(node_count, |(min, max)| {
-                usize::try_from(max.saturating_sub(min).saturating_add(1))
-                    .expect("candidate span fits usize")
+                let min = usize::try_from(min).expect("candidate index fits usize");
+                let max = usize::try_from(max).expect("candidate index fits usize");
+                max.saturating_sub(min).saturating_add(1)
             })
     }
 
