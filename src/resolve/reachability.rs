@@ -289,8 +289,9 @@ pub enum TraversalMode {
 struct CandidateQuery {
     candidate_count: usize,
     known_candidate_position_count: usize,
-    candidate_positions: HashMap<u32, Vec<usize>>,
-    remaining_candidates: BTreeSet<u32>,
+    unique_candidate_count: usize,
+    /// Indexed directly by node index; empty entries mean "not a candidate".
+    candidate_positions: Vec<Vec<usize>>,
     min_candidate_index: Option<u32>,
     max_candidate_index: Option<u32>,
 }
@@ -305,8 +306,33 @@ impl CandidateQuery {
             })
     }
 
-    fn unique_count(&self) -> usize {
-        self.remaining_candidates.len()
+    const fn unique_count(&self) -> usize {
+        self.unique_candidate_count
+    }
+
+    fn positions_at(&self, node_idx: u32) -> &[usize] {
+        self.candidate_positions
+            .get(node_idx as usize)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Builds the sorted set of remaining candidate node indices.
+    ///
+    /// Only the `RangePruned` and `SegmentJumps` traversal modes need this;
+    /// it is deliberately not computed up front so that `PlainIndexedBfs`
+    /// queries never pay for it.
+    fn remaining_candidate_set(&self) -> BTreeSet<u32> {
+        self.candidate_positions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, positions)| {
+                if positions.is_empty() {
+                    None
+                } else {
+                    Some(u32::try_from(idx).expect("node index fits u32"))
+                }
+            })
+            .collect()
     }
 }
 
@@ -566,10 +592,11 @@ where
         C: IntoIterator<Item = &'a Id>,
         Id: 'a,
     {
-        let mut candidate_positions: HashMap<u32, Vec<usize>> = HashMap::new();
-        let mut remaining_candidates = BTreeSet::new();
+        let mut candidate_positions: Vec<Vec<usize>> =
+            vec![Vec::new(); self.children_by_index.len()];
         let mut candidate_count = 0_usize;
         let mut known_candidate_count = 0_usize;
+        let mut unique_candidate_count = 0_usize;
         let mut min_candidate_index = None;
         let mut max_candidate_index = None;
         for (idx, candidate) in candidates.into_iter().enumerate() {
@@ -577,11 +604,11 @@ where
             let Some(&candidate_idx) = self.id_to_index.get(candidate) else {
                 continue;
             };
-            candidate_positions
-                .entry(candidate_idx)
-                .or_default()
-                .push(idx);
-            remaining_candidates.insert(candidate_idx);
+            let positions = &mut candidate_positions[candidate_idx as usize];
+            if positions.is_empty() {
+                unique_candidate_count = unique_candidate_count.saturating_add(1);
+            }
+            positions.push(idx);
             known_candidate_count = known_candidate_count.saturating_add(1);
             min_candidate_index =
                 Some(min_candidate_index.map_or(candidate_idx, |min: u32| min.min(candidate_idx)));
@@ -592,8 +619,8 @@ where
         CandidateQuery {
             candidate_count,
             known_candidate_position_count: known_candidate_count,
+            unique_candidate_count,
             candidate_positions,
-            remaining_candidates,
             min_candidate_index,
             max_candidate_index,
         }
@@ -636,14 +663,12 @@ where
         let mut remaining_known_candidates = candidates.known_candidate_position_count;
 
         while let Some(curr) = queue.pop_front() {
-            if let Some(positions) = candidates.candidate_positions.get(&curr) {
-                for &position in positions {
-                    if results[position] {
-                        continue;
-                    }
-                    results[position] = true;
-                    remaining_known_candidates = remaining_known_candidates.saturating_sub(1);
+            for &position in candidates.positions_at(curr) {
+                if results[position] {
+                    continue;
                 }
+                results[position] = true;
+                remaining_known_candidates = remaining_known_candidates.saturating_sub(1);
             }
 
             if remaining_known_candidates == 0 {
@@ -683,9 +708,10 @@ where
         let mut reachable = vec![false; self.children_by_index.len()];
         let mut queue = self.seed_queue(seeds, &mut reachable);
         let mut remaining_known_candidates = candidates.known_candidate_position_count;
-        let mut remaining_candidates = candidates.remaining_candidates.clone();
+        let mut remaining_candidates = candidates.remaining_candidate_set();
         while let Some(curr) = queue.pop_front() {
-            if let Some(positions) = candidates.candidate_positions.get(&curr) {
+            let positions = candidates.positions_at(curr);
+            if !positions.is_empty() {
                 for &position in positions {
                     if results[position] {
                         continue;
@@ -742,7 +768,11 @@ where
         let mut reachable = vec![false; self.children_by_index.len()];
         let mut candidate_positions_by_segment: Vec<Vec<(u32, u32, usize)>> =
             vec![Vec::new(); self.segments.len()];
-        for (&candidate_idx, positions) in &candidates.candidate_positions {
+        for (candidate_idx, positions) in candidates.candidate_positions.iter().enumerate() {
+            if positions.is_empty() {
+                continue;
+            }
+            let candidate_idx = u32::try_from(candidate_idx).expect("node index fits u32");
             let segment_id = self.node_segment[candidate_idx as usize] as usize;
             let segment_offset = self.node_segment_offset[candidate_idx as usize];
             for &position in positions {
@@ -761,7 +791,7 @@ where
         let mut results = vec![false; candidates.candidate_count];
         let mut queue = self.seed_queue(seeds, &mut reachable);
         let mut remaining_known_candidates = candidates.known_candidate_position_count;
-        let mut remaining_candidates = candidates.remaining_candidates.clone();
+        let mut remaining_candidates = candidates.remaining_candidate_set();
         let mut segment_covered_from = vec![usize::MAX; self.segments.len()];
         let mut segment_expanded = vec![false; self.segments.len()];
         while let Some(curr) = queue.pop_front() {
