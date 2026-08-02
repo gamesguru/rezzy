@@ -736,6 +736,55 @@ fn run_branchy_low_memory_suite() {
     }
 }
 
+/// Mirrors the `resolve::subgraph` forward-reachability call site: candidates
+/// are every node in the graph, so the caller only wants the reachable id
+/// set, not positional filtering against an external candidate list.
+fn benchmark_branchy_forward_reachable_ids(
+    node_count: usize,
+    seed_count: usize,
+) -> (Duration, Duration, u32, usize) {
+    let branchy = BranchyDag::new(node_count, seed_count);
+    let index = RangePrefilterReachability::build(&branchy.graph);
+
+    let iterations = if node_count <= 50_000 { 10 } else { 3 };
+
+    let filter_start = Instant::now();
+    let mut filter_hits = 0usize;
+    for _ in 0..iterations {
+        filter_hits = index
+            .filter_reachable(branchy.seeds.iter(), branchy.candidates.iter())
+            .len();
+    }
+    let filter_elapsed = filter_start.elapsed();
+
+    let direct_start = Instant::now();
+    let mut direct_hits = 0usize;
+    for _ in 0..iterations {
+        direct_hits = index.forward_reachable_ids(branchy.seeds.iter()).count();
+    }
+    let direct_elapsed = direct_start.elapsed();
+
+    assert_eq!(filter_hits, direct_hits);
+    black_box((filter_hits, direct_hits));
+    (filter_elapsed, direct_elapsed, iterations, direct_hits)
+}
+
+fn run_branchy_forward_reachable_ids_suite() {
+    println!(
+        "\n--- branchy forward_reachable_ids vs filter_reachable (subgraph.rs call-site shape: |C|=|V|) ---"
+    );
+    for (node_count, seed_count) in [(25_000, 64), (100_000, 128), (250_000, 256)] {
+        let (filter_elapsed, direct_elapsed, iterations, hits) =
+            benchmark_branchy_forward_reachable_ids(node_count, seed_count);
+        let filter_avg_ms = filter_elapsed.as_secs_f64() * 1e3 / f64::from(iterations);
+        let direct_avg_ms = direct_elapsed.as_secs_f64() * 1e3 / f64::from(iterations);
+        let speedup = filter_avg_ms / direct_avg_ms;
+        println!(
+            "resolve/forward-reachable-ids/{node_count} hits={hits}: filter_reachable={filter_avg_ms:.6} ms/query ({iterations} iters), forward_reachable_ids={direct_avg_ms:.6} ms/query ({iterations} iters), speedup={speedup:.2}x"
+        );
+    }
+}
+
 fn run_topology_query_matrix() {
     println!(
         "\n--- topology/query matrix (compact exact reachability vs prebuilt bfs; bfs adjacency prebuilt in fixture) ---"
@@ -914,6 +963,7 @@ fn run_candidate_sweep_suite() {
 fn main() {
     run_branchy_exact_suite();
     run_branchy_low_memory_suite();
+    run_branchy_forward_reachable_ids_suite();
     run_topology_stats_suite();
     run_topology_query_matrix();
     run_repeated_seed_cache_suite();

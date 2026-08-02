@@ -99,14 +99,11 @@ where
     }
 
     // Forward-reachability fast path: build a compact exact accelerator once,
-    // then filter the entire candidate set in a single pass.
+    // then enumerate the forward-reachable set directly (no candidate-list
+    // indirection — every node in auth_graph is a candidate here anyway).
     let reachability = RangePrefilterReachability::build(auth_graph);
-    let candidate_ids: Vec<&Id> = auth_graph.keys().collect();
-    let forward_indices =
-        reachability.filter_reachable(conflicted_set.iter(), candidate_ids.iter().copied());
-
-    for idx in forward_indices {
-        forwards_reachable.insert(candidate_ids[idx].clone());
+    for id in reachability.forward_reachable_ids(conflicted_set.iter()) {
+        forwards_reachable.insert(id.clone());
     }
 
     // Intersect and build the final Conflicted Subgraph

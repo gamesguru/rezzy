@@ -413,13 +413,23 @@ impl CandidateQuery {
 /// structural, not a bug, and no traversal-mode choice can avoid it since
 /// mode selection happens after the pass runs.
 ///
-/// Not expected to matter in practice: Matrix state resolution candidate
-/// sets are the conflicted-state antichain at a DAG tip — dozens to
-/// hundreds of events, never the full timeline. `|C| ≈ |V|` is a synthetic
-/// worst case exercised by the `range-prefilter` branchy benchmark suite.
+/// Callers who want "every node reachable from these seeds" rather than
+/// "which of these specific candidates are reachable" should use
+/// [`RangePrefilterReachability::forward_reachable_ids`] instead of
+/// [`RangePrefilterReachability::filter_reachable`] — it skips this pass
+/// entirely and enumerates the reachable set directly from the BFS, with
+/// cost proportional to the reachable set rather than the whole graph.
+/// This matters in practice: the conflicted-subgraph forward pass
+/// (`resolve::subgraph`) used to build a full-graph candidate list purely
+/// to recover reachable ids, which is exactly the `|C| ≈ |V|` shape above;
+/// it now uses `forward_reachable_ids` and pays none of this cost.
 #[derive(Debug, Clone)]
 pub struct RangePrefilterReachability<Id> {
     id_to_index: HashMap<Id, u32>,
+    /// Inverse of `id_to_index`, ordered by node index. Lets
+    /// [`RangePrefilterReachability::forward_reachable_ids`] map visited
+    /// node indices back to `Id`s without a hash lookup.
+    index_to_id: Vec<Id>,
     children_by_index: Vec<Vec<u32>>,
     descendant_ranges: Vec<(u32, u32)>,
     segments: Vec<Segment>,
@@ -610,6 +620,7 @@ where
     ) -> Self {
         let (topo, children) = collect_topology(graph);
         let id_to_index = index_topology(&topo);
+        let index_to_id: Vec<Id> = topo.iter().map(|&id| id.clone()).collect();
         let (children_by_index, in_degree_by_index) =
             build_indexed_children(topo.len(), children, &id_to_index);
         let descendant_ranges = build_descendant_ranges(&children_by_index);
@@ -623,6 +634,7 @@ where
 
         Self {
             id_to_index,
+            index_to_id,
             children_by_index,
             descendant_ranges,
             segments,
@@ -976,6 +988,38 @@ where
         }
 
         false
+    }
+
+    /// Returns every node forward-reachable from `seeds` (seeds included).
+    ///
+    /// Unlike [`RangePrefilterReachability::filter_reachable`], this does
+    /// not test membership against a caller-supplied candidate list: it
+    /// enumerates the full forward-reachable set directly from the BFS
+    /// visitation, with no per-node hashing or graph-sized scratch space.
+    /// Use this when the caller wants "all reachable ids" rather than
+    /// "which of these specific candidates are reachable" — the latter is
+    /// what [`RangePrefilterReachability::filter_reachable`] is for.
+    pub fn forward_reachable_ids<'a, S>(&'a self, seeds: S) -> impl Iterator<Item = &'a Id> + 'a
+    where
+        S: IntoIterator<Item = &'a Id>,
+        Id: 'a,
+    {
+        let mut reachable = vec![false; self.children_by_index.len()];
+        let mut queue = self.seed_queue(seeds, &mut reachable);
+        let mut visited_indices = Vec::new();
+        while let Some(curr) = queue.pop_front() {
+            visited_indices.push(curr);
+            for &child in &self.children_by_index[curr as usize] {
+                if reachable[child as usize] {
+                    continue;
+                }
+                reachable[child as usize] = true;
+                queue.push_back(child);
+            }
+        }
+        visited_indices
+            .into_iter()
+            .map(move |idx| &self.index_to_id[idx as usize])
     }
 
     /// Returns the descendants of a seed set as candidate indices.
