@@ -378,6 +378,10 @@ where
 
     // Coordinate Projection Phase (Mainline distance mapping)
     let mainline = build_mainline(&resolved, &sort_context);
+    debug_assert!(
+        mainline.is_empty() || mainline.first() == resolved.get(&("m.room.power_levels".into(), String::new())),
+        "Mainline must be ordered head-first (resolved PL event at index 0) for the LUB operator to work correctly!"
+    );
     let mut target_events: alloc::vec::Vec<&LeanEvent<Id, C>> = non_power_events.values().collect();
     let mainline_distances =
         compute_closest_mainline_positions(&mut target_events, &mainline, &sort_context);
