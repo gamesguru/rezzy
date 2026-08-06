@@ -16,8 +16,9 @@
 //!
 //! This module provides [`resolve_lattice_fold`], an alternative to
 //! [`crate::resolve::iterative::resolve_iterative_sort`] that replaces the sequential mainline sort
-//! with a parallel, `O(1)` causal coordinatization projection and commutative
-//! join-semilattice fold.
+//! with a parallel causal coordinatization projection and commutative
+//! join-semilattice fold. Note that this is currently an exploratory hypothesis
+//! that approximates iterative auth-checks using a fixed terminal snapshot.
 //!
 //! ## How it works
 //!
@@ -293,10 +294,10 @@ pub fn route_power_events<
     }
 }
 
-/// Resolves conflicted state using `O(1)` causal coordinatization projection
+/// Resolves conflicted state using causal coordinatization projection
 /// and commutative join-semilattice folding.
 ///
-/// This is functionally equivalent to [`crate::resolve::iterative::resolve_iterative_sort`] but
+/// This is an exploratory hypothesis that approximates [`crate::resolve::iterative::resolve_iterative_sort`] but
 /// replaces the sequential mainline sort + iterative auth-check loop with a
 /// parallel per-key fold. Each non-power event competes for its `(type, state_key)`
 /// slot via the [`is_lattice_winner_better`] LUB operator.
