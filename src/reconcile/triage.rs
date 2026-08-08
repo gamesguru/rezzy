@@ -54,8 +54,8 @@ pub struct StrataEstimate {
 
 /// Estimates the symmetric difference from corresponding strata sketches.
 ///
-/// This is kept crate-private so provisional tail estimates cannot be consumed
-/// without their paired `low_confidence` flag.
+/// This helper stays test-only so production callers use the structured
+/// [`StrataEstimate`] API rather than a bare scalar estimate.
 ///
 /// # Errors
 /// Returns an error when root finding exceeds its work budget.
@@ -116,11 +116,7 @@ fn estimate_delta_internal(
                     return Ok(None);
                 }
 
-                let scaled_stratum = if decoded_tail == 0 {
-                    lowest_decoded.unwrap_or(stratum)
-                } else {
-                    stratum
-                };
+                let scaled_stratum = lowest_decoded.unwrap_or(stratum);
                 let shift =
                     u32::try_from(scaled_stratum).map_err(|_| AlgebraicError::CountOverflow)?;
                 let estimate = decoded_tail
@@ -428,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn low_confidence_estimate_uses_max_tail_not_sum() {
+    fn low_confidence_estimate_uses_lowest_decoded_stratum() {
         let local = [[0; STRATUM_CAPACITY]; STRATA_COUNT];
         let mut remote = local;
 
@@ -438,11 +434,11 @@ mod tests {
         populate_stratum(&mut remote, 4, &[1, 3, 5, 7, 9]);
         populate_stratum(&mut remote, 3, &[1, 3, 5, 7, 9, 11, 13, 15, 17]);
 
-        assert_eq!(estimate_delta(&local, &remote), Ok(Some(160)));
+        assert_eq!(estimate_delta(&local, &remote), Ok(Some(320)));
         assert_eq!(
             estimate_strata(&local, &remote),
             Ok(Some(StrataEstimate {
-                delta: 160,
+                delta: 320,
                 low_confidence: true,
             }))
         );
