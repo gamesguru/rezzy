@@ -13,7 +13,7 @@ use super::{pinsketch, AlgebraicError, SyndromeSketch, STRATA_COUNT, STRATUM_CAP
 pub const MAX_BUCKETED_SKETCH_CAPACITY: usize = 4_096;
 /// Maximum extraction capacity assigned to one bucket.
 pub const MAX_BUCKET_SKETCH_CAPACITY: usize = 32;
-/// Spec fallback estimate when the sparsest residual stratum overflows.
+/// Client-side sketch-mode cutoff for estimates in the saturated regime.
 pub const SATURATED_DELTA_ESTIMATE: u64 = 8 * (1_u64 << 31);
 /// Minimum cardinality implied by an over-capacity stratum-0 decode failure.
 const OVER_CAPACITY_DELTA_FLOOR: u64 = (STRATUM_CAPACITY as u64) + 1;
@@ -128,12 +128,7 @@ fn estimate_delta_internal(
         }
     }
 
-    let Some(stratum) = lowest_decoded else {
-        return Ok(Some((SATURATED_DELTA_ESTIMATE, false)));
-    };
-    if decoded_tail == 0 && stratum != 0 {
-        return Ok(Some((SATURATED_DELTA_ESTIMATE, false)));
-    }
+    let stratum = lowest_decoded.expect("all strata decoded implies stratum 0 decoded");
     let shift = u32::try_from(stratum).map_err(|_| AlgebraicError::CountOverflow)?;
     // saturating_mul overflows to u64::MAX rather than silently collapsing to 0
     // (which the old checked_shl(shift).unwrap_or(0) scale factor could do).
