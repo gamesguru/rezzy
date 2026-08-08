@@ -995,10 +995,11 @@ where
     /// Unlike [`RangePrefilterReachability::filter_reachable`], this does
     /// not test membership against a caller-supplied candidate list: it
     /// enumerates the full forward-reachable set directly from the BFS
-    /// visitation, with no per-node hashing or graph-sized scratch space.
-    /// Use this when the caller wants "all reachable ids" rather than
-    /// "which of these specific candidates are reachable" — the latter is
-    /// what [`RangePrefilterReachability::filter_reachable`] is for.
+    /// visitation. This skips the candidate hashing pass and
+    /// `CandidateQuery` scratch space used by
+    /// [`RangePrefilterReachability::filter_reachable`], which is the main
+    /// win when the caller wants "all reachable ids" rather than "which of
+    /// these specific candidates are reachable".
     pub fn forward_reachable_ids<'a, S>(&'a self, seeds: S) -> impl Iterator<Item = &'a Id> + 'a
     where
         S: IntoIterator<Item = &'a Id>,
@@ -1194,6 +1195,80 @@ mod tests {
             previous_layer = current_layer;
         }
         graph
+    }
+
+    fn build_interleaved_chain_graph(
+        node_count: usize,
+        chain_count: usize,
+    ) -> HashMap<String, LeanEvent<String>> {
+        let mut graph = HashMap::with_capacity(node_count);
+        for idx in 0..node_count {
+            let event_id = format!("interleaved-{idx:04}");
+            let auth_events = if idx < chain_count {
+                Vec::new()
+            } else {
+                let parent_idx = idx
+                    .checked_sub(chain_count)
+                    .expect("idx >= chain_count in this branch");
+                vec![format!("interleaved-{parent_idx:04}")]
+            };
+            graph.insert(
+                event_id.clone(),
+                LeanEvent {
+                    event_id: event_id.clone(),
+                    auth_events,
+                    ..Default::default()
+                },
+            );
+        }
+        graph
+    }
+
+    fn naive_reachable_positions(
+        index: &RangePrefilterReachability<String>,
+        seeds: &[String],
+        candidates: &[String],
+    ) -> Vec<usize> {
+        let mut reachable = vec![false; index.children_by_index.len()];
+        let mut queue = index.seed_queue(seeds.iter(), &mut reachable);
+        while let Some(curr) = queue.pop_front() {
+            for &child in &index.children_by_index[curr as usize] {
+                if reachable[child as usize] {
+                    continue;
+                }
+                reachable[child as usize] = true;
+                queue.push_back(child);
+            }
+        }
+
+        candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(position, candidate)| {
+                index
+                    .id_to_index
+                    .get(candidate)
+                    .and_then(|&idx| reachable[idx as usize].then_some(position))
+            })
+            .collect()
+    }
+
+    fn assert_forced_traversals_match_naive(
+        graph: &HashMap<String, LeanEvent<String>>,
+        seeds: &[String],
+        candidates: &[String],
+    ) {
+        let index = RangePrefilterReachability::build(graph);
+        let query = index.collect_candidates(candidates.iter());
+        let plain = index.filter_reachable_numeric_bfs_with_candidates(seeds.iter(), &query);
+        let range = index.filter_reachable_range_pruned_with_candidates(seeds.iter(), &query);
+        let jumps = index.filter_reachable_segment_jumps(seeds.iter(), &query);
+        let naive = naive_reachable_positions(&index, seeds, candidates);
+
+        for result in [&plain, &range, &jumps] {
+            assert_eq!(result, &naive);
+            assert!(result.windows(2).all(|pair| pair[0] < pair[1]));
+        }
     }
 
     impl Reachability for Dummy {
@@ -1413,7 +1488,7 @@ mod tests {
 
     #[test]
     fn range_prefilter_selects_range_pruned_for_selective_layered_queries() {
-        let graph = build_layered_graph(100, 10);
+        let graph = build_layered_graph(101, 10);
         let index = RangePrefilterReachability::build(&graph);
         let seeds = [String::from("layer-0000-0000")];
         let candidates = [
@@ -1435,5 +1510,59 @@ mod tests {
 
         let (_, mode) = index.filter_reachable_with_mode(seeds.iter(), candidates.iter());
         assert_eq!(mode, TraversalMode::SegmentJumps);
+    }
+
+    #[test]
+    fn forced_traversals_match_naive_bfs_across_topologies() {
+        let chain_candidates = vec![
+            String::from("chain-0008"),
+            String::from("missing-chain"),
+            String::from("chain-0010"),
+            String::from("chain-0016"),
+            String::from("chain-0016"),
+            String::from("chain-0032"),
+            String::from("chain-0048"),
+            String::from("chain-0063"),
+        ];
+        let chain_graph = build_chain_graph(64);
+        let chain_seeds = vec![String::from("chain-0010"), String::from("chain-0030")];
+        assert_forced_traversals_match_naive(&chain_graph, &chain_seeds, &chain_candidates);
+
+        let layered_candidates = vec![
+            String::from("missing-layer"),
+            String::from("layer-0003-0001"),
+            String::from("layer-0004-0001"),
+            String::from("layer-0006-0002"),
+            String::from("layer-0006-0002"),
+            String::from("layer-0008-0003"),
+            String::from("layer-0010-0000"),
+        ];
+        let layered_graph = build_layered_graph(96, 6);
+        let layered_seeds = vec![
+            String::from("layer-0003-0001"),
+            String::from("layer-0003-0004"),
+        ];
+        assert_forced_traversals_match_naive(&layered_graph, &layered_seeds, &layered_candidates);
+
+        let interleaved_candidates = vec![
+            String::from("interleaved-0004"),
+            String::from("interleaved-0008"),
+            String::from("interleaved-0020"),
+            String::from("interleaved-0020"),
+            String::from("interleaved-0032"),
+            String::from("missing-interleaved"),
+            String::from("interleaved-0068"),
+            String::from("interleaved-0092"),
+        ];
+        let interleaved_graph = build_interleaved_chain_graph(96, 4);
+        let interleaved_seeds = vec![
+            String::from("interleaved-0008"),
+            String::from("interleaved-0020"),
+        ];
+        assert_forced_traversals_match_naive(
+            &interleaved_graph,
+            &interleaved_seeds,
+            &interleaved_candidates,
+        );
     }
 }
