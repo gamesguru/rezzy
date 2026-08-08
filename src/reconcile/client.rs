@@ -351,9 +351,10 @@ impl ReconciliationClient {
     /// Selects the next protocol action from local and remote level-0 state.
     ///
     /// `concurrency_headroom` accounts for events expected to arrive during
-    /// the exchange. The strata estimator returns the initial sketch target
-    /// directly. Requests that exceed local policy are capped and ask for a
-    /// bucket summary so the next exchange can localize the difference.
+    /// the exchange. Sketch provisioning follows the MSC rule
+    /// `ceil(1.5 * estimate) + 4`, with `concurrency_headroom` added on top.
+    /// Requests that exceed local policy are capped and ask for a bucket
+    /// summary so the next exchange can localize the difference.
     #[must_use]
     pub fn select_action(
         self,
@@ -392,7 +393,13 @@ impl ReconciliationClient {
 
         let provisioned = u64::try_from(concurrency_headroom)
             .ok()
-            .and_then(|headroom| estimated_delta.checked_add(headroom));
+            .and_then(|headroom| {
+                estimated_delta
+                    .checked_add(estimated_delta / 2)
+                    .and_then(|capacity| capacity.checked_add(estimated_delta % 2))
+                    .and_then(|capacity| capacity.checked_add(4))
+                    .and_then(|capacity| capacity.checked_add(headroom))
+            });
         let target_capacity = provisioned
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY)
@@ -781,7 +788,7 @@ mod tests {
                 requests: vec![BucketRequest {
                     depth: 0,
                     prefix: 0,
-                    capacity: 18,
+                    capacity: 31,
                 }],
                 accumulated_roots: vec![],
             }
@@ -818,7 +825,7 @@ mod tests {
                 requests: vec![BucketRequest {
                     depth: 0,
                     prefix: 0,
-                    capacity: 18,
+                    capacity: 31,
                 }],
                 accumulated_roots: vec![],
             }

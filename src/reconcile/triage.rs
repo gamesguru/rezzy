@@ -42,10 +42,13 @@ pub struct BucketDecodeBatch {
     pub failed_buckets: Vec<(u8, u32)>,
 }
 
-/// Initial requester-side sketch capacity derived from the strata estimator.
+/// Estimated symmetric-difference cardinality derived from the strata sketches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrataEstimate {
+    /// Estimated symmetric-difference cardinality.
     pub estimate: u64,
+    /// Whether the estimate is provisional because decoding stopped at an
+    /// over-capacity stratum and had to extrapolate from the decoded tail.
     pub low_confidence: bool,
 }
 
@@ -64,7 +67,15 @@ fn estimate_delta(
     Ok(estimate_delta_internal(local, remote)?.map(|(estimate, _)| estimate))
 }
 
-/// Estimates the initial sketch capacity and whether the estimate is provisional.
+/// Estimates the symmetric difference and whether that estimate is provisional.
+///
+/// Starting at the sparsest stratum, this decodes the longest consecutive tail.
+/// If `r` is the lowest decoded stratum and `T` is the decoded tail cardinality,
+/// `T * 2^r` estimates the complete difference. Decoding every stratum yields
+/// the exact cardinality.
+///
+/// If even the sparsest residual stratum overflows, this returns `None` so the
+/// caller can route away from sketch mode.
 ///
 /// # Errors
 /// Returns an error when root finding exceeds its work budget.
