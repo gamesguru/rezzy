@@ -351,9 +351,9 @@ impl ReconciliationClient {
     /// Selects the next protocol action from local and remote level-0 state.
     ///
     /// `concurrency_headroom` accounts for events expected to arrive during
-    /// the exchange. Capacity follows the MSC's `ceil(1.5 * count_delta) + 4`
-    /// rule. Requests that exceed local policy are capped and ask for a bucket
-    /// summary so the next exchange can localize the difference.
+    /// the exchange. The strata estimator returns the initial sketch target
+    /// directly. Requests that exceed local policy are capped and ask for a
+    /// bucket summary so the next exchange can localize the difference.
     #[must_use]
     pub fn select_action(
         self,
@@ -375,8 +375,8 @@ impl ReconciliationClient {
             .known_event_count()
             .abs_diff(remote.known_event_count);
         let estimated_delta =
-            match crate::reconcile::triage::estimate_delta(local.strata(), &remote.strata) {
-                Ok(Some(value)) => value.max(count_delta),
+            match crate::reconcile::triage::estimate_strata(local.strata(), &remote.strata) {
+                Ok(Some(estimate)) => estimate.estimate.max(count_delta),
                 Ok(None) | Err(_) => return ClientAction::ExtremityDiff,
             };
 
@@ -392,13 +392,7 @@ impl ReconciliationClient {
 
         let provisioned = u64::try_from(concurrency_headroom)
             .ok()
-            .and_then(|headroom| {
-                estimated_delta
-                    .checked_add(estimated_delta / 2)
-                    .and_then(|capacity| capacity.checked_add(estimated_delta % 2))
-                    .and_then(|capacity| capacity.checked_add(4))
-                    .and_then(|capacity| capacity.checked_add(headroom))
-            });
+            .and_then(|headroom| estimated_delta.checked_add(headroom));
         let target_capacity = provisioned
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY)

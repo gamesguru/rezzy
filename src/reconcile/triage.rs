@@ -51,17 +51,13 @@ pub struct StrataEstimate {
 
 /// Estimates the symmetric difference from corresponding strata sketches.
 ///
-/// Starting at the sparsest stratum, this decodes the longest consecutive tail.
-/// If `r` is the lowest decoded stratum and `T` is the decoded tail cardinality,
-/// `T * 2^r` estimates the complete difference. Decoding every stratum yields
-/// the exact cardinality.
-///
-/// If even the sparsest residual stratum overflows, this falls back to the
-/// spec estimate of `8 * 2^31`.
+/// This is kept crate-private so provisional tail estimates cannot be consumed
+/// without their paired `low_confidence` flag.
 ///
 /// # Errors
 /// Returns an error when root finding exceeds its work budget.
-pub fn estimate_delta(
+#[cfg(test)]
+fn estimate_delta(
     local: &[[u64; STRATUM_CAPACITY]; STRATA_COUNT],
     remote: &[[u64; STRATUM_CAPACITY]; STRATA_COUNT],
 ) -> Result<Option<u64>, AlgebraicError> {
@@ -69,9 +65,6 @@ pub fn estimate_delta(
 }
 
 /// Estimates the initial sketch capacity and whether the estimate is provisional.
-///
-/// The returned `estimate` already applies the MSC capacity rule
-/// `ceil(1.5 * delta) + 4`.
 ///
 /// # Errors
 /// Returns an error when root finding exceeds its work budget.
@@ -82,13 +75,8 @@ pub fn estimate_strata(
     let Some((delta, low_confidence)) = estimate_delta_internal(local, remote)? else {
         return Ok(None);
     };
-    let estimate = delta
-        .checked_add(delta / 2)
-        .and_then(|capacity| capacity.checked_add(delta % 2))
-        .and_then(|capacity| capacity.checked_add(4))
-        .unwrap_or(u64::MAX);
     Ok(Some(StrataEstimate {
-        estimate,
+        estimate: delta,
         low_confidence,
     }))
 }
@@ -113,16 +101,17 @@ fn estimate_delta_internal(
                 lowest_decoded = Some(stratum);
             }
             Err(AlgebraicError::DecodeFailure) => {
-                if decoded_tail == 0 {
-                    if stratum == 0 {
-                        return Ok(Some((OVER_CAPACITY_DELTA_FLOOR, true)));
-                    }
-                    if stratum == STRATA_COUNT - 1 {
-                        return Ok(None);
-                    }
+                if lowest_decoded.is_none() && stratum == STRATA_COUNT - 1 {
+                    return Ok(None);
                 }
 
-                let shift = u32::try_from(stratum).map_err(|_| AlgebraicError::CountOverflow)?;
+                let scaled_stratum = if decoded_tail == 0 {
+                    lowest_decoded.unwrap_or(stratum)
+                } else {
+                    stratum
+                };
+                let shift =
+                    u32::try_from(scaled_stratum).map_err(|_| AlgebraicError::CountOverflow)?;
                 let estimate = decoded_tail
                     .max(OVER_CAPACITY_DELTA_FLOOR)
                     .saturating_mul(1_u64 << shift);
@@ -397,13 +386,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_sparse_tail_uses_spec_fallback_estimate() {
+    fn empty_sparse_tail_uses_low_confidence_tail_estimate() {
         let local = [[0; STRATUM_CAPACITY]; STRATA_COUNT];
         let mut remote = local;
         for value in (1..=17).step_by(2) {
             toggle_stratum(&mut remote, value);
         }
-        assert_eq!(estimate_delta(&local, &remote), Ok(Some(9)));
+        assert_eq!(estimate_delta(&local, &remote), Ok(Some(18)));
     }
 
     #[test]
@@ -442,7 +431,7 @@ mod tests {
         assert_eq!(
             estimate_strata(&local, &remote),
             Ok(Some(StrataEstimate {
-                estimate: 244,
+                estimate: 160,
                 low_confidence: true,
             }))
         );

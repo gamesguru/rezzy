@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 use rezzy::{
-    build_bucket_sketches, decode_bucket_sketches, estimate_delta, gf64_mul, BucketDecodeBatch,
+    build_bucket_sketches, decode_bucket_sketches, estimate_strata, gf64_mul, BucketDecodeBatch,
     BucketDecodeSuccess, BucketExchange, BucketRequest, ClientAction, ElementHash,
     ReconciliationClient, RemoteDigest, ResidentKernel, SyndromeSketch,
     MAX_BUCKETED_SKETCH_CAPACITY, MAX_BUCKETS_PER_ROUND, MAX_SKETCH_CAPACITY,
@@ -257,9 +257,10 @@ fn benchmark_bucket_exchange_from_pool(
         frame_matches: true,
         has_unknown_extremity: false,
     };
-    let estimated_delta = estimate_delta(local.strata(), remote.strata())
+    let estimated_delta = estimate_strata(local.strata(), remote.strata())
         .ok()
-        .flatten();
+        .flatten()
+        .map(|estimate| estimate.estimate);
     let client = ReconciliationClient::default().allow_unlimited_delta();
     let initial_action = client.select_action(&local, remote_digest, 0);
 
@@ -402,7 +403,7 @@ fn main() {
         }
         let iterations = if count == 100 { 10 } else { 100 };
         let elapsed = measure(iterations, || {
-            let _ = black_box(estimate_delta(local.strata(), remote.strata()));
+            let _ = black_box(estimate_strata(local.strata(), remote.strata()));
         });
         report(
             &format!("triage/estimate strata/{count}"),
