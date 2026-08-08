@@ -776,14 +776,21 @@ mod tests {
                 &local,
                 RemoteDigest {
                     digest: 1,
-                    known_event_count: 17,
+                    known_event_count: 9,
                     strata: *remote.strata(),
                     frame_matches: true,
                     has_unknown_extremity: false,
                 },
                 0,
             ),
-            ClientAction::ExtremityDiff
+            ClientAction::BucketSketches {
+                requests: vec![BucketRequest {
+                    depth: 0,
+                    prefix: 0,
+                    capacity: 18,
+                }],
+                accumulated_roots: vec![],
+            }
         );
     }
 
@@ -806,14 +813,21 @@ mod tests {
                 &local,
                 RemoteDigest {
                     digest: 1,
-                    known_event_count: 17,
+                    known_event_count: 9,
                     strata: *remote.strata(),
                     frame_matches: true,
                     has_unknown_extremity: false,
                 },
                 0,
             ),
-            ClientAction::ExtremityDiff
+            ClientAction::BucketSketches {
+                requests: vec![BucketRequest {
+                    depth: 0,
+                    prefix: 0,
+                    capacity: 18,
+                }],
+                accumulated_roots: vec![],
+            }
         );
     }
 

@@ -15,6 +15,8 @@ pub const MAX_BUCKETED_SKETCH_CAPACITY: usize = 4_096;
 pub const MAX_BUCKET_SKETCH_CAPACITY: usize = 32;
 /// Spec fallback estimate when the sparsest residual stratum overflows.
 pub const SATURATED_DELTA_ESTIMATE: u64 = 8 * (1_u64 << 31);
+/// Minimum cardinality implied by an over-capacity stratum-0 decode failure.
+const OVER_CAPACITY_DELTA_FLOOR: u64 = (STRATUM_CAPACITY as u64) + 1;
 
 /// One localized sketch request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +42,13 @@ pub struct BucketDecodeBatch {
     pub failed_buckets: Vec<(u8, u32)>,
 }
 
+/// Initial requester-side sketch capacity derived from the strata estimator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StrataEstimate {
+    pub estimate: u64,
+    pub low_confidence: bool,
+}
+
 /// Estimates the symmetric difference from corresponding strata sketches.
 ///
 /// Starting at the sparsest stratum, this decodes the longest consecutive tail.
@@ -56,6 +65,38 @@ pub fn estimate_delta(
     local: &[[u64; STRATUM_CAPACITY]; STRATA_COUNT],
     remote: &[[u64; STRATUM_CAPACITY]; STRATA_COUNT],
 ) -> Result<Option<u64>, AlgebraicError> {
+    Ok(estimate_delta_internal(local, remote)?.map(|(estimate, _)| estimate))
+}
+
+/// Estimates the initial sketch capacity and whether the estimate is provisional.
+///
+/// The returned `estimate` already applies the MSC capacity rule
+/// `ceil(1.5 * delta) + 4`.
+///
+/// # Errors
+/// Returns an error when root finding exceeds its work budget.
+pub fn estimate_strata(
+    local: &[[u64; STRATUM_CAPACITY]; STRATA_COUNT],
+    remote: &[[u64; STRATUM_CAPACITY]; STRATA_COUNT],
+) -> Result<Option<StrataEstimate>, AlgebraicError> {
+    let Some((delta, low_confidence)) = estimate_delta_internal(local, remote)? else {
+        return Ok(None);
+    };
+    let estimate = delta
+        .checked_add(delta / 2)
+        .and_then(|capacity| capacity.checked_add(delta % 2))
+        .and_then(|capacity| capacity.checked_add(4))
+        .unwrap_or(u64::MAX);
+    Ok(Some(StrataEstimate {
+        estimate,
+        low_confidence,
+    }))
+}
+
+fn estimate_delta_internal(
+    local: &[[u64; STRATUM_CAPACITY]; STRATA_COUNT],
+    remote: &[[u64; STRATUM_CAPACITY]; STRATA_COUNT],
+) -> Result<Option<(u64, bool)>, AlgebraicError> {
     let mut decoded_tail = 0_u64;
     let mut lowest_decoded = None;
 
@@ -71,21 +112,36 @@ pub fn estimate_delta(
                     .ok_or(AlgebraicError::CountOverflow)?;
                 lowest_decoded = Some(stratum);
             }
-            Err(AlgebraicError::DecodeFailure) => break,
+            Err(AlgebraicError::DecodeFailure) => {
+                if decoded_tail == 0 {
+                    if stratum == 0 {
+                        return Ok(Some((OVER_CAPACITY_DELTA_FLOOR, true)));
+                    }
+                    if stratum == STRATA_COUNT - 1 {
+                        return Ok(None);
+                    }
+                }
+
+                let shift = u32::try_from(stratum).map_err(|_| AlgebraicError::CountOverflow)?;
+                let estimate = decoded_tail
+                    .max(OVER_CAPACITY_DELTA_FLOOR)
+                    .saturating_mul(1_u64 << shift);
+                return Ok(Some((estimate, true)));
+            }
             Err(error) => return Err(error),
         }
     }
 
     let Some(stratum) = lowest_decoded else {
-        return Ok(Some(SATURATED_DELTA_ESTIMATE));
+        return Ok(Some((SATURATED_DELTA_ESTIMATE, false)));
     };
     if decoded_tail == 0 && stratum != 0 {
-        return Ok(Some(SATURATED_DELTA_ESTIMATE));
+        return Ok(Some((SATURATED_DELTA_ESTIMATE, false)));
     }
     let shift = u32::try_from(stratum).map_err(|_| AlgebraicError::CountOverflow)?;
     // saturating_mul overflows to u64::MAX rather than silently collapsing to 0
     // (which the old checked_shl(shift).unwrap_or(0) scale factor could do).
-    Ok(Some(decoded_tail.saturating_mul(1_u64 << shift)))
+    Ok(Some((decoded_tail.saturating_mul(1_u64 << shift), false)))
 }
 
 /// Parses and independently decodes concatenated residual bucket sketches.
@@ -319,6 +375,16 @@ mod tests {
         }
     }
 
+    fn populate_stratum(
+        strata: &mut [[u64; STRATUM_CAPACITY]; STRATA_COUNT],
+        stratum: usize,
+        odd_values: &[u64],
+    ) {
+        for odd in odd_values {
+            toggle_stratum(strata, odd << stratum);
+        }
+    }
+
     #[test]
     fn strata_tail_is_exact_when_every_stratum_decodes() {
         let local = [[0; STRATUM_CAPACITY]; STRATA_COUNT];
@@ -337,7 +403,67 @@ mod tests {
         for value in (1..=17).step_by(2) {
             toggle_stratum(&mut remote, value);
         }
-        assert_eq!(estimate_delta(&local, &remote), Ok(Some(8_u64 << 31)));
+        assert_eq!(estimate_delta(&local, &remote), Ok(Some(9)));
+    }
+
+    #[test]
+    fn strata_estimator_marks_stratum_zero_overflow_low_confidence() {
+        let local = [[0; STRATUM_CAPACITY]; STRATA_COUNT];
+        let mut remote = local;
+        for value in (1..=17).step_by(2) {
+            toggle_stratum(&mut remote, value);
+        }
+
+        assert_eq!(
+            pinsketch::decode(&remote[0], STRATUM_CAPACITY),
+            Err(AlgebraicError::DecodeFailure)
+        );
+        assert_eq!(
+            estimate_strata(&local, &remote),
+            Ok(Some(StrataEstimate {
+                estimate: 18,
+                low_confidence: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn low_confidence_estimate_uses_max_tail_not_sum() {
+        let local = [[0; STRATUM_CAPACITY]; STRATA_COUNT];
+        let mut remote = local;
+
+        populate_stratum(&mut remote, 7, &[1, 3, 5, 7, 9]);
+        populate_stratum(&mut remote, 6, &[1, 3, 5, 7, 9]);
+        populate_stratum(&mut remote, 5, &[1, 3, 5, 7, 9]);
+        populate_stratum(&mut remote, 4, &[1, 3, 5, 7, 9]);
+        populate_stratum(&mut remote, 3, &[1, 3, 5, 7, 9, 11, 13, 15, 17]);
+
+        assert_eq!(estimate_delta(&local, &remote), Ok(Some(160)));
+        assert_eq!(
+            estimate_strata(&local, &remote),
+            Ok(Some(StrataEstimate {
+                estimate: 244,
+                low_confidence: true,
+            }))
+        );
+    }
+
+    #[test]
+    fn highest_stratum_overflow_remains_unmeasurable() {
+        let local = [[0; STRATUM_CAPACITY]; STRATA_COUNT];
+        let mut remote = local;
+        populate_stratum(
+            &mut remote,
+            STRATA_COUNT - 1,
+            &[1, 3, 5, 7, 9, 11, 13, 15, 17],
+        );
+
+        assert_eq!(
+            pinsketch::decode(&remote[STRATA_COUNT - 1], STRATUM_CAPACITY),
+            Err(AlgebraicError::DecodeFailure)
+        );
+        assert_eq!(estimate_delta(&local, &remote), Ok(None));
+        assert_eq!(estimate_strata(&local, &remote), Ok(None));
     }
 
     #[test]
