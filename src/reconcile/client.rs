@@ -22,6 +22,15 @@ pub const MAX_RECONCILIATION_ROUNDS: usize = 20;
 /// Maximum number of bucket requests emitted in one reconciliation round.
 pub const MAX_BUCKETS_PER_ROUND: usize = 128;
 
+/// MSC4521 requester-side provisioning: `ceil(1.5 * delta) + 4`, plus headroom.
+fn provision_capacity(delta: u64, headroom: u64) -> Option<u64> {
+    delta
+        .checked_add(delta / 2)
+        .and_then(|capacity| capacity.checked_add(delta % 2))
+        .and_then(|capacity| capacity.checked_add(4))
+        .and_then(|capacity| capacity.checked_add(headroom))
+}
+
 /// Requester policy for one MSC0501 reconciliation exchange.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReconciliationClient {
@@ -377,8 +386,8 @@ impl ReconciliationClient {
             .abs_diff(remote.known_event_count);
         let estimated_delta =
             match crate::reconcile::triage::estimate_strata(local.strata(), &remote.strata) {
-                Ok(Some(estimate)) => estimate.estimate.max(count_delta),
-                Ok(None) | Err(_) => return ClientAction::ExtremityDiff,
+                Ok(Some(estimate)) if !estimate.low_confidence => estimate.delta.max(count_delta),
+                Ok(Some(_) | None) | Err(_) => return ClientAction::ExtremityDiff,
             };
 
         if estimated_delta >= SATURATED_DELTA_ESTIMATE {
@@ -393,13 +402,7 @@ impl ReconciliationClient {
 
         let provisioned = u64::try_from(concurrency_headroom)
             .ok()
-            .and_then(|headroom| {
-                estimated_delta
-                    .checked_add(estimated_delta / 2)
-                    .and_then(|capacity| capacity.checked_add(estimated_delta % 2))
-                    .and_then(|capacity| capacity.checked_add(4))
-                    .and_then(|capacity| capacity.checked_add(headroom))
-            });
+            .and_then(|headroom| provision_capacity(estimated_delta, headroom));
         let target_capacity = provisioned
             .and_then(|value| usize::try_from(value).ok())
             .unwrap_or(crate::reconcile::triage::MAX_BUCKETED_SKETCH_CAPACITY)
@@ -510,10 +513,7 @@ impl ReconciliationClient {
                     return ClientAction::ExtremityDiff;
                 };
                 let target = share.max(floor_u64);
-                let provisioned = target
-                    .checked_add(target / 2)
-                    .and_then(|value| value.checked_add(target % 2))
-                    .and_then(|value| value.checked_add(4));
+                let provisioned = provision_capacity(target, 0);
                 let capacity = provisioned
                     .and_then(|value| usize::try_from(value).ok())
                     .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY));
@@ -542,10 +542,7 @@ impl ReconciliationClient {
                     return ClientAction::ExtremityDiff;
                 };
                 let target = (share / 2).max(floor_u64);
-                let provisioned = target
-                    .checked_add(target / 2)
-                    .and_then(|value| value.checked_add(target % 2))
-                    .and_then(|value| value.checked_add(4));
+                let provisioned = provision_capacity(target, 0);
                 let capacity = provisioned
                     .and_then(|value| usize::try_from(value).ok())
                     .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY));
@@ -689,6 +686,12 @@ mod tests {
     }
 
     #[test]
+    fn provision_capacity_rounds_up_odd_deltas() {
+        assert_eq!(provision_capacity(5, 2), Some(14));
+        assert_eq!(provision_capacity(18, 0), Some(31));
+    }
+
+    #[test]
     fn caps_large_and_two_sided_differences_for_localization() {
         let client = ReconciliationClient::new(16).unwrap();
         let local = accumulator(&[hash(1, 1)]);
@@ -784,14 +787,7 @@ mod tests {
                 },
                 0,
             ),
-            ClientAction::BucketSketches {
-                requests: vec![BucketRequest {
-                    depth: 0,
-                    prefix: 0,
-                    capacity: 31,
-                }],
-                accumulated_roots: vec![],
-            }
+            ClientAction::ExtremityDiff
         );
     }
 
@@ -821,14 +817,7 @@ mod tests {
                 },
                 0,
             ),
-            ClientAction::BucketSketches {
-                requests: vec![BucketRequest {
-                    depth: 0,
-                    prefix: 0,
-                    capacity: 31,
-                }],
-                accumulated_roots: vec![],
-            }
+            ClientAction::ExtremityDiff
         );
     }
 

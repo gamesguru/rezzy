@@ -46,7 +46,7 @@ pub struct BucketDecodeBatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrataEstimate {
     /// Estimated symmetric-difference cardinality.
-    pub estimate: u64,
+    pub delta: u64,
     /// Whether the estimate is provisional because decoding stopped at an
     /// over-capacity stratum and had to extrapolate from the decoded tail.
     pub low_confidence: bool,
@@ -87,7 +87,7 @@ pub fn estimate_strata(
         return Ok(None);
     };
     Ok(Some(StrataEstimate {
-        estimate: delta,
+        delta,
         low_confidence,
     }))
 }
@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(
             estimate_strata(&local, &remote),
             Ok(Some(StrataEstimate {
-                estimate: 18,
+                delta: 18,
                 low_confidence: true,
             }))
         );
@@ -442,7 +442,7 @@ mod tests {
         assert_eq!(
             estimate_strata(&local, &remote),
             Ok(Some(StrataEstimate {
-                estimate: 160,
+                delta: 160,
                 low_confidence: true,
             }))
         );
