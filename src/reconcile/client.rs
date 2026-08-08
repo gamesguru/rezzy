@@ -386,8 +386,8 @@ impl ReconciliationClient {
             .abs_diff(remote.known_event_count);
         let estimated_delta =
             match crate::reconcile::triage::estimate_strata(local.strata(), &remote.strata) {
-                Ok(Some(estimate)) if !estimate.low_confidence => estimate.delta.max(count_delta),
-                Ok(Some(_) | None) | Err(_) => return ClientAction::ExtremityDiff,
+                Ok(Some(estimate)) => estimate.delta.max(count_delta),
+                Ok(None) | Err(_) => return ClientAction::ExtremityDiff,
             };
 
         if estimated_delta >= SATURATED_DELTA_ESTIMATE {
@@ -787,7 +787,14 @@ mod tests {
                 },
                 0,
             ),
-            ClientAction::ExtremityDiff
+            ClientAction::BucketSketches {
+                requests: vec![BucketRequest {
+                    depth: 0,
+                    prefix: 0,
+                    capacity: 31,
+                }],
+                accumulated_roots: vec![],
+            }
         );
     }
 
@@ -817,7 +824,14 @@ mod tests {
                 },
                 0,
             ),
-            ClientAction::ExtremityDiff
+            ClientAction::BucketSketches {
+                requests: vec![BucketRequest {
+                    depth: 0,
+                    prefix: 0,
+                    capacity: 31,
+                }],
+                accumulated_roots: vec![],
+            }
         );
     }
 
