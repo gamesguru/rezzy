@@ -1,5 +1,5 @@
 // CLI-only: Multi-file event set merging.
-#![cfg(feature = "cli")]
+#![cfg(feature = "cli-common")]
 use std::string::String;
 use std::vec::Vec;
 

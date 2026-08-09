@@ -96,7 +96,7 @@ pub use state::*;
 /// timeline-oriented output and the raw resolved-state view without depending
 /// on the CLI binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
+#[cfg_attr(feature = "cli-common", derive(clap::ValueEnum))]
 pub enum OutputFormat {
     #[default]
     Events,
@@ -105,7 +105,7 @@ pub enum OutputFormat {
     Federation,
     Summary,
     Timeline,
-    #[cfg_attr(feature = "cli", value(alias = "resolve_state"))]
+    #[cfg_attr(feature = "cli-common", value(alias = "resolve_state"))]
     ResolveState,
 }
 
