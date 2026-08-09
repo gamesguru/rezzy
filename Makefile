@@ -75,8 +75,8 @@ lint: ##H Run all linters
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .PHONY: rust/build
-rust/build: ##H Compile Rust binary (release), falling back to rustls if native-tls/OpenSSL fails to build
-	./scripts/cargo-tls-fallback.sh build --release --timings
+rust/build: ##H Compile Rust binary (release)
+	$(CARGO) build --locked --release --timings --features cli
 
 .PHONY: rust/doc
 rust/doc: ##H Generate rustdoc API documentation
@@ -116,8 +116,8 @@ rust/clean: ##H Remove Rust build artifacts
 	rm -rf .coverage/
 
 .PHONY: rust/install
-rust/install: ##H Install rezzy binary to cargo bin, falling back to rustls if native-tls/OpenSSL fails to build
-	./scripts/cargo-tls-fallback.sh install --path . --bin rezzy
+rust/install: ##H Install rezzy binary to cargo bin
+	$(CARGO) install --locked --features cli --path . --bin rezzy
 
 .PHONY: rust/uninstall
 rust/uninstall: ##H Uninstall rezzy binary from cargo bin

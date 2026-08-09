@@ -73,7 +73,7 @@ impl<T: Clone + Eq + core::hash::Hash + Ord + core::fmt::Debug + core::fmt::Disp
 /// **Key invariant:** `users` in `m.room.power_levels` is preserved on redaction
 /// in ALL versions. Redaction alone cannot cause the PL wipeout vulnerability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-#[cfg_attr(feature = "cli-common", derive(clap::ValueEnum))]
+#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[allow(non_camel_case_types)]
 pub enum StateResVersion {
     /// State Resolution V1 (room version 1).

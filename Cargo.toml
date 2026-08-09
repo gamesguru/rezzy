@@ -45,18 +45,12 @@ ignored = [
     # Direct optional anchors for transitive CLI dependency versions that still
     # parse and build on the Rust 1.75 MSRV.
     "idna_adapter",
-    "native-tls",
-    "openssl",
-    "openssl-sys",
 ]
 
 [[bin]]
 name = "rezzy"
 path = "src/bin/rezzy/main.rs"
-# Only cli-common is strictly required to build; a TLS backend (tls-native
-# and/or tls-rustls, both pulled in by the default `cli` feature) is checked
-# at runtime in network.rs so `--features cli-rustls` alone still builds.
-required-features = ["cli-common"]
+required-features = ["cli"]
 
 [[bin]]
 name = "regen_oracles"
@@ -71,20 +65,15 @@ path = "scripts/bench_files.rs"
 default = ["std", "hashing"]
 std = ["alloc", "serde_json/std", "serde/std"]
 alloc = []
-cli = ["cli-common", "tls-native"]
-# Base CLI bits with no TLS backend chosen yet — pick `tls-native` or
-# `tls-rustls` (or both) on top of this.
-cli-common = ["std", "dep:clap", "dep:anyhow", "dep:ureq", "dep:idna_adapter", "mimalloc"]
-# System OpenSSL via native-tls. Default backend: integrates with the OS
-# trust store, but is only as portable as `openssl-sys`'s pregenerated
-# bindings — a system OpenSSL newer than those (e.g. a fresh point release)
-# can fail to *link*, not just fail at runtime. See `tls-rustls` fallback.
-tls-native = ["dep:native-tls", "dep:openssl", "dep:openssl-sys", "ureq/native-tls"]
-# Pure-Rust TLS via rustls. No system OpenSSL dependency at all, so it can't
-# hit the openssl-sys/system-version mismatch that `tls-native` can. Use
-# `--no-default-features --features cli-rustls` when `cli` fails to build.
-tls-rustls = ["ureq/tls"]
-cli-rustls = ["cli-common", "tls-rustls"]
+cli = [
+    "std",
+    "dep:clap",
+    "dep:anyhow",
+    "dep:ureq",
+    "dep:idna_adapter",
+    "mimalloc",
+    "ureq/tls",
+]
 regen = ["std"]
 hashing = []
 signing = []
@@ -112,14 +101,7 @@ idna_adapter = { version = ">=1.0, <1.2", optional = true, default-features = fa
 imbl = { version = "3.0", default-features = false, features = ["serde"] }
 insta = { version = "1.47.2", optional = true }
 mimalloc = { version = "0.1.52", optional = true }
-# Note: pulled in only by the `cli` feature (not part of `default`), so this
-# does not affect the library's rust-version = "1.75" MSRV. openssl >=0.10.79
-# requires rustc 1.80+, so building with `--features cli` needs rustc 1.80+.
-# Bound to the current semver-major/minor lines to avoid unexpected breaking
-# releases or MSRV bumps for downstream `cli` consumers.
-native-tls = { version = ">=0.2.11, <0.3", optional = true, default-features = false }
-openssl = { version = ">=0.10.64, <0.11", optional = true, default-features = false }
-openssl-sys = { version = ">=0.9.101, <0.10", optional = true, default-features = false }
+
 roaring = "0.10" # compatible with the Rust 1.75 MSRV
 ruma-common = { version = "0.19.0", optional = true }
 ruma-events = { version = "0.34.0", optional = true }
