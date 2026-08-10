@@ -1588,6 +1588,131 @@ where
     result
 }
 
+// ─── Gap-fill depth hardening ─────────────────────────────────────────
+
+/// A `prev_events` edge whose two endpoints' wire-supplied `depth` values
+/// are not consistent with the DAG structure: the child's claimed `depth`
+/// does not exceed its parent's.
+///
+/// Both `depth` and `prev_events` are covered by an event's content hash
+/// (and therefore its signature), so a signature proves the sender *said*
+/// `depth: N` — it doesn't prove `N` is a truthful function of the parents
+/// it also signed. `prev_events` is checkable against the DAG the local
+/// server already holds; `depth` is not independently checkable at all
+/// except by comparing it back against that same DAG. That comparison is
+/// what this type reports: a byzantine or buggy peer can attach any
+/// `depth` it likes, and this flags claims that are structurally
+/// impossible given the parent it also claims.
+///
+/// This only checks *relative* monotonicity across a single edge, not
+/// absolute depth-from-room-creation — an edge check works on a partial
+/// view (e.g. a backfill gap-fill batch, where ancestors above the gap
+/// aren't in `events_map`), whereas an absolute check would require the
+/// full DAG back to `m.room.create` and would flag every legitimate
+/// partial batch as a false positive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepthDivergence<Id> {
+    /// The parent event (referenced via `prev_events`).
+    pub parent: Id,
+    /// The child event (the one whose `prev_events` includes `parent`).
+    pub child: Id,
+    /// The parent's claimed wire `depth`.
+    pub parent_depth: u64,
+    /// The child's claimed wire `depth`.
+    pub child_depth: u64,
+}
+
+/// Scans a set of events and reports every `prev_events` edge whose
+/// endpoints' wire `depth` values violate DAG monotonicity — i.e. a child
+/// whose claimed `depth` does not exceed its parent's claimed `depth`.
+/// Only edges where **both** endpoints are present in `events_map` are
+/// checked; an edge to a parent outside the map (a genuine gap) is
+/// silently skipped rather than treated as a violation.
+///
+/// This is a pure detector — it doesn't decide what to do about a
+/// divergence, only surfaces it. A homeserver can use this to log or alert
+/// on peers sending events with implausible depths, independent of whether
+/// it also chooses to use [`resolve_gap_fill_order`] to sidestep the
+/// untrusted value entirely when merging a gap-fill batch.
+///
+/// # Complexity
+///
+/// `O(Σ |prev_events|)` — linear in the total number of parent references.
+#[must_use]
+pub fn find_depth_divergences<Id, C, S>(
+    events_map: &HashMap<Id, LeanEvent<Id, C>, S>,
+) -> Vec<DepthDivergence<Id>>
+where
+    Id: crate::basespec::rezzy_types::EventId,
+    S: core::hash::BuildHasher,
+    C: Clone,
+{
+    let mut divergences = Vec::new();
+
+    for child in events_map.values() {
+        for parent_id in &child.prev_events {
+            let Some(parent) = events_map.get(parent_id) else {
+                continue; // parent outside the map — a gap, not a violation
+            };
+            if parent.depth == u64::MAX {
+                continue; // saturated: a correct sender clamps rather than increments
+            }
+            if child.depth <= parent.depth {
+                divergences.push(DepthDivergence {
+                    parent: parent_id.clone(),
+                    child: child.event_id.clone(),
+                    parent_depth: parent.depth,
+                    child_depth: child.depth,
+                });
+            }
+        }
+    }
+
+    // `events_map` iteration order is hash-map-arbitrary; sort for a
+    // deterministic, reproducible report.
+    divergences.sort_by(|a, b| (&a.parent, &a.child).cmp(&(&b.parent, &b.child)));
+    divergences
+}
+
+/// Re-derives the ordering of a backfill gap-fill batch directly from
+/// `prev_events` DAG edges, ignoring every event's wire-supplied `depth`
+/// field entirely.
+///
+/// This is not new logic — it's [`compute_topo_positions`] under a name
+/// that documents the intended call site: the point where a homeserver
+/// merges a `/backfill` response into its timeline index, where trusting
+/// wire `depth` for ordering would otherwise be tempting because the value
+/// is "right there" on each PDU. `compute_topo_positions` already ignores
+/// `depth` and derives order purely from `prev_events`, which is why it's
+/// safe to reuse as-is rather than needing new derivation logic; only the
+/// entry point is new.
+///
+/// Works correctly on a partial batch: the derived order is a valid
+/// topological order of the subgraph you pass in, which is what a gap-fill
+/// merge needs, even though it says nothing about where that subgraph
+/// slots into the full room DAG above the gap.
+///
+/// Pair with [`find_depth_divergences`] if you also want to log/alert on
+/// peers whose claimed depths are structurally inconsistent with this
+/// derived order, rather than silently overriding them.
+///
+/// # Complexity
+///
+/// Identical to [`compute_topo_positions`]: `O(V log V + E)`.
+#[must_use]
+pub fn resolve_gap_fill_order<Id, C, S, F>(
+    events_map: &HashMap<Id, LeanEvent<Id, C>, S>,
+    tiebreak: F,
+) -> Vec<Id>
+where
+    Id: crate::basespec::rezzy_types::EventId,
+    S: core::hash::BuildHasher,
+    C: Clone,
+    F: Fn(&Id, &Id) -> core::cmp::Ordering,
+{
+    compute_topo_positions(events_map, tiebreak)
+}
+
 /// Returns events reachable from `tip` in **reverse topological order**
 /// (newest first). This is the spec-correct ordering for
 /// `/messages?dir=b` backward pagination.
@@ -2760,6 +2885,164 @@ mod tests {
         let events_map: HashMap<String, LeanEvent> = HashMap::new();
         let result = compute_depths(&events_map);
         assert!(result.is_empty());
+    }
+
+    /// `find_depth_divergences` must stay silent when every child's wire
+    /// `depth` exceeds its parent's, even on a full-DAG view.
+    #[test]
+    fn test_find_depth_divergences_no_divergence() {
+        let a = LeanEvent {
+            event_id: "A".into(),
+            prev_events: vec![],
+            depth: 1,
+            ..Default::default()
+        };
+        let b = LeanEvent {
+            event_id: "B".into(),
+            prev_events: vec!["A".into()],
+            depth: 2,
+            ..Default::default()
+        };
+
+        let mut events_map: HashMap<String, LeanEvent> = HashMap::new();
+        events_map.insert("A".into(), a);
+        events_map.insert("B".into(), b);
+
+        let divergences = find_depth_divergences(&events_map);
+        assert!(
+            divergences.is_empty(),
+            "expected no divergences, got: {divergences:?}"
+        );
+    }
+
+    /// `find_depth_divergences` must NOT flag a partial view (the shape of
+    /// a real backfill gap-fill batch) just because it doesn't reach back
+    /// to `m.room.create` — a genuinely legitimate pair of consecutive
+    /// wire depths (e.g. 26/27) whose parent above the gap isn't loaded
+    /// must not be reported as a divergence.
+    #[test]
+    fn test_find_depth_divergences_ignores_edges_outside_the_batch() {
+        // "A" (parent of B) deliberately NOT inserted — it's above the gap.
+        let b = LeanEvent {
+            event_id: "B".into(),
+            prev_events: vec!["A".into()],
+            depth: 26,
+            ..Default::default()
+        };
+        let c = LeanEvent {
+            event_id: "C".into(),
+            prev_events: vec!["B".into()],
+            depth: 27,
+            ..Default::default()
+        };
+
+        let mut events_map: HashMap<String, LeanEvent> = HashMap::new();
+        events_map.insert("B".into(), b);
+        events_map.insert("C".into(), c);
+
+        let divergences = find_depth_divergences(&events_map);
+        assert!(
+            divergences.is_empty(),
+            "edges to a parent outside the batch must not be flagged, got: {divergences:?}"
+        );
+    }
+
+    /// `find_depth_divergences` must flag an edge whose child's claimed
+    /// `depth` doesn't exceed its parent's — simulating a byzantine/buggy
+    /// peer attaching a `depth` that's structurally impossible given the
+    /// parent it also claims.
+    #[test]
+    fn test_find_depth_divergences_detects_non_monotonic_edge() {
+        let a = LeanEvent {
+            event_id: "A".into(),
+            prev_events: vec![],
+            depth: 5,
+            ..Default::default()
+        };
+        // B claims to be a child of A but claims a *lower* depth than A.
+        let b = LeanEvent {
+            event_id: "B".into(),
+            prev_events: vec!["A".into()],
+            depth: 3,
+            ..Default::default()
+        };
+
+        let mut events_map: HashMap<String, LeanEvent> = HashMap::new();
+        events_map.insert("A".into(), a);
+        events_map.insert("B".into(), b);
+
+        let divergences = find_depth_divergences(&events_map);
+        assert_eq!(divergences.len(), 1);
+        assert_eq!(divergences[0].parent, "A");
+        assert_eq!(divergences[0].child, "B");
+        assert_eq!(divergences[0].parent_depth, 5);
+        assert_eq!(divergences[0].child_depth, 3);
+    }
+
+    /// `find_depth_divergences` must not flag an edge whose parent sits at
+    /// saturated depth (`u64::MAX`): a correct sender clamps at the
+    /// maximum rather than incrementing past it, so `child.depth <=
+    /// parent.depth` at saturation is expected, not a violation.
+    #[test]
+    fn test_find_depth_divergences_ignores_saturated_parent() {
+        let a = LeanEvent {
+            event_id: "A".into(),
+            prev_events: vec![],
+            depth: u64::MAX,
+            ..Default::default()
+        };
+        let b = LeanEvent {
+            event_id: "B".into(),
+            prev_events: vec!["A".into()],
+            depth: u64::MAX, // correctly clamped, not incremented
+            ..Default::default()
+        };
+
+        let mut events_map: HashMap<String, LeanEvent> = HashMap::new();
+        events_map.insert("A".into(), a);
+        events_map.insert("B".into(), b);
+
+        let divergences = find_depth_divergences(&events_map);
+        assert!(
+            divergences.is_empty(),
+            "saturated parent depth must not be flagged, got: {divergences:?}"
+        );
+    }
+
+    /// `resolve_gap_fill_order` must recover the correct total order from
+    /// `prev_events` edges even when wire `depth` is wildly wrong — the
+    /// wrong `depth` value must not influence the derived order at all.
+    #[test]
+    fn test_resolve_gap_fill_order_ignores_wire_depth() {
+        let a = LeanEvent {
+            event_id: "A".into(),
+            prev_events: vec![],
+            depth: 9999, // implausible wire depth, should be ignored entirely
+            ..Default::default()
+        };
+        let b = LeanEvent {
+            event_id: "B".into(),
+            prev_events: vec!["A".into()],
+            depth: 1, // claims to be *before* its own parent
+            ..Default::default()
+        };
+        let c = LeanEvent {
+            event_id: "C".into(),
+            prev_events: vec!["B".into()],
+            depth: 2,
+            ..Default::default()
+        };
+
+        let mut events_map: HashMap<String, LeanEvent> = HashMap::new();
+        events_map.insert("A".into(), a);
+        events_map.insert("B".into(), b);
+        events_map.insert("C".into(), c);
+
+        let order = resolve_gap_fill_order(&events_map, core::cmp::Ord::cmp);
+        assert_eq!(
+            order,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
     }
 
     /// Coverage: `reverse_topological_order` with missing tip (line 1576).
