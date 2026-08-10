@@ -3518,6 +3518,30 @@ mod tests {
         );
     }
 
+    /// Coverage: `try_compute_state_at_streaming` early-returns when all
+    /// requested targets are absent from `events_map` (line 2200).
+    #[test]
+    fn test_try_compute_state_at_streaming_with_no_resolvable_targets() {
+        let events_map: HashMap<String, LeanEvent> = HashMap::new();
+        let mut callback_called = false;
+
+        let result = try_compute_state_at_streaming(
+            &["ghost"],
+            &events_map,
+            crate::StateResVersion::V2,
+            |_, _| {
+                callback_called = true;
+                Ok::<(), &'static str>(())
+            },
+        );
+
+        assert_eq!(result, Ok(()));
+        assert!(
+            !callback_called,
+            "callback must not run with no actual targets"
+        );
+    }
+
     /// Coverage: `collect_ancestor_short_ids_batch` (missing target, line 967)
     /// and `topological_sort_short_ids` (missing event, line 1002). Every
     /// current public call site pre-filters targets to ones present in
