@@ -781,11 +781,13 @@ where
         }
         steps = steps.saturating_add(1);
 
-        let Some(&current_mask) = masks.get(current_id) else {
-            // Invariant: queue entries are only pushed for ids present in `masks`.
-            debug_assert!(false, "current_id in queue must exist in masks");
-            continue;
-        };
+        // Every id ever pushed onto `queue` was inserted into `masks` first
+        // (initial extremity seeding above, or `masks.entry(pk)` before the
+        // parent push below); `masks` entries are never removed. So this
+        // lookup cannot miss.
+        let &current_mask = masks
+            .get(current_id)
+            .expect("queue entries are only pushed for ids already present in `masks`");
 
         let popcount = current_mask.count_ones();
 
@@ -932,11 +934,13 @@ where
     }
 
     while let Some((_, current_id)) = queue.pop() {
-        let Some(current_mask) = masks.get(current_id).cloned() else {
-            // Invariant: queue entries are only pushed for ids present in `masks`.
-            debug_assert!(false, "current_id in queue must exist in masks");
-            continue;
-        };
+        // Same invariant as `compute_merge_bases`: every id pushed onto
+        // `queue` was inserted into `masks` first, and entries are never
+        // removed, so this lookup cannot miss.
+        let current_mask = masks
+            .get(current_id)
+            .cloned()
+            .expect("queue entries are only pushed for ids already present in `masks`");
 
         // If reachable by ALL extremities, this is the merge base.
         if current_mask.len() == target_count {
@@ -3434,5 +3438,225 @@ mod tests {
             "C should have been yielded as Unchanged with parent A!"
         );
         assert!(d_has_new_state, "D should have been yielded as New!");
+    }
+
+    /// Coverage: `run_state_pipeline_streaming`'s `out_degree[pe_idx] == 0`
+    /// continue, and `topological_sort_short_ids`'s parent-edge dedup
+    /// continue. Both fire for the same scenario: an event that lists the
+    /// same `prev_events` parent twice (a duplicate a byzantine/buggy peer
+    /// could send). `topological_sort_short_ids` dedupes the duplicate when
+    /// computing `out_degree`, so `out_degree[parent]` reflects one distinct
+    /// child — the second occurrence in `D`'s own `prev_events` list then
+    /// finds `out_degree` already driven to zero by the first occurrence.
+    #[test]
+    fn test_compute_state_at_duplicate_prev_events() {
+        let a = LeanEvent {
+            event_id: "A".into(),
+            event_type: "m.room.create".into(),
+            state_key: Some(String::new()),
+            sender: "@x:x".into(),
+            content: json!({"room_version": "10", "creator": "@x:x"}),
+            depth: 1,
+            ..Default::default()
+        };
+        let b = LeanEvent {
+            event_id: "B".into(),
+            event_type: "m.room.message".into(),
+            sender: "@x:x".into(),
+            depth: 2,
+            prev_events: vec!["A".into()],
+            ..Default::default()
+        };
+        // D lists B twice as a parent.
+        let d = LeanEvent {
+            event_id: "D".into(),
+            event_type: "m.room.message".into(),
+            sender: "@x:x".into(),
+            depth: 3,
+            prev_events: vec!["B".into(), "B".into()],
+            ..Default::default()
+        };
+
+        let mut events_map: HashMap<String, LeanEvent> = HashMap::new();
+        events_map.insert("A".into(), a);
+        events_map.insert("B".into(), b);
+        events_map.insert("D".into(), d);
+
+        // Must not panic (e.g. double-take on B's state) and must resolve.
+        let result = compute_state_at(&"D".to_string(), &events_map, crate::StateResVersion::V2);
+        assert!(result.is_some());
+    }
+
+    /// Coverage: the `?`-propagated callback error path in
+    /// `run_state_pipeline_streaming` (reached via `try_compute_state_at_streaming`).
+    #[test]
+    fn test_try_compute_state_at_streaming_propagates_callback_error() {
+        let a = LeanEvent {
+            event_id: "A".into(),
+            event_type: "m.room.create".into(),
+            state_key: Some(String::new()),
+            sender: "@x:x".into(),
+            content: json!({"room_version": "10", "creator": "@x:x"}),
+            depth: 1,
+            ..Default::default()
+        };
+
+        let mut events_map: HashMap<String, LeanEvent> = HashMap::new();
+        events_map.insert("A".into(), a);
+
+        let result: Result<(), StateComputationError<&'static str>> =
+            try_compute_state_at_streaming(
+                &["A"],
+                &events_map,
+                crate::StateResVersion::V2,
+                |_, _| Err("callback aborted"),
+            );
+
+        assert_eq!(
+            result,
+            Err(StateComputationError::Callback("callback aborted"))
+        );
+    }
+
+    /// Coverage: `collect_ancestor_short_ids_batch` (missing target, line 967)
+    /// and `topological_sort_short_ids` (missing event, line 1002). Every
+    /// current public call site pre-filters targets to ones present in
+    /// `events_map`, so these guards are only reachable by calling the
+    /// private helpers directly with an unfiltered target — which is exactly
+    /// what these functions tolerate rather than assume away.
+    #[test]
+    fn test_collect_ancestor_and_topo_sort_tolerate_missing_target() {
+        let a = LeanEvent {
+            event_id: "A".into(),
+            prev_events: vec![],
+            depth: 1,
+            ..Default::default()
+        };
+        let mut events_map: HashMap<String, LeanEvent> = HashMap::new();
+        events_map.insert("A".into(), a);
+
+        // "ghost" is never inserted into events_map.
+        let ghost = "ghost".to_string();
+        let targets: Vec<&String> = alloc::vec![&ghost];
+
+        let (id_to_index, index_to_id) = collect_ancestor_short_ids_batch(&targets, &events_map);
+        assert_eq!(
+            index_to_id.len(),
+            1,
+            "the unresolvable target still gets a short id"
+        );
+        assert!(id_to_index.contains_key(&ghost));
+
+        // Must not panic when the topological sort walks an id absent from events_map.
+        let (sorted, out_degree) =
+            topological_sort_short_ids(&index_to_id, &id_to_index, &events_map);
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(out_degree.len(), 1);
+    }
+
+    /// Coverage: `StateUpdate::into_state`'s `New` arm (the `Unchanged` arm
+    /// is covered by `test_state_update_into_state_unchanged`).
+    #[test]
+    fn test_state_update_into_state_new() {
+        let mut state: SharedState<String> = SharedState::new();
+        state.insert(
+            ("m.room.create".into(), String::new()),
+            "create_event".into(),
+        );
+        let hash = crate::state::lthash::LtHash::from_state(&state);
+
+        let update = StateUpdate::New {
+            state: state.clone(),
+            hash,
+        };
+
+        // The callback must never be invoked for the `New` arm.
+        let resolved = update.into_state(|_| panic!("New must not consult the parent lookup"));
+        assert_eq!(resolved, state);
+    }
+
+    /// Coverage: `resolve_merge_fast_path_hashed`'s defense-in-depth full
+    /// equality check — two independently built states with identical
+    /// content (same `LtHash`, same entries) but distinct allocations
+    /// (`ptr_eq` false), simulating two DAG branches that converge on the
+    /// same room state through different edit histories.
+    #[test]
+    fn test_resolve_merge_fast_path_hashed_full_equality_fallback() {
+        let mut state_a: SharedState<String> = SharedState::new();
+        state_a.insert(("m.room.topic".into(), String::new()), "final".into());
+        let hash_a = crate::state::lthash::LtHash::from_state(&state_a);
+
+        let mut state_b: SharedState<String> = SharedState::new();
+        state_b.insert(("m.room.topic".into(), String::new()), "final".into());
+        let hash_b = crate::state::lthash::LtHash::from_state(&state_b);
+
+        assert_eq!(hash_a, hash_b, "identical content must hash identically");
+        assert!(
+            !state_a.ptr_eq(&state_b),
+            "must be distinct allocations to exercise the full-equality fallback, \
+             not just the ptr_eq fast path"
+        );
+
+        let prev_states = alloc::vec![
+            HashedState {
+                state: state_a.clone(),
+                hash: hash_a,
+            },
+            HashedState {
+                state: state_b,
+                hash: hash_b,
+            },
+        ];
+
+        let events_map: HashMap<String, LeanEvent> = HashMap::new();
+        let mut cache = LocalAuthCache::new(crate::StateResVersion::V2);
+        let result = resolve_merge_fast_path_hashed(
+            &prev_states,
+            &events_map,
+            &mut cache,
+            crate::StateResVersion::V2,
+        );
+
+        assert_eq!(
+            result.state, state_a,
+            "matching content must take the fast path rather than re-resolving"
+        );
+    }
+
+    /// Coverage: the deterministic sort comparator in `find_depth_divergences`
+    /// only runs when there are 2+ divergences to order.
+    #[test]
+    fn test_find_depth_divergences_sorts_multiple_results() {
+        let a = LeanEvent {
+            event_id: "A".into(),
+            prev_events: vec![],
+            depth: 10,
+            ..Default::default()
+        };
+        // Two independent non-monotonic children of A, inserted in an order
+        // that requires the comparator to actually reorder them.
+        let z = LeanEvent {
+            event_id: "Z".into(),
+            prev_events: vec!["A".into()],
+            depth: 1,
+            ..Default::default()
+        };
+        let b = LeanEvent {
+            event_id: "B".into(),
+            prev_events: vec!["A".into()],
+            depth: 2,
+            ..Default::default()
+        };
+
+        let mut events_map: HashMap<String, LeanEvent> = HashMap::new();
+        events_map.insert("A".into(), a);
+        events_map.insert("Z".into(), z);
+        events_map.insert("B".into(), b);
+
+        let divergences = find_depth_divergences(&events_map);
+        assert_eq!(divergences.len(), 2);
+        // Sorted by (parent, child): both share parent "A", so child order breaks the tie.
+        assert_eq!(divergences[0].child, "B");
+        assert_eq!(divergences[1].child, "Z");
     }
 }
