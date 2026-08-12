@@ -56,14 +56,26 @@ fn test_lthash_short_circuit() {
 #[test]
 fn test_persisted_internal_node_round_trip() {
     let node = PersistedInternalNode {
-        datamap: 0x1122_3344,
-        nodemap: 0x5566_7788,
+        datamap: 0b11,
+        nodemap: 0b1,
         structural_hash: [0xaa; 16],
-        child_hashes: vec![[0x11; 16], [0x22; 16]],
+        leaves: vec![(1_i32, 10_i32), (2_i32, 20_i32)],
+        child_hashes: vec![[0x11; 16]],
     };
 
     let encoded = node.encode_v1();
     let decoded = PersistedInternalNode::decode_v1(&encoded).expect("round-trip must decode");
 
     assert_eq!(decoded, node);
+}
+
+#[test]
+fn test_root_handle_uses_distinct_state_group_id() {
+    let lattice = LtHash::default();
+    let structural_hash = [0x42; 16];
+    let handle = RootHandle::from_lthash(structural_hash, &lattice);
+
+    assert_eq!(handle.structural_hash, structural_hash);
+    assert_eq!(handle.state_group_id, state_group_id_from_lthash(&lattice));
+    assert_eq!(handle.state_group_id.len(), 32);
 }

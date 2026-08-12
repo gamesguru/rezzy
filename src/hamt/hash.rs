@@ -7,6 +7,32 @@ use core::hash::Hasher;
 /// instances. It is not a wire format.
 pub type StructuralHash = [u8; 16];
 
+/// A 32-byte state-group identifier derived from the full root lattice.
+///
+/// This is the cross-server, deduplicable identifier for a resolved root. It
+/// must not be confused with the local-only `StructuralHash`.
+pub type StateGroupId = [u8; 32];
+
+/// A resolved root handle carrying both the local structural hash and the
+/// global state-group identifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootHandle {
+    pub structural_hash: StructuralHash,
+    pub state_group_id: StateGroupId,
+}
+
+impl RootHandle {
+    /// Builds a root handle from a precomputed structural hash and a state
+    /// lattice.
+    #[must_use]
+    pub fn from_lthash(structural_hash: StructuralHash, lattice: &crate::state::LtHash) -> Self {
+        Self {
+            structural_hash,
+            state_group_id: state_group_id_from_lthash(lattice),
+        }
+    }
+}
+
 pub(crate) struct StructuralHashBuilder(Blake2bMac512);
 
 impl StructuralHashBuilder {
@@ -30,6 +56,14 @@ impl Hasher for StructuralHashBuilder {
     fn write(&mut self, bytes: &[u8]) {
         self.0.update(bytes);
     }
+}
+
+/// Computes the 32-byte state-group identifier from the full resolved lattice.
+///
+/// This uses the `LtHash` checksum, which is `BLAKE2b-256(lattice)`.
+#[must_use]
+pub fn state_group_id_from_lthash(lattice: &crate::state::LtHash) -> StateGroupId {
+    lattice.checksum()
 }
 
 /// Computes the 128-bit keyed structural hash for an internal node based on

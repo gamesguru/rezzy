@@ -17,7 +17,7 @@ pub mod hash;
 mod tests;
 
 pub use codec::PersistedInternalNode;
-pub use hash::StructuralHash;
+pub use hash::{state_group_id_from_lthash, RootHandle, StateGroupId, StructuralHash};
 
 use hash::StructuralHashBuilder;
 
