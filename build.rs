@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(has_avx512_support)");
+    println!("cargo:rustc-check-cfg=cfg(has_avx512_host_support)");
     println!("cargo:rustc-check-cfg=cfg(has_res_submodule)");
     println!("cargo:rustc-check-cfg=cfg(tarpaulin_include)");
     // Used to gate tests that depend on the res submodule
@@ -22,6 +23,16 @@ fn main() {
                     }
                 }
             }
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx512f")
+            && std::is_x86_feature_detected!("avx512bw")
+            && std::is_x86_feature_detected!("vpclmulqdq")
+        {
+            println!("cargo:rustc-cfg=has_avx512_host_support");
         }
     }
 

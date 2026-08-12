@@ -36,6 +36,7 @@ pub(crate) struct Avx512Evaluator;
 #[cfg(all(target_arch = "x86_64", has_avx512_support))]
 impl Gf64Evaluator for Avx512Evaluator {
     #[allow(clippy::incompatible_msrv)]
+    #[cfg_attr(all(coverage_nightly, not(has_avx512_host_support)), coverage(off))]
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
         // SAFETY: The dispatcher only selects this backend after runtime AVX-512 detection.
         unsafe { poly_mac_avx512(term, source, target) }
@@ -45,6 +46,7 @@ impl Gf64Evaluator for Avx512Evaluator {
 #[cfg(all(target_arch = "x86_64", has_avx512_support))]
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
 #[allow(clippy::incompatible_msrv)]
+#[cfg_attr(all(coverage_nightly, not(has_avx512_host_support)), coverage(off))]
 // SAFETY: Only called by `Avx512Evaluator::poly_mac`, which enforces CPU feature constraints.
 unsafe fn poly_mac_avx512(term: u64, source: &[u64], target: &mut [u64]) {
     assert_eq!(source.len(), target.len());
@@ -124,6 +126,7 @@ unsafe fn poly_mac_avx512(term: u64, source: &[u64], target: &mut [u64]) {
 #[cfg(all(target_arch = "x86_64", has_avx512_support))]
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
 #[allow(clippy::incompatible_msrv)]
+#[cfg_attr(all(coverage_nightly, not(has_avx512_host_support)), coverage(off))]
 // SAFETY: Only called by `Avx512Evaluator::poly_mac` which enforces CPU feature constraints.
 unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
     let product = _mm512_clmulepi64_epi128(a, b, 0x00);
