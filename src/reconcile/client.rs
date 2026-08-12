@@ -21,6 +21,10 @@ use alloc::collections::VecDeque;
 pub const MAX_RECONCILIATION_ROUNDS: usize = 20;
 /// Maximum number of bucket requests emitted in one reconciliation round.
 pub const MAX_BUCKETS_PER_ROUND: usize = 128;
+/// Maximum split depth implied by `MAX_BUCKETS_PER_ROUND`.
+#[allow(clippy::cast_possible_truncation)]
+pub const MAX_BUCKET_ROUND_DEPTH: u8 =
+    (usize::BITS - MAX_BUCKETS_PER_ROUND.leading_zeros() - 1) as u8;
 
 /// MSC4521 requester-side provisioning: `ceil(1.5 * delta) + 4`, plus headroom.
 fn provision_capacity(delta: u64, headroom: u64) -> Option<u64> {
@@ -92,10 +96,10 @@ impl BucketExchange {
         Self {
             pending: VecDeque::new(),
             accumulated_roots,
-            rounds_emitted: 0,
+            rounds_emitted: 1,
             max_rounds,
             max_buckets_per_round,
-            max_aggregate_capacity,
+            max_aggregate_capacity: max_aggregate_capacity.min(MAX_BUCKETED_SKETCH_CAPACITY),
             max_pending_requests: max_rounds.saturating_mul(max_buckets_per_round),
         }
     }
@@ -198,6 +202,10 @@ impl BucketExchange {
                 return ClientAction::ExtremityDiff;
             }
         }
+
+        self.pending
+            .make_contiguous()
+            .sort_unstable_by_key(|request| (request.depth, request.prefix));
 
         if !had_failures && self.pending.is_empty() {
             return ClientAction::ResolveRoots {
@@ -386,8 +394,8 @@ impl ReconciliationClient {
             .abs_diff(remote.known_event_count);
         let estimated_delta =
             match crate::reconcile::triage::estimate_strata(local.strata(), &remote.strata) {
-                Ok(Some(estimate)) => estimate.delta.max(count_delta),
-                Ok(None) | Err(_) => return ClientAction::ExtremityDiff,
+                Ok(estimate) => estimate.delta.max(count_delta),
+                Err(_) => return ClientAction::ExtremityDiff,
             };
 
         if estimated_delta >= SATURATED_DELTA_ESTIMATE {
@@ -411,7 +419,9 @@ impl ReconciliationClient {
         let mut depth = 0_u8;
         let mut buckets = 1_usize;
 
-        while buckets.saturating_mul(32) < target_capacity && depth < 7 {
+        while buckets.saturating_mul(MAX_BUCKET_SKETCH_CAPACITY) < target_capacity
+            && depth < MAX_BUCKET_ROUND_DEPTH
+        {
             depth = depth.saturating_add(1);
             buckets = buckets.saturating_mul(2);
         }
@@ -505,71 +515,21 @@ impl ReconciliationClient {
                 return ClientAction::ExtremityDiff;
             };
 
-            if previous.capacity < MAX_BUCKET_SKETCH_CAPACITY {
-                let Some(floor) = previous.capacity.checked_add(1) else {
-                    return ClientAction::ExtremityDiff;
-                };
-                let Ok(floor_u64) = u64::try_from(floor) else {
-                    return ClientAction::ExtremityDiff;
-                };
-                let target = share.max(floor_u64);
-                let provisioned = provision_capacity(target, 0);
-                let capacity = provisioned
-                    .and_then(|value| usize::try_from(value).ok())
-                    .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY));
-                let Some(capacity) = capacity else {
-                    return ClientAction::ExtremityDiff;
-                };
-                total = match total.checked_add(capacity) {
+            let Ok(next_requests) = retry_or_split_bucket(previous, share) else {
+                return ClientAction::ExtremityDiff;
+            };
+            for request in next_requests {
+                total = match total.checked_add(request.capacity) {
                     Some(total) if total <= aggregate_limit => total,
                     _ => return ClientAction::ExtremityDiff,
                 };
                 if requests.len() >= MAX_BUCKETS_PER_ROUND {
                     return ClientAction::ExtremityDiff;
                 }
-                requests.push(BucketRequest {
-                    depth: previous.depth,
-                    prefix,
-                    capacity,
-                });
-            } else {
-                if previous.depth >= 31 {
-                    return ClientAction::ExtremityDiff;
-                }
-
-                let floor = 4_usize;
-                let Ok(floor_u64) = u64::try_from(floor) else {
-                    return ClientAction::ExtremityDiff;
-                };
-                let target = (share / 2).max(floor_u64);
-                let provisioned = provision_capacity(target, 0);
-                let capacity = provisioned
-                    .and_then(|value| usize::try_from(value).ok())
-                    .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY));
-                let Some(capacity) = capacity else {
-                    return ClientAction::ExtremityDiff;
-                };
-
-                let Some(next_depth) = previous.depth.checked_add(1) else {
-                    return ClientAction::ExtremityDiff;
-                };
-
-                for sub in 0..2 {
-                    total = match total.checked_add(capacity) {
-                        Some(total) if total <= aggregate_limit => total,
-                        _ => return ClientAction::ExtremityDiff,
-                    };
-                    if requests.len() >= MAX_BUCKETS_PER_ROUND {
-                        return ClientAction::ExtremityDiff;
-                    }
-                    requests.push(BucketRequest {
-                        depth: next_depth,
-                        prefix: (previous.prefix << 1) | sub,
-                        capacity,
-                    });
-                }
+                requests.push(request);
             }
         }
+        requests.sort_unstable_by_key(|request| (request.depth, request.prefix));
         ClientAction::BucketSketches {
             requests,
             accumulated_roots,
@@ -973,9 +933,9 @@ mod tests {
         let mut failed_buckets = alloc::vec::Vec::with_capacity(65);
         let mut previous_requests = alloc::vec::Vec::with_capacity(65);
         for prefix in 0..65_u32 {
-            failed_buckets.push((0, prefix));
+            failed_buckets.push((7, prefix));
             previous_requests.push(BucketRequest {
-                depth: 0,
+                depth: 7,
                 prefix,
                 capacity: MAX_BUCKET_SKETCH_CAPACITY,
             });
@@ -1011,9 +971,9 @@ mod tests {
         let mut previous_requests = alloc::vec::Vec::with_capacity(65);
         let mut failed_buckets = alloc::vec::Vec::with_capacity(65);
         for prefix in 0..65_u32 {
-            failed_buckets.push((0, prefix));
+            failed_buckets.push((7, prefix));
             previous_requests.push(BucketRequest {
-                depth: 0,
+                depth: 7,
                 prefix,
                 capacity: MAX_BUCKET_SKETCH_CAPACITY,
             });

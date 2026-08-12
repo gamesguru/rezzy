@@ -30,6 +30,11 @@
 //! 4. The fold is embarrassingly parallel and runs on `std::thread::scope`
 //!    when the `std` feature is enabled.
 //!
+//! # Panics
+//!
+//! Panics if the resolved mainline does not begin with the resolved
+//! `m.room.power_levels` event.
+//!
 //! Also contains [`route_power_events`], which classifies events into
 //! power vs. non-power buckets.
 //!
@@ -311,6 +316,11 @@ pub fn route_power_events<
 /// **Note:** V2.1+ rooms delegate entirely to [`resolve_iterative_sort`](crate::resolve::iterative::resolve_iterative_sort)
 /// because the lattice fold does not support MSC4297's conflicted subgraph. This
 /// changes the parallelism characteristics for V2.1+ callers.
+///
+/// # Panics
+///
+/// Panics if the resolved mainline does not begin with the resolved
+/// `m.room.power_levels` event.
 // jscpd:ignore-start
 #[must_use]
 pub fn resolve_lattice_fold<
@@ -378,8 +388,14 @@ where
 
     // Coordinate Projection Phase (Mainline distance mapping)
     let mainline = build_mainline(&resolved, &sort_context);
+    let pl_key = (String::from("m.room.power_levels"), String::new());
+    let resolved_pl = resolved.get(&pl_key);
+    assert!(
+        mainline.is_empty() || mainline.first() == resolved_pl,
+        "Mainline must be ordered head-first (resolved PL event at index 0) for the LUB operator to work correctly!"
+    );
     debug_assert!(
-        mainline.is_empty() || mainline.first() == resolved.get(&("m.room.power_levels".into(), String::new())),
+        mainline.is_empty() || mainline.first() == resolved_pl,
         "Mainline must be ordered head-first (resolved PL event at index 0) for the LUB operator to work correctly!"
     );
     let mut target_events: alloc::vec::Vec<&LeanEvent<Id, C>> = non_power_events.values().collect();

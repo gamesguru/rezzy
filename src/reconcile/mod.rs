@@ -35,6 +35,7 @@ pub use algebraic::{
 };
 pub use client::{
     BucketExchange, ClientAction, ReconciliationClient, RemoteDigest, MAX_BUCKETS_PER_ROUND,
+    MAX_RECONCILIATION_ROUNDS,
 };
 pub use resident::{ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
 pub use server::{
@@ -45,8 +46,8 @@ pub use triage::{
     StrataEstimate, MAX_BUCKETED_SKETCH_CAPACITY,
 };
 
-const _: [(); 32] = [(); MAX_SKETCH_CAPACITY];
-const _: [(); 32] = [(); resident::STRATA_COUNT];
-const _: [(); 8] = [(); resident::STRATUM_CAPACITY];
-const _: [(); 32] = [(); triage::MAX_BUCKET_SKETCH_CAPACITY];
-const _: [(); 4_096] = [(); triage::MAX_BUCKETED_SKETCH_CAPACITY];
+const _: () = assert!(MAX_SKETCH_CAPACITY == 32);
+const _: () = assert!(resident::STRATA_COUNT == 32);
+const _: () = assert!(resident::STRATUM_CAPACITY == 8);
+const _: () = assert!(triage::MAX_BUCKET_SKETCH_CAPACITY == 32);
+const _: () = assert!(triage::MAX_BUCKETED_SKETCH_CAPACITY == 4_096);

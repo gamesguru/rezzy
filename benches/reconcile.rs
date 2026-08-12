@@ -257,10 +257,11 @@ fn benchmark_bucket_exchange_from_pool(
         frame_matches: true,
         has_unknown_extremity: false,
     };
-    let estimated_delta = estimate_strata(local.strata(), remote.strata())
-        .ok()
-        .flatten()
-        .map(|estimate| estimate.delta);
+    let estimated_delta = Some(
+        estimate_strata(local.strata(), remote.strata())
+            .unwrap()
+            .delta,
+    );
     let client = ReconciliationClient::default().allow_unlimited_delta();
     let initial_action = client.select_action(&local, remote_digest, 0);
 

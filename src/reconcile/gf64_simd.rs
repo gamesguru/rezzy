@@ -170,20 +170,19 @@ pub enum EvaluatorBackend {
     Avx512,
 }
 
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 pub fn get_evaluator() -> EvaluatorBackend {
-    #[cfg(target_arch = "x86_64")]
-    {
-        use std::sync::OnceLock;
-        static BACKEND: OnceLock<EvaluatorBackend> = OnceLock::new();
-        *BACKEND.get_or_init(get_evaluator_internal)
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        EvaluatorBackend::Scalar
-    }
+    use std::sync::OnceLock;
+    static BACKEND: OnceLock<EvaluatorBackend> = OnceLock::new();
+    *BACKEND.get_or_init(get_evaluator_internal)
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(not(feature = "std"), target_arch = "x86_64"))]
+pub fn get_evaluator() -> EvaluatorBackend {
+    EvaluatorBackend::Scalar
+}
+
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn get_evaluator_internal() -> EvaluatorBackend {
     #[cfg(has_avx512_support)]

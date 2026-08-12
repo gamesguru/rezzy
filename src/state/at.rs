@@ -894,6 +894,7 @@ where
 /// ```
 #[must_use]
 /// Computes the merge base (common ancestors) of a set of target events in the DAG.
+#[cfg(feature = "std")]
 pub fn compute_merge_base<'a, Id, Q, S, Node>(
     extremities: &[&Q],
     events_map: &'a HashMap<Id, Node, S>,
@@ -1652,14 +1653,18 @@ where
     C: Clone,
 {
     let mut divergences = Vec::new();
+    let mut seen_edges = BTreeSet::new();
 
     for child in events_map.values() {
         for parent_id in &child.prev_events {
             let Some(parent) = events_map.get(parent_id) else {
                 continue; // parent outside the map — a gap, not a violation
             };
-            if parent.depth == u64::MAX {
-                continue; // saturated: a correct sender clamps rather than increments
+            if !seen_edges.insert((parent_id.clone(), child.event_id.clone())) {
+                continue;
+            }
+            if parent.depth == u64::MAX && child.depth == u64::MAX {
+                continue; // saturated clamp: both endpoints reached the cap
             }
             if child.depth <= parent.depth {
                 divergences.push(DepthDivergence {
@@ -3519,7 +3524,7 @@ mod tests {
     }
 
     /// Coverage: `try_compute_state_at_streaming` early-returns when all
-    /// requested targets are absent from `events_map` (line 2200).
+    /// requested targets are absent from `events_map` (line 537).
     #[test]
     fn test_try_compute_state_at_streaming_with_no_resolvable_targets() {
         let events_map: HashMap<String, LeanEvent> = HashMap::new();

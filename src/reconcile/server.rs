@@ -333,9 +333,8 @@ impl<'a> SketchBuilder<'a> {
         let mut total_work: usize = 0;
 
         crate::reconcile::triage::validate_bucket_requests(initial_requests)?;
-        let mut requests = Vec::with_capacity(initial_requests.len());
         for req in initial_requests {
-            let range = self.index.bucket_range(req)?;
+            let range = self.index.bucket_range_unchecked(req);
             let slice_len = range.len();
 
             if slice_len > self.policy.hard_fallback_threshold {
@@ -346,14 +345,18 @@ impl<'a> SketchBuilder<'a> {
             if total_work > self.policy.max_aggregate_work {
                 return Ok(SketchResult::FallbackToRangeSync);
             }
-
-            requests.push(*req);
         }
 
-        Ok(SketchResult::Success(build_bucket_sketches(
-            self.index.sorted_h64,
-            &requests,
-        )?))
+        let mut sketches = Vec::with_capacity(initial_requests.len());
+        for req in initial_requests {
+            let mut sketch = SyndromeSketch::new(req.capacity)?;
+            for &h64 in self.index.bucket_slice_unchecked(req) {
+                sketch.toggle(h64)?;
+            }
+            sketches.push(sketch);
+        }
+
+        Ok(SketchResult::Success(sketches))
     }
 }
 
