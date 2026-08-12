@@ -307,7 +307,7 @@ impl<K, V> core::convert::TryFrom<PersistedInternalNode<K, V>> for crate::hamt::
         if persisted.child_hashes.len() != expected_children {
             return Err("PersistedInternalNode child count does not match nodemap");
         }
-        
+
         let expected_leaves = persisted.datamap.count_ones() as usize;
         if persisted.leaves.len() != expected_leaves {
             return Err("PersistedInternalNode leaf count does not match datamap");
@@ -334,7 +334,7 @@ impl<K: Clone, V: Clone> From<&crate::hamt::HamtNode<K, V>> for PersistedInterna
         let child_hashes = node
             .children
             .iter()
-            .map(|child| child.structural_hash().clone())
+            .map(super::NodeRef::structural_hash)
             .collect();
 
         Self {

@@ -446,8 +446,8 @@ fn test_diff_nodes_fast_paths() {
 
 #[test]
 fn test_hamt_node_persisted_round_trip() {
-    use core::convert::TryFrom;
     use crate::hamt::codec::PersistedInternalNode;
+    use core::convert::TryFrom;
 
     let key = b"dummy_server_key";
 
@@ -491,11 +491,14 @@ fn test_hamt_node_persisted_round_trip() {
     assert_eq!(restored.datamap, original.datamap);
     assert_eq!(restored.nodemap, original.nodemap);
     assert_eq!(restored.leaves, original.leaves);
-    
+
     // Check children (restored children will be Lazy, original are Resolved)
     assert_eq!(restored.children.len(), original.children.len());
     for (restored_child, original_child) in restored.children.iter().zip(original.children.iter()) {
         assert!(matches!(restored_child, NodeRef::Lazy(_)));
-        assert_eq!(restored_child.structural_hash(), original_child.structural_hash());
+        assert_eq!(
+            restored_child.structural_hash(),
+            original_child.structural_hash()
+        );
     }
 }
