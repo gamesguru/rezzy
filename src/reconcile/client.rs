@@ -78,7 +78,6 @@ pub struct BucketExchange {
     pending: VecDeque<BucketRequest>,
     accumulated_roots: alloc::vec::Vec<u64>,
     rounds_emitted: usize,
-    rounds_spent: usize,
     max_rounds: usize,
     max_buckets_per_round: usize,
     max_aggregate_capacity: usize,
@@ -98,7 +97,6 @@ impl BucketExchange {
             pending: VecDeque::new(),
             accumulated_roots,
             rounds_emitted: 0,
-            rounds_spent: 1,
             max_rounds,
             max_buckets_per_round,
             max_aggregate_capacity: max_aggregate_capacity.min(MAX_BUCKETED_SKETCH_CAPACITY),
@@ -125,7 +123,7 @@ impl BucketExchange {
     }
 
     fn drain_pending_round(&mut self) -> Result<VecDeque<BucketRequest>, ClientAction> {
-        if self.rounds_spent >= self.max_rounds {
+        if self.rounds_emitted.saturating_add(1) >= self.max_rounds {
             return Err(ClientAction::ExtremityDiff);
         }
 
@@ -151,7 +149,6 @@ impl BucketExchange {
         }
 
         self.rounds_emitted = self.rounds_emitted.saturating_add(1);
-        self.rounds_spent = self.rounds_spent.saturating_add(1);
         Ok(requests)
     }
 
