@@ -210,6 +210,7 @@ fn get_evaluator_internal() -> EvaluatorBackend {
 
 #[cfg(test)]
 #[cfg(not(tarpaulin_include))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use alloc::vec::Vec;
