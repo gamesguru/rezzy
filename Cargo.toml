@@ -73,6 +73,7 @@ cli = [
     "dep:idna_adapter",
     "mimalloc",
     "ureq/tls",
+    "dep:zeroize",
 ]
 regen = ["std"]
 hashing = []
@@ -119,6 +120,7 @@ test-log = { version = "0.2.20", optional = true }
 ureq = { version = "2.9", optional = true, default-features = false, features = [
     "json",
 ] }
+zeroize = { version = "=1.8.2", optional = true, default-features = false }
 
 [dev-dependencies]
 rayon = "1.10.0"
