@@ -53,6 +53,9 @@ unsafe fn poly_mac_avx512(term: u64, source: &[u64], target: &mut [u64]) {
     let mut i = 0;
     let len = source.len();
 
+    // SAFETY: This helper is only entered after the caller has selected the
+    // AVX-512 backend, and the `target_feature` annotation enables the
+    // required intrinsics for this block.
     unsafe {
         // Broadcast the scalar term to all lanes. We only need it in the lower 64 bits of each 128-bit lane.
         let t = i64::from_ne_bytes(term.to_ne_bytes());
