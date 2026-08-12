@@ -1,7 +1,6 @@
 use super::*;
+use crate::hamt::codec::PersistedInternalNode;
 use crate::hamt::delta::isolate_delta;
-use crate::hamt::hash::compute_structural_hash;
-use crate::hamt::PersistedInternalNode;
 use crate::state::LtHash;
 use alloc::vec;
 use std::sync::Arc;
@@ -9,46 +8,90 @@ use std::sync::Arc;
 #[test]
 fn test_structural_hash_equivalence() {
     let key = b"dummy_server_key";
-    let leaf1 = Arc::new(HamtNode::Leaf { key: 1, value: 100 });
-    let leaf2 = Arc::new(HamtNode::Leaf { key: 1, value: 100 });
-    let leaf3 = Arc::new(HamtNode::Leaf { key: 2, value: 200 });
-
-    // Identical leaves should have the same structural hash
-    assert_eq!(leaf1.structural_hash(key), leaf2.structural_hash(key));
-    assert_ne!(leaf1.structural_hash(key), leaf3.structural_hash(key));
-
-    let internal1 = Arc::new(HamtNode::Internal {
+    let leaf1 = Arc::new(HamtNode {
         datamap: 1,
         nodemap: 0,
-        children: vec![leaf1.clone()],
-        structural_hash: compute_structural_hash(key, 1, 0, &[leaf1.structural_hash(key)]),
+        leaves: vec![(1, 100)],
+        children: vec![],
+        structural_hash: HamtNode::compute_structural_hash(key, 1, 0, &[(1, 100)], &[]),
+    });
+    let leaf2 = Arc::new(HamtNode {
+        datamap: 1,
+        nodemap: 0,
+        leaves: vec![(1, 100)],
+        children: vec![],
+        structural_hash: HamtNode::compute_structural_hash(key, 1, 0, &[(1, 100)], &[]),
+    });
+    let leaf3 = Arc::new(HamtNode {
+        datamap: 1,
+        nodemap: 0,
+        leaves: vec![(2, 200)],
+        children: vec![],
+        structural_hash: HamtNode::compute_structural_hash(key, 1, 0, &[(2, 200)], &[]),
     });
 
-    let internal2 = Arc::new(HamtNode::Internal {
-        datamap: 1,
-        nodemap: 0,
-        children: vec![leaf2.clone()],
-        structural_hash: compute_structural_hash(key, 1, 0, &[leaf2.structural_hash(key)]),
+    // Identical leaves should have the same structural hash
+    assert_eq!(leaf1.structural_hash, leaf2.structural_hash);
+    assert_ne!(leaf1.structural_hash, leaf3.structural_hash);
+
+    let internal1 = Arc::new(HamtNode {
+        datamap: 0,
+        nodemap: 1,
+        leaves: vec![],
+        children: vec![NodeRef::Resolved(leaf1.clone())],
+        structural_hash: HamtNode::compute_structural_hash(
+            key,
+            0,
+            1,
+            &[],
+            &[NodeRef::Resolved(leaf1.clone())],
+        ),
+    });
+
+    let internal2 = Arc::new(HamtNode {
+        datamap: 0,
+        nodemap: 1,
+        leaves: vec![],
+        children: vec![NodeRef::Resolved(leaf2.clone())],
+        structural_hash: HamtNode::compute_structural_hash(
+            key,
+            0,
+            1,
+            &[],
+            &[NodeRef::Resolved(leaf2.clone())],
+        ),
     });
 
     // Even though they are different Arc instances, their structural hashes must match
-    assert_eq!(
-        internal1.structural_hash(key),
-        internal2.structural_hash(key)
-    );
+    assert_eq!(internal1.structural_hash, internal2.structural_hash);
 }
 
 #[test]
 fn test_lthash_short_circuit() {
     let key = b"dummy_server_key";
-    let leaf1 = Arc::new(HamtNode::Leaf { key: 1, value: 100 });
-    let leaf2 = Arc::new(HamtNode::Leaf { key: 2, value: 200 });
+    let leaf1 = Arc::new(HamtNode {
+        datamap: 1,
+        nodemap: 0,
+        leaves: vec![(1, 100)],
+        children: vec![],
+        structural_hash: HamtNode::compute_structural_hash(key, 1, 0, &[(1, 100)], &[]),
+    });
+    let leaf2 = Arc::new(HamtNode {
+        datamap: 1,
+        nodemap: 0,
+        leaves: vec![(2, 200)],
+        children: vec![],
+        structural_hash: HamtNode::compute_structural_hash(key, 1, 0, &[(2, 200)], &[]),
+    });
 
     let lattice_a = LtHash::default();
     let lattice_b = LtHash::default();
 
+    let mut resolver = |_hash: &StructuralHash| leaf1.clone();
+
     // Simulate identical sets
-    let (added, removed) = isolate_delta(key, &leaf1, &lattice_a, &leaf2, &lattice_b);
+    let (added, removed) =
+        isolate_delta(key, &leaf1, &lattice_a, &leaf2, &lattice_b, &mut resolver);
     assert!(added.is_empty());
     assert!(removed.is_empty());
 }

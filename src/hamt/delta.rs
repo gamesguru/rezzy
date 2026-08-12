@@ -2,23 +2,25 @@ use std::{hash::Hash, sync::Arc, vec::Vec};
 
 use crate::state::LtHash;
 
-use super::HamtNode;
+use super::{HamtNode, NodeRef, StructuralHash};
 
 pub type Delta<K, V> = Vec<(K, V)>;
 
 /// Isolates the delta (added/removed items) between two HAMT tries in O(|Delta|
 /// * log32 N) time. Uses the `LtHash` lattice to quickly short-circuit if the
 ///   tries are convergently identical.
-pub fn isolate_delta<K, V>(
+pub fn isolate_delta<K, V, F>(
     hash_key: &[u8],
     root_a: &Arc<HamtNode<K, V>>,
     lattice_a: &LtHash,
     root_b: &Arc<HamtNode<K, V>>,
     lattice_b: &LtHash,
+    resolver: &mut F,
 ) -> (Delta<K, V>, Delta<K, V>)
 where
     K: Hash + Clone + Eq,
     V: Hash + Clone + Eq,
+    F: FnMut(&StructuralHash) -> Arc<HamtNode<K, V>>,
 {
     // Short-circuit: if the LtHash lattices match, the sets are identical (with
     // very high probability).
@@ -30,20 +32,22 @@ where
     let mut removed = Vec::new();
 
     // Begin recursive diffing
-    diff_nodes(hash_key, root_a, root_b, &mut added, &mut removed);
+    diff_nodes(hash_key, root_a, root_b, &mut added, &mut removed, resolver);
 
     (added, removed)
 }
 
-fn diff_nodes<K, V>(
+fn diff_nodes<K, V, F>(
     hash_key: &[u8],
     node_a: &Arc<HamtNode<K, V>>,
     node_b: &Arc<HamtNode<K, V>>,
     added: &mut Vec<(K, V)>,
     removed: &mut Vec<(K, V)>,
+    resolver: &mut F,
 ) where
     K: Hash + Clone + Eq,
     V: Hash + Clone + Eq,
+    F: FnMut(&StructuralHash) -> Arc<HamtNode<K, V>>,
 {
     // Pointer equality check (fastest path for structurally shared nodes)
     if Arc::ptr_eq(node_a, node_b) {
@@ -51,56 +55,114 @@ fn diff_nodes<K, V>(
     }
 
     // Structural hash check (fast path across process/storage boundaries)
-    if node_a.structural_hash(hash_key) == node_b.structural_hash(hash_key) {
+    if node_a.structural_hash == node_b.structural_hash {
         return;
     }
 
-    // Fall back to deep diff based on node variants
-    match (&**node_a, &**node_b) {
-        (
-            HamtNode::Internal {
-                datamap: _d_a,
-                nodemap: _n_a,
-                children: _c_a,
-                ..
-            },
-            HamtNode::Internal {
-                datamap: _d_b,
-                nodemap: _n_b,
-                children: _c_b,
-                ..
-            },
-        ) => {
-            // Find nodes that only exist in A (removed from B's perspective)
-            // Find nodes that only exist in B (added from A's perspective)
-            // For matching bits, recurse down.
-            // A full implementation would iterate over set bits of (d_a | n_a)
-            // and (d_b | n_b) and recurse into matching indexes, or gather
-            // the entire subtree if the bit is disjoint. TODO: Implement
-            // CHAMP bit-level traversal
-        }
-        (
-            HamtNode::Leaf {
-                key: k_a,
-                value: v_a,
-            },
-            HamtNode::Leaf {
-                key: k_b,
-                value: v_b,
-            },
-        ) => {
-            if k_a != k_b || v_a != v_b {
-                removed.push((k_a.clone(), v_a.clone()));
-                added.push((k_b.clone(), v_b.clone()));
+    // Traverse datamaps
+    let d_a = node_a.datamap;
+    let d_b = node_b.datamap;
+
+    let mut idx_a = 0;
+    let mut idx_b = 0;
+
+    for i in 0..32 {
+        let bit = 1 << i;
+        let in_a = (d_a & bit) != 0;
+        let in_b = (d_b & bit) != 0;
+
+        match (in_a, in_b) {
+            (true, true) => {
+                let (k_a, v_a) = &node_a.leaves[idx_a];
+                let (k_b, v_b) = &node_b.leaves[idx_b];
+                if k_a != k_b || v_a != v_b {
+                    removed.push((k_a.clone(), v_a.clone()));
+                    added.push((k_b.clone(), v_b.clone()));
+                }
+                idx_a += 1;
+                idx_b += 1;
             }
+            (true, false) => {
+                let (k_a, v_a) = &node_a.leaves[idx_a];
+                removed.push((k_a.clone(), v_a.clone()));
+                idx_a += 1;
+            }
+            (false, true) => {
+                let (k_b, v_b) = &node_b.leaves[idx_b];
+                added.push((k_b.clone(), v_b.clone()));
+                idx_b += 1;
+            }
+            (false, false) => {}
         }
-        (HamtNode::Internal { .. }, HamtNode::Leaf { key, value }) => {
-            added.push((key.clone(), value.clone()));
-            // TODO: collect all leaves from Internal and add to `removed`
+    }
+
+    // Traverse nodemaps
+    let n_a = node_a.nodemap;
+    let n_b = node_b.nodemap;
+
+    let mut cidx_a = 0;
+    let mut cidx_b = 0;
+
+    for i in 0..32 {
+        let bit = 1 << i;
+        let in_a = (n_a & bit) != 0;
+        let in_b = (n_b & bit) != 0;
+
+        match (in_a, in_b) {
+            (true, true) => {
+                let child_a = &node_a.children[cidx_a];
+                let child_b = &node_b.children[cidx_b];
+
+                if child_a.structural_hash() != child_b.structural_hash() {
+                    let res_a = resolve_node(child_a, resolver);
+                    let res_b = resolve_node(child_b, resolver);
+                    diff_nodes(hash_key, &res_a, &res_b, added, removed, resolver);
+                }
+
+                cidx_a += 1;
+                cidx_b += 1;
+            }
+            (true, false) => {
+                let child_a = &node_a.children[cidx_a];
+                let res_a = resolve_node(child_a, resolver);
+                collect_all_leaves(&res_a, removed, resolver);
+                cidx_a += 1;
+            }
+            (false, true) => {
+                let child_b = &node_b.children[cidx_b];
+                let res_b = resolve_node(child_b, resolver);
+                collect_all_leaves(&res_b, added, resolver);
+                cidx_b += 1;
+            }
+            (false, false) => {}
         }
-        (HamtNode::Leaf { key, value }, HamtNode::Internal { .. }) => {
-            removed.push((key.clone(), value.clone()));
-            // TODO: collect all leaves from Internal and add to `added`
-        }
+    }
+}
+
+fn resolve_node<K, V, F>(node_ref: &NodeRef<K, V>, resolver: &mut F) -> Arc<HamtNode<K, V>>
+where
+    F: FnMut(&StructuralHash) -> Arc<HamtNode<K, V>>,
+{
+    match node_ref {
+        NodeRef::Resolved(arc) => arc.clone(),
+        NodeRef::Lazy(hash) => resolver(hash),
+    }
+}
+
+fn collect_all_leaves<K, V, F>(
+    node: &Arc<HamtNode<K, V>>,
+    collection: &mut Vec<(K, V)>,
+    resolver: &mut F,
+) where
+    K: Hash + Clone + Eq,
+    V: Hash + Clone + Eq,
+    F: FnMut(&StructuralHash) -> Arc<HamtNode<K, V>>,
+{
+    for (k, v) in &node.leaves {
+        collection.push((k.clone(), v.clone()));
+    }
+    for child in &node.children {
+        let resolved = resolve_node(child, resolver);
+        collect_all_leaves(&resolved, collection, resolver);
     }
 }
