@@ -195,6 +195,13 @@ pub fn get_evaluator() -> EvaluatorBackend {
 
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 fn get_evaluator_internal() -> EvaluatorBackend {
+    let (has_avx512, has_pclmul) = get_evaluator_features();
+    select_evaluator_backend(has_avx512, has_pclmul)
+}
+
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+#[cfg_attr(all(coverage_nightly, not(has_avx512_host_support)), coverage(off))]
+fn get_evaluator_features() -> (bool, bool) {
     #[cfg(has_avx512_support)]
     let has_avx512 = std::is_x86_feature_detected!("avx512f")
         && std::is_x86_feature_detected!("avx512bw")
@@ -202,7 +209,7 @@ fn get_evaluator_internal() -> EvaluatorBackend {
     #[cfg(not(has_avx512_support))]
     let has_avx512 = false;
     let has_pclmul = std::is_x86_feature_detected!("pclmulqdq");
-    select_evaluator_backend(has_avx512, has_pclmul)
+    (has_avx512, has_pclmul)
 }
 
 fn select_evaluator_backend(has_avx512: bool, has_pclmul: bool) -> EvaluatorBackend {
