@@ -90,8 +90,7 @@ fn test_lthash_short_circuit() {
     let mut resolver = |_hash: &StructuralHash| leaf1.clone();
 
     // Simulate identical sets
-    let (added, removed) =
-        isolate_delta(key, &leaf1, &lattice_a, &leaf2, &lattice_b, &mut resolver);
+    let (added, removed) = isolate_delta(&leaf1, &lattice_a, &leaf2, &lattice_b, &mut resolver);
     assert!(added.is_empty());
     assert!(removed.is_empty());
 }

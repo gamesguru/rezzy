@@ -10,7 +10,6 @@ pub type Delta<K, V> = Vec<(K, V)>;
 /// * log32 N) time. Uses the `LtHash` lattice to quickly short-circuit if the
 ///   tries are convergently identical.
 pub fn isolate_delta<K, V, F>(
-    hash_key: &[u8],
     root_a: &Arc<HamtNode<K, V>>,
     lattice_a: &LtHash,
     root_b: &Arc<HamtNode<K, V>>,
@@ -32,13 +31,12 @@ where
     let mut removed = Vec::new();
 
     // Begin recursive diffing
-    diff_nodes(hash_key, root_a, root_b, &mut added, &mut removed, resolver);
+    diff_nodes(root_a, root_b, &mut added, &mut removed, resolver);
 
     (added, removed)
 }
 
 fn diff_nodes<K, V, F>(
-    hash_key: &[u8],
     node_a: &Arc<HamtNode<K, V>>,
     node_b: &Arc<HamtNode<K, V>>,
     added: &mut Vec<(K, V)>,
@@ -79,18 +77,18 @@ fn diff_nodes<K, V, F>(
                     removed.push((k_a.clone(), v_a.clone()));
                     added.push((k_b.clone(), v_b.clone()));
                 }
-                idx_a += 1;
-                idx_b += 1;
+                idx_a = idx_a.wrapping_add(1);
+                idx_b = idx_b.wrapping_add(1);
             }
             (true, false) => {
                 let (k_a, v_a) = &node_a.leaves[idx_a];
                 removed.push((k_a.clone(), v_a.clone()));
-                idx_a += 1;
+                idx_a = idx_a.wrapping_add(1);
             }
             (false, true) => {
                 let (k_b, v_b) = &node_b.leaves[idx_b];
                 added.push((k_b.clone(), v_b.clone()));
-                idx_b += 1;
+                idx_b = idx_b.wrapping_add(1);
             }
             (false, false) => {}
         }
@@ -116,23 +114,23 @@ fn diff_nodes<K, V, F>(
                 if child_a.structural_hash() != child_b.structural_hash() {
                     let res_a = resolve_node(child_a, resolver);
                     let res_b = resolve_node(child_b, resolver);
-                    diff_nodes(hash_key, &res_a, &res_b, added, removed, resolver);
+                    diff_nodes(&res_a, &res_b, added, removed, resolver);
                 }
 
-                cidx_a += 1;
-                cidx_b += 1;
+                cidx_a = cidx_a.wrapping_add(1);
+                cidx_b = cidx_b.wrapping_add(1);
             }
             (true, false) => {
                 let child_a = &node_a.children[cidx_a];
                 let res_a = resolve_node(child_a, resolver);
                 collect_all_leaves(&res_a, removed, resolver);
-                cidx_a += 1;
+                cidx_a = cidx_a.wrapping_add(1);
             }
             (false, true) => {
                 let child_b = &node_b.children[cidx_b];
                 let res_b = resolve_node(child_b, resolver);
                 collect_all_leaves(&res_b, added, resolver);
-                cidx_b += 1;
+                cidx_b = cidx_b.wrapping_add(1);
             }
             (false, false) => {}
         }

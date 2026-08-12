@@ -65,28 +65,3 @@ impl Hasher for StructuralHashBuilder {
 pub fn state_group_id_from_lthash(lattice: &crate::state::LtHash) -> StateGroupId {
     lattice.checksum()
 }
-
-/// Computes the 128-bit keyed structural hash for an internal node based on
-/// its bitmap and children.
-///
-/// # Panics
-/// Panics if the keyed MAC constructor rejects the provided key.
-pub(crate) fn compute_structural_hash<K: core::hash::Hash, V: core::hash::Hash>(
-    key: &[u8],
-    datamap: u32,
-    nodemap: u32,
-    leaves: &[(K, V)],
-    children_hashes: &[StructuralHash],
-) -> StructuralHash {
-    let mut mac = StructuralHashBuilder::new(key);
-    mac.write(&datamap.to_le_bytes());
-    mac.write(&nodemap.to_le_bytes());
-    for (k, v) in leaves {
-        k.hash(&mut mac);
-        v.hash(&mut mac);
-    }
-    for h in children_hashes {
-        mac.write(h);
-    }
-    mac.finish()
-}
