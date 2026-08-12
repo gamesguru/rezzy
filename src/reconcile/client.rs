@@ -22,8 +22,9 @@ pub const MAX_RECONCILIATION_ROUNDS: usize = 20;
 /// Maximum number of bucket requests emitted in one reconciliation round.
 pub const MAX_BUCKETS_PER_ROUND: usize = 128;
 /// Maximum split depth implied by `MAX_BUCKETS_PER_ROUND`.
+#[allow(clippy::cast_possible_truncation)]
 pub const MAX_BUCKET_ROUND_DEPTH: u8 =
-    ((usize::BITS - MAX_BUCKETS_PER_ROUND.leading_zeros() - 1) & 0xFF) as u8;
+    (usize::BITS - MAX_BUCKETS_PER_ROUND.leading_zeros() - 1) as u8;
 
 /// MSC4521 requester-side provisioning: `ceil(1.5 * delta) + 4`, plus headroom.
 fn provision_capacity(delta: u64, headroom: u64) -> Option<u64> {
