@@ -194,10 +194,6 @@ where
             reachable.insert(idx);
             reachable |= &self.descendant_bitmaps[idx as usize];
         }
-        for &idx in &self.cyclic_nodes {
-            reachable.insert(idx);
-        }
-
         candidates
             .into_iter()
             .enumerate()
@@ -1071,7 +1067,7 @@ where
             return Reach::Unknown;
         };
         if self.cyclic_nodes.contains(&from_idx) || self.cyclic_nodes.contains(&to_idx) {
-            return Reach::Yes;
+            return Reach::Unknown;
         }
         if self.reaches_index(from_idx, to_idx) {
             Reach::Yes
@@ -1099,7 +1095,7 @@ where
             return Reach::Yes;
         }
         if self.cyclic_nodes.contains(&from_idx) || self.cyclic_nodes.contains(&to_idx) {
-            return Reach::Yes;
+            return Reach::Unknown;
         }
         if self.descendant_bitmaps[from_idx as usize].contains(to_idx) {
             Reach::Yes
