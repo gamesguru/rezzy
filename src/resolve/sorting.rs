@@ -397,6 +397,16 @@ where
         current = found;
     }
 
+    let resolved_pl = resolved.get(&pl_key);
+    assert!(
+        mainline.is_empty() || mainline.first() == resolved_pl,
+        "Mainline must be ordered head-first (resolved PL event at index 0) for the LUB operator to work correctly!"
+    );
+    debug_assert!(
+        mainline.is_empty() || mainline.first() == resolved_pl,
+        "Mainline must be ordered head-first (resolved PL event at index 0) for the LUB operator to work correctly!"
+    );
+
     mainline
 }
 

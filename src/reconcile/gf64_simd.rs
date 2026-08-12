@@ -31,86 +31,95 @@ impl Gf64Evaluator for ScalarEvaluator {
 
 #[cfg(all(target_arch = "x86_64", has_avx512_support))]
 #[derive(Clone, Copy)]
-pub struct Avx512Evaluator;
+pub(crate) struct Avx512Evaluator;
 
 #[cfg(all(target_arch = "x86_64", has_avx512_support))]
 impl Gf64Evaluator for Avx512Evaluator {
     #[allow(clippy::incompatible_msrv)]
     #[cfg_attr(coverage_nightly, coverage(off))]
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
-        assert_eq!(source.len(), target.len());
-        let mut i = 0;
-        let len = source.len();
+        // SAFETY: The dispatcher only selects this backend after runtime AVX-512 detection.
+        unsafe { poly_mac_avx512(term, source, target) }
+    }
+}
 
-        // SAFETY: The `get_evaluator` dispatcher ensures this function is only called on CPUs with `avx512f` and `vpclmulqdq` support.
-        unsafe {
-            // Broadcast the scalar term to all lanes. We only need it in the lower 64 bits of each 128-bit lane.
-            let t = i64::from_ne_bytes(term.to_ne_bytes());
-            let term_vec = _mm512_set_epi64(0, t, 0, t, 0, t, 0, t);
+#[cfg(all(target_arch = "x86_64", has_avx512_support))]
+#[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
+#[allow(clippy::incompatible_msrv)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+// SAFETY: Only called by `Avx512Evaluator::poly_mac`, which enforces CPU feature constraints.
+unsafe fn poly_mac_avx512(term: u64, source: &[u64], target: &mut [u64]) {
+    assert_eq!(source.len(), target.len());
+    let mut i = 0;
+    let len = source.len();
 
-            // Process chunks of 8
-            let chunk_limit = len.saturating_sub(7);
-            while i < chunk_limit {
-                // Load 8 coefficients from source (unaligned)
-                let s_ptr = source.as_ptr().add(i);
-                // We need to unpack 8 contiguous 64-bit values into two 512-bit registers,
-                // placing each 64-bit value into the lower half of a 128-bit lane.
-                // Since they are contiguous in memory, we can't just do a single 512-bit load.
-                // We could load them scalar, or use shuffle/unpack instructions.
-                // For simplicity and to ensure correctness, we manually set them.
-                // (In a heavily optimized pass, we could use AVX-512 gather or shuffle).
-                let s0 = _mm512_set_epi64(
-                    0,
-                    i64::from_ne_bytes((*s_ptr.add(3)).to_ne_bytes()),
-                    0,
-                    i64::from_ne_bytes((*s_ptr.add(2)).to_ne_bytes()),
-                    0,
-                    i64::from_ne_bytes((*s_ptr.add(1)).to_ne_bytes()),
-                    0,
-                    i64::from_ne_bytes((*s_ptr.add(0)).to_ne_bytes()),
-                );
-                let s1 = _mm512_set_epi64(
-                    0,
-                    i64::from_ne_bytes((*s_ptr.add(7)).to_ne_bytes()),
-                    0,
-                    i64::from_ne_bytes((*s_ptr.add(6)).to_ne_bytes()),
-                    0,
-                    i64::from_ne_bytes((*s_ptr.add(5)).to_ne_bytes()),
-                    0,
-                    i64::from_ne_bytes((*s_ptr.add(4)).to_ne_bytes()),
-                );
+    unsafe {
+        // Broadcast the scalar term to all lanes. We only need it in the lower 64 bits of each 128-bit lane.
+        let t = i64::from_ne_bytes(term.to_ne_bytes());
+        let term_vec = _mm512_set_epi64(0, t, 0, t, 0, t, 0, t);
 
-                // Multiply
-                let p0 = gf64_mul_x4_avx512(term_vec, s0);
-                let p1 = gf64_mul_x4_avx512(term_vec, s1);
+        // Process chunks of 8
+        let chunk_limit = len.saturating_sub(7);
+        while i < chunk_limit {
+            // Load 8 coefficients from source (unaligned)
+            let s_ptr = source.as_ptr().add(i);
+            // We need to unpack 8 contiguous 64-bit values into two 512-bit registers,
+            // placing each 64-bit value into the lower half of a 128-bit lane.
+            // Since they are contiguous in memory, we can't just do a single 512-bit load.
+            // We could load them scalar, or use shuffle/unpack instructions.
+            // For simplicity and to ensure correctness, we manually set them.
+            // (In a heavily optimized pass, we could use AVX-512 gather or shuffle).
+            let s0 = _mm512_set_epi64(
+                0,
+                i64::from_ne_bytes((*s_ptr.add(3)).to_ne_bytes()),
+                0,
+                i64::from_ne_bytes((*s_ptr.add(2)).to_ne_bytes()),
+                0,
+                i64::from_ne_bytes((*s_ptr.add(1)).to_ne_bytes()),
+                0,
+                i64::from_ne_bytes((*s_ptr.add(0)).to_ne_bytes()),
+            );
+            let s1 = _mm512_set_epi64(
+                0,
+                i64::from_ne_bytes((*s_ptr.add(7)).to_ne_bytes()),
+                0,
+                i64::from_ne_bytes((*s_ptr.add(6)).to_ne_bytes()),
+                0,
+                i64::from_ne_bytes((*s_ptr.add(5)).to_ne_bytes()),
+                0,
+                i64::from_ne_bytes((*s_ptr.add(4)).to_ne_bytes()),
+            );
 
-                let mut tmp0 = AlignedArray([0u64; 8]);
-                let mut tmp1 = AlignedArray([0u64; 8]);
-                let tmp0_ptr = core::ptr::addr_of_mut!(tmp0).cast::<__m512i>();
-                let tmp1_ptr = core::ptr::addr_of_mut!(tmp1).cast::<__m512i>();
+            // Multiply
+            let p0 = gf64_mul_x4_avx512(term_vec, s0);
+            let p1 = gf64_mul_x4_avx512(term_vec, s1);
 
-                _mm512_store_si512(tmp0_ptr, p0);
-                _mm512_store_si512(tmp1_ptr, p1);
+            let mut tmp0 = AlignedArray([0u64; 8]);
+            let mut tmp1 = AlignedArray([0u64; 8]);
+            let tmp0_ptr = core::ptr::addr_of_mut!(tmp0).cast::<__m512i>();
+            let tmp1_ptr = core::ptr::addr_of_mut!(tmp1).cast::<__m512i>();
 
-                let t_ptr = target.as_mut_ptr().add(i);
-                *t_ptr.add(0) ^= tmp0.0[0];
-                *t_ptr.add(1) ^= tmp0.0[2];
-                *t_ptr.add(2) ^= tmp0.0[4];
-                *t_ptr.add(3) ^= tmp0.0[6];
+            _mm512_store_si512(tmp0_ptr, p0);
+            _mm512_store_si512(tmp1_ptr, p1);
 
-                *t_ptr.add(4) ^= tmp1.0[0];
-                *t_ptr.add(5) ^= tmp1.0[2];
-                *t_ptr.add(6) ^= tmp1.0[4];
-                *t_ptr.add(7) ^= tmp1.0[6];
+            let t_ptr = target.as_mut_ptr().add(i);
+            *t_ptr.add(0) ^= tmp0.0[0];
+            *t_ptr.add(1) ^= tmp0.0[2];
+            *t_ptr.add(2) ^= tmp0.0[4];
+            *t_ptr.add(3) ^= tmp0.0[6];
 
-                i = i.checked_add(8).expect("i cannot overflow len");
-            }
+            *t_ptr.add(4) ^= tmp1.0[0];
+            *t_ptr.add(5) ^= tmp1.0[2];
+            *t_ptr.add(6) ^= tmp1.0[4];
+            *t_ptr.add(7) ^= tmp1.0[6];
+
+            i = i.checked_add(8).expect("i cannot overflow len");
         }
+    }
 
-        // Handle remainder
-        for idx in i..len {
-            target[idx] ^= crate::reconcile::gf64::mul(term, source[idx]);
-        }
+    // Handle remainder
+    for idx in i..len {
+        target[idx] ^= crate::reconcile::gf64::mul(term, source[idx]);
     }
 }
 

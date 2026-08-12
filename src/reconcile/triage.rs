@@ -74,8 +74,10 @@ fn estimate_delta(
 /// `T * 2^r` estimates the complete difference. Decoding every stratum yields
 /// the exact cardinality.
 ///
-/// If even the sparsest residual stratum overflows, this returns `None` so the
-/// caller can route away from sketch mode.
+/// If even the sparsest residual stratum overflows, this returns a saturated
+/// estimate in [`StrataEstimate::delta`] and marks it
+/// [`StrataEstimate::low_confidence`] so the caller can route away from sketch
+/// mode.
 ///
 /// # Errors
 /// Returns an error when root finding exceeds its work budget.

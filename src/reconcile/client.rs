@@ -205,7 +205,7 @@ impl BucketExchange {
 
         self.pending
             .make_contiguous()
-            .sort_unstable_by_key(|request| (request.depth, request.prefix));
+            .sort_unstable_by_key(bucket_range_start);
 
         if !had_failures && self.pending.is_empty() {
             return ClientAction::ResolveRoots {
@@ -292,6 +292,11 @@ fn retry_or_split_bucket(
     });
 
     Ok(requests)
+}
+
+fn bucket_range_start(request: &BucketRequest) -> u64 {
+    let shift = 32_u8.saturating_sub(request.depth);
+    u64::from(request.prefix) << shift
 }
 
 impl Default for ReconciliationClient {
@@ -529,7 +534,7 @@ impl ReconciliationClient {
                 requests.push(request);
             }
         }
-        requests.sort_unstable_by_key(|request| (request.depth, request.prefix));
+        requests.sort_unstable_by_key(bucket_range_start);
         ClientAction::BucketSketches {
             requests,
             accumulated_roots,
@@ -722,7 +727,7 @@ mod tests {
     }
 
     #[test]
-    fn sparse_tail_estimator_failure_falls_back_to_extremity_diff() {
+    fn sparse_tail_estimator_failure_proceeds_with_bucket_sketches() {
         let local = ResidentKernel::new();
         let mut remote = ResidentKernel::new();
         for value in (1_u64..=17).step_by(2) {
@@ -759,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn sparse_tail_estimator_failure_falls_back_even_without_gate() {
+    fn sparse_tail_estimator_failure_proceeds_with_bucket_sketches_even_without_gate() {
         let local = ResidentKernel::new();
         let mut remote = ResidentKernel::new();
         for value in (1_u64..=17).step_by(2) {
