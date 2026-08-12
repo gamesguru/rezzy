@@ -25,11 +25,16 @@ pub const MAX_BUCKETS_PER_ROUND: usize = 128;
 pub const MAX_BUCKET_ROUND_DEPTH: u8 = bucket_round_depth(MAX_BUCKETS_PER_ROUND);
 
 const fn bucket_round_depth(bucket_count: usize) -> u8 {
-    let depth = usize::BITS - bucket_count.leading_zeros() - 1;
-    if depth > u8::MAX as u32 {
-        panic!("MAX_BUCKETS_PER_ROUND depth must fit in u8");
+    let mut count = bucket_count;
+    let mut depth: u8 = 0;
+    while count > 1 {
+        count >>= 1;
+        depth = match depth.checked_add(1) {
+            Some(next) => next,
+            None => panic!("MAX_BUCKETS_PER_ROUND depth must fit in u8"),
+        };
     }
-    depth as u8
+    depth
 }
 
 /// MSC4521 requester-side provisioning: `ceil(1.5 * delta) + 4`, plus headroom.
