@@ -172,7 +172,7 @@ impl Gf64Evaluator for SseEvaluator {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EvaluatorBackend {
     Scalar,
     #[cfg(target_arch = "x86_64")]
@@ -196,15 +196,19 @@ pub fn get_evaluator() -> EvaluatorBackend {
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 fn get_evaluator_internal() -> EvaluatorBackend {
     #[cfg(has_avx512_support)]
-    {
-        if std::is_x86_feature_detected!("avx512f")
-            && std::is_x86_feature_detected!("avx512bw")
-            && std::is_x86_feature_detected!("vpclmulqdq")
-        {
-            return EvaluatorBackend::Avx512;
-        }
-    }
-    if std::is_x86_feature_detected!("pclmulqdq") {
+    let has_avx512 = std::is_x86_feature_detected!("avx512f")
+        && std::is_x86_feature_detected!("avx512bw")
+        && std::is_x86_feature_detected!("vpclmulqdq");
+    #[cfg(not(has_avx512_support))]
+    let has_avx512 = false;
+    let has_pclmul = std::is_x86_feature_detected!("pclmulqdq");
+    select_evaluator_backend(has_avx512, has_pclmul)
+}
+
+fn select_evaluator_backend(has_avx512: bool, has_pclmul: bool) -> EvaluatorBackend {
+    if has_avx512 {
+        EvaluatorBackend::Avx512
+    } else if has_pclmul {
         EvaluatorBackend::Sse
     } else {
         EvaluatorBackend::Scalar
@@ -217,6 +221,19 @@ fn get_evaluator_internal() -> EvaluatorBackend {
 mod tests {
     use super::*;
     use alloc::vec::Vec;
+
+    #[test]
+    fn select_evaluator_backend_prefers_avx512_then_sse_then_scalar() {
+        assert_eq!(
+            select_evaluator_backend(true, true),
+            EvaluatorBackend::Avx512
+        );
+        assert_eq!(select_evaluator_backend(false, true), EvaluatorBackend::Sse);
+        assert_eq!(
+            select_evaluator_backend(false, false),
+            EvaluatorBackend::Scalar
+        );
+    }
 
     #[test]
     fn test_evaluators_match_scalar() {
