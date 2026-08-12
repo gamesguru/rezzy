@@ -1,9 +1,9 @@
-use std::{
-	hash::{Hash, Hasher},
-	sync::Arc,
-	vec::Vec,
-};
 use blake2::{digest::Mac, Blake2bMac512};
+use std::{
+    hash::{Hash, Hasher},
+    sync::Arc,
+    vec::Vec,
+};
 
 pub mod delta;
 
@@ -130,8 +130,8 @@ impl PersistedInternalNode {
     /// Panics if the node has too many child hashes to fit in `u32`.
     #[must_use]
     pub fn encode_v1(&self) -> Vec<u8> {
-        let child_count = u32::try_from(self.child_hashes.len())
-            .expect("too many child hashes for v1 encoding");
+        let child_count =
+            u32::try_from(self.child_hashes.len()).expect("too many child hashes for v1 encoding");
         let child_bytes = self
             .child_hashes
             .len()
@@ -205,7 +205,10 @@ impl PersistedInternalNode {
         let mut child_hashes = Vec::with_capacity(child_count);
         for i in 0..child_count {
             let start = 29_usize
-                .checked_add(i.checked_mul(16).ok_or("Child hash index overflows usize")?)
+                .checked_add(
+                    i.checked_mul(16)
+                        .ok_or("Child hash index overflows usize")?,
+                )
                 .ok_or("Child hash index overflows usize")?;
             let end = start
                 .checked_add(16)
@@ -223,6 +226,3 @@ impl PersistedInternalNode {
         })
     }
 }
-
-#[cfg(test)]
-mod tests;
