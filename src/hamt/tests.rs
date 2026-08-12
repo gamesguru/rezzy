@@ -235,8 +235,8 @@ fn test_diff_nodes_and_lazy_resolver() {
 
 #[test]
 fn test_hamt_codec_types() {
-    use alloc::string::String;
     use crate::hamt::codec::HamtCodec;
+    use alloc::string::String;
     let mut out = Vec::new();
 
     // bool
@@ -245,12 +245,12 @@ fn test_hamt_codec_types() {
     let mut cursor = 0;
     assert_eq!(bool::decode_hamt(&out, &mut cursor), Ok(true));
     assert_eq!(bool::decode_hamt(&out, &mut cursor), Ok(false));
-    assert!(bool::decode_hamt(&vec![2u8], &mut 0).is_err());
+    assert!(bool::decode_hamt(&[2u8], &mut 0).is_err());
 
     out.clear();
     // String
     let s1 = String::from("hello");
-    let s2 = String::from("");
+    let s2 = String::new();
     s1.encode_hamt(&mut out);
     s2.encode_hamt(&mut out);
     let mut cursor = 0;
@@ -365,7 +365,10 @@ fn test_collect_all_leaves_recursion() {
     // root_b has nothing in slot 0. So root_a's slot 0 will be completely removed,
     // triggering collect_all_leaves on internal, which then recurses into its children (leaf).
     let root_b = Arc::new(HamtNode {
-        datamap: 0, nodemap: 0, leaves: vec![], children: vec![],
+        datamap: 0,
+        nodemap: 0,
+        leaves: vec![],
+        children: vec![],
         structural_hash: HamtNode::<i32, i32>::compute_structural_hash(key, 0, 0, &[], &[]),
     });
 
@@ -387,4 +390,41 @@ fn test_structural_hash_builder_hasher() {
 
     let builder = StructuralHashBuilder::new(b"key");
     assert_eq!(Hasher::finish(&builder), 0);
+}
+
+#[test]
+fn test_diff_nodes_fast_paths() {
+    let key = b"dummy_server_key";
+
+    let node1 = Arc::new(HamtNode {
+        datamap: 1,
+        nodemap: 0,
+        leaves: vec![(1, 100)],
+        children: vec![],
+        structural_hash: HamtNode::compute_structural_hash(key, 1, 0, &[(1, 100)], &[]),
+    });
+
+    let node2 = Arc::new(HamtNode {
+        datamap: 1,
+        nodemap: 0,
+        leaves: vec![(1, 100)],
+        children: vec![],
+        structural_hash: HamtNode::compute_structural_hash(key, 1, 0, &[(1, 100)], &[]),
+    });
+
+    let lattice_a = LtHash::default();
+    let lattice_b = LtHash([1u16; 1024]);
+    let mut resolver = |_hash: &StructuralHash| panic!("unexpected lazy");
+
+    // -- Arc pointer equality --
+    // node1 and node1 are the same Arc allocation.
+    let (added1, removed1) = isolate_delta(&node1, &lattice_a, &node1, &lattice_b, &mut resolver);
+    assert!(added1.is_empty());
+    assert!(removed1.is_empty());
+
+    // -- Structural hash equality --
+    // node1 and node2 are different Arcs, but have the exact same structural hash.
+    let (added2, removed2) = isolate_delta(&node1, &lattice_a, &node2, &lattice_b, &mut resolver);
+    assert!(added2.is_empty());
+    assert!(removed2.is_empty());
 }
