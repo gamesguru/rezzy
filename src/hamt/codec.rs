@@ -298,3 +298,51 @@ where
         })
     }
 }
+
+impl<K, V> core::convert::TryFrom<PersistedInternalNode<K, V>> for crate::hamt::HamtNode<K, V> {
+    type Error = &'static str;
+
+    fn try_from(persisted: PersistedInternalNode<K, V>) -> Result<Self, Self::Error> {
+        let expected_children = persisted.nodemap.count_ones() as usize;
+        if persisted.child_hashes.len() != expected_children {
+            return Err("PersistedInternalNode child count does not match nodemap");
+        }
+        
+        let expected_leaves = persisted.datamap.count_ones() as usize;
+        if persisted.leaves.len() != expected_leaves {
+            return Err("PersistedInternalNode leaf count does not match datamap");
+        }
+
+        let children = persisted
+            .child_hashes
+            .into_iter()
+            .map(crate::hamt::NodeRef::Lazy)
+            .collect();
+
+        Ok(crate::hamt::HamtNode {
+            datamap: persisted.datamap,
+            nodemap: persisted.nodemap,
+            leaves: persisted.leaves,
+            children,
+            structural_hash: persisted.structural_hash,
+        })
+    }
+}
+
+impl<K: Clone, V: Clone> From<&crate::hamt::HamtNode<K, V>> for PersistedInternalNode<K, V> {
+    fn from(node: &crate::hamt::HamtNode<K, V>) -> Self {
+        let child_hashes = node
+            .children
+            .iter()
+            .map(|child| child.structural_hash().clone())
+            .collect();
+
+        Self {
+            datamap: node.datamap,
+            nodemap: node.nodemap,
+            structural_hash: node.structural_hash,
+            leaves: node.leaves.clone(),
+            child_hashes,
+        }
+    }
+}

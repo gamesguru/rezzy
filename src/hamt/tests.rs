@@ -443,3 +443,59 @@ fn test_diff_nodes_fast_paths() {
     assert!(added2.is_empty());
     assert!(removed2.is_empty());
 }
+
+#[test]
+fn test_hamt_node_persisted_round_trip() {
+    use core::convert::TryFrom;
+    use crate::hamt::codec::PersistedInternalNode;
+
+    let key = b"dummy_server_key";
+
+    // Build a HamtNode with leaves and children
+    let leaf = Arc::new(HamtNode {
+        datamap: 1,
+        nodemap: 0,
+        leaves: vec![(1, 100)],
+        children: vec![],
+        structural_hash: HamtNode::compute_structural_hash(key, 1, 0, &[(1, 100)], &[]),
+    });
+
+    let original = HamtNode {
+        datamap: 0b10,
+        nodemap: 0b1,
+        leaves: vec![(2, 200)],
+        children: vec![NodeRef::Resolved(leaf.clone())],
+        structural_hash: HamtNode::compute_structural_hash(
+            key,
+            0b10,
+            0b1,
+            &[(2, 200)],
+            &[NodeRef::Resolved(leaf.clone())],
+        ),
+    };
+
+    // 1. Convert to PersistedInternalNode
+    let persisted: PersistedInternalNode<i32, i32> = (&original).into();
+
+    // 2. Encode to bytes
+    let encoded = persisted.encode_v1();
+
+    // 3. Decode from bytes
+    let decoded = PersistedInternalNode::<i32, i32>::decode_v1(&encoded).expect("decode failed");
+
+    // 4. TryFrom back to HamtNode
+    let restored = HamtNode::try_from(decoded).expect("try_from failed");
+
+    // Assertions
+    assert_eq!(restored.structural_hash, original.structural_hash);
+    assert_eq!(restored.datamap, original.datamap);
+    assert_eq!(restored.nodemap, original.nodemap);
+    assert_eq!(restored.leaves, original.leaves);
+    
+    // Check children (restored children will be Lazy, original are Resolved)
+    assert_eq!(restored.children.len(), original.children.len());
+    for (restored_child, original_child) in restored.children.iter().zip(original.children.iter()) {
+        assert!(matches!(restored_child, NodeRef::Lazy(_)));
+        assert_eq!(restored_child.structural_hash(), original_child.structural_hash());
+    }
+}
