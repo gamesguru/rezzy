@@ -1,5 +1,7 @@
 use super::*;
 use crate::hamt::delta::isolate_delta;
+use crate::hamt::hash::compute_structural_hash;
+use crate::hamt::PersistedInternalNode;
 use crate::state::LtHash;
 use alloc::vec;
 use std::sync::Arc;
@@ -49,4 +51,19 @@ fn test_lthash_short_circuit() {
     let (added, removed) = isolate_delta(key, &leaf1, &lattice_a, &leaf2, &lattice_b);
     assert!(added.is_empty());
     assert!(removed.is_empty());
+}
+
+#[test]
+fn test_persisted_internal_node_round_trip() {
+    let node = PersistedInternalNode {
+        datamap: 0x1122_3344,
+        nodemap: 0x5566_7788,
+        structural_hash: [0xaa; 16],
+        child_hashes: vec![[0x11; 16], [0x22; 16]],
+    };
+
+    let encoded = node.encode_v1();
+    let decoded = PersistedInternalNode::decode_v1(&encoded).expect("round-trip must decode");
+
+    assert_eq!(decoded, node);
 }
