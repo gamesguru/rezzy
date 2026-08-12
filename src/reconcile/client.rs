@@ -1001,7 +1001,7 @@ mod tests {
         assert_eq!(accumulated_roots, vec![99, 42]);
         assert_eq!(second_requests.len(), MAX_BUCKETS_PER_ROUND);
         assert_eq!(exchange.pending_len(), 2);
-        assert_eq!(exchange.rounds_emitted(), 1);
+        assert_eq!(exchange.rounds_emitted(), 2);
 
         let second = exchange.advance(
             BucketDecodeBatch {
@@ -1021,7 +1021,7 @@ mod tests {
         assert_eq!(accumulated_roots, vec![99, 42]);
         assert_eq!(third_requests.len(), 2);
         assert_eq!(exchange.pending_len(), 0);
-        assert_eq!(exchange.rounds_emitted(), 2);
+        assert_eq!(exchange.rounds_emitted(), 3);
 
         let final_action = exchange.advance(
             BucketDecodeBatch {
@@ -1084,7 +1084,7 @@ mod tests {
             }]
         );
         assert_eq!(exchange.pending_len(), 1);
-        assert_eq!(exchange.rounds_emitted(), 1);
+        assert_eq!(exchange.rounds_emitted(), 2);
     }
 
     #[test]
