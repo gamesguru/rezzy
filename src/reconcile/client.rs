@@ -1127,4 +1127,17 @@ mod tests {
             Err(AlgebraicError::DecodeFailure)
         );
     }
+
+    #[test]
+    fn test_bucket_round_depth() {
+        assert_eq!(bucket_round_depth(1), 0);
+        assert_eq!(bucket_round_depth(2), 1);
+        assert_eq!(bucket_round_depth(3), 1);
+        assert_eq!(bucket_round_depth(4), 2);
+        assert_eq!(bucket_round_depth(5), 2);
+        assert_eq!(bucket_round_depth(127), 6);
+        assert_eq!(bucket_round_depth(128), 7);
+        assert_eq!(bucket_round_depth(255), 7);
+        assert_eq!(bucket_round_depth(256), 8);
+    }
 }
