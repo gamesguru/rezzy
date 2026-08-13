@@ -7,8 +7,8 @@
 
 use super::resident::{ResidentKernel, STRATA_COUNT, STRATUM_CAPACITY};
 use super::triage::{
-    BucketDecodeBatch, BucketRequest, MAX_BUCKETED_SKETCH_CAPACITY, MAX_BUCKET_SKETCH_CAPACITY,
-    SATURATED_DELTA_ESTIMATE,
+    bucket_range_start, BucketDecodeBatch, BucketRequest, MAX_BUCKETED_SKETCH_CAPACITY,
+    MAX_BUCKET_SKETCH_CAPACITY, SATURATED_DELTA_ESTIMATE,
 };
 use super::{AlgebraicError, ElementHash, SyndromeSketch, MAX_LOCAL_SKETCH_DECODE_CAPACITY};
 use alloc::collections::VecDeque;
@@ -304,12 +304,6 @@ fn retry_or_split_bucket(
 
     Ok(requests)
 }
-
-fn bucket_range_start(request: &BucketRequest) -> u64 {
-    let shift = 32_u8.saturating_sub(request.depth);
-    u64::from(request.prefix) << shift
-}
-
 impl Default for ReconciliationClient {
     fn default() -> Self {
         Self {

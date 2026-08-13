@@ -42,6 +42,16 @@ pub struct BucketDecodeBatch {
     pub failed_buckets: Vec<(u8, u32)>,
 }
 
+/// Returns the canonical start of a bucket's key-space range.
+///
+/// This is shared between bucket ordering and request validation so the two
+/// paths stay aligned if the bucket geometry changes.
+#[must_use]
+pub(crate) fn bucket_range_start(request: &BucketRequest) -> u64 {
+    let shift = 32_u8.saturating_sub(request.depth);
+    u64::from(request.prefix) << shift
+}
+
 /// Estimated symmetric-difference cardinality derived from the strata sketches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrataEstimate {
@@ -240,8 +250,8 @@ pub fn validate_bucket_requests(requests: &[BucketRequest]) -> Result<(), Algebr
             return Err(AlgebraicError::InvalidSketchCapacity);
         }
 
+        let start = bucket_range_start(request);
         let shift = 32_u8.saturating_sub(request.depth);
-        let start = u64::from(request.prefix) << shift;
         let end = start
             .checked_add(1_u64 << shift)
             .ok_or(AlgebraicError::InvalidBucketIndex)?;
