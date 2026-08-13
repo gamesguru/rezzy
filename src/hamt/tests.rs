@@ -1,6 +1,7 @@
 use super::*;
 use crate::hamt::codec::PersistedInternalNode;
 use crate::hamt::delta::isolate_delta;
+use crate::hamt::{build_hamt, build_hamt_root_handle, HamtBuildError};
 use crate::state::LtHash;
 use alloc::vec;
 use core::hash::{Hash, Hasher};
@@ -310,6 +311,45 @@ fn test_root_handle_uses_distinct_state_group_id() {
     assert_eq!(handle.structural_hash, structural_hash);
     assert_eq!(handle.state_group_id, state_group_id_from_lthash(&lattice));
     assert_eq!(handle.state_group_id.len(), 32);
+}
+
+#[test]
+fn test_build_hamt_creates_expected_root_shape() {
+    let key = b"dummy_server_key";
+    let root = build_hamt(key, vec![(1_u8, 10_u8), (2_u8, 20_u8)]).expect("build should work");
+
+    assert_eq!(root.leaves.len(), 2);
+    assert_eq!(root.children.len(), 0);
+    assert_eq!(root.datamap.count_ones(), 2);
+    assert_eq!(root.nodemap, 0);
+}
+
+#[test]
+fn test_build_hamt_root_handle_tracks_root_identity() {
+    let key = b"dummy_server_key";
+    let lattice = LtHash::default();
+    let (handle, root) = build_hamt_root_handle(key, &lattice, vec![(1_u8, 10_u8)])
+        .expect("build with handle should work");
+
+    assert_eq!(handle.structural_hash, root.structural_hash);
+    assert_eq!(handle.state_group_id, state_group_id_from_lthash(&lattice));
+}
+
+#[test]
+fn test_build_hamt_reports_hash_collisions() {
+    let key = b"dummy_server_key";
+    let result =
+        crate::hamt::build_hamt_with_key_hash(key, vec![(1_u8, 10_u8), (2_u8, 20_u8)], |_| {
+            [0u8; 16]
+        });
+
+    assert!(matches!(
+        result,
+        Err(HamtBuildError::HashCollision {
+            depth: 24,
+            bucket_size: 2
+        })
+    ));
 }
 
 #[test]
