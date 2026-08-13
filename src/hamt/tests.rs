@@ -87,10 +87,11 @@ fn test_lthash_short_circuit() {
     let lattice_a = LtHash::default();
     let lattice_b = LtHash::default();
 
-    let mut resolver = |_hash: &StructuralHash| leaf1.clone();
+    let mut resolver = |_hash: &StructuralHash| Ok::<_, ()>(leaf1.clone());
 
     // Simulate identical sets
-    let (added, removed) = isolate_delta(&leaf1, &lattice_a, &leaf2, &lattice_b, &mut resolver);
+    let (added, removed) =
+        isolate_delta(&leaf1, &lattice_a, &leaf2, &lattice_b, &mut resolver).unwrap();
     assert!(added.is_empty());
     assert!(removed.is_empty());
 }
@@ -209,13 +210,14 @@ fn test_diff_nodes_and_lazy_resolver() {
     let mut resolver = |hash: &StructuralHash| {
         if hash == &leaf3.structural_hash {
             resolve_called = true;
-            leaf3.clone()
+            Ok::<_, ()>(leaf3.clone())
         } else {
             panic!("Unexpected lazy resolution");
         }
     };
 
-    let (added, removed) = isolate_delta(&root_a, &lattice_a, &root_b, &lattice_b, &mut resolver);
+    let (added, removed) =
+        isolate_delta(&root_a, &lattice_a, &root_b, &lattice_b, &mut resolver).unwrap();
 
     assert!(
         resolve_called,
@@ -313,7 +315,8 @@ fn test_leaf_differences() {
         &root_b,
         &lattice_b,
         &mut panic_resolver,
-    );
+    )
+    .unwrap();
 
     // slot 0 (true, false): removed (1, 100)
     // slot 1 (true, true): differs, removed (2, 200) added (2, 250)
@@ -326,7 +329,7 @@ fn test_leaf_differences() {
     assert!(added.contains(&(2, 250)));
     assert!(added.contains(&(3, 300)));
 }
-fn panic_resolver<K, V>(_hash: &StructuralHash) -> Arc<HamtNode<K, V>> {
+fn panic_resolver<K, V>(_hash: &StructuralHash) -> Result<Arc<HamtNode<K, V>>, ()> {
     panic!("unexpected lazy");
 }
 
@@ -390,7 +393,8 @@ fn test_collect_all_leaves_recursion() {
         &root_b,
         &lattice_b,
         &mut panic_resolver,
-    );
+    )
+    .unwrap();
 
     assert!(added.is_empty());
     assert_eq!(removed.len(), 1);
@@ -432,14 +436,14 @@ fn test_diff_nodes_fast_paths() {
     // -- Arc pointer equality --
     // node1 and node1 are the same Arc allocation.
     let (added1, removed1) =
-        isolate_delta(&node1, &lattice_a, &node1, &lattice_b, &mut panic_resolver);
+        isolate_delta(&node1, &lattice_a, &node1, &lattice_b, &mut panic_resolver).unwrap();
     assert!(added1.is_empty());
     assert!(removed1.is_empty());
 
     // -- Structural hash equality --
     // node1 and node2 are different Arcs, but have the exact same structural hash.
     let (added2, removed2) =
-        isolate_delta(&node1, &lattice_a, &node2, &lattice_b, &mut panic_resolver);
+        isolate_delta(&node1, &lattice_a, &node2, &lattice_b, &mut panic_resolver).unwrap();
     assert!(added2.is_empty());
     assert!(removed2.is_empty());
 }
