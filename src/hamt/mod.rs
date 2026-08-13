@@ -59,8 +59,6 @@ pub struct HamtNode<K, V> {
 impl<K, V> HamtNode<K, V> {
     /// Computes the structural hash of this node from its contents.
     ///
-    /// # Panics
-    /// Panics if the keyed MAC constructor rejects the provided key.
     pub fn compute_structural_hash(
         key: &[u8],
         datamap: u32,
@@ -76,8 +74,13 @@ impl<K, V> HamtNode<K, V> {
         mac.write(&datamap.to_le_bytes());
         mac.write(&nodemap.to_le_bytes());
         for (k, v) in leaves {
-            k.hash(&mut mac);
-            v.hash(&mut mac);
+            let mut leaf_mac = StructuralHashBuilder::new(key);
+            k.hash(&mut leaf_mac);
+            mac.write(&leaf_mac.finish());
+
+            let mut leaf_mac = StructuralHashBuilder::new(key);
+            v.hash(&mut leaf_mac);
+            mac.write(&leaf_mac.finish());
         }
         for child in children {
             mac.write(&child.structural_hash());

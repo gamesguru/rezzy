@@ -47,7 +47,45 @@ macro_rules! impl_fixed_hamt_codec {
     };
 }
 
-impl_fixed_hamt_codec!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize);
+impl_fixed_hamt_codec!(u8, u16, u32, u64, u128, i8, i16, i32, i64, i128);
+
+impl HamtCodec for usize {
+    #[inline]
+    fn encode_hamt(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(*self as u64).to_le_bytes());
+    }
+
+    #[inline]
+    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
+        let end = cursor.checked_add(8).ok_or("HAMT codec cursor overflow")?;
+        let bytes = input
+            .get(*cursor..end)
+            .ok_or("HAMT codec buffer too short")?;
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(bytes);
+        *cursor = end;
+        usize::try_from(u64::from_le_bytes(raw)).map_err(|_| "HAMT codec usize out of range")
+    }
+}
+
+impl HamtCodec for isize {
+    #[inline]
+    fn encode_hamt(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&(*self as i64).to_le_bytes());
+    }
+
+    #[inline]
+    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
+        let end = cursor.checked_add(8).ok_or("HAMT codec cursor overflow")?;
+        let bytes = input
+            .get(*cursor..end)
+            .ok_or("HAMT codec buffer too short")?;
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(bytes);
+        *cursor = end;
+        isize::try_from(i64::from_le_bytes(raw)).map_err(|_| "HAMT codec isize out of range")
+    }
+}
 
 impl HamtCodec for bool {
     #[inline]
@@ -271,6 +309,9 @@ where
             .ok_or("Child hash payload size overflows usize")?;
         if buf.len() < total_len {
             return Err("Buffer too short for child hashes");
+        }
+        if buf.len() > total_len {
+            return Err("Buffer contains trailing bytes");
         }
 
         let mut child_hashes = Vec::with_capacity(child_count);

@@ -25,9 +25,10 @@ where
     V: Hash + Clone + Eq,
     F: FnMut(&StructuralHash) -> Result<Arc<HamtNode<K, V>>, E>,
 {
-    // Short-circuit: if the LtHash lattices match, the sets are identical (with
-    // very high probability).
-    if lattice_a == lattice_b {
+    // Short-circuit only when both the lattice and the root structural hashes
+    // match. A lattice collision alone must not suppress a real structural
+    // diff.
+    if lattice_a == lattice_b && root_a.structural_hash == root_b.structural_hash {
         return Ok((Vec::new(), Vec::new()));
     }
 

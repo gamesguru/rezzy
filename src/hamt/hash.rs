@@ -1,4 +1,4 @@
-use blake2::{digest::Mac, Blake2bMac512};
+use blake2::{digest::Digest, Blake2b512};
 use core::hash::Hasher;
 
 /// A 128-bit structural hash for HAMT nodes.
@@ -33,15 +33,18 @@ impl RootHandle {
     }
 }
 
-pub(crate) struct StructuralHashBuilder(Blake2bMac512);
+pub(crate) struct StructuralHashBuilder(Blake2b512);
 
 impl StructuralHashBuilder {
     pub(crate) fn new(key: &[u8]) -> Self {
-        Self(Blake2bMac512::new_from_slice(key).expect("Blake2b takes any key size"))
+        let mut hasher = Blake2b512::new();
+        hasher.update((key.len() as u64).to_le_bytes());
+        hasher.update(key);
+        Self(hasher)
     }
 
     pub(crate) fn finish(self) -> StructuralHash {
-        let result = self.0.finalize().into_bytes();
+        let result = self.0.finalize();
         let mut out = [0_u8; 16];
         out.copy_from_slice(&result[..16]);
         out
