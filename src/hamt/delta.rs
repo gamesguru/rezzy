@@ -5,6 +5,7 @@ use crate::state::LtHash;
 use super::{HamtNode, NodeRef, StructuralHash};
 
 pub type Delta<K, V> = Vec<(K, V)>;
+pub type DeltaResult<K, V, E> = Result<(Delta<K, V>, Delta<K, V>), E>;
 
 /// Isolates the delta (added/removed items) between two HAMT tries in O(|Delta|
 /// * log32 N) time. Uses the `LtHash` lattice to quickly short-circuit if the
@@ -12,14 +13,13 @@ pub type Delta<K, V> = Vec<(K, V)>;
 ///
 /// # Errors
 /// Returns the error from the `resolver` closure if it fails to resolve a lazy node.
-#[allow(clippy::type_complexity)]
 pub fn isolate_delta<K, V, F, E>(
     root_a: &Arc<HamtNode<K, V>>,
     lattice_a: &LtHash,
     root_b: &Arc<HamtNode<K, V>>,
     lattice_b: &LtHash,
     resolver: &mut F,
-) -> Result<(Delta<K, V>, Delta<K, V>), E>
+) -> DeltaResult<K, V, E>
 where
     K: Hash + Clone + Eq,
     V: Hash + Clone + Eq,
