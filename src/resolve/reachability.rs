@@ -1552,4 +1552,63 @@ mod tests {
             &interleaved_candidates,
         );
     }
+
+    #[test]
+    fn forward_reachability_ids_enumerate_every_reachable_node() {
+        let graph = build_chain_graph(4);
+        let index = RangePrefilterReachability::build(&graph);
+        let seeds = [String::from("chain-0001")];
+
+        let reachable: Vec<_> = index.forward_reachable_ids(seeds.iter()).cloned().collect();
+        assert_eq!(
+            reachable,
+            vec![
+                String::from("chain-0001"),
+                String::from("chain-0002"),
+                String::from("chain-0003"),
+            ]
+        );
+    }
+
+    #[test]
+    fn cyclic_graphs_fall_back_to_unknown_reachability() {
+        let mut graph: HashMap<String, LeanEvent<String>> = HashMap::new();
+        for (id, auth_events) in [
+            ("A", vec![String::from("B")]),
+            ("B", vec![String::from("A")]),
+            ("C", Vec::new()),
+        ] {
+            graph.insert(
+                String::from(id),
+                LeanEvent {
+                    event_id: String::from(id),
+                    auth_events,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let forward = ForwardReachabilityIndex::build(&graph);
+        let range = RangePrefilterReachability::build(&graph);
+        let a = String::from("A");
+        let b = String::from("B");
+        let c = String::from("C");
+
+        assert_eq!(forward.reaches(&a, &b), Reach::Unknown);
+        assert_eq!(range.reaches(&a, &b), Reach::Unknown);
+        assert_eq!(forward.reaches(&c, &a), Reach::Unknown);
+        assert_eq!(range.reaches(&c, &a), Reach::Unknown);
+
+        let seeds = [&a];
+        let candidates = [&a, &b, &c];
+        assert_eq!(forward.filter_reachable(seeds, candidates), vec![0, 1]);
+        assert_eq!(range.filter_reachable(seeds, candidates), vec![0, 1]);
+        assert_eq!(
+            range
+                .forward_reachable_ids([&a].into_iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![String::from("A"), String::from("B")]
+        );
+    }
 }

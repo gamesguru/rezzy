@@ -187,6 +187,114 @@ fn test_decode_v1_rejects_trailing_bytes() {
 }
 
 #[test]
+fn test_decode_v1_rejects_shape_mismatches() {
+    let node = PersistedInternalNode {
+        datamap: 0b1,
+        nodemap: 0b1,
+        structural_hash: [0xaa; 16],
+        leaves: vec![(1_i32, 10_i32)],
+        child_hashes: vec![[0x11; 16]],
+    };
+    let encoded = node.encode_v1();
+
+    assert_eq!(
+        PersistedInternalNode::<i32, i32>::decode_v1(&[]),
+        Err("Invalid version byte")
+    );
+    assert_eq!(
+        PersistedInternalNode::<i32, i32>::decode_v1(&encoded[..3]),
+        Err("Buffer too short for v1 header")
+    );
+
+    let mut bad_leaf_count = encoded.clone();
+    bad_leaf_count[25..29].copy_from_slice(&0_u32.to_le_bytes());
+    assert_eq!(
+        PersistedInternalNode::<i32, i32>::decode_v1(&bad_leaf_count),
+        Err("Leaf count does not match datamap")
+    );
+
+    let mut bad_child_count = encoded.clone();
+    bad_child_count[29..33].copy_from_slice(&0_u32.to_le_bytes());
+    assert_eq!(
+        PersistedInternalNode::<i32, i32>::decode_v1(&bad_child_count),
+        Err("Child count does not match nodemap")
+    );
+
+    let mut truncated = encoded.clone();
+    truncated.pop();
+    assert_eq!(
+        PersistedInternalNode::<i32, i32>::decode_v1(&truncated),
+        Err("Buffer too short for child hashes")
+    );
+}
+
+#[test]
+fn test_hamt_codec_numeric_round_trips() {
+    use crate::hamt::codec::HamtCodec;
+
+    macro_rules! round_trip {
+        ($ty:ty, $value:expr) => {{
+            let mut out = Vec::new();
+            let value: $ty = $value;
+            value.encode_hamt(&mut out);
+            let mut cursor = 0;
+            assert_eq!(<$ty>::decode_hamt(&out, &mut cursor), Ok(value));
+            assert_eq!(cursor, out.len());
+        }};
+    }
+
+    round_trip!(u8, 7);
+    round_trip!(u16, 7_000);
+    round_trip!(u32, 7_000_000);
+    round_trip!(u64, 7_000_000_000);
+    round_trip!(u128, 7_000_000_000_000);
+    round_trip!(i8, -7);
+    round_trip!(i16, -7_000);
+    round_trip!(i32, -7_000_000);
+    round_trip!(i64, -7_000_000_000);
+    round_trip!(i128, -7_000_000_000_000);
+    round_trip!(usize, 7);
+    round_trip!(isize, -7);
+
+    let mut cursor = 0;
+    assert_eq!(
+        usize::decode_hamt(&[1, 2, 3], &mut cursor),
+        Err("HAMT codec buffer too short")
+    );
+    let mut cursor = 0;
+    assert_eq!(
+        isize::decode_hamt(&[1, 2, 3], &mut cursor),
+        Err("HAMT codec buffer too short")
+    );
+}
+
+#[test]
+#[should_panic(expected = "leaf count must match datamap bits")]
+fn test_encode_v1_panics_when_leaf_count_mismatches_datamap() {
+    let node = PersistedInternalNode::<i32, i32> {
+        datamap: 0b1,
+        nodemap: 0,
+        structural_hash: [0xaa; 16],
+        leaves: vec![],
+        child_hashes: vec![],
+    };
+    let _ = node.encode_v1();
+}
+
+#[test]
+#[should_panic(expected = "child count must match nodemap bits")]
+fn test_encode_v1_panics_when_child_count_mismatches_nodemap() {
+    let node = PersistedInternalNode::<i32, i32> {
+        datamap: 0,
+        nodemap: 0b1,
+        structural_hash: [0xaa; 16],
+        leaves: vec![],
+        child_hashes: vec![],
+    };
+    let _ = node.encode_v1();
+}
+
+#[test]
 fn test_structural_hash_accepts_long_key() {
     let key = [0x5au8; 100];
     let hash = HamtNode::<u8, u8>::compute_structural_hash(&key, 0, 0, &[], &[]);
