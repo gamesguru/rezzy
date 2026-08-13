@@ -346,10 +346,45 @@ fn test_build_hamt_reports_hash_collisions() {
     assert!(matches!(
         result,
         Err(HamtBuildError::HashCollision {
-            depth: 24,
+            depth: 25,
             bucket_size: 2
         })
     ));
+}
+
+#[test]
+fn test_build_hamt_uses_final_partial_hash_chunk() {
+    let key = b"dummy_server_key";
+    let root =
+        crate::hamt::build_hamt_with_key_hash(key, vec![(1_u8, 10_u8), (2_u8, 20_u8)], |entry| {
+            match entry {
+                1 => {
+                    let mut hash = [0_u8; 16];
+                    hash[15] = 0b0010_0000;
+                    hash
+                }
+                2 => {
+                    let mut hash = [0_u8; 16];
+                    hash[15] = 0b0100_0000;
+                    hash
+                }
+                _ => unreachable!("unexpected test key"),
+            }
+        })
+        .expect("final partial chunk should separate entries");
+
+    let mut node = &root;
+    while let [child] = node.children.as_slice() {
+        match child {
+            NodeRef::Resolved(next) => node = next,
+            NodeRef::Lazy(_) => panic!("builder should materialize resolved children"),
+        }
+    }
+
+    assert_eq!(node.leaves.len(), 2);
+    assert_eq!(node.children.len(), 0);
+    assert_eq!(node.datamap.count_ones(), 2);
+    assert_eq!(node.nodemap, 0);
 }
 
 #[test]

@@ -24,7 +24,8 @@ use hash::StructuralHashBuilder;
 const HAMT_BRANCH_BITS: usize = 5;
 const HAMT_BRANCH_FACTOR: usize = 1 << HAMT_BRANCH_BITS;
 const HAMT_BRANCH_MASK: u16 = 0b1_1111;
-const HAMT_MAX_DEPTH: usize = (core::mem::size_of::<StructuralHash>() * 8) / HAMT_BRANCH_BITS;
+const HAMT_MAX_DEPTH: usize =
+    (core::mem::size_of::<StructuralHash>() * 8).div_ceil(HAMT_BRANCH_BITS);
 
 /// A reference to a child node in the HAMT.
 #[derive(Clone, Debug)]
