@@ -47,34 +47,14 @@ use std::time::{Duration, Instant};
 
 use rezzy::hamt::{self, codec::HamtCodec, HamtNode};
 
+mod common;
+use common::{collect_new_nodes, to_persisted, Xorshift128};
+
 type Key = String;
 type Value = String;
 
 const STRUCTURAL_KEY: &[u8] = b"bench-state-groups";
 const SNAPSHOT_EVERY: usize = 100;
-
-struct Xorshift128 {
-    state: [u64; 2],
-}
-
-impl Xorshift128 {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: [seed ^ 0x9E37_79B9_7F4A_7C15, seed.wrapping_add(1) | 1],
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.state[0];
-        let y = self.state[1];
-        self.state[0] = y;
-        x ^= x << 23;
-        x ^= x >> 17;
-        x ^= y ^ (y >> 26);
-        self.state[1] = x;
-        x.wrapping_add(y)
-    }
-}
 
 fn make_entries(n: usize, seed: u64) -> Vec<(Key, Value)> {
     let mut rng = Xorshift128::new(seed);
@@ -198,24 +178,28 @@ fn bench_state_groups(n: usize, steps: usize) {
         .expect("insert should not collide");
         hamt_root = new_root;
         let mut new_nodes = Vec::new();
-        crate_collect_new_nodes(&prev_root, &hamt_root, &mut new_nodes);
+        collect_new_nodes(&prev_root, &hamt_root, &mut new_nodes);
         for node in &new_nodes {
-            hamt_bytes_total += node_encoded_len(node) as u64;
+            hamt_bytes_total += to_persisted(node).encode_v1().len() as u64;
         }
         black_box(&hamt_root);
     }
     let hamt_write_elapsed = write_start_hamt.elapsed();
 
     let write_start_chain = Instant::now();
-    for (step, (k, v)) in mutations.iter().enumerate() {
-        flat_state.insert(k.clone(), v.clone());
-
+    for (k, v) in &mutations {
         let parent = chain_unbounded.len() - 1;
         chain_unbounded_bytes += encode_row(k, v) as u64;
         chain_unbounded.push(Group::Delta {
             parent,
             row: (k.clone(), v.clone()),
         });
+    }
+    let chain_write_elapsed = write_start_chain.elapsed();
+
+    let write_start_bounded = Instant::now();
+    for (step, (k, v)) in mutations.iter().enumerate() {
+        flat_state.insert(k.clone(), v.clone());
 
         let parent_b = chain_bounded.len() - 1;
         if (step + 1) % SNAPSHOT_EVERY == 0 {
@@ -229,7 +213,7 @@ fn bench_state_groups(n: usize, steps: usize) {
             });
         }
     }
-    let chain_write_elapsed = write_start_chain.elapsed();
+    let chain_bounded_write_elapsed = write_start_bounded.elapsed();
 
     let op_count = mutations.len() as u32;
     println!("  write cost per mutation:");
@@ -244,7 +228,8 @@ fn bench_state_groups(n: usize, steps: usize) {
         chain_unbounded_bytes as f64 / f64::from(op_count)
     );
     println!(
-        "    synapse-style chain + snapshot every {SNAPSHOT_EVERY} hops: {:.1} bytes/op (write time shared with the row above)",
+        "    synapse-style chain + snapshot every {SNAPSHOT_EVERY} hops: {:.1} ns/op, {:.1} bytes/op",
+        (chain_bounded_write_elapsed.as_nanos() as f64) / f64::from(op_count),
         chain_bounded_bytes as f64 / f64::from(op_count)
     );
     report_ratio_bytes(
@@ -336,73 +321,7 @@ fn bench_state_groups(n: usize, steps: usize) {
     println!();
 }
 
-// --- node-diff helpers (same shape as persistence.rs's `collect_new_nodes` /
-// `to_persisted`; duplicated locally so this file stands alone) ---
-
-fn crate_collect_new_nodes(
-    old: &std::sync::Arc<HamtNode<Key, Value>>,
-    new: &std::sync::Arc<HamtNode<Key, Value>>,
-    out: &mut Vec<std::sync::Arc<HamtNode<Key, Value>>>,
-) {
-    if std::sync::Arc::ptr_eq(old, new) || old.structural_hash == new.structural_hash {
-        return;
-    }
-    out.push(std::sync::Arc::clone(new));
-
-    let (n_a, n_b) = (old.nodemap, new.nodemap);
-    let (mut cidx_a, mut cidx_b) = (0usize, 0usize);
-    for i in 0..32 {
-        let bit = 1u32 << i;
-        let (in_a, in_b) = (n_a & bit != 0, n_b & bit != 0);
-        match (in_a, in_b) {
-            (true, true) => {
-                if let (hamt::NodeRef::Resolved(a), hamt::NodeRef::Resolved(b)) =
-                    (&old.children[cidx_a], &new.children[cidx_b])
-                {
-                    crate_collect_new_nodes(a, b, out);
-                }
-                cidx_a += 1;
-                cidx_b += 1;
-            }
-            (true, false) => cidx_a += 1,
-            (false, true) => {
-                if let hamt::NodeRef::Resolved(b) = &new.children[cidx_b] {
-                    collect_all_nodes(b, out);
-                }
-                cidx_b += 1;
-            }
-            (false, false) => {}
-        }
-    }
-}
-
-fn collect_all_nodes(
-    node: &std::sync::Arc<HamtNode<Key, Value>>,
-    out: &mut Vec<std::sync::Arc<HamtNode<Key, Value>>>,
-) {
-    out.push(std::sync::Arc::clone(node));
-    for child in &node.children {
-        if let hamt::NodeRef::Resolved(c) = child {
-            collect_all_nodes(c, out);
-        }
-    }
-}
-
-fn node_encoded_len(node: &HamtNode<Key, Value>) -> usize {
-    hamt::PersistedInternalNode {
-        datamap: node.datamap,
-        nodemap: node.nodemap,
-        structural_hash: node.structural_hash,
-        leaves: node.leaves.clone(),
-        child_hashes: node
-            .children
-            .iter()
-            .map(hamt::NodeRef::structural_hash)
-            .collect(),
-    }
-    .encode_v1()
-    .len()
-}
+// --- node-diff helpers come from `common` (same shape as persistence.rs) ---
 
 fn report_speedup(label: &str, slow: Duration, fast: Duration) {
     let slow_ns = slow.as_nanos() as f64;

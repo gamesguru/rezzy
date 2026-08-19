@@ -916,7 +916,7 @@ fn test_hamt_any_entry_short_circuits() {
 
     // Fallible predicate error propagation
     let err_result = root.any_entry(&mut resolver, &mut |_k, _v| Err("db error"));
-    assert_eq!(err_result, Err("db error"));
+    assert_eq!(err_result, Err(HamtTraversalError::Resolve("db error")));
 }
 
 #[test]
@@ -2093,9 +2093,10 @@ fn test_walk_reachable_node_hashes_shares_subtrees_across_roots() {
     use std::collections::BTreeSet;
 
     let key = b"dummy_server_key";
-    // Two independently built trees that share no entries, so the only way
-    // any node hash can coincide between them is genuine structural
-    // sharing/coincidence -- there isn't any here, this is the baseline.
+    // Two independently built trees from identical entries: distinct `Arc`
+    // allocations, identical content, and therefore identical node hashes at
+    // every level. Walking the second one must mark nothing new while
+    // producing the same structural hash.
     let entries_a: Vec<(u64, u64)> = (0_u64..64).map(|i| (i, i.wrapping_mul(10))).collect();
     let entries_b: Vec<(u64, u64)> = (0_u64..64).map(|i| (i, i.wrapping_mul(10))).collect();
     let root_a = build_hamt(key, entries_a).expect("build A");
@@ -2385,6 +2386,91 @@ fn test_diff_node_hashes_rejects_excessive_depth() {
     assert_eq!(
         err,
         crate::hamt::HamtTraversalError::MaxDepthExceeded {
+            depth: HAMT_MAX_DEPTH
+        }
+    );
+}
+
+#[test]
+fn test_diff_hamt_nodes_rejects_excessive_depth() {
+    // Two chains that differ (via distinct tags) at every level, so the
+    // diff can never short-circuit on a matching structural_hash before it
+    // recurses past HAMT_MAX_DEPTH.
+    let root_a = build_deep_chain(HAMT_MAX_DEPTH.saturating_add(3), 0xAA);
+    let root_b = build_deep_chain(HAMT_MAX_DEPTH.saturating_add(3), 0xBB);
+
+    let mut resolver = |_hash: &StructuralHash| -> Result<Arc<HamtNode<u64, u64>>, ()> {
+        unreachable!("chains are fully resolved, no lazy children")
+    };
+
+    let err = crate::hamt::diff_hamt_nodes(&root_a, &root_b, &mut resolver)
+        .expect_err("a chain deeper than HAMT_MAX_DEPTH must be rejected, not stack-overflow");
+    assert_eq!(
+        err,
+        HamtTraversalError::MaxDepthExceeded {
+            depth: HAMT_MAX_DEPTH
+        }
+    );
+}
+
+#[test]
+fn test_isolate_delta_rejects_excessive_depth() {
+    let root_a = build_deep_chain(HAMT_MAX_DEPTH.saturating_add(3), 0xAA);
+    let root_b = build_deep_chain(HAMT_MAX_DEPTH.saturating_add(3), 0xBB);
+
+    let mut resolver = |_hash: &StructuralHash| -> Result<Arc<HamtNode<u64, u64>>, ()> {
+        unreachable!("chains are fully resolved, no lazy children")
+    };
+
+    let err = isolate_delta(
+        &root_a,
+        &LtHash::default(),
+        &root_b,
+        &LtHash::default(),
+        &mut resolver,
+    )
+    .expect_err("a chain deeper than HAMT_MAX_DEPTH must be rejected, not stack-overflow");
+    assert_eq!(
+        err,
+        HamtTraversalError::MaxDepthExceeded {
+            depth: HAMT_MAX_DEPTH
+        }
+    );
+}
+
+#[test]
+fn test_any_entry_rejects_excessive_depth() {
+    let root = build_deep_chain(HAMT_MAX_DEPTH.saturating_add(3), 0xAA);
+
+    let mut resolver = |_hash: &StructuralHash| -> Result<Arc<HamtNode<u64, u64>>, ()> {
+        unreachable!("chain is fully resolved, no lazy children")
+    };
+
+    let err = root
+        .any_entry(&mut resolver, &mut |_k, _v| Ok::<_, ()>(false))
+        .expect_err("a chain deeper than HAMT_MAX_DEPTH must be rejected, not stack-overflow");
+    assert_eq!(
+        err,
+        HamtTraversalError::MaxDepthExceeded {
+            depth: HAMT_MAX_DEPTH
+        }
+    );
+}
+
+#[test]
+fn test_find_entry_rejects_excessive_depth() {
+    let root = build_deep_chain(HAMT_MAX_DEPTH.saturating_add(3), 0xAA);
+
+    let mut resolver = |_hash: &StructuralHash| -> Result<Arc<HamtNode<u64, u64>>, ()> {
+        unreachable!("chain is fully resolved, no lazy children")
+    };
+
+    let err = root
+        .find_entry(&mut resolver, &mut |_k, _v| Ok::<_, ()>(false))
+        .expect_err("a chain deeper than HAMT_MAX_DEPTH must be rejected, not stack-overflow");
+    assert_eq!(
+        err,
+        HamtTraversalError::MaxDepthExceeded {
             depth: HAMT_MAX_DEPTH
         }
     );

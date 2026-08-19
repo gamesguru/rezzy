@@ -32,7 +32,10 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rezzy::hamt::{self, codec::HamtCodec, HamtNode, PersistedInternalNode};
+use rezzy::hamt::{self, codec::HamtCodec, HamtNode};
+
+mod common;
+use common::{collect_new_nodes, to_persisted, Xorshift128};
 
 // String keys/values keep this bench decoupled from rezzy's real `Key`/`Value`
 // aliases (which don't implement `HamtCodec`) while still exercising the same
@@ -41,29 +44,6 @@ type Key = String;
 type Value = String;
 
 const STRUCTURAL_KEY: &[u8] = b"bench-persistence";
-
-struct Xorshift128 {
-    state: [u64; 2],
-}
-
-impl Xorshift128 {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: [seed ^ 0x9E37_79B9_7F4A_7C15, seed.wrapping_add(1) | 1],
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.state[0];
-        let y = self.state[1];
-        self.state[0] = y;
-        x ^= x << 23;
-        x ^= x >> 17;
-        x ^= y ^ (y >> 26);
-        self.state[1] = x;
-        x.wrapping_add(y)
-    }
-}
 
 fn make_entries(n: usize, seed: u64) -> Vec<(Key, Value)> {
     let mut rng = Xorshift128::new(seed);
@@ -83,87 +63,6 @@ fn make_entries(n: usize, seed: u64) -> Vec<(Key, Value)> {
 fn unreachable_resolver(
 ) -> impl FnMut(&hamt::hash::StructuralHash) -> Result<Arc<HamtNode<Key, Value>>, ()> {
     |_hash| unreachable!("bench trees are always fully resolved")
-}
-
-fn to_persisted(node: &HamtNode<Key, Value>) -> PersistedInternalNode<Key, Value> {
-    PersistedInternalNode {
-        datamap: node.datamap,
-        nodemap: node.nodemap,
-        structural_hash: node.structural_hash,
-        leaves: node.leaves.clone(),
-        child_hashes: node
-            .children
-            .iter()
-            .map(NodeRefExt::structural_hash)
-            .collect(),
-    }
-}
-
-// Local alias so `to_persisted` reads naturally; `NodeRef::structural_hash` is
-// already `pub`, this just avoids importing the enum name for one call site.
-trait NodeRefExt {
-    fn structural_hash(&self) -> hamt::hash::StructuralHash;
-}
-impl NodeRefExt for hamt::NodeRef<Key, Value> {
-    fn structural_hash(&self) -> hamt::hash::StructuralHash {
-        hamt::NodeRef::structural_hash(self)
-    }
-}
-
-/// Walks `old` and `new` in lockstep (same alignment logic
-/// `diff_node_hashes` uses internally) and collects every node in `new`
-/// that wasn't already present in `old` — i.e. exactly the nodes a
-/// path-copying mutation newly allocated and that a storage backend must
-/// persist to make `new` durable.
-///
-/// Trees here are always fully resolved (no `NodeRef::Lazy`), so this never
-/// needs a resolver.
-fn collect_new_nodes(
-    old: &Arc<HamtNode<Key, Value>>,
-    new: &Arc<HamtNode<Key, Value>>,
-    out: &mut Vec<Arc<HamtNode<Key, Value>>>,
-) {
-    if Arc::ptr_eq(old, new) || old.structural_hash == new.structural_hash {
-        return;
-    }
-    out.push(Arc::clone(new));
-
-    let (n_a, n_b) = (old.nodemap, new.nodemap);
-    let (mut cidx_a, mut cidx_b) = (0usize, 0usize);
-    for i in 0..32 {
-        let bit = 1u32 << i;
-        let (in_a, in_b) = (n_a & bit != 0, n_b & bit != 0);
-        match (in_a, in_b) {
-            (true, true) => {
-                if let (hamt::NodeRef::Resolved(a), hamt::NodeRef::Resolved(b)) =
-                    (&old.children[cidx_a], &new.children[cidx_b])
-                {
-                    collect_new_nodes(a, b, out);
-                }
-                cidx_a += 1;
-                cidx_b += 1;
-            }
-            (true, false) => cidx_a += 1,
-            (false, true) => {
-                if let hamt::NodeRef::Resolved(b) = &new.children[cidx_b] {
-                    // Entire subtree is new (a fresh branch point), not just
-                    // its root — every node under it must be persisted too.
-                    collect_all_nodes(b, out);
-                }
-                cidx_b += 1;
-            }
-            (false, false) => {}
-        }
-    }
-}
-
-fn collect_all_nodes(node: &Arc<HamtNode<Key, Value>>, out: &mut Vec<Arc<HamtNode<Key, Value>>>) {
-    out.push(Arc::clone(node));
-    for child in &node.children {
-        if let hamt::NodeRef::Resolved(c) = child {
-            collect_all_nodes(c, out);
-        }
-    }
 }
 
 fn encode_full_map(entries: &[(Key, Value)]) -> usize {
