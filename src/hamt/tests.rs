@@ -2439,6 +2439,36 @@ fn test_isolate_delta_rejects_excessive_depth() {
 }
 
 #[test]
+fn test_diff_hamt_nodes_rejects_excessive_depth_via_collect_all_leaves() {
+    // One side is a chain deeper than HAMT_MAX_DEPTH while the other has no
+    // matching nodemap child, so diff_nodes takes the (true, false) branch
+    // and routes the whole chain through collect_all_leaves — whose own
+    // depth guard (not diff_nodes') is what must fire here.
+    let root_a = build_deep_chain(HAMT_MAX_DEPTH, 0xAA);
+    let root_b = Arc::new(HamtNode {
+        datamap: 1,
+        nodemap: 0,
+        leaves: vec![(1_u64, 1_u64)],
+        children: vec![],
+        structural_hash: [0xBB; 16],
+    });
+
+    let mut resolver = |_hash: &StructuralHash| -> Result<Arc<HamtNode<u64, u64>>, ()> {
+        unreachable!("chains are fully resolved, no lazy children")
+    };
+
+    let err = crate::hamt::diff_hamt_nodes(&root_a, &root_b, &mut resolver).expect_err(
+        "collect_all_leaves must reject a chain deeper than HAMT_MAX_DEPTH, not stack-overflow",
+    );
+    assert_eq!(
+        err,
+        HamtTraversalError::MaxDepthExceeded {
+            depth: HAMT_MAX_DEPTH
+        }
+    );
+}
+
+#[test]
 fn test_any_entry_rejects_excessive_depth() {
     let root = build_deep_chain(HAMT_MAX_DEPTH.saturating_add(3), 0xAA);
 
