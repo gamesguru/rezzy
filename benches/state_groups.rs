@@ -186,7 +186,7 @@ fn bench_state_groups(n: usize, steps: usize) {
     }
     let hamt_write_elapsed = write_start_hamt.elapsed();
 
-    let write_start_chain = Instant::now();
+    let unbounded_write_start = Instant::now();
     for (k, v) in &mutations {
         let parent = chain_unbounded.len() - 1;
         chain_unbounded_bytes += encode_row(k, v) as u64;
@@ -195,7 +195,7 @@ fn bench_state_groups(n: usize, steps: usize) {
             row: (k.clone(), v.clone()),
         });
     }
-    let chain_write_elapsed = write_start_chain.elapsed();
+    let chain_unbounded_write_elapsed = unbounded_write_start.elapsed();
 
     let write_start_bounded = Instant::now();
     for (step, (k, v)) in mutations.iter().enumerate() {
@@ -224,7 +224,7 @@ fn bench_state_groups(n: usize, steps: usize) {
     );
     println!(
         "    synapse-style unbounded chain (1 delta row/op): {:.1} ns/op, {:.1} bytes/op",
-        (chain_write_elapsed.as_nanos() as f64) / f64::from(op_count),
+        (chain_unbounded_write_elapsed.as_nanos() as f64) / f64::from(op_count),
         chain_unbounded_bytes as f64 / f64::from(op_count)
     );
     println!(
