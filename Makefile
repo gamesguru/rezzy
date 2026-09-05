@@ -33,6 +33,11 @@ lint: ##H Run all linters
 	-shellcheck $(LINT_LOCS_SH)
 	$(CARGO) clippy --all-targets $(CARGO_FEATURE_ARGS)
 
+.PHONY: check
+check:	##H Cargo check and code dupe
+	$(CARGO) check
+	-jscpd $$(git diff HEAD~5 --name-only '*.rs')
+
 .PHONY: doc rust/doc
 doc: rust/doc ##H Alias for rust/doc
 rust/doc: ##H Generate rustdoc API documentation
