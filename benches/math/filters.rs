@@ -290,13 +290,22 @@ impl RemainderProbeFilter {
         }
     }
 
+    /// Splits `value`'s hash into (odd remainder, home slot) under this
+    /// table's remainder width and slot count. Shared by [`Self::insert`]
+    /// and [`Self::contains`], which only differ in what they do once
+    /// they've linear-probed to a slot.
+    fn remainder_and_home<T: Hash>(&self, value: &T) -> (u32, usize) {
+        let h = hash_value(value);
+        let r = ((h >> (64 - self.remainder_bits)) as u32) | 1;
+        let q = ((h & ((1_u64 << (64 - self.remainder_bits)) - 1)) as usize) % self.slots;
+        (r, q)
+    }
+
     pub fn insert<T: Hash>(&mut self, value: &T) -> bool {
         if self.len >= self.capacity {
             return false;
         }
-        let h = hash_value(value);
-        let r = ((h >> (64 - self.remainder_bits)) as u32) | 1;
-        let q = ((h & ((1_u64 << (64 - self.remainder_bits)) - 1)) as usize) % self.slots;
+        let (r, q) = self.remainder_and_home(value);
 
         let mut pos = q;
         for _ in 0..self.slots {
@@ -315,9 +324,7 @@ impl RemainderProbeFilter {
     }
 
     pub fn contains<T: Hash>(&self, value: &T) -> bool {
-        let h = hash_value(value);
-        let r = ((h >> (64 - self.remainder_bits)) as u32) | 1;
-        let q = ((h & ((1_u64 << (64 - self.remainder_bits)) - 1)) as usize) % self.slots;
+        let (r, q) = self.remainder_and_home(value);
 
         let mut pos = q;
         for _ in 0..self.slots {
@@ -587,19 +594,22 @@ impl BloomFilter {
         }
     }
 
+    /// Double-hashed bit position for the `index`-th probe of `hash`.
+    /// Shared by [`Self::get_bit`] and [`Self::set_bit`].
+    fn bit_position(&self, hash: u64, index: u32) -> usize {
+        (hash.wrapping_add(u64::from(index).wrapping_mul(hash.swap_bytes().rotate_left(13)))
+            % self.num_bits) as usize
+    }
+
     fn get_bit(&self, hash: u64, index: u32) -> bool {
-        let bit = (hash
-            .wrapping_add(u64::from(index).wrapping_mul(hash.swap_bytes().rotate_left(13)))
-            % self.num_bits) as usize;
+        let bit = self.bit_position(hash, index);
         let word = bit / 64;
         let offset = bit % 64;
         (self.bits[word] >> offset) & 1 == 1
     }
 
     fn set_bit(&mut self, hash: u64, index: u32) {
-        let bit = (hash
-            .wrapping_add(u64::from(index).wrapping_mul(hash.swap_bytes().rotate_left(13)))
-            % self.num_bits) as usize;
+        let bit = self.bit_position(hash, index);
         let word = bit / 64;
         let offset = bit % 64;
         self.bits[word] |= 1_u64 << offset;
@@ -642,6 +652,32 @@ mod tests {
     #[allow(unused_imports)]
     use super::*;
 
+    /// Measures the false-positive rate over the query range
+    /// `insert_count..n` -- values never inserted -- encoding each as
+    /// `(i << 1) | 1`, the convention every filter test in this module
+    /// shares. Shared by the cuckoo/remainder_probe/bloom FPR tests, which
+    /// only differ in which filter's `contains` they measure and what
+    /// bound they assert against the result.
+    ///
+    /// `#[allow(dead_code)]`: this bench target sets `test = false`
+    /// (Cargo.toml), so `cargo test` never builds it as a real `--test`
+    /// harness -- these `#[test]` fns only exist for `cargo clippy
+    /// --all-targets`'s static check. rustc's dead_code lint exempts
+    /// `#[test]`-tagged functions themselves from that check, but a plain
+    /// helper only reachable *through* them (never a genuine call root
+    /// without the harness) doesn't inherit that exemption.
+    #[allow(dead_code)]
+    fn measure_fpr(insert_count: usize, n: u64, mut contains: impl FnMut(u64) -> bool) -> f64 {
+        let mut false_positives = 0u64;
+        for i in insert_count as u64..n {
+            if contains((i << 1) | 1) {
+                false_positives += 1;
+            }
+        }
+        let queried = n - insert_count as u64;
+        false_positives as f64 / queried as f64
+    }
+
     #[test]
     fn cuckoo_insert_and_contains() {
         let n: u64 = 10_000;
@@ -654,14 +690,7 @@ mod tests {
         for i in 0..insert_count as u64 {
             assert!(f.contains(&((i << 1) | 1)), "cuckoo missing element {i}");
         }
-        let mut false_positives = 0u64;
-        for i in insert_count as u64..n {
-            if f.contains(&((i << 1) | 1)) {
-                false_positives += 1;
-            }
-        }
-        let queried = n - insert_count as u64;
-        let measured = false_positives as f64 / queried as f64;
+        let measured = measure_fpr(insert_count, n, |v| f.contains(&v));
         assert!(
             measured < 0.005,
             "cuckoo measured FPR {measured:.6} exceeds 0.5% upper bound (target 0.1%)"
@@ -703,14 +732,7 @@ mod tests {
                 "remainder_probe missing element {i}"
             );
         }
-        let mut false_positives = 0u64;
-        for i in insert_count as u64..n {
-            if f.contains(&((i << 1) | 1)) {
-                false_positives += 1;
-            }
-        }
-        let queried = n - insert_count as u64;
-        let measured = false_positives as f64 / queried as f64;
+        let measured = measure_fpr(insert_count, n, |v| f.contains(&v));
         assert!(
             measured < target_fpr * 2.0,
             "remainder_probe measured FPR {measured:.6} exceeds 2x the {target_fpr} target \
@@ -763,14 +785,7 @@ mod tests {
         // This is a probabilistic filter: some false positives on
         // never-inserted values are expected, not a bug, so assert a bound
         // rather than requiring zero (17 bits targets ~0.1% FPR).
-        let mut false_positives = 0u64;
-        for i in insert_count as u64..n {
-            if f.contains(&((i << 1) | 1)) {
-                false_positives += 1;
-            }
-        }
-        let queried = n - insert_count as u64;
-        let measured = false_positives as f64 / queried as f64;
+        let measured = measure_fpr(insert_count, n, |v| f.contains(&v));
         assert!(
             measured < 0.01,
             "remainder_probe measured FPR {measured:.6} exceeds 1% upper bound (target 0.1%)"
@@ -816,14 +831,7 @@ mod tests {
         for i in 0..insert_count as u64 {
             assert!(f.contains(&((i << 1) | 1)));
         }
-        let mut false_positives = 0u64;
-        for i in insert_count as u64..n {
-            if f.contains(&((i << 1) | 1)) {
-                false_positives += 1;
-            }
-        }
-        let queried = n - insert_count as u64;
-        let measured = false_positives as f64 / queried as f64;
+        let measured = measure_fpr(insert_count, n, |v| f.contains(&v));
         assert!(
             measured < 0.005,
             "bloom measured FPR {measured:.6} exceeds 0.5% upper bound (target 0.1%)"

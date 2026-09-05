@@ -237,22 +237,25 @@ fn get_membership(resolved: &ResolvedStateMap, map: &EventMap, user_id: &str) ->
     "none".to_string()
 }
 
-fn resolve_pathology(jsonl_filename: &str) -> (ResolvedStateMap, EventMap) {
+/// Loads a `tests/critique_data/<jsonl_filename>` fixture and its event map.
+/// Shared by [`resolve_pathology`] and [`assert_benign_convergence`].
+fn load_pathology_fixture(jsonl_filename: &str) -> (Vec<LeanEvent>, EventMap) {
     let absolute_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/critique_data")
         .join(jsonl_filename);
     let events = load_fixture(&absolute_path);
     let map = to_event_map(&events);
+    (events, map)
+}
+
+fn resolve_pathology(jsonl_filename: &str) -> (ResolvedStateMap, EventMap) {
+    let (events, map) = load_pathology_fixture(jsonl_filename);
     let resolved = resolve_full(&events, StateResVersion::V2_1_1);
     (resolved, map)
 }
 
 fn assert_benign_convergence(jsonl_filename: &str) -> (ResolvedStateMap, EventMap) {
-    let absolute_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/critique_data")
-        .join(jsonl_filename);
-    let events = load_fixture(&absolute_path);
-    let map = to_event_map(&events);
+    let (events, map) = load_pathology_fixture(jsonl_filename);
 
     let resolved_v2_1 = resolve_full(&events, StateResVersion::V2_1);
     let resolved_v2_1_1 = resolve_full(&events, StateResVersion::V2_1_1);

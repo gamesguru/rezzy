@@ -125,10 +125,83 @@ fn update_winner_if_better<'a, Id, C>(
     }
 }
 
+/// Auth-checks a single event and, if it passes, competes it for the LUB
+/// winner of its `(type, state_key)` slot in `winners`. Shared by
+/// [`fold_lattice_chunk`]'s sequential loop and each worker thread's loop in
+/// [`compute_lattice_coordinatized_winners`]'s std fan-out -- the two must
+/// stay in lockstep, since the `conflicted_keys` no-guard invariant
+/// documented on `fold_lattice_chunk` depends on both doing the exact same
+/// admission check before competing.
+///
+/// Unlike the power phase (`run_power_phase_iterative_checks`), this fold
+/// has no `conflicted_keys` guard on the winning insert below. That's safe
+/// only for as long as `ev` is drawn from a `non_power_events` built by
+/// *partitioning* the same event set `conflicted_keys` was derived from --
+/// never a set widened afterward (e.g. by an MSC4297-style subgraph
+/// supplement the way `multi.rs` widens `conflicted_events` before deriving
+/// its own `conflicted_keys`, or the way `expand_v2` grows `power_events`).
+/// `conflicted_keys` is threaded in from the caller rather than recomputed
+/// here from `sort_set` so that a caller who computed it from the *narrow*,
+/// pre-widening set (as `resolve_semilattice_fold`'s own caller must, if it
+/// ever wires this into a widened path) makes the assert below actually
+/// load-bearing instead of trivially true against the widened set.
+#[allow(clippy::too_many_arguments)]
+fn process_lattice_event<'a, Id, C, S2: core::hash::BuildHasher, S3: core::hash::BuildHasher>(
+    ev: &'a LeanEvent<Id, C>,
+    mainline_distances: &HashMap<Id, usize>,
+    mainline_len: usize,
+    terminal_power_state: &crate::state::at::SharedState<Id>,
+    auth_context: &HashMap<Id, LeanEvent<Id, C>, S2>,
+    sort_set: &HashMap<Id, LeanEvent<Id, C>, S3>,
+    version: StateResVersion,
+    create_ev: Option<&LeanEvent<Id, C>>,
+    conflicted_keys: &crate::FastSet<(EventType, String)>,
+    local_auth_cache: &mut crate::state::at::LocalAuthCache<Id, C>,
+    winners: &mut HashMap<(EventType, String), &'a LeanEvent<Id, C>>,
+) where
+    Id: crate::basespec::rezzy_types::EventId,
+    C: crate::basespec::rezzy_types::EventContent + Clone,
+{
+    // VALIDATE FIRST (filters out Byzantine garbage/supremum deletion attacks)
+    let local_auth = compute_local_auth(ev, auth_context, sort_set, local_auth_cache, version);
+
+    if !iterative_auth_ok(
+        ev,
+        terminal_power_state,
+        auth_context,
+        sort_set,
+        local_auth,
+        create_ev,
+        version,
+        false,
+    ) {
+        return; // Drop unauthorized events before they can compete for the LUB!
+    }
+
+    // Skip events with no `state_key` (e.g. `m.room.redaction`)
+    if ev.state_key.is_none() {
+        return;
+    }
+
+    // NOW COMPETE FOR LUB
+    let key = (
+        EventType::from(ev.event_type.as_str()),
+        ev.state_key.clone().unwrap(),
+    );
+    assert!(
+        conflicted_keys.contains(&key),
+        "process_lattice_event competed on a key ({:?}, {:?}) absent from \
+         conflicted_events -- the no-guard invariant documented above \
+         this function has been broken by a caller change",
+        key.0,
+        key.1,
+    );
+    update_winner_if_better(winners, key, ev, mainline_distances, mainline_len);
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(feature = "std", allow(dead_code))]
 fn fold_lattice_chunk<'a, Id, C, S2: core::hash::BuildHasher, S3: core::hash::BuildHasher>(
-    // jscpd:ignore-start
     chunk: &[&'a LeanEvent<Id, C>],
     mainline_distances: &HashMap<Id, usize>,
     mainline_len: usize,
@@ -137,20 +210,6 @@ fn fold_lattice_chunk<'a, Id, C, S2: core::hash::BuildHasher, S3: core::hash::Bu
     sort_set: &HashMap<Id, LeanEvent<Id, C>, S3>,
     version: StateResVersion,
     create_ev: Option<&LeanEvent<Id, C>>,
-    // jscpd:ignore-end
-    // Unlike the power phase (`run_power_phase_iterative_checks`), this fold
-    // has no `conflicted_keys` guard on the winning insert below. That's
-    // safe only for as long as `chunk` is drawn from a `non_power_events`
-    // built by *partitioning* the same event set `conflicted_keys` was
-    // derived from -- never a set widened afterward (e.g. by an
-    // MSC4297-style subgraph supplement the way `multi.rs` widens
-    // `conflicted_events` before deriving its own `conflicted_keys`, or the
-    // way `expand_v2` grows `power_events`). `conflicted_keys` is threaded
-    // in from the caller rather than recomputed here from `sort_set` so
-    // that a caller who computed it from the *narrow*, pre-widening set (as
-    // `resolve_semilattice_fold`'s own caller must, if it ever wires this into
-    // a widened path) makes the assert below actually load-bearing
-    // instead of trivially true against the widened set.
     conflicted_keys: &crate::FastSet<(EventType, String)>,
 ) -> HashMap<(EventType, String), &'a LeanEvent<Id, C>>
 where
@@ -161,42 +220,19 @@ where
     let mut local_auth_cache = crate::state::at::LocalAuthCache::<Id, C>::new(version);
 
     for &ev in chunk {
-        // VALIDATE FIRST (filters out Byzantine garbage/supremum deletion attacks)
-        let local_auth =
-            compute_local_auth(ev, auth_context, sort_set, &mut local_auth_cache, version);
-
-        if !iterative_auth_ok(
+        process_lattice_event(
             ev,
+            mainline_distances,
+            mainline_len,
             terminal_power_state,
             auth_context,
             sort_set,
-            local_auth,
-            create_ev,
             version,
-            false,
-        ) {
-            continue; // Drop unauthorized events before they can compete for the LUB!
-        }
-
-        // Skip events with no `state_key` (e.g. `m.room.redaction`)
-        if ev.state_key.is_none() {
-            continue;
-        }
-
-        // NOW COMPETE FOR LUB
-        let key = (
-            EventType::from(ev.event_type.as_str()),
-            ev.state_key.clone().unwrap(),
+            create_ev,
+            conflicted_keys,
+            &mut local_auth_cache,
+            &mut thread_res,
         );
-        assert!(
-            conflicted_keys.contains(&key),
-            "fold_lattice_chunk competed on a key ({:?}, {:?}) absent from \
-             conflicted_events -- the no-guard invariant documented above \
-             this function has been broken by a caller change",
-            key.0,
-            key.1,
-        );
-        update_winner_if_better(&mut thread_res, key, ev, mainline_distances, mainline_len);
     }
     thread_res
 }
@@ -252,48 +288,19 @@ fn compute_lattice_coordinatized_winners<
                         if idx >= len {
                             break;
                         }
-                        let ev = v[idx];
                         // Auth-check + LUB fold for this single event.
-                        let local_auth = compute_local_auth(
-                            ev,
-                            auth_context,
-                            sort_set,
-                            &mut local_auth_cache,
-                            version,
-                        );
-                        if !iterative_auth_ok(
-                            ev,
+                        process_lattice_event(
+                            v[idx],
+                            mainline_distances,
+                            mainline_len,
                             terminal_power_state,
                             auth_context,
                             sort_set,
-                            local_auth,
-                            create_ev,
                             version,
-                            false,
-                        ) {
-                            continue;
-                        }
-                        if ev.state_key.is_none() {
-                            continue;
-                        }
-                        let key = (
-                            EventType::from(ev.event_type.as_str()),
-                            ev.state_key.clone().unwrap(),
-                        );
-                        assert!(
-                            conflicted_keys.contains(&key),
-                            "fold_lattice_chunk competed on a key ({:?}, {:?}) absent from \
-                             conflicted_events -- the no-guard invariant documented in \
-                             fold_lattice_chunk has been broken by a caller change",
-                            key.0,
-                            key.1,
-                        );
-                        update_winner_if_better(
+                            create_ev,
+                            conflicted_keys,
+                            &mut local_auth_cache,
                             &mut local,
-                            key,
-                            ev,
-                            mainline_distances,
-                            mainline_len,
                         );
                     }
                     local
