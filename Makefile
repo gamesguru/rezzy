@@ -112,7 +112,7 @@ rust/coverage: ##H Run code coverage and generate HTML report
 	@echo ''
 	@echo '══════════════ COVERAGE SUMMARY ══════════════'
 	$(CARGO) llvm-cov report \
-		--ignore-filename-regex 'src/bin/.*|scripts/.*'
+		--ignore-filename-regex 'src/bin/.*|scripts/.*|build\.rs$$'
 	# Process report to codecov-compatible JSON
 	$(CARGO) llvm-cov report \
 		--ignore-filename-regex 'src/bin/.*|scripts/.*|build\.rs$$' \
