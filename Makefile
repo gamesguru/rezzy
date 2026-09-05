@@ -98,6 +98,9 @@ rust/bench: ##H Run benchmarks
 	#$(CARGO) bench --profile release --bench rezzy -- resolve
 	$(CARGO) bench --profile release --benches
 
+
+export LLVM_COV_FLAGS = -show-region-summary=false -show-branch-summary=false
+
 .PHONY: rust/coverage
 rust/coverage: ##H Run code coverage and generate HTML report
 	# TODO: include `src/bin/` in coverage
@@ -105,6 +108,11 @@ rust/coverage: ##H Run code coverage and generate HTML report
 	$(CARGO) llvm-cov --lib --tests \
 		--html --output-dir .coverage \
 		--ignore-filename-regex 'src/bin/.*|scripts/.*|build\.rs$$'
+	# Print per-file summary to the terminal (functions/lines only)
+	@echo ''
+	@echo '══════════════ COVERAGE SUMMARY ══════════════'
+	$(CARGO) llvm-cov report \
+		--ignore-filename-regex 'src/bin/.*|scripts/.*'
 	# Process report to codecov-compatible JSON
 	$(CARGO) llvm-cov report \
 		--ignore-filename-regex 'src/bin/.*|scripts/.*|build\.rs$$' \
