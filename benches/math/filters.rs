@@ -230,9 +230,16 @@ pub(crate) fn quotient_remainder_bits_for_fpr(target_fpr: f64) -> u32 {
 /// same factor for every caller (`benches/math/filter_spillover.rs`,
 /// `benches/math/invertible_filter.rs`) whenever they compared this
 /// strategy's FPR against cuckoo/CQF/bloom at a nominally equal target.
+///
+/// The load factor here (`REMAINDER_PROBE_LOAD_FACTOR`) must match the slot
+/// allocation in [`RemainderProbeFilter::with_remainder_bits`] -- the two
+/// must agree, or the filter is probed at a different load than the FPR was
+/// derived for.
+pub(crate) const REMAINDER_PROBE_LOAD_FACTOR: f64 = 10.0 / 11.0;
+
 pub(crate) fn remainder_probe_bits_for_fpr(target_fpr: f64) -> u32 {
     assert!((0.0..1.0).contains(&target_fpr));
-    let alpha: f64 = 10.0 / 11.0;
+    let alpha: f64 = REMAINDER_PROBE_LOAD_FACTOR;
     let probes = 0.5 * (1.0 + 1.0 / (1.0 - alpha).powi(2));
     // FPR ≈ probes / 2^(bits-1) because remainder values are always odd.
     // The higher (correct) probe count needs one more bit than before to
@@ -267,8 +274,12 @@ pub struct RemainderProbeFilter {
 
 impl RemainderProbeFilter {
     pub fn with_remainder_bits(capacity: usize, remainder_bits: u32) -> Self {
+        // Match remainder_probe_bits_for_fpr's assumed load factor -- a
+        // different multiplier here means the filter runs at a load the FPR
+        // wasn't derived for, making the bit count it returns too wide or
+        // too narrow for the *actual* probe cost this table pays.
         #[allow(clippy::cast_sign_loss)]
-        let slots = ((capacity as f64 * 1.5).ceil() as usize).max(64);
+        let slots = ((capacity as f64 / REMAINDER_PROBE_LOAD_FACTOR).ceil() as usize).max(64);
         Self {
             rem: vec![0; slots],
             occupied: vec![false; slots],

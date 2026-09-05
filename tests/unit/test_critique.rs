@@ -706,10 +706,12 @@ fn test_anomaly_21_concurrent_kick_still_holds() {
 ///   closed transitively over `auth_events` ∪ `prev_events` until fixpoint.
 ///
 /// In the fallback case (no State DAGs), `state_predecessors` = `prev_events`,
-/// so the closure follows both edge types recursively. The ratio is
-/// mathematically ≤ 1 (seed is inside C(P), closure under `prev_events` can't
-/// escape a prev_events-closed set), so the real question is absolute size:
-/// how large is I(P) for late events in a real room?
+/// so the closure follows both edge types recursively. The seed itself sits
+/// inside C(P), but I(P) also follows `auth_events`, which can reach an
+/// event outside C(P)'s `prev_events`-only closure (an auth event need not
+/// be a `prev_events`-ancestor of the head) -- so the ratio is not bounded
+/// by 1 in general; the real question is absolute size: how large is I(P)
+/// for late events in a real room, and how far past 100% the ratio runs.
 #[test]
 #[ignore = "manual analysis tool: prints closure-ratio stats for large fixtures, some of which live outside the repo (/tmp/opencode/res_tmp) and aren't available in CI"]
 fn test_ip_closure_ratio() {

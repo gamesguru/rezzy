@@ -245,6 +245,8 @@ fn compute_lattice_coordinatized_winners<
             for _ in 0..num_threads {
                 let handle = s.spawn(|| {
                     let mut local = HashMap::new();
+                    let mut local_auth_cache =
+                        crate::state::at::LocalAuthCache::<Id, C>::new(version);
                     loop {
                         let idx = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         if idx >= len {
@@ -256,7 +258,7 @@ fn compute_lattice_coordinatized_winners<
                             ev,
                             auth_context,
                             sort_set,
-                            &mut crate::state::at::LocalAuthCache::<Id, C>::new(version),
+                            &mut local_auth_cache,
                             version,
                         );
                         if !iterative_auth_ok(
