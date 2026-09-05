@@ -1461,7 +1461,7 @@ pub mod causal {
     mod test_oracle {
         use super::*;
 
-        #[derive(PartialEq, Eq)]
+        #[derive(Debug, PartialEq, Eq)]
         pub(crate) enum TerminalKind {
             Leaf,
             Empty,
@@ -1764,6 +1764,55 @@ pub mod causal {
                     assert!(verify_causal_non_inclusion(
                         &absent, depth, &path, root, count
                     ));
+                })
+                .unwrap();
+            child.join().unwrap();
+        }
+
+        /// Regression test for the oracle's terminal precedence: a
+        /// non-member that diverges from every set member *only* in the
+        /// final bit (255) must terminate as [`TerminalKind::Empty`] at
+        /// [`CAUSAL_DEPTH`], not [`TerminalKind::Leaf`]. The old `descend`
+        /// checked empty-subtree before leaf, and [`CausalOracle::descend`]
+        /// must keep that precedence — an earlier order declared `Leaf` at
+        /// depth 256 without confirming the target-directed leaf node
+        /// actually exists.
+        #[test]
+        fn oracle_non_member_diverging_only_in_final_bit() {
+            // Member = bit_key(0); absent = same key with bit 255 flipped,
+            // so it shares bits 0..254 with the member and diverges only at
+            // the very last bit.
+            let member = bit_key(0);
+            let mut absent = member;
+            absent[31] |= 0x01; // bit 255 (byte 31, MSB-first, LSB).
+            assert_ne!(absent, member);
+
+            let child = std::thread::Builder::new()
+                .stack_size(16 * 1024 * 1024)
+                .spawn(move || {
+                    let oracle = CausalOracle::new(&[member]);
+                    let (root_hash, root_count, path, kind, term_depth) = oracle.descend(&absent);
+
+                    assert_eq!(kind, TerminalKind::Empty, "must terminate Empty, not Leaf");
+                    assert_eq!(term_depth, CAUSAL_DEPTH);
+                    assert_eq!((root_hash, root_count), oracle.root());
+                    assert_eq!(path.len(), CAUSAL_DEPTH);
+                    // Deepest sibling (pushed last, reversed to first) is the
+                    // member's leaf at depth 256.
+                    let first = path.first().expect("full-depth path");
+                    assert_eq!(first.count, 1);
+                    assert_eq!(first.hash, causal_leaf(member));
+
+                    // Cross-check the incremental cache reaches the same
+                    // terminal depth and path.
+                    let mut set = CausalSet::empty();
+                    set.insert_mut(member);
+                    let (prod_path, prod_depth, prod_root, prod_count) = set
+                        .non_inclusion_proof(&absent)
+                        .expect("absent key is not a member");
+                    assert_eq!(prod_depth, term_depth);
+                    assert_eq!((prod_root, prod_count), oracle.root());
+                    assert_eq!(prod_path, path);
                 })
                 .unwrap();
             child.join().unwrap();
