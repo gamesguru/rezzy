@@ -1723,7 +1723,12 @@ pub mod causal {
             let child = std::thread::Builder::new()
                 .stack_size(16 * 1024 * 1024)
                 .spawn(move || {
-                    for &n in &[1, 2, 32, 64] {
+                    // O(n² · depth²) oracle cost — the per-key `descend`
+                    // recomputes sibling subtree roots from scratch at every
+                    // level. n=16 is enough to densely exercise Phase 2's
+                    // tail-zeroing and intra-byte mask across all 32 bytes
+                    // without the 64-key case dominating the test suite.
+                    for &n in &[1, 2, 8, 16] {
                         let keys = dense_keys(0xDEAD_BEEF_CAFE_1234, n);
 
                         let mut set = CausalSet::empty();
