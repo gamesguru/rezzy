@@ -1228,6 +1228,29 @@ pub mod causal {
     }
 
     impl CausalSet {
+        /// Splits `prefix` (bits `0..d` already set to `key`'s path, the
+        /// rest zero) into `key`'s two depth-`d+1` children: `(sibling,
+        /// own)`. `sibling` is the subtree `key` does *not* descend into;
+        /// `own` is the one it does. Shared by [`Self::inclusion_proof`]
+        /// and [`Self::non_inclusion_proof`], whose only difference is what
+        /// they do with `own` (walk it unconditionally vs. stop at the
+        /// first empty one).
+        fn step_prefixes(mut prefix: [u8; 32], key: &Hash, d: usize) -> ([u8; 32], [u8; 32]) {
+            let mut sibling = prefix;
+            let byte_idx = d / 8;
+            let bit = 1_u8 << 7_usize.wrapping_sub(d % 8);
+            if causal_bit(key, d) == 0 {
+                // key goes left; sibling is right.
+                sibling[byte_idx] |= bit;
+                prefix[byte_idx] &= !bit;
+            } else {
+                // key goes right; sibling is left.
+                sibling[byte_idx] &= !bit;
+                prefix[byte_idx] |= bit;
+            }
+            (sibling, prefix)
+        }
+
         /// Returns the ordered (leaf-to-root) sibling path proving `key` is a
         /// member of `self`, along with `self`'s root and count. Returns
         /// [`None`] if `key` is not a member; there is no inclusion proof for
@@ -1242,33 +1265,17 @@ pub mod causal {
             let mut prefix = [0u8; 32];
             for d in 0..CAUSAL_DEPTH {
                 let child_depth = depth_u16(d.wrapping_add(1));
-                // The sibling is the other child at this depth.
-                let (sib_hash, sib_count) = if causal_bit(key, d) == 0 {
-                    // key goes left; sibling is right
-                    let mut right_prefix = prefix;
-                    right_prefix[d / 8] |= 1 << (7_usize.wrapping_sub(d % 8));
-                    self.nodes
-                        .get(&(child_depth, right_prefix))
-                        .copied()
-                        .unwrap_or((empty[d.wrapping_add(1)], 0))
-                } else {
-                    // key goes right; sibling is left
-                    let mut left_prefix = prefix;
-                    left_prefix[d / 8] &= !(1 << (7_usize.wrapping_sub(d % 8)));
-                    self.nodes
-                        .get(&(child_depth, left_prefix))
-                        .copied()
-                        .unwrap_or((empty[d.wrapping_add(1)], 0))
-                };
+                let (sibling_prefix, own_prefix) = Self::step_prefixes(prefix, key, d);
+                let (sib_hash, sib_count) = self
+                    .nodes
+                    .get(&(child_depth, sibling_prefix))
+                    .copied()
+                    .unwrap_or((empty[d.wrapping_add(1)], 0));
                 path.push(CausalProofStep {
                     hash: sib_hash,
                     count: sib_count,
                 });
-                if causal_bit(key, d) == 0 {
-                    prefix[d / 8] &= !(1 << (7_usize.wrapping_sub(d % 8)));
-                } else {
-                    prefix[d / 8] |= 1 << (7_usize.wrapping_sub(d % 8));
-                }
+                prefix = own_prefix;
             }
             let root_hash = self.root();
             let root_count = self.count();
@@ -1297,35 +1304,18 @@ pub mod causal {
             let mut prefix = [0u8; 32];
             for d in 0..CAUSAL_DEPTH {
                 let child_depth = depth_u16(d.wrapping_add(1));
-                // Collect the sibling at this depth (the other child of
-                // the node at depth d).
-                let (sib_hash, sib_count) = if causal_bit(key, d) == 0 {
-                    let mut right_prefix = prefix;
-                    right_prefix[d / 8] |= 1 << (7_usize.wrapping_sub(d % 8));
-                    self.nodes
-                        .get(&(child_depth, right_prefix))
-                        .copied()
-                        .unwrap_or((empty[d.wrapping_add(1)], 0))
-                } else {
-                    let mut left_prefix = prefix;
-                    left_prefix[d / 8] &= !(1 << (7_usize.wrapping_sub(d % 8)));
-                    self.nodes
-                        .get(&(child_depth, left_prefix))
-                        .copied()
-                        .unwrap_or((empty[d.wrapping_add(1)], 0))
-                };
+                let (sibling_prefix, child_prefix) = Self::step_prefixes(prefix, key, d);
+                let (sib_hash, sib_count) = self
+                    .nodes
+                    .get(&(child_depth, sibling_prefix))
+                    .copied()
+                    .unwrap_or((empty[d.wrapping_add(1)], 0));
                 path.push(CausalProofStep {
                     hash: sib_hash,
                     count: sib_count,
                 });
                 // Check if the child node on the key-directed path exists
                 // and is non-empty.
-                let mut child_prefix = prefix;
-                if causal_bit(key, d) == 0 {
-                    child_prefix[d / 8] &= !(1 << (7_usize.wrapping_sub(d % 8)));
-                } else {
-                    child_prefix[d / 8] |= 1 << (7_usize.wrapping_sub(d % 8));
-                }
                 let child = self.nodes.get(&(child_depth, child_prefix));
                 let child_is_empty = child.map_or(true, |(_, c)| *c == 0);
                 if child_is_empty {
