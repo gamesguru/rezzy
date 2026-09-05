@@ -1251,6 +1251,27 @@ pub mod causal {
             (sibling, prefix)
         }
 
+        /// Looks up the sibling at `(child_depth, sibling_prefix)`, falling
+        /// back to the canonical empty node for that depth, and packages it
+        /// as a proof step.
+        fn sibling_step(
+            &self,
+            empty: &EmptyTable,
+            child_depth: u16,
+            sibling_prefix: [u8; 32],
+            d: usize,
+        ) -> CausalProofStep {
+            let (sib_hash, sib_count) = self
+                .nodes
+                .get(&(child_depth, sibling_prefix))
+                .copied()
+                .unwrap_or((empty[d.wrapping_add(1)], 0));
+            CausalProofStep {
+                hash: sib_hash,
+                count: sib_count,
+            }
+        }
+
         /// Returns the ordered (leaf-to-root) sibling path proving `key` is a
         /// member of `self`, along with `self`'s root and count. Returns
         /// [`None`] if `key` is not a member; there is no inclusion proof for
@@ -1266,15 +1287,7 @@ pub mod causal {
             for d in 0..CAUSAL_DEPTH {
                 let child_depth = depth_u16(d.wrapping_add(1));
                 let (sibling_prefix, own_prefix) = Self::step_prefixes(prefix, key, d);
-                let (sib_hash, sib_count) = self
-                    .nodes
-                    .get(&(child_depth, sibling_prefix))
-                    .copied()
-                    .unwrap_or((empty[d.wrapping_add(1)], 0));
-                path.push(CausalProofStep {
-                    hash: sib_hash,
-                    count: sib_count,
-                });
+                path.push(self.sibling_step(&empty, child_depth, sibling_prefix, d));
                 prefix = own_prefix;
             }
             let root_hash = self.root();
@@ -1305,15 +1318,7 @@ pub mod causal {
             for d in 0..CAUSAL_DEPTH {
                 let child_depth = depth_u16(d.wrapping_add(1));
                 let (sibling_prefix, child_prefix) = Self::step_prefixes(prefix, key, d);
-                let (sib_hash, sib_count) = self
-                    .nodes
-                    .get(&(child_depth, sibling_prefix))
-                    .copied()
-                    .unwrap_or((empty[d.wrapping_add(1)], 0));
-                path.push(CausalProofStep {
-                    hash: sib_hash,
-                    count: sib_count,
-                });
+                path.push(self.sibling_step(&empty, child_depth, sibling_prefix, d));
                 // Check if the child node on the key-directed path exists
                 // and is non-empty.
                 let child = self.nodes.get(&(child_depth, child_prefix));
@@ -1466,13 +1471,9 @@ pub mod causal {
             }
         }
 
-        /// Independent recursive computation of the causal trie root for a
-        /// given key set. Used as a differential oracle against the
-        /// incremental node-cache implementation.
-        pub(crate) fn subtree_root(keys: &[Hash], depth: usize) -> (Hash, u64) {
-            if depth == CAUSAL_DEPTH {
-                return (causal_leaf(keys[0]), 1);
-            }
+        /// Splits `keys` into (left, right) by their bit at `depth`, matching
+        /// [`causal_bit`]'s MSB-first convention.
+        fn partition_by_bit(keys: &[Hash], depth: usize) -> (Vec<Hash>, Vec<Hash>) {
             let mut left = Vec::new();
             let mut right = Vec::new();
             for k in keys {
@@ -1482,6 +1483,17 @@ pub mod causal {
                     right.push(*k);
                 }
             }
+            (left, right)
+        }
+
+        /// Independent recursive computation of the causal trie root for a
+        /// given key set. Used as a differential oracle against the
+        /// incremental node-cache implementation.
+        pub(crate) fn subtree_root(keys: &[Hash], depth: usize) -> (Hash, u64) {
+            if depth == CAUSAL_DEPTH {
+                return (causal_leaf(keys[0]), 1);
+            }
+            let (left, right) = partition_by_bit(keys, depth);
             let next_depth = depth.saturating_add(1);
             let (left_hash, left_count) = subtree_root_or_empty(&left, next_depth);
             let (right_hash, right_count) = subtree_root_or_empty(&right, next_depth);
@@ -1543,15 +1555,7 @@ pub mod causal {
                     nodes.insert((depth_u16(depth), prefix), (causal_leaf(*first), 1));
                     return;
                 }
-                let mut left = Vec::new();
-                let mut right = Vec::new();
-                for k in keys {
-                    if causal_bit(k, depth) == 0 {
-                        left.push(*k);
-                    } else {
-                        right.push(*k);
-                    }
-                }
+                let (left, right) = partition_by_bit(keys, depth);
                 let next_depth = depth.saturating_add(1);
                 let mut left_prefix = prefix;
                 let mut right_prefix = prefix;
@@ -1686,6 +1690,60 @@ pub mod causal {
             keys
         }
 
+        /// Asserts `set` and `oracle` agree with each other and with
+        /// `(ref_root, ref_count)`, then cross-checks every inclusion proof
+        /// in `keys` between the two. `label` is appended to failure
+        /// messages to disambiguate which test/iteration failed.
+        fn assert_matches_oracle(
+            set: &CausalSet,
+            oracle: &CausalOracle,
+            ref_root: Hash,
+            ref_count: u64,
+            keys: &[Hash],
+            label: &str,
+        ) {
+            assert_eq!(set.root(), ref_root, "root diverges{label}");
+            assert_eq!(set.count(), ref_count, "count diverges{label}");
+            assert_eq!(
+                oracle.root(),
+                (ref_root, ref_count),
+                "oracle root diverges{label}"
+            );
+
+            for k in keys {
+                let (path, root, count) = set.inclusion_proof(k).expect("key is a member");
+                let (oracle_hash, oracle_count, oracle_path, kind, term_depth) = oracle.descend(k);
+                assert!(matches!(kind, TerminalKind::Leaf));
+                assert_eq!(term_depth, CAUSAL_DEPTH);
+                assert_eq!(oracle_hash, root, "inclusion hash diverges{label}");
+                assert_eq!(oracle_count, count, "inclusion count diverges{label}");
+                assert_eq!(oracle_path, path, "inclusion path diverges{label}");
+                assert!(verify_causal_inclusion(k, &path, root, count));
+            }
+        }
+
+        /// Asserts a non-inclusion proof for `absent` against `set` matches
+        /// `oracle`'s descent. `label` is appended to failure messages.
+        fn assert_non_inclusion_matches_oracle(
+            set: &CausalSet,
+            oracle: &CausalOracle,
+            absent: &Hash,
+            label: &str,
+        ) {
+            let (oracle_hash, oracle_count, oracle_path, kind, term_depth) = oracle.descend(absent);
+            assert!(matches!(kind, TerminalKind::Empty));
+            let (path, depth, root, count) = set
+                .non_inclusion_proof(absent)
+                .expect("key is not a member");
+            assert_eq!(depth, term_depth);
+            assert_eq!(oracle_hash, root);
+            assert_eq!(oracle_count, count);
+            assert_eq!(oracle_path, path, "non-inclusion path diverges{label}");
+            assert!(verify_causal_non_inclusion(
+                absent, depth, &path, root, count
+            ));
+        }
+
         /// Cross-checks `CausalSet`'s incremental root/proofs against the
         /// recursive oracle for keys that differ only at the byte-boundary
         /// bits (7/8, 15/16) and the final bit (255) — exactly where a strip
@@ -1710,50 +1768,16 @@ pub mod causal {
                     let oracle = CausalOracle::new(&keys);
 
                     let (ref_root, ref_count) = subtree_root_or_empty(&keys, 0);
-                    assert_eq!(
-                        set.root(),
-                        ref_root,
-                        "incremental root diverges from oracle"
-                    );
-                    assert_eq!(set.count(), ref_count);
-                    assert_eq!(oracle.root(), (ref_root, ref_count), "oracle root diverges");
-
-                    for &k in &keys {
-                        let (path, root, count) = set.inclusion_proof(&k).expect("key is a member");
-                        let (oracle_hash, oracle_count, oracle_path, kind, term_depth) =
-                            oracle.descend(&k);
-                        assert!(matches!(kind, TerminalKind::Leaf));
-                        assert_eq!(term_depth, CAUSAL_DEPTH);
-                        assert_eq!(oracle_hash, root);
-                        assert_eq!(oracle_count, count);
-                        assert_eq!(
-                            oracle_path, path,
-                            "inclusion path diverges from oracle for bit key"
-                        );
-                        assert!(verify_causal_inclusion(&k, &path, root, count));
-                    }
+                    assert_matches_oracle(&set, &oracle, ref_root, ref_count, &keys, "");
 
                     // Bit 47 is the reviewer-flagged boundary this test exists
                     // to cover: absent from the member set, it must terminate
                     // in an empty subtree whose depth and path match the
-                    // oracle exactly.
+                    // oracle exactly (the terminal hash is the hash of the
+                    // subtree containing all 5 keys at the terminal depth —
+                    // the non-empty sibling — NOT empty[term_depth]).
                     let absent = bit_key(47);
-                    let (oracle_hash, oracle_count, oracle_path, kind, term_depth) =
-                        oracle.descend(&absent);
-                    assert!(matches!(kind, TerminalKind::Empty));
-                    let (path, depth, root, count) = set
-                        .non_inclusion_proof(&absent)
-                        .expect("key is not a member");
-                    assert_eq!(depth, term_depth);
-                    // The terminal hash is the hash of the subtree containing
-                    // all 5 keys at the terminal depth (the non-empty sibling),
-                    // NOT empty[term_depth].
-                    assert_eq!(oracle_hash, root);
-                    assert_eq!(oracle_count, count);
-                    assert_eq!(oracle_path, path, "non-inclusion path diverges from oracle");
-                    assert!(verify_causal_non_inclusion(
-                        &absent, depth, &path, root, count
-                    ));
+                    assert_non_inclusion_matches_oracle(&set, &oracle, &absent, "");
                 })
                 .unwrap();
             child.join().unwrap();
@@ -1831,42 +1855,12 @@ pub mod causal {
                         }
 
                         let (ref_root, ref_count) = subtree_root_or_empty(&keys, 0);
-                        assert_eq!(set.root(), ref_root, "root diverges at n={n}");
-                        assert_eq!(set.count(), ref_count, "count diverges at n={n}");
-                        assert_eq!(
-                            oracle.root(),
-                            (ref_root, ref_count),
-                            "oracle root diverges at n={n}"
-                        );
-
-                        for &k in &keys {
-                            let (path, root, count) =
-                                set.inclusion_proof(&k).expect("key is a member");
-                            let (oracle_hash, oracle_count, oracle_path, kind, term_depth) =
-                                oracle.descend(&k);
-                            assert!(matches!(kind, TerminalKind::Leaf));
-                            assert_eq!(term_depth, CAUSAL_DEPTH);
-                            assert_eq!(oracle_hash, root, "inclusion hash diverges at n={n}");
-                            assert_eq!(oracle_count, count, "inclusion count diverges at n={n}");
-                            assert_eq!(oracle_path, path, "inclusion path diverges at n={n}");
-                            assert!(verify_causal_inclusion(&k, &path, root, count));
-                        }
+                        let label = alloc::format!(" at n={n}");
+                        assert_matches_oracle(&set, &oracle, ref_root, ref_count, &keys, &label);
 
                         // Non-inclusion: pick a key not in the set.
                         let absent = dense_keys(0xBEEF_CAFE_1234_DEAD, 1)[0];
-                        let (oracle_hash, oracle_count, oracle_path, kind, term_depth) =
-                            oracle.descend(&absent);
-                        assert!(matches!(kind, TerminalKind::Empty));
-                        let (path, depth, root, count) = set
-                            .non_inclusion_proof(&absent)
-                            .expect("key is not a member");
-                        assert_eq!(depth, term_depth);
-                        assert_eq!(oracle_hash, root);
-                        assert_eq!(oracle_count, count);
-                        assert_eq!(oracle_path, path, "non-inclusion path diverges at n={n}");
-                        assert!(verify_causal_non_inclusion(
-                            &absent, depth, &path, root, count
-                        ));
+                        assert_non_inclusion_matches_oracle(&set, &oracle, &absent, &label);
                     }
                 })
                 .unwrap();
