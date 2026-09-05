@@ -792,10 +792,10 @@ pub mod causal {
                 self.nodes.entry((depth, prefix)).or_insert((empty[d], 0));
                 if causal_bit(&key, d) == 0 {
                     // go left: clear bit d in prefix
-                    prefix[d / 8] &= !(1 << (7 - d % 8));
+                    prefix[d / 8] &= !(1 << (7_usize.wrapping_sub(d % 8)));
                 } else {
                     // go right: set bit d in prefix
-                    prefix[d / 8] |= 1 << (7 - d % 8);
+                    prefix[d / 8] |= 1 << (7_usize.wrapping_sub(d % 8));
                 }
             }
             // Leaf at depth 256
@@ -810,33 +810,33 @@ pub mod causal {
             let mut child_prefix = prefix;
             for d in (0..CAUSAL_DEPTH).rev() {
                 let depth = depth_u16(d);
-                let child_depth = depth_u16(d + 1);
+                let child_depth = depth_u16(d.wrapping_add(1));
 
                 // Strip child_prefix to only have bits 0..d set.
                 let byte_idx = d / 8;
                 let bit_idx = d % 8;
-                child_prefix[byte_idx] &= 0xFF << (7 - bit_idx);
-                for i in (byte_idx + 1)..32 {
-                    child_prefix[i] = 0;
+                child_prefix[byte_idx] &= 0xFF << (7_usize.wrapping_sub(bit_idx));
+                for byte in child_prefix.iter_mut().skip(byte_idx.wrapping_add(1)) {
+                    *byte = 0;
                 }
 
                 // Left child prefix: bit d = 0.
                 let mut left_prefix = child_prefix;
-                left_prefix[byte_idx] &= !(1 << (7 - bit_idx));
+                left_prefix[byte_idx] &= !(1 << (7_usize.wrapping_sub(bit_idx)));
                 let (left_hash, left_count) = self
                     .nodes
                     .get(&(child_depth, left_prefix))
                     .copied()
-                    .unwrap_or((empty[d + 1], 0));
+                    .unwrap_or((empty[d.wrapping_add(1)], 0));
 
                 // Right child prefix: bit d = 1.
                 let mut right_prefix = child_prefix;
-                right_prefix[byte_idx] |= 1 << (7 - bit_idx);
+                right_prefix[byte_idx] |= 1 << (7_usize.wrapping_sub(bit_idx));
                 let (right_hash, right_count) = self
                     .nodes
                     .get(&(child_depth, right_prefix))
                     .copied()
-                    .unwrap_or((empty[d + 1], 0));
+                    .unwrap_or((empty[d.wrapping_add(1)], 0));
 
                 let node = causal_node(depth, left_hash, left_count, right_hash, right_count);
                 // Node at depth d is stored with prefix bits 0..d-1 set
@@ -1241,33 +1241,33 @@ pub mod causal {
             let mut path = Vec::with_capacity(CAUSAL_DEPTH);
             let mut prefix = [0u8; 32];
             for d in 0..CAUSAL_DEPTH {
-                let child_depth = depth_u16(d + 1);
+                let child_depth = depth_u16(d.wrapping_add(1));
                 // The sibling is the other child at this depth.
                 let (sib_hash, sib_count) = if causal_bit(key, d) == 0 {
                     // key goes left; sibling is right
                     let mut right_prefix = prefix;
-                    right_prefix[d / 8] |= 1 << (7 - d % 8);
+                    right_prefix[d / 8] |= 1 << (7_usize.wrapping_sub(d % 8));
                     self.nodes
                         .get(&(child_depth, right_prefix))
                         .copied()
-                        .unwrap_or((empty[d + 1], 0))
+                        .unwrap_or((empty[d.wrapping_add(1)], 0))
                 } else {
                     // key goes right; sibling is left
                     let mut left_prefix = prefix;
-                    left_prefix[d / 8] &= !(1 << (7 - d % 8));
+                    left_prefix[d / 8] &= !(1 << (7_usize.wrapping_sub(d % 8)));
                     self.nodes
                         .get(&(child_depth, left_prefix))
                         .copied()
-                        .unwrap_or((empty[d + 1], 0))
+                        .unwrap_or((empty[d.wrapping_add(1)], 0))
                 };
                 path.push(CausalProofStep {
                     hash: sib_hash,
                     count: sib_count,
                 });
                 if causal_bit(key, d) == 0 {
-                    prefix[d / 8] &= !(1 << (7 - d % 8));
+                    prefix[d / 8] &= !(1 << (7_usize.wrapping_sub(d % 8)));
                 } else {
-                    prefix[d / 8] |= 1 << (7 - d % 8);
+                    prefix[d / 8] |= 1 << (7_usize.wrapping_sub(d % 8));
                 }
             }
             let root_hash = self.root();
@@ -1296,23 +1296,23 @@ pub mod causal {
             let mut path = Vec::new();
             let mut prefix = [0u8; 32];
             for d in 0..CAUSAL_DEPTH {
-                let child_depth = depth_u16(d + 1);
+                let child_depth = depth_u16(d.wrapping_add(1));
                 // Collect the sibling at this depth (the other child of
                 // the node at depth d).
                 let (sib_hash, sib_count) = if causal_bit(key, d) == 0 {
                     let mut right_prefix = prefix;
-                    right_prefix[d / 8] |= 1 << (7 - d % 8);
+                    right_prefix[d / 8] |= 1 << (7_usize.wrapping_sub(d % 8));
                     self.nodes
                         .get(&(child_depth, right_prefix))
                         .copied()
-                        .unwrap_or((empty[d + 1], 0))
+                        .unwrap_or((empty[d.wrapping_add(1)], 0))
                 } else {
                     let mut left_prefix = prefix;
-                    left_prefix[d / 8] &= !(1 << (7 - d % 8));
+                    left_prefix[d / 8] &= !(1 << (7_usize.wrapping_sub(d % 8)));
                     self.nodes
                         .get(&(child_depth, left_prefix))
                         .copied()
-                        .unwrap_or((empty[d + 1], 0))
+                        .unwrap_or((empty[d.wrapping_add(1)], 0))
                 };
                 path.push(CausalProofStep {
                     hash: sib_hash,
@@ -1322,9 +1322,9 @@ pub mod causal {
                 // and is non-empty.
                 let mut child_prefix = prefix;
                 if causal_bit(key, d) == 0 {
-                    child_prefix[d / 8] &= !(1 << (7 - d % 8));
+                    child_prefix[d / 8] &= !(1 << (7_usize.wrapping_sub(d % 8)));
                 } else {
-                    child_prefix[d / 8] |= 1 << (7 - d % 8);
+                    child_prefix[d / 8] |= 1 << (7_usize.wrapping_sub(d % 8));
                 }
                 let child = self.nodes.get(&(child_depth, child_prefix));
                 let child_is_empty = child.map_or(true, |(_, c)| *c == 0);
@@ -1333,7 +1333,7 @@ pub mod causal {
                     let root_hash = self.root();
                     let root_count = self.count();
                     path.reverse();
-                    return Some((path, d + 1, root_hash, root_count));
+                    return Some((path, d.wrapping_add(1), root_hash, root_count));
                 }
                 prefix = child_prefix;
             }
@@ -1617,7 +1617,7 @@ pub mod causal {
         /// key makes the boundary observable.
         fn bit_key(bit: usize) -> Hash {
             let mut k = [0u8; 32];
-            k[bit / 8] |= 1 << (7 - bit % 8);
+            k[bit / 8] |= 1 << (7_usize.wrapping_sub(bit % 8));
             k
         }
 
