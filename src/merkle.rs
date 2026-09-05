@@ -680,7 +680,7 @@ pub mod causal {
     /// Built once per top-level call (see [`empty_table`]) rather than
     /// recomputed recursively per lookup: a naive `empty_hash(depth)` that
     /// recurses to `CAUSAL_DEPTH` on every call is called at nearly every
-    /// level of [`subtree_root`]/[`descend`]'s own recursion, which blows up
+    /// level of [`subtree_root`]'s own recursion, which blows up
     /// to roughly `CAUSAL_DEPTH^2` hash calls for one root computation.
     /// Building this table bottom-up costs exactly `CAUSAL_DEPTH` hash calls
     /// total.
@@ -741,7 +741,7 @@ pub mod causal {
     ///
     /// This is derived from the key during verification — it is not part of
     /// the wire format. The type exists only for internal use in
-    /// [`verify_causal_path`] and [`descend`].
+    /// [`verify_causal_path`] and the causal-trie oracle's descent.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum CausalSide {
         Left,
@@ -1507,87 +1507,143 @@ pub mod causal {
             )
         }
 
-        /// Recursively computes the (hash, count) of the subtree over `keys`
-        /// at `depth`, plus the ordered leaf-to-root sibling path along
-        /// `target`'s bit-directed descent. Returns the terminal node's kind
-        /// and depth.
-        pub(crate) fn descend(
-            keys: &[Hash],
-            depth: usize,
-            target: &Hash,
-        ) -> (Hash, u64, Vec<CausalProofStep>, TerminalKind, usize) {
-            if keys.is_empty() {
-                return (
-                    empty_table()[depth],
-                    0,
-                    Vec::new(),
-                    TerminalKind::Empty,
-                    depth,
-                );
+        /// Sets bit `bit` (MSB-first, matching [`causal_bit`]) in `prefix`.
+        fn set_bit(prefix: &mut [u8; 32], bit: usize) {
+            prefix[bit / 8] |= 1 << (7_usize.wrapping_sub(bit % 8));
+        }
+
+        /// Clears bit `bit` (MSB-first, matching [`causal_bit`]) in `prefix`.
+        fn clear_bit(prefix: &mut [u8; 32], bit: usize) {
+            prefix[bit / 8] &= !(1 << (7_usize.wrapping_sub(bit % 8)));
+        }
+
+        /// Memoized causal-trie oracle.
+        ///
+        /// Builds every non-empty subtree of the trie over `keys` exactly
+        /// once, keyed by `(depth, prefix)` the same way the production node
+        /// cache is — `O(n·depth)` nodes total. A proof for any key is then
+        /// just `O(depth)` memo lookups, instead of the from-scratch
+        /// `O(n·depth²)` recompute the old `descend` paid per key (and
+        /// `O(n²·depth²)` across the set). This is what lets the dense tests
+        /// run `n` up to 64 at negligible cost.
+        pub(crate) struct CausalOracle {
+            nodes: std::collections::HashMap<(u16, [u8; 32]), (Hash, u64)>,
+        }
+
+        impl CausalOracle {
+            /// Builds the memoized subtree table for `keys`.
+            pub(crate) fn new(keys: &[Hash]) -> Self {
+                let mut nodes = std::collections::HashMap::new();
+                let empty = empty_table();
+                Self::build(&mut nodes, keys, 0, [0u8; 32], &empty);
+                Self { nodes }
             }
-            if depth == CAUSAL_DEPTH {
-                return (
-                    causal_leaf(keys[0]),
-                    1,
-                    Vec::new(),
-                    TerminalKind::Leaf,
-                    depth,
-                );
-            }
-            let mut left = Vec::new();
-            let mut right = Vec::new();
-            for k in keys {
-                if causal_bit(k, depth) == 0 {
-                    left.push(*k);
-                } else {
-                    right.push(*k);
+
+            fn build(
+                nodes: &mut std::collections::HashMap<(u16, [u8; 32]), (Hash, u64)>,
+                keys: &[Hash],
+                depth: usize,
+                prefix: [u8; 32],
+                empty: &EmptyTable,
+            ) {
+                let Some(first) = keys.first() else {
+                    return;
+                };
+                if depth == CAUSAL_DEPTH {
+                    nodes.insert((depth_u16(depth), prefix), (causal_leaf(*first), 1));
+                    return;
                 }
+                let mut left = Vec::new();
+                let mut right = Vec::new();
+                for k in keys {
+                    if causal_bit(k, depth) == 0 {
+                        left.push(*k);
+                    } else {
+                        right.push(*k);
+                    }
+                }
+                let next_depth = depth.saturating_add(1);
+                let mut left_prefix = prefix;
+                let mut right_prefix = prefix;
+                clear_bit(&mut left_prefix, depth);
+                set_bit(&mut right_prefix, depth);
+                Self::build(nodes, &left, next_depth, left_prefix, empty);
+                Self::build(nodes, &right, next_depth, right_prefix, empty);
+                let (left_hash, left_count) = nodes
+                    .get(&(depth_u16(next_depth), left_prefix))
+                    .copied()
+                    .unwrap_or((empty[next_depth], 0));
+                let (right_hash, right_count) = nodes
+                    .get(&(depth_u16(next_depth), right_prefix))
+                    .copied()
+                    .unwrap_or((empty[next_depth], 0));
+                nodes.insert(
+                    (depth_u16(depth), prefix),
+                    (
+                        causal_node(
+                            depth_u16(depth),
+                            left_hash,
+                            left_count,
+                            right_hash,
+                            right_count,
+                        ),
+                        count_sum(left_count, right_count),
+                    ),
+                );
             }
-            let next_depth = depth.saturating_add(1);
-            if causal_bit(target, depth) == 0 {
-                let (left_hash, left_count, mut path, kind, term_depth) =
-                    descend(&left, next_depth, target);
-                let (right_hash, right_count) = subtree_root_or_empty(&right, next_depth);
-                let node = causal_node(
-                    depth_u16(depth),
-                    left_hash,
-                    left_count,
-                    right_hash,
-                    right_count,
-                );
-                path.push(CausalProofStep {
-                    hash: right_hash,
-                    count: right_count,
-                });
-                (
-                    node,
-                    count_sum(left_count, right_count),
-                    path,
-                    kind,
-                    term_depth,
-                )
-            } else {
-                let (right_hash, right_count, mut path, kind, term_depth) =
-                    descend(&right, next_depth, target);
-                let (left_hash, left_count) = subtree_root_or_empty(&left, next_depth);
-                let node = causal_node(
-                    depth_u16(depth),
-                    left_hash,
-                    left_count,
-                    right_hash,
-                    right_count,
-                );
-                path.push(CausalProofStep {
-                    hash: left_hash,
-                    count: left_count,
-                });
-                (
-                    node,
-                    count_sum(left_count, right_count),
-                    path,
-                    kind,
-                    term_depth,
-                )
+
+            /// Root (`hash`, `count`) of the whole key set — the node at
+            /// depth 0, or the canonical empty root.
+            pub(crate) fn root(&self) -> (Hash, u64) {
+                self.nodes
+                    .get(&(depth_u16(0), [0u8; 32]))
+                    .copied()
+                    .unwrap_or((empty_table()[0], 0))
+            }
+
+            /// The root (`hash`, `count`) of the whole key set, plus the
+            /// leaf-to-root sibling path along `target`'s bit-directed
+            /// descent. A member ends in [`TerminalKind::Leaf`] at
+            /// [`CAUSAL_DEPTH`]; a non-member ends in [`TerminalKind::Empty`]
+            /// at the first depth whose target-directed subtree is empty.
+            pub(crate) fn descend(
+                &self,
+                target: &Hash,
+            ) -> (Hash, u64, Vec<CausalProofStep>, TerminalKind, usize) {
+                let empty = empty_table();
+                let mut path = Vec::with_capacity(CAUSAL_DEPTH);
+                let mut prefix = [0u8; 32];
+                let mut depth = 0;
+                let (kind, term_depth) = loop {
+                    if !self.nodes.contains_key(&(depth_u16(depth), prefix)) {
+                        break (TerminalKind::Empty, depth);
+                    }
+                    if depth == CAUSAL_DEPTH {
+                        break (TerminalKind::Leaf, depth);
+                    }
+                    let next_depth = depth.saturating_add(1);
+                    let mut sibling_prefix = prefix;
+                    if causal_bit(target, depth) == 0 {
+                        set_bit(&mut sibling_prefix, depth);
+                        clear_bit(&mut prefix, depth);
+                    } else {
+                        clear_bit(&mut sibling_prefix, depth);
+                        set_bit(&mut prefix, depth);
+                    }
+                    let (sibling_hash, sibling_count) = self
+                        .nodes
+                        .get(&(depth_u16(next_depth), sibling_prefix))
+                        .copied()
+                        .unwrap_or((empty[next_depth], 0));
+                    path.push(CausalProofStep {
+                        hash: sibling_hash,
+                        count: sibling_count,
+                    });
+                    depth = next_depth;
+                };
+                path.reverse();
+                let (root_hash, root_count) = self.root();
+                (root_hash, root_count, path, kind, term_depth)
             }
         }
     }
@@ -1604,7 +1660,7 @@ pub mod causal {
     /// module can see it.
     #[cfg(all(test, feature = "std"))]
     mod tests {
-        use super::test_oracle::{descend, subtree_root_or_empty, TerminalKind};
+        use super::test_oracle::{subtree_root_or_empty, CausalOracle, TerminalKind};
         use super::*;
 
         /// A key with exactly one bit set, at bit index `bit` (MSB-first,
@@ -1651,8 +1707,8 @@ pub mod causal {
             let bits = [7_usize, 8, 15, 16, 255];
             let keys: Vec<Hash> = bits.iter().copied().map(bit_key).collect();
 
-            // descend recurses 256 levels; subtree_root recurses 256 levels
-            // for each non-target subtree. Use a larger stack to avoid
+            // CausalOracle::build recurses 256 levels; subtree_root recurses 256
+            // levels for each subtree. Use a larger stack to avoid
             // overflow in the oracle.
             let child = std::thread::Builder::new()
                 .stack_size(16 * 1024 * 1024)
@@ -1661,6 +1717,7 @@ pub mod causal {
                     for &k in &keys {
                         set.insert_mut(k);
                     }
+                    let oracle = CausalOracle::new(&keys);
 
                     let (ref_root, ref_count) = subtree_root_or_empty(&keys, 0);
                     assert_eq!(
@@ -1669,11 +1726,12 @@ pub mod causal {
                         "incremental root diverges from oracle"
                     );
                     assert_eq!(set.count(), ref_count);
+                    assert_eq!(oracle.root(), (ref_root, ref_count), "oracle root diverges");
 
                     for &k in &keys {
                         let (path, root, count) = set.inclusion_proof(&k).expect("key is a member");
                         let (oracle_hash, oracle_count, oracle_path, kind, term_depth) =
-                            descend(&keys, 0, &k);
+                            oracle.descend(&k);
                         assert!(matches!(kind, TerminalKind::Leaf));
                         assert_eq!(term_depth, CAUSAL_DEPTH);
                         assert_eq!(oracle_hash, root);
@@ -1691,7 +1749,7 @@ pub mod causal {
                     // oracle exactly.
                     let absent = bit_key(47);
                     let (oracle_hash, oracle_count, oracle_path, kind, term_depth) =
-                        descend(&keys, 0, &absent);
+                        oracle.descend(&absent);
                     assert!(matches!(kind, TerminalKind::Empty));
                     let (path, depth, root, count) = set
                         .non_inclusion_proof(&absent)
@@ -1717,19 +1775,16 @@ pub mod causal {
         /// keys where those bytes are non-trivial — the exact gap left by
         /// single-bit keys. Tests n=1, n=2 (trivial degeneracies), and
         /// n=32, n=64 (dense enough that Phase 2 recurses through many
-        /// non-trivial prefixes).
+        /// non-trivial prefixes). The memoized [`CausalOracle`] keeps the
+        /// per-key proof descent `O(depth)` regardless of `n`.
         #[test]
         fn differential_root_and_proofs_dense_random() {
             let child = std::thread::Builder::new()
                 .stack_size(16 * 1024 * 1024)
                 .spawn(move || {
-                    // O(n² · depth²) oracle cost — the per-key `descend`
-                    // recomputes sibling subtree roots from scratch at every
-                    // level. n=16 is enough to densely exercise Phase 2's
-                    // tail-zeroing and intra-byte mask across all 32 bytes
-                    // without the 64-key case dominating the test suite.
-                    for &n in &[1, 2, 8, 16] {
+                    for &n in &[1, 2, 32, 64] {
                         let keys = dense_keys(0xDEAD_BEEF_CAFE_1234, n);
+                        let oracle = CausalOracle::new(&keys);
 
                         let mut set = CausalSet::empty();
                         for &k in &keys {
@@ -1739,12 +1794,17 @@ pub mod causal {
                         let (ref_root, ref_count) = subtree_root_or_empty(&keys, 0);
                         assert_eq!(set.root(), ref_root, "root diverges at n={n}");
                         assert_eq!(set.count(), ref_count, "count diverges at n={n}");
+                        assert_eq!(
+                            oracle.root(),
+                            (ref_root, ref_count),
+                            "oracle root diverges at n={n}"
+                        );
 
                         for &k in &keys {
                             let (path, root, count) =
                                 set.inclusion_proof(&k).expect("key is a member");
                             let (oracle_hash, oracle_count, oracle_path, kind, term_depth) =
-                                descend(&keys, 0, &k);
+                                oracle.descend(&k);
                             assert!(matches!(kind, TerminalKind::Leaf));
                             assert_eq!(term_depth, CAUSAL_DEPTH);
                             assert_eq!(oracle_hash, root, "inclusion hash diverges at n={n}");
@@ -1756,7 +1816,7 @@ pub mod causal {
                         // Non-inclusion: pick a key not in the set.
                         let absent = dense_keys(0xBEEF_CAFE_1234_DEAD, 1)[0];
                         let (oracle_hash, oracle_count, oracle_path, kind, term_depth) =
-                            descend(&keys, 0, &absent);
+                            oracle.descend(&absent);
                         assert!(matches!(kind, TerminalKind::Empty));
                         let (path, depth, root, count) = set
                             .non_inclusion_proof(&absent)
