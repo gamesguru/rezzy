@@ -1,4 +1,5 @@
 use crate::utils;
+use crate::utils_extra;
 use rezzy::{resolve_iterative_sort, LeanEvent, StateResVersion};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -293,7 +294,7 @@ fn test_dueling_admins_backdated_kick(version: StateResVersion) {
         "#,
     );
     let auth_context: EventMap = to_event_map(&events);
-    let unconflicted = utils::build_unconflicted_state_from_ids(
+    let unconflicted = utils_extra::build_unconflicted_state_from_ids(
         &auth_context,
         &["$create", "$creator_join", "$a_join", "$c_join"],
     );
