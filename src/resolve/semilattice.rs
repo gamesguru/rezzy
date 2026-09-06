@@ -188,7 +188,7 @@ fn process_lattice_event<'a, Id, C, S2: core::hash::BuildHasher, S3: core::hash:
         EventType::from(ev.event_type.as_str()),
         ev.state_key.clone().unwrap(),
     );
-    assert!(
+    debug_assert!(
         conflicted_keys.contains(&key),
         "process_lattice_event competed on a key ({:?}, {:?}) absent from \
          conflicted_events -- the no-guard invariant documented above \

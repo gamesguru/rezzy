@@ -23,9 +23,10 @@ format: ##H Format codebase (Rust + Lean + scripts)
 	-isort $(LINT_LOCS_PY)
 	-shfmt -w $(LINT_LOCS_SH)
 
-.PHONY: fix
-fix:	##H Clippy auto-fix
-	$(CARGO) clippy --allow-dirty --allow-staged --fix --all-targets $(CARGO_FEATURE_ARGS)
+.PHONY: check
+check:	##H Cargo check and code dupe
+	$(CARGO) check --all-targets --all-features
+	-jscpd $$(git ls-files '*.rs')
 	# $(CARGO) fix --all-targets --allow-dirty
 
 .PHONY: lint
@@ -33,15 +34,13 @@ lint: ##H Run all linters
 	-shellcheck $(LINT_LOCS_SH)
 	$(CARGO) clippy --all-targets $(CARGO_FEATURE_ARGS)
 
-N ?= 5
+.PHONY: fix
+fix:	##H Clippy auto-fix
+	$(CARGO) clippy --allow-dirty --allow-staged --fix --all-targets $(CARGO_FEATURE_ARGS)
 
-.PHONY: check
-check:	##H Cargo check and code dupe
-	$(CARGO) check
-	-jscpd $$(git diff HEAD~${N} --name-only '*.rs')
 
-.PHONY: doc rust/doc
-doc: rust/doc ##H Alias for rust/doc
+.PHONY: doc
+doc: ##H Build docs
 rust/doc: ##H Generate rustdoc API documentation
 	$(CARGO) doc --no-deps
 	echo '<meta http-equiv="refresh" content="0;url=rezzy/index.html">' > target/doc/index.html
