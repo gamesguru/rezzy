@@ -13,7 +13,7 @@
 //! | `std`       | ✓       | Enables `std::collections::{HashMap, HashSet}` and thread-parallel lattice resolution. |
 //! | `cli`       | ✗       | Builds the `rezzy` CLI binary and merge utilities. |
 //! | `mock-ruma` | ✗       | Enables Ruma SDK interop for upstream parity testing. |
-//! | `regen`     | ✗       | Builds the `regen_oracles` snapshot regeneration binary. |
+//! | `regen`     | ✗       | Builds the `regen-oracles` snapshot regeneration binary. |
 //! | `signing`   | ✗       | Signature-verification traits (`SignatureVerifier` et al.), backend-agnostic. |
 //! | `signing-dalek` | ✗   | `ed25519-dalek`-backed `SignatureVerifier` implementation. |
 //!

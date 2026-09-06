@@ -301,6 +301,70 @@ fn test_persisted_internal_node_round_trip() {
 }
 
 #[test]
+fn test_encode_v1_writes_current_wire_version() {
+    let node = PersistedInternalNode::<i32, i32> {
+        datamap: 0b0,
+        nodemap: 0b0,
+        leaves: vec![],
+        child_hashes: vec![],
+    };
+    assert_eq!(node.encode_v1()[0], super::codec::HAMT_WIRE_VERSION);
+    assert_ne!(
+        super::codec::HAMT_WIRE_VERSION,
+        super::codec::LEGACY_WIRE_VERSION_16_BYTE_HASHES
+    );
+}
+
+#[test]
+fn test_decode_v1_rejects_legacy_wire_version_explicitly() {
+    // Hand-crafted legacy 0x01 record: version + datamap + nodemap +
+    // leaf_count + child_count + one i32 leaf + one 16-byte child hash.
+    let mut legacy = Vec::new();
+    legacy.push(super::codec::LEGACY_WIRE_VERSION_16_BYTE_HASHES);
+    legacy.extend_from_slice(&1_u32.to_le_bytes()); // datamap (bit 0)
+    legacy.extend_from_slice(&2_u32.to_le_bytes()); // nodemap (bit 1)
+    legacy.extend_from_slice(&1_u32.to_le_bytes()); // leaf_count
+    legacy.extend_from_slice(&1_u32.to_le_bytes()); // child_count
+    legacy.extend_from_slice(&5_i32.to_le_bytes()); // leaf key
+    legacy.extend_from_slice(&50_i32.to_le_bytes()); // leaf value
+    legacy.extend_from_slice(&[0xAB; 16]); // legacy child hash
+
+    assert_eq!(
+        PersistedInternalNode::<i32, i32>::decode_v1_unverified(&legacy),
+        Err(
+            "Legacy v1 node (16-byte structural hashes) is unsupported; \
+             re-persist or migrate before decoding"
+        )
+    );
+}
+
+#[test]
+fn test_decode_v1_legacy_unverified_reads_16_byte_hash_layout() {
+    let mut legacy = Vec::new();
+    legacy.push(1); // legacy version byte
+    legacy.extend_from_slice(&1_u32.to_le_bytes()); // datamap (bit 0)
+    legacy.extend_from_slice(&2_u32.to_le_bytes()); // nodemap (bit 1)
+    legacy.extend_from_slice(&1_u32.to_le_bytes()); // leaf_count
+    legacy.extend_from_slice(&1_u32.to_le_bytes()); // child_count
+    legacy.extend_from_slice(&5_i32.to_le_bytes()); // leaf key
+    legacy.extend_from_slice(&50_i32.to_le_bytes()); // leaf value
+    legacy.extend_from_slice(&[0xAB; 16]); // legacy child hash
+
+    let decoded = PersistedInternalNode::<i32, i32>::decode_v1_legacy_unverified(&legacy)
+        .expect("legacy layout must parse for diagnostics");
+
+    assert_eq!(decoded.datamap, 0b1);
+    assert_eq!(decoded.nodemap, 0b10);
+    assert_eq!(decoded.leaves, vec![(5, 50)]);
+    let mut expected_hash = [0u8; 32];
+    expected_hash[..16].copy_from_slice(&[0xAB; 16]);
+    assert_eq!(decoded.child_hashes, vec![expected_hash]);
+
+    // The same bytes must be rejected by the current-version decoder.
+    assert!(PersistedInternalNode::<i32, i32>::decode_v1_unverified(&legacy).is_err());
+}
+
+#[test]
 fn test_structural_hash_commits_to_canonical_persisted_bytes() {
     let structural_key = b"canonical_persisted_bytes";
     let child_hash = [0x42; 32];
@@ -5559,7 +5623,7 @@ fn test_descend_level_rejects_corruption() {
     let req_hash = crate::hamt::key_path_hash(key, &42_u32);
 
     // 1. Truncated buffer: returns Decode error
-    let truncated_buf = vec![0x01, 0x00];
+    let truncated_buf = vec![crate::hamt::codec::HAMT_WIRE_VERSION, 0x00];
     let res =
         descend_level::<u32, u64, _>(key, &[([0; 32], &truncated_buf, 0, &[req_hash])], |k| {
             crate::hamt::key_path_hash(key, k)
@@ -5572,7 +5636,7 @@ fn test_descend_level_rejects_corruption() {
     );
 
     // 2. Overlapping datamap & nodemap: returns Decode error
-    let mut corrupt_header = vec![0x01]; // v1
+    let mut corrupt_header = vec![crate::hamt::codec::HAMT_WIRE_VERSION]; // current version
     corrupt_header.extend_from_slice(&1_u32.to_le_bytes()); // datamap bit 0
     corrupt_header.extend_from_slice(&1_u32.to_le_bytes()); // nodemap bit 0 (overlap!)
     corrupt_header.extend_from_slice(&1_u32.to_le_bytes()); // leaves count 1

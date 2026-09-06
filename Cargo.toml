@@ -63,13 +63,13 @@ required-features = ["cli"]
 test = false
 
 [[bin]]
-name = "regen_oracles"
+name = "regen-oracles"
 path = "tests/bin/regen_oracles.rs"
 required-features = ["regen"]
 test = false
 
 [[bin]]
-name = "bench_ruma_vs_rezzy"
+name = "bench-ruma-vs-rezzy"
 path = "scripts/bench_ruma_vs_rezzy.rs"
 required-features = ["mock-ruma"]
 test = false
