@@ -23,6 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: dev
           path: dev
 
       - uses: actions/checkout@v4
