@@ -269,14 +269,15 @@ pub fn verify_non_inclusion(
     // empty children and so be canonical-empty itself — the descent
     // would have stopped a level higher. Biconditional, so this is
     // exact, not a heuristic.
+    let empty_at_depth = empty_table()[terminal_depth];
     if let Some(s0) = path.first() {
-        if s0.hash == empty_table()[terminal_depth] {
+        if s0.hash == empty_at_depth {
             return false;
         }
     }
     verify(
         state_key_hash(event_type, state_key),
-        empty_table()[terminal_depth],
+        empty_at_depth,
         terminal_depth,
         path,
         root,

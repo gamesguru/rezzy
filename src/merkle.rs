@@ -858,7 +858,8 @@ pub mod causal {
 
         /// Returns a new [`CausalSet`] containing every key in `self` plus
         /// `key`. A no-op (returns an equal set) if `key` is already a
-        /// member. The node cache is updated incrementally (O(256)).
+        /// member. Clones the full node cache, then updates incrementally
+        /// (O(|nodes| + 256)).
         #[must_use]
         pub fn insert(&self, key: Hash) -> Self {
             let mut next = self.clone();
@@ -868,8 +869,8 @@ pub mod causal {
 
         /// Returns the set union of `self` and `other`, eliminating
         /// duplicates, as required for a multi-predecessor merge event's
-        /// `causal_set` transition. The node cache is updated
-        /// incrementally.
+        /// `causal_set` transition. Clones the full node cache
+        /// (O(|nodes|)) before processing `other.keys` incrementally.
         #[must_use]
         pub fn union(&self, other: &Self) -> Self {
             let mut next = self.clone();

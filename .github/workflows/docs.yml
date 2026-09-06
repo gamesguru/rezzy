@@ -28,7 +28,7 @@ jobs:
 
       - uses: actions/checkout@v4
         with:
-          ref: master
+          ref: 11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
           path: master
 
       - name: Install Rust toolchain
