@@ -1,13 +1,13 @@
 // CLI-only: Multi-file event set merging.
 #![cfg(feature = "cli")]
+use crate::error::{AppError, ErrorCode};
 use std::string::String;
 use std::vec::Vec;
 
 /// Perform a connectivity check across states.
 fn perform_connectivity_check(
     per_file_ids: &[std::collections::HashSet<String>],
-) -> Result<(), anyhow::Error> {
-    extern crate anyhow;
+) -> Result<(), AppError> {
     let num_files = per_file_ids.len();
     if num_files < 2 {
         return Ok(());
@@ -38,7 +38,8 @@ fn perform_connectivity_check(
     // If any file node is not visited, then the inputs are disjoint (not connected as a single component!)
     for (idx, &is_visited) in visited.iter().enumerate() {
         if !is_visited {
-            anyhow::bail!(
+            bail_code!(
+                ErrorCode::DisjointDags,
                 "Disjoint DAGs: input file at index {idx} shares no history with the connected component. \
                  Cannot compute meaningful merge — all inputs must share history."
             );
@@ -93,8 +94,7 @@ pub fn merge_event_sets(
     file_sets: &[(String, Vec<serde_json::Value>)],
     debug: bool,
     quiet: bool,
-) -> Result<Vec<serde_json::Value>, anyhow::Error> {
-    extern crate anyhow;
+) -> Result<Vec<serde_json::Value>, AppError> {
     use std::collections::HashSet;
 
     let num_files = file_sets.len();
@@ -119,6 +119,17 @@ pub fn merge_event_sets(
             }
 
             file_ids.insert(event_id.clone());
+
+            // Also collect auth_events references so files linked through
+            // auth chains (e.g. a create-event-only file) are seen as connected.
+            if let Some(auth) = val.get("auth_events").and_then(|a| a.as_array()) {
+                for ae in auth {
+                    if let Some(aid) = ae.as_str() {
+                        file_ids.insert(aid.to_owned());
+                    }
+                }
+            }
+
             if seen_ids.insert(event_id) {
                 merged.push(val.clone());
                 added = added.saturating_add(1);

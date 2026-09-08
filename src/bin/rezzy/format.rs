@@ -684,6 +684,7 @@ mod tests {
             format: OutputFormat::ResolveState,
             debug: false,
             quiet: false,
+            check: false,
             origin: "matrix.org".to_string(),
         };
 
@@ -750,6 +751,7 @@ mod tests {
                 format: OutputFormat::Timeline,
                 debug: false,
                 quiet: false,
+                check: false,
                 origin: "matrix.org".to_string(),
             };
             let raw_map = HashMap::new();

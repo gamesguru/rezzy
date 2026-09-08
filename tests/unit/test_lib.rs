@@ -3386,11 +3386,11 @@ fn test_types_validate_syntactic() {
     ev.sender = "@alice:example.com".to_string();
     assert!(ev.validate_syntactic("11").is_ok());
 
-    // Test sender localpart charset (only a-z, 0-9, '.', '_', '=', '-', '/', '+')
+    // Test sender localpart charset (a-z, A-Z, 0-9, '.', '_', '=', '-', '/', '+')
     ev.sender = "@Alice:example.com".to_string();
     assert!(
-        ev.validate_syntactic("11").is_err(),
-        "uppercase is not a valid localpart character"
+        ev.validate_syntactic("11").is_ok(),
+        "uppercase is valid per Matrix spec"
     );
     ev.sender = "@:example.com".to_string();
     assert!(

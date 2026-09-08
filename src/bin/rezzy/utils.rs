@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::error::{AppError, ErrorCode};
 use crate::network::fetch_room_state;
 use crate::Args;
 use rezzy::basespec::event_types::{
@@ -29,16 +30,20 @@ use std::time::Instant;
 pub type SharedStateMap = std::sync::Arc<ResolvedState>;
 
 /// Parse a room version string.
-pub fn parse_room_version(ver: &str) -> anyhow::Result<StateResVersion> {
-    StateResVersion::from_room_version(ver)
-        .ok_or_else(|| anyhow::anyhow!("Unsupported room version: {ver}"))
+pub fn parse_room_version(ver: &str) -> Result<StateResVersion, AppError> {
+    StateResVersion::from_room_version(ver).ok_or_else(|| {
+        err!(
+            ErrorCode::UnsupportedVersion,
+            "Unsupported room version: {ver}"
+        )
+    })
 }
 
 /// Detect the room version from a state map.
 pub fn detect_version(
     events: &[serde_json::Value],
     debug: bool,
-) -> anyhow::Result<StateResVersion> {
+) -> Result<StateResVersion, AppError> {
     for ev in events {
         if ev.get(FIELD_TYPE).and_then(|t| t.as_str()) == Some(M_ROOM_CREATE) {
             if let Some(ver) = ev
@@ -54,7 +59,8 @@ pub fn detect_version(
         }
     }
 
-    anyhow::bail!(
+    bail_code!(
+        ErrorCode::NoCreateEvent,
         "No m.room.create event found — cannot detect room version. \
          Use --state-res to specify the algorithm manually."
     )
@@ -140,7 +146,7 @@ pub fn compute_state_hash(state: &imbl::OrdMap<(EventType, String), String>) -> 
 }
 
 /// Load a JSON file.
-pub fn load_file(input_path: &PathBuf) -> anyhow::Result<Vec<serde_json::Value>> {
+pub fn load_file(input_path: &PathBuf) -> Result<Vec<serde_json::Value>, AppError> {
     let input_reader: Box<dyn Read> = if input_path.to_str() == Some("-") {
         Box::new(io::stdin())
     } else {
@@ -164,7 +170,10 @@ pub fn load_file(input_path: &PathBuf) -> anyhow::Result<Vec<serde_json::Value>>
             values.push(val);
         }
         if values.is_empty() {
-            anyhow::bail!("No input data provided in JSONL file.");
+            bail_code!(
+                ErrorCode::EmptyInput,
+                "No input data provided in JSONL file."
+            );
         }
         Ok(values)
     } else {
@@ -181,7 +190,10 @@ pub fn load_file(input_path: &PathBuf) -> anyhow::Result<Vec<serde_json::Value>>
             input_data.extend_from_slice(line.as_bytes());
         }
         if input_data.is_empty() {
-            anyhow::bail!("No input data provided before empty line or EOF.");
+            bail_code!(
+                ErrorCode::EmptyInput,
+                "No input data provided before empty line or EOF."
+            );
         }
         let val: serde_json::Value = serde_json::from_slice(&input_data)?;
         match val {
@@ -192,12 +204,14 @@ pub fn load_file(input_path: &PathBuf) -> anyhow::Result<Vec<serde_json::Value>>
 }
 
 /// Load or fetch the input value from args.
-pub fn load_or_fetch_input_value(args: &Args) -> anyhow::Result<serde_json::Value> {
+pub fn load_or_fetch_input_value(args: &Args) -> Result<serde_json::Value, AppError> {
     if let Some(room_id) = &args.room {
-        let homeserver = args
-            .homeserver
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("--homeserver is required when using --room"))?;
+        let homeserver = args.homeserver.as_deref().ok_or_else(|| {
+            err!(
+                ErrorCode::MissingHomeserver,
+                "--homeserver is required when using --room"
+            )
+        })?;
 
         let token = args.token.clone().or_else(|| {
             let env_key = format!(
@@ -211,6 +225,7 @@ pub fn load_or_fetch_input_value(args: &Args) -> anyhow::Result<serde_json::Valu
             std::env::var(&env_key).ok()
         });
         fetch_room_state(homeserver, room_id, token.as_deref())
+            .map_err(|e| err!(ErrorCode::NetworkError, "{e}"))
     } else if !args.input.is_empty() {
         if args.input.len() == 1 {
             let input_path = &args.input[0];
@@ -239,46 +254,59 @@ pub fn load_or_fetch_input_value(args: &Args) -> anyhow::Result<serde_json::Valu
             Ok(serde_json::Value::Array(merged))
         }
     } else {
-        anyhow::bail!("Either --input or --room must be provided.");
+        bail_code!(
+            ErrorCode::MissingInputFlag,
+            "Either --input or --room must be provided. Use -h or --help for more info."
+        );
     }
 }
 
 /// Parse input and extract the state heads.
 pub fn parse_and_extract_heads(
     input_val: &serde_json::Value,
-) -> anyhow::Result<(Vec<serde_json::Value>, Vec<String>)> {
-    let (raw_events, heads) = if let Some(obj) = input_val.as_object() {
+) -> Result<(Vec<serde_json::Value>, Vec<String>), AppError> {
+    if let Some(obj) = input_val.as_object() {
         if obj.contains_key("events") {
             let evs = obj
                 .get("events")
                 .unwrap()
                 .as_array()
-                .ok_or_else(|| anyhow::anyhow!("'events' field must be a JSON array"))?
+                .ok_or_else(|| {
+                    err!(
+                        ErrorCode::EventsNotArray,
+                        "'events' field must be a JSON array"
+                    )
+                })?
                 .clone();
             let mut hds = Vec::new();
             if let Some(hds_arr) = obj.get("heads").and_then(|h| h.as_array()) {
                 for v in hds_arr {
                     hds.push(
                         v.as_str()
-                            .ok_or_else(|| anyhow::anyhow!("each 'head' must be a string"))?
+                            .ok_or_else(|| {
+                                err!(ErrorCode::InvalidHeadType, "each 'head' must be a string")
+                            })?
                             .to_string(),
                     );
                 }
             }
-            (evs, hds)
+            return Ok((evs, hds));
         } else if obj.contains_key(FIELD_EVENT_ID) || obj.contains_key(FIELD_TYPE) {
-            (vec![input_val.clone()], Vec::new())
+            return Ok((vec![input_val.clone()], Vec::new()));
         } else {
-            anyhow::bail!(
+            bail_code!(
+                ErrorCode::UnrecognisedStructure,
                 "Unrecognized JSON object structure. Top-level object must either contain 'events' or represent a single event with 'event_id' or 'type'."
             );
         }
     } else if let Some(arr) = input_val.as_array() {
-        (arr.clone(), Vec::new())
+        return Ok((arr.clone(), Vec::new()));
     } else {
-        anyhow::bail!("Unexpected JSON format: expected object or array");
-    };
-    Ok((raw_events, heads))
+        bail_code!(
+            ErrorCode::UnexpectedFormat,
+            "Unexpected JSON format: expected object or array"
+        );
+    }
 }
 
 fn collect_reachable_events<'a>(

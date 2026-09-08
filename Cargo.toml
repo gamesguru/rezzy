@@ -89,7 +89,6 @@ std = ["serde_json/std", "serde/std"]
 cli = [
     "std",
     "dep:clap",
-    "dep:anyhow",
     "dep:ureq",
     "dep:idna_adapter",
     "mimalloc",
@@ -167,17 +166,14 @@ test-log = { version = "0.2.20", optional = true }
 ureq = { version = "2.9", optional = true, default-features = false, features = [
     "json",
 ] }
-# Keep the transitive TLS dependency compatible with the CLI's Rust 1.82 CI.
-# The exact requirement prevents `cargo update` from selecting zeroize 1.9+.
-# This is intentionally unconditional: dev-dependencies are resolved by the
-# default-features CI job too, so an optional CLI-only pin would not protect
-# the crate's MSRV there.
-zeroize = "=1.8.1"
 [dev-dependencies]
 ed25519-consensus = { version = "2.1", default-features = false, features = ["std"] }
 rand_08 = { package = "rand", version = "0.8" }
 similar = "2.7.0"
 test-case = "3.3.1"
+# Transitive pin: prevents cargo update from selecting zeroize 1.9+
+# (which raises rust-version to 1.85 and breaks the 1.81 MSRV).
+zeroize = "=1.8.1"
 
 [[example]]
 name = "bench_files"

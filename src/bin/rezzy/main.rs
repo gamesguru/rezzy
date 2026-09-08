@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[macro_use]
+mod error;
 mod format;
 mod jsonl_merge;
 mod network;
@@ -65,13 +67,17 @@ pub struct Args {
     #[arg(short, long)]
     pub quiet: bool,
 
+    /// Validate input only; suppress state output and exit.
+    #[arg(short = 'c', long)]
+    pub check: bool,
+
     #[arg(long, default_value = "matrix.org")]
     pub origin: String,
 }
 
 /// Run the CLI application.
 #[allow(clippy::too_many_lines)]
-fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
+fn run_cli(args: &Args) -> Result<serde_json::Value, error::AppError> {
     let input_val = load_or_fetch_input_value(args)?;
     let (raw_events, heads) = parse_and_extract_heads(&input_val)?;
 
@@ -139,7 +145,13 @@ fn run_cli(args: &Args) -> anyhow::Result<serde_json::Value> {
                 if args.debug {
                     eprintln!("[DEBUG] Failed to parse event: {val:?}. Error: {e}");
                 }
-                let _ = serde_json::from_value::<LeanEvent>(val)?;
+                let msg = e.to_string();
+                let code = if msg.contains("event_type") {
+                    error::ErrorCode::EmptyEventType
+                } else {
+                    error::ErrorCode::MalformedJson
+                };
+                return Err(error::AppError::new(code, msg));
             }
         }
     }
@@ -273,6 +285,9 @@ fn main() {
     let args = Args::parse();
     match run_cli(&args) {
         Ok(output) => {
+            if args.check {
+                return;
+            }
             let output_writer: Box<dyn Write> = match args.output {
                 Some(path) => Box::new(BufWriter::new(
                     File::create(path).expect("Failed to create output file"),
@@ -294,6 +309,7 @@ fn main() {
             eprintln!("Error: {e}");
             let err_json = serde_json::json!({
                 "status": "error",
+                "code": e.code().code(),
                 "error": e.to_string()
             });
             serde_json::to_writer_pretty(io::stderr(), &err_json).ok();
