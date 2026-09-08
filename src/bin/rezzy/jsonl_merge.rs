@@ -1,7 +1,7 @@
 // CLI-only: Multi-file event set merging.
 #![cfg(feature = "cli")]
 use crate::error::{AppError, ErrorCode};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::string::String;
 use std::vec::Vec;
 
@@ -103,18 +103,16 @@ fn report_highest_shared_depths(per_file_refs: &[FileRefs], merged: &[serde_json
         }
         s
     };
+    let depth_by_id: HashMap<&str, u64> = merged
+        .iter()
+        .filter_map(|v| {
+            let eid = v.get("event_id")?.as_str()?;
+            Some((eid, v.get("depth")?.as_u64().unwrap_or(0)))
+        })
+        .collect();
     let mut shared_depths: Vec<(&String, u64)> = shared_all
         .iter()
-        .filter_map(|id| {
-            merged.iter().find_map(|v| {
-                let eid = v.get("event_id")?.as_str()?;
-                if eid == id.as_str() {
-                    Some((*id, v.get("depth")?.as_u64().unwrap_or(0)))
-                } else {
-                    None
-                }
-            })
-        })
+        .filter_map(|id| depth_by_id.get(id.as_str()).map(|&depth| (*id, depth)))
         .collect();
     shared_depths.sort_by_key(|b| std::cmp::Reverse(b.1));
     std::eprintln!(
@@ -188,8 +186,17 @@ pub fn merge_event_sets(
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut merged: Vec<serde_json::Value> = Vec::new();
     let mut per_file_refs: Vec<FileRefs> = Vec::with_capacity(num_files);
-    let mut per_file_stats: Vec<(String, usize, usize, usize, usize, usize, usize, usize, usize)> =
-        Vec::with_capacity(num_files);
+    let mut per_file_stats: Vec<(
+        String,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+        usize,
+    )> = Vec::with_capacity(num_files);
 
     for (label, events) in file_sets {
         let mut refs = FileRefs::with_capacity(events.len());
@@ -238,7 +245,10 @@ pub fn merge_event_sets(
             .max()
             .unwrap_or(0)
             .max(4);
-        let mut ww = [0usize; 8];
+        let hdr_labels = [
+            "total", "new", "shared", "auth", "prev", "relates", "redacts", "state",
+        ];
+        let mut ww: [usize; 8] = hdr_labels.map(|l| l.len());
         for s in &per_file_stats {
             ww[0] = ww[0].max(format!("{}", s.1).len());
             ww[1] = ww[1].max(format!("{}", s.2).len());
@@ -250,15 +260,22 @@ pub fn merge_event_sets(
             ww[7] = ww[7].max(format!("{}", s.8).len());
         }
 
-        let hdr_labels = ["total", "new", "shared", "auth", "prev", "relates", "redacts", "state"];
         let dbl_space = [false, true, false, true, false, false, true, false];
+
+        // Compute the content width (everything after "[merge] ") using the
+        // same building blocks as the data rows to guarantee alignment.
+        let mut content_width = wfl; // left-aligned file column
+        for (i, w) in ww.iter().enumerate() {
+            content_width += if dbl_space[i] { 2 } else { 1 } + w;
+        }
+
         let mut hdr = format!("[merge] {:<wfl$}", "file", wfl = wfl);
         for (i, (label, w)) in hdr_labels.iter().zip(ww.iter()).enumerate() {
             hdr.push_str(if dbl_space[i] { "  " } else { " " });
             hdr.push_str(&format!("{:>w$}", label, w = *w));
         }
         std::eprintln!("{hdr}");
-        std::eprintln!("[merge] {}", "-".repeat(hdr.len() - "[merge] ".len()));
+        std::eprintln!("[merge] {}", "-".repeat(content_width));
 
         for s in &per_file_stats {
             let vals = [s.1, s.2, s.3, s.4, s.5, s.6, s.7, s.8];

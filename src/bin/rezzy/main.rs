@@ -80,7 +80,7 @@ pub struct Args {
 #[allow(clippy::too_many_lines)]
 fn run_cli(args: &Args) -> Result<serde_json::Value, error::AppError> {
     let input_val = load_or_fetch_input_value(args)?;
-    let (raw_events, heads) = parse_and_extract_heads(&input_val)?;
+    let (raw_events, heads) = parse_and_extract_heads(&input_val, args.debug)?;
 
     let event_count = raw_events.len();
     let mut room_version: Option<String> = None;
@@ -247,7 +247,7 @@ fn run_cli(args: &Args) -> Result<serde_json::Value, error::AppError> {
             eprintln!("[progress] building state maps...");
         }
         let t = Instant::now();
-        let m = compute_state_maps(&heads, &events_map, &raw_map);
+        let m = compute_state_maps(&heads, &events_map, &raw_map, args.debug);
         if !args.quiet {
             eprintln!("[progress] state maps built in {:.2?}", t.elapsed());
         }

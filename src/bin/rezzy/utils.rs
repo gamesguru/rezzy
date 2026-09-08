@@ -247,11 +247,30 @@ pub fn load_or_fetch_input_value(args: &Args) -> Result<serde_json::Value, AppEr
                     || path.display().to_string(),
                     |n| n.to_string_lossy().to_string(),
                 );
+                let t = Instant::now();
                 let events = load_file(path)?;
+                if args.debug {
+                    eprintln!(
+                        "[DEBUG] loaded {label}: {} events in {:.2?}",
+                        events.len(),
+                        t.elapsed()
+                    );
+                }
                 file_sets.push((label, events));
             }
             let merged = crate::jsonl_merge::merge_event_sets(&file_sets, args.debug, args.quiet)?;
-            Ok(serde_json::Value::Array(merged))
+            if args.debug {
+                eprintln!(
+                    "[DEBUG] packaging {} merged events into input value...",
+                    merged.len()
+                );
+            }
+            let t = Instant::now();
+            let out = serde_json::Value::Array(merged);
+            if args.debug {
+                eprintln!("[DEBUG] packaged merged events in {:.2?}", t.elapsed());
+            }
+            Ok(out)
         }
     } else {
         bail_code!(
@@ -264,20 +283,27 @@ pub fn load_or_fetch_input_value(args: &Args) -> Result<serde_json::Value, AppEr
 /// Parse input and extract the state heads.
 pub fn parse_and_extract_heads(
     input_val: &serde_json::Value,
+    debug: bool,
 ) -> Result<(Vec<serde_json::Value>, Vec<String>), AppError> {
     if let Some(obj) = input_val.as_object() {
         if obj.contains_key("events") {
-            let evs = obj
-                .get("events")
-                .unwrap()
-                .as_array()
-                .ok_or_else(|| {
-                    err!(
-                        ErrorCode::EventsNotArray,
-                        "'events' field must be a JSON array"
-                    )
-                })?
-                .clone();
+            let arr = obj.get("events").unwrap().as_array().ok_or_else(|| {
+                err!(
+                    ErrorCode::EventsNotArray,
+                    "'events' field must be a JSON array"
+                )
+            })?;
+            if debug {
+                eprintln!(
+                    "[DEBUG] cloning {} events out of 'events' field...",
+                    arr.len()
+                );
+            }
+            let t = Instant::now();
+            let evs = arr.clone();
+            if debug {
+                eprintln!("[DEBUG] cloned events in {:.2?}", t.elapsed());
+            }
             let mut hds = Vec::new();
             if let Some(hds_arr) = obj.get("heads").and_then(|h| h.as_array()) {
                 for v in hds_arr {
@@ -300,7 +326,15 @@ pub fn parse_and_extract_heads(
             );
         }
     } else if let Some(arr) = input_val.as_array() {
-        return Ok((arr.clone(), Vec::new()));
+        if debug {
+            eprintln!("[DEBUG] cloning {} top-level events...", arr.len());
+        }
+        let t = Instant::now();
+        let evs = arr.clone();
+        if debug {
+            eprintln!("[DEBUG] cloned events in {:.2?}", t.elapsed());
+        }
+        return Ok((evs, Vec::new()));
     } else {
         bail_code!(
             ErrorCode::UnexpectedFormat,
@@ -354,6 +388,7 @@ pub fn compute_state_maps(
     heads: &[String],
     events_map: &HashMap<String, LeanEvent>,
     raw_map: &HashMap<String, serde_json::Value>,
+    debug: bool,
 ) -> Vec<HashMap<(EventType, String), String>> {
     if heads.len() <= 1 {
         let reachable_set: std::collections::HashSet<String> = if heads.len() == 1 {
@@ -373,11 +408,28 @@ pub fn compute_state_maps(
 
         vec![build_state_map(sorted_events, raw_map)]
     } else {
+        if debug {
+            eprintln!(
+                "[DEBUG] computing state maps for {} heads over {} events...",
+                heads.len(),
+                events_map.len()
+            );
+        }
         let mut maps = Vec::new();
-        for head_id in heads {
+        for (i, head_id) in heads.iter().enumerate() {
+            let t = Instant::now();
             let mut reachable = collect_reachable_events(head_id, events_map);
+            let reachable_count = reachable.len();
             reachable.sort_by(|a, b| a.cmp_by_depth(b));
             maps.push(build_state_map(reachable, raw_map));
+            if debug {
+                eprintln!(
+                    "[DEBUG] head {}/{} ({head_id}): {reachable_count} reachable events in {:.2?}",
+                    i.saturating_add(1),
+                    heads.len(),
+                    t.elapsed()
+                );
+            }
         }
         maps
     }
