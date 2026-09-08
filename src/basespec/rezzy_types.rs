@@ -2919,8 +2919,7 @@ pub(crate) fn is_valid_mxid(id: &str) -> bool {
     !localpart.is_empty()
         && !domain.is_empty()
         && localpart.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(b, b'.' | b'_' | b'=' | b'-' | b'/' | b'+')
+            b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'=' | b'-' | b'/' | b'+')
         })
 }
 

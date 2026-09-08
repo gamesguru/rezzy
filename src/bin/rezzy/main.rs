@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
+use std::time::Instant;
 use utils::{
     apply_global_power_levels, compute_state_maps, detect_version, load_or_fetch_input_value,
     parse_and_extract_heads, partition_and_resolve_state,
@@ -98,9 +99,11 @@ fn run_cli(args: &Args) -> Result<serde_json::Value, error::AppError> {
     let mut events_map = HashMap::with_capacity(event_count);
     let mut creator_user_id = String::new();
     let mut syntactically_rejected: usize = 0;
+    let mut parsed: usize = 0;
+    let progress_interval = if args.debug { 10_000 } else { 50_000 };
 
     for val in raw_events {
-        match serde_json::from_value::<LeanEvent>(val.clone()) {
+        match LeanEvent::from_value(&val, None) {
             Ok(ev) => {
                 // A syntactically-invalid-but-parseable event (e.g. a
                 // malformed sender MXID a lenient origin server already
@@ -153,6 +156,10 @@ fn run_cli(args: &Args) -> Result<serde_json::Value, error::AppError> {
                 };
                 return Err(error::AppError::new(code, msg));
             }
+        }
+        parsed = parsed.saturating_add(1);
+        if !args.quiet && parsed % progress_interval == 0 {
+            eprintln!("[progress] parsed {parsed}/{event_count} events, {} in graph, {syntactically_rejected} rejected", events_map.len());
         }
     }
 
@@ -235,16 +242,49 @@ fn run_cli(args: &Args) -> Result<serde_json::Value, error::AppError> {
         }
     }
 
-    let state_maps = compute_state_maps(&heads, &events_map, &raw_map);
+    let state_maps = {
+        if !args.quiet {
+            eprintln!("[progress] building state maps...");
+        }
+        let t = Instant::now();
+        let m = compute_state_maps(&heads, &events_map, &raw_map);
+        if !args.quiet {
+            eprintln!("[progress] state maps built in {:.2?}", t.elapsed());
+        }
+        m
+    };
 
     if version != rezzy::StateResVersion::V2_1 && version != rezzy::StateResVersion::V2_1_1 {
         apply_global_power_levels(&mut events_map, &creator_user_id, version);
     }
 
-    let auth_graph = rezzy::auth::roaring::AuthGraph::build(&events_map);
+    let auth_graph = {
+        if !args.quiet {
+            eprintln!("[progress] building auth graph...");
+        }
+        let t = Instant::now();
+        let g = rezzy::auth::roaring::AuthGraph::build(&events_map);
+        if !args.quiet {
+            eprintln!("[progress] auth graph built in {:.2?}", t.elapsed());
+        }
+        g
+    };
 
-    let (final_state_map, duration) =
-        partition_and_resolve_state(&heads, &events_map, &state_maps, version, &auth_graph);
+    let (final_state_map, duration) = {
+        if !args.quiet {
+            eprintln!("[progress] resolving state...");
+        }
+        let t = Instant::now();
+        let r = partition_and_resolve_state(&heads, &events_map, &state_maps, version, &auth_graph);
+        if !args.quiet {
+            eprintln!(
+                "[progress] state resolved in {:?} (wall {:?})",
+                r.1,
+                t.elapsed()
+            );
+        }
+        r
+    };
 
     let resolved_state_list: Vec<String> = final_state_map.values().cloned().collect();
     let mut auth_chain_bitmap = roaring::RoaringBitmap::new();

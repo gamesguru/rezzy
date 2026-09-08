@@ -86,14 +86,7 @@ std = ["serde_json/std", "serde/std"]
 # `cargo clippy --all-targets` pulled dev-deps in. With that pin,
 # `cargo metadata --features cli` shows clap (1.74) as the real `cli` MSRV
 # floor -- below the crate's own 1.81, not above it.
-cli = [
-    "std",
-    "dep:clap",
-    "dep:ureq",
-    "dep:idna_adapter",
-    "mimalloc",
-    "ureq/tls",
-]
+cli = ["std", "dep:clap", "dep:ureq", "dep:idna_adapter", "mimalloc", "ureq/tls"]
 regen = ["std"]
 # Event signature verification uses the RFC-8032 (ed25519-dalek) backend,
 # which shares rezzy's sha2 0.10 (no duplicate production hash crate).

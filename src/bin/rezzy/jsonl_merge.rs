@@ -1,20 +1,63 @@
 // CLI-only: Multi-file event set merging.
 #![cfg(feature = "cli")]
 use crate::error::{AppError, ErrorCode};
+use std::collections::HashSet;
 use std::string::String;
 use std::vec::Vec;
 
+/// Per-file reference index: own event_ids plus every id the file *mentions*.
+struct FileRefs {
+    /// Top-level `event_id` values owned by this file.
+    event_ids: HashSet<String>,
+    /// Ids referenced in `auth_events` arrays.
+    auth_refs: HashSet<String>,
+    /// Ids referenced in `prev_events` arrays.
+    prev_refs: HashSet<String>,
+    /// Ids referenced via `content.m.relates_to.event_id` / `relates_to`.
+    relates_to: HashSet<String>,
+    /// Ids targeted by `m.room.redaction` (the `redacts` field).
+    redacts: HashSet<String>,
+    /// `(type, state_key)` pairs from state events — implicit state chain,
+    /// not an event-ID reference, tracked for diagnostics.
+    state_keys: HashSet<(String, String)>,
+}
+
+impl FileRefs {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            event_ids: HashSet::with_capacity(n),
+            auth_refs: HashSet::with_capacity(n),
+            prev_refs: HashSet::with_capacity(n),
+            relates_to: HashSet::with_capacity(n),
+            redacts: HashSet::with_capacity(n),
+            state_keys: HashSet::with_capacity(n),
+        }
+    }
+
+    /// The union of all event-ID sets — used for the connectivity check.
+    fn all_ids(&self) -> HashSet<&String> {
+        let mut out: HashSet<&String> = HashSet::new();
+        out.extend(&self.event_ids);
+        out.extend(&self.auth_refs);
+        out.extend(&self.prev_refs);
+        out.extend(&self.relates_to);
+        out.extend(&self.redacts);
+        out
+    }
+}
+
 /// Perform a connectivity check across states.
-fn perform_connectivity_check(
-    per_file_ids: &[std::collections::HashSet<String>],
-) -> Result<(), AppError> {
-    let num_files = per_file_ids.len();
+fn perform_connectivity_check(per_file_refs: &[FileRefs]) -> Result<(), AppError> {
+    let num_files = per_file_refs.len();
     if num_files < 2 {
         return Ok(());
     }
 
-    // Treat files as nodes in a graph. An edge exists if they share at least one event.
-    // We check if the entire graph is connected starting from node 0.
+    // Treat files as nodes in a graph. An edge exists if they share at least
+    // one event id through any reference type (owned, auth, prev, relates_to,
+    // redacts). We check if the entire graph is connected starting from node 0.
+    let all_sets: Vec<HashSet<&String>> = per_file_refs.iter().map(|r| r.all_ids()).collect();
+
     let mut visited = vec![false; num_files];
     let mut queue = Vec::new();
     queue.push(0);
@@ -23,8 +66,8 @@ fn perform_connectivity_check(
     while let Some(current) = queue.pop() {
         for next in 0..num_files {
             if !visited[next] {
-                let shared = per_file_ids[current]
-                    .intersection(&per_file_ids[next])
+                let shared = all_sets[current]
+                    .intersection(&all_sets[next])
                     .next()
                     .is_some();
                 if shared {
@@ -35,7 +78,6 @@ fn perform_connectivity_check(
         }
     }
 
-    // If any file node is not visited, then the inputs are disjoint (not connected as a single component!)
     for (idx, &is_visited) in visited.iter().enumerate() {
         if !is_visited {
             bail_code!(
@@ -49,17 +91,14 @@ fn perform_connectivity_check(
 }
 
 /// Report the highest shared depths.
-fn report_highest_shared_depths(
-    per_file_ids: &[std::collections::HashSet<String>],
-    merged: &[serde_json::Value],
-) {
-    use std::collections::HashSet;
-    let num_files = per_file_ids.len();
+fn report_highest_shared_depths(per_file_refs: &[FileRefs], merged: &[serde_json::Value]) {
+    let num_files = per_file_refs.len();
+    let all_sets: Vec<HashSet<&String>> = per_file_refs.iter().map(|r| r.all_ids()).collect();
     let shared_all: HashSet<&String> = {
         let mut s: HashSet<&String> = HashSet::new();
         for i in 0..num_files {
             for j in (i.saturating_add(1))..num_files {
-                s.extend(per_file_ids[i].intersection(&per_file_ids[j]));
+                s.extend(all_sets[i].intersection(&all_sets[j]));
             }
         }
         s
@@ -84,6 +123,56 @@ fn report_highest_shared_depths(
     );
 }
 
+fn collect_refs(val: &serde_json::Value, refs: &mut FileRefs, event_id: &str) {
+    if let Some(auth) = val.get("auth_events").and_then(|a| a.as_array()) {
+        for ae in auth {
+            if let Some(aid) = ae.as_str() {
+                refs.auth_refs.insert(aid.to_owned());
+            }
+        }
+    }
+
+    if let Some(prev) = val.get("prev_events").and_then(|p| p.as_array()) {
+        for pe in prev {
+            if let Some(pid) = pe.as_str() {
+                refs.prev_refs.insert(pid.to_owned());
+            }
+        }
+    }
+
+    if let Some(content) = val.get("content") {
+        if let Some(rel) = content.get("m.relates_to") {
+            if let Some(rid) = rel.get("event_id").and_then(|v| v.as_str()) {
+                refs.relates_to.insert(rid.to_owned());
+            }
+            if let Some(rid) = rel.get("relates_to").and_then(|v| v.as_str()) {
+                refs.relates_to.insert(rid.to_owned());
+            }
+        }
+    }
+
+    if val.get("type").and_then(|t| t.as_str()) == Some("m.room.redaction") {
+        if let Some(rid) = val.get("redacts").and_then(|v| v.as_str()) {
+            refs.redacts.insert(rid.to_owned());
+        }
+        if let Some(rid) = val
+            .get("content")
+            .and_then(|c| c.get("redacts"))
+            .and_then(|v| v.as_str())
+        {
+            refs.redacts.insert(rid.to_owned());
+        }
+    }
+
+    if let Some(sk) = val.get("state_key").and_then(|s| s.as_str()) {
+        if let Some(ty) = val.get("type").and_then(|t| t.as_str()) {
+            refs.state_keys.insert((ty.to_owned(), sk.to_owned()));
+        }
+    }
+
+    refs.event_ids.insert(event_id.to_owned());
+}
+
 /// Merge multiple event sets by `event_id` (first-seen wins, PDUs are immutable).
 /// Returns the merged events.
 ///
@@ -95,15 +184,15 @@ pub fn merge_event_sets(
     debug: bool,
     quiet: bool,
 ) -> Result<Vec<serde_json::Value>, AppError> {
-    use std::collections::HashSet;
-
     let num_files = file_sets.len();
     let mut seen_ids: HashSet<String> = HashSet::new();
     let mut merged: Vec<serde_json::Value> = Vec::new();
-    let mut per_file_ids: Vec<HashSet<String>> = Vec::with_capacity(num_files);
+    let mut per_file_refs: Vec<FileRefs> = Vec::with_capacity(num_files);
+    let mut per_file_stats: Vec<(String, usize, usize, usize, usize, usize, usize, usize, usize)> =
+        Vec::with_capacity(num_files);
 
     for (label, events) in file_sets {
-        let mut file_ids = HashSet::with_capacity(events.len());
+        let mut refs = FileRefs::with_capacity(events.len());
         let mut added = 0usize;
         let mut dupes = 0usize;
 
@@ -118,17 +207,7 @@ pub fn merge_event_sets(
                 continue;
             }
 
-            file_ids.insert(event_id.clone());
-
-            // Also collect auth_events references so files linked through
-            // auth chains (e.g. a create-event-only file) are seen as connected.
-            if let Some(auth) = val.get("auth_events").and_then(|a| a.as_array()) {
-                for ae in auth {
-                    if let Some(aid) = ae.as_str() {
-                        file_ids.insert(aid.to_owned());
-                    }
-                }
-            }
+            collect_refs(val, &mut refs, &event_id);
 
             if seen_ids.insert(event_id) {
                 merged.push(val.clone());
@@ -138,28 +217,71 @@ pub fn merge_event_sets(
             }
         }
 
-        if !quiet {
-            std::eprintln!(
-                "[merge] {}: {} events ({} new, {} shared)",
-                label,
-                events.len(),
-                added,
-                dupes
-            );
+        per_file_stats.push((
+            label.clone(),
+            events.len(),
+            added,
+            dupes,
+            refs.auth_refs.len(),
+            refs.prev_refs.len(),
+            refs.relates_to.len(),
+            refs.redacts.len(),
+            refs.state_keys.len(),
+        ));
+        per_file_refs.push(refs);
+    }
+
+    if !quiet {
+        let wfl = per_file_stats
+            .iter()
+            .map(|s| s.0.len())
+            .max()
+            .unwrap_or(0)
+            .max(4);
+        let mut ww = [0usize; 8];
+        for s in &per_file_stats {
+            ww[0] = ww[0].max(format!("{}", s.1).len());
+            ww[1] = ww[1].max(format!("{}", s.2).len());
+            ww[2] = ww[2].max(format!("{}", s.3).len());
+            ww[3] = ww[3].max(format!("{}", s.4).len());
+            ww[4] = ww[4].max(format!("{}", s.5).len());
+            ww[5] = ww[5].max(format!("{}", s.6).len());
+            ww[6] = ww[6].max(format!("{}", s.7).len());
+            ww[7] = ww[7].max(format!("{}", s.8).len());
         }
-        per_file_ids.push(file_ids);
+
+        let hdr_labels = ["total", "new", "shared", "auth", "prev", "relates", "redacts", "state"];
+        let dbl_space = [false, true, false, true, false, false, true, false];
+        let mut hdr = format!("[merge] {:<wfl$}", "file", wfl = wfl);
+        for (i, (label, w)) in hdr_labels.iter().zip(ww.iter()).enumerate() {
+            hdr.push_str(if dbl_space[i] { "  " } else { " " });
+            hdr.push_str(&format!("{:>w$}", label, w = *w));
+        }
+        std::eprintln!("{hdr}");
+        std::eprintln!("[merge] {}", "-".repeat(hdr.len() - "[merge] ".len()));
+
+        for s in &per_file_stats {
+            let vals = [s.1, s.2, s.3, s.4, s.5, s.6, s.7, s.8];
+            let mut row = format!("[merge] {:<wfl$}", s.0, wfl = wfl);
+            for (i, (v, w)) in vals.iter().zip(ww.iter()).enumerate() {
+                row.push_str(if dbl_space[i] { "  " } else { " " });
+                row.push_str(&format!("{:>w$}", v, w = *w));
+            }
+            std::eprintln!("{row}");
+        }
     }
 
     // Merge-base check: verify each file shares at least one event with another
     if num_files >= 2 {
-        perform_connectivity_check(&per_file_ids)?;
+        perform_connectivity_check(&per_file_refs)?;
 
         // Report total shared count (union of all pairwise intersections)
+        let all_sets: Vec<HashSet<&String>> = per_file_refs.iter().map(|r| r.all_ids()).collect();
         let total_shared: usize = {
             let mut shared_ids: HashSet<&String> = HashSet::new();
             for i in 0..num_files {
                 for j in (i.saturating_add(1))..num_files {
-                    shared_ids.extend(per_file_ids[i].intersection(&per_file_ids[j]));
+                    shared_ids.extend(all_sets[i].intersection(&all_sets[j]));
                 }
             }
             shared_ids.len()
@@ -167,12 +289,12 @@ pub fn merge_event_sets(
 
         if !quiet {
             std::eprintln!(
-                "[merge] merge-base: {total_shared} shared events across {num_files} inputs"
+                "[merge] merge-base: {total_shared} shared refs across {num_files} inputs"
             );
         }
 
         if debug {
-            report_highest_shared_depths(&per_file_ids, &merged);
+            report_highest_shared_depths(&per_file_refs, &merged);
         }
     }
 
@@ -316,5 +438,114 @@ mod tests {
         let a = vec![ev("$1", 1)];
         let result = merge_event_sets(&[("a.jsonl".into(), a)], false, true).unwrap();
         assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn test_connectivity_via_auth_events() {
+        // File a: only the create event (no auth/prev)
+        let create = json!({
+            "event_id": "$create",
+            "type": "m.room.create",
+            "state_key": "",
+            "sender": "@alice:x",
+            "origin_server_ts": 1000,
+            "depth": 0,
+            "content": {"room_version": "12"},
+            "prev_events": [],
+            "auth_events": []
+        });
+        // File b: a message that auth-references the create event
+        let msg = json!({
+            "event_id": "$msg",
+            "type": "m.room.message",
+            "sender": "@alice:x",
+            "origin_server_ts": 2000,
+            "depth": 1,
+            "content": {"body": "hi"},
+            "prev_events": [],
+            "auth_events": ["$create"]
+        });
+        let result = merge_event_sets(
+            &[
+                ("create.jsonl".into(), vec![create]),
+                ("msg.jsonl".into(), vec![msg]),
+            ],
+            false,
+            true,
+        );
+        assert!(
+            result.is_ok(),
+            "auth_events reference should connect the files: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_connectivity_via_relates_to() {
+        let a = vec![json!({
+            "event_id": "$target",
+            "type": "m.room.message",
+            "sender": "@alice:x",
+            "origin_server_ts": 1000,
+            "depth": 1,
+            "content": {"body": "original"},
+            "prev_events": [],
+            "auth_events": []
+        })];
+        let b = vec![json!({
+            "event_id": "$reaction",
+            "type": "m.reaction",
+            "sender": "@bob:x",
+            "origin_server_ts": 2000,
+            "depth": 2,
+            "content": {"m.relates_to": {"event_id": "$target", "rel_type": "m.annotation"}},
+            "prev_events": [],
+            "auth_events": []
+        })];
+        let result = merge_event_sets(
+            &[("target.jsonl".into(), a), ("reaction.jsonl".into(), b)],
+            false,
+            true,
+        );
+        assert!(
+            result.is_ok(),
+            "m.relates_to should connect the files: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_connectivity_via_redacts() {
+        let a = vec![json!({
+            "event_id": "$victim",
+            "type": "m.room.message",
+            "sender": "@alice:x",
+            "origin_server_ts": 1000,
+            "depth": 1,
+            "content": {"body": "delete me"},
+            "prev_events": [],
+            "auth_events": []
+        })];
+        let b = vec![json!({
+            "event_id": "$redaction",
+            "type": "m.room.redaction",
+            "sender": "@alice:x",
+            "origin_server_ts": 2000,
+            "depth": 2,
+            "redacts": "$victim",
+            "content": {"redacts": "$victim"},
+            "prev_events": [],
+            "auth_events": []
+        })];
+        let result = merge_event_sets(
+            &[("victim.jsonl".into(), a), ("redaction.jsonl".into(), b)],
+            false,
+            true,
+        );
+        assert!(
+            result.is_ok(),
+            "m.room.redaction should connect the files: {:?}",
+            result.err()
+        );
     }
 }
