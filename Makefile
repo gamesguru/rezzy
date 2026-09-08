@@ -41,7 +41,6 @@ fix:	##H Clippy auto-fix
 
 .PHONY: doc
 doc: ##H Build docs
-rust/doc: ##H Generate rustdoc API documentation
 	$(CARGO) doc --no-deps
 	echo '<meta http-equiv="refresh" content="0;url=rezzy/index.html">' > target/doc/index.html
 
