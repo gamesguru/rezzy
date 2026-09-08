@@ -35,6 +35,14 @@ pub struct FormattingContext<'a> {
 
 /// Format the output for deltas.
 pub fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
+    let debug = ctx.args.debug;
+    let total = ctx.event_count;
+    let progress_interval = if debug { 10_000 } else { 50_000 };
+    if debug {
+        eprintln!("[DEBUG] deltas: walking {total} events...");
+    }
+    let overall_start = std::time::Instant::now();
+
     let mut sorted_events: Vec<&LeanEvent> = ctx.events_map.values().collect();
     sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
 
@@ -42,7 +50,19 @@ pub fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
     let mut state_hash_map: HashMap<String, String> = HashMap::new();
     let mut checkpoints = Vec::new();
 
+    let mut fork_count: usize = 0;
+    let mut fork_time = std::time::Duration::ZERO;
+    let mut processed: usize = 0;
+
     for ev in &sorted_events {
+        processed = processed.saturating_add(1);
+        if debug && processed % progress_interval == 0 {
+            eprintln!(
+                "[DEBUG] deltas: {processed}/{total} events walked ({fork_count} forks resolved, {:.2?} spent in state-res) elapsed {:.2?}",
+                fork_time,
+                overall_start.elapsed()
+            );
+        }
         let mut state_before = std::sync::Arc::new(imbl::OrdMap::new());
         let mut parent_hash = None;
 
@@ -71,8 +91,19 @@ pub fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
                         .and_then(|prev_id| state_hash_map.get(prev_id))
                         .cloned();
                 } else {
+                    let t = std::time::Instant::now();
                     state_before =
                         resolve_parent_states(&parent_states, ctx.events_map, ctx.version);
+                    let elapsed = t.elapsed();
+                    fork_count = fork_count.saturating_add(1);
+                    fork_time = fork_time.saturating_add(elapsed);
+                    if debug && elapsed.as_millis() > 50 {
+                        eprintln!(
+                            "[DEBUG] deltas: slow fork resolve at {} ({} parents) took {elapsed:.2?}",
+                            ev.event_id,
+                            parent_states.len()
+                        );
+                    }
                     parent_hash = Some(compute_state_hash(state_before.as_ref()));
                 }
             }
@@ -135,6 +166,14 @@ pub fn format_deltas_output(ctx: &FormattingContext) -> serde_json::Value {
             "event_id": ev.event_id,
             "deltas": deltas,
         }));
+    }
+
+    if debug {
+        eprintln!(
+            "[DEBUG] deltas: done. {processed} events walked, {fork_count} forks resolved via state-res ({:.2?} total), overall {:.2?}",
+            fork_time,
+            overall_start.elapsed()
+        );
     }
 
     serde_json::json!(checkpoints)
