@@ -312,6 +312,7 @@ fn run_cli(args: &Args) -> Result<serde_json::Value, error::AppError> {
         final_state_map: &final_state_map,
         resolved_state_list: &resolved_state_list,
         auth_chain_ids: &auth_chain_ids,
+        auth_graph: &auth_graph,
         version,
         room_version: room_version.as_deref(),
         duration,
