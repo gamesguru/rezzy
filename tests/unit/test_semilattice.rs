@@ -10,6 +10,7 @@ use rezzy::resolve::semilattice::{
 };
 use rezzy::{LeanEvent, StateResVersion};
 use std::collections::HashMap;
+use test_case::test_case;
 
 const FIXTURE: &str = r#"
 {"event_id":"$create","type":"m.room.create","state_key":"","sender":"@alice:a.com","depth":0,"origin_server_ts":1000,"content":{"creator":"@alice:a.com","room_version":"11"},"prev_events":[],"auth_events":[]}
@@ -138,8 +139,9 @@ fn test_lattice_fold_resolves_conflicting_topics() {
     );
 }
 
-#[test]
-fn test_lattice_fold_does_not_admit_supplemental_key() {
+#[test_case(true; "semilattice")]
+#[test_case(false; "iterative")]
+fn test_supplemental_key_does_not_overwrite_resolved_state(use_semilattice: bool) {
     let events = utils::parse_jsonl_events(FIXTURE);
     let map = to_event_map(&events);
     let unconflicted = utils::build_unconflicted_state_test_helper(&map);
@@ -151,13 +153,26 @@ fn test_lattice_fold_does_not_admit_supplemental_key() {
     supplemental_events.insert("$topic_b".to_string(), map["$topic_b"].clone());
     let conflicted_keys = rezzy::FastSet::default();
 
-    let resolved = resolve_semilattice_fold_with_conflicted_keys(
-        unconflicted,
-        supplemental_events,
-        &map,
-        StateResVersion::V2,
-        &conflicted_keys,
-    );
+    let resolved = if use_semilattice {
+        resolve_semilattice_fold_with_conflicted_keys(
+            unconflicted,
+            supplemental_events,
+            &map,
+            StateResVersion::V2,
+            &conflicted_keys,
+        )
+    } else {
+        rezzy::resolve::iterative::resolve_iterative_sort_with_cache(
+            &unconflicted,
+            &supplemental_events,
+            &map,
+            None,
+            StateResVersion::V2,
+            &mut HashMap::new(),
+            Some(&conflicted_keys),
+            &String::new(),
+        )
+    };
 
     let topic_key = (
         rezzy::basespec::event_types::EventType::from("m.room.topic"),
