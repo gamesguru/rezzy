@@ -243,13 +243,12 @@ where
     S1: core::hash::BuildHasher,
     S2: core::hash::BuildHasher,
 {
-    let mut relevant_ids = crate::FastSet::default();
-    let mut visited = crate::FastSet::default();
+    let mut relevant_events = HashMap::new();
+    let mut visited = BTreeSet::new();
     let mut queue = alloc::collections::VecDeque::new();
-    let event = |id: &Id| conflicted_events.get(id).or_else(|| auth_context.get(id));
 
     for (id, ev) in conflicted_events {
-        relevant_ids.insert(id.clone());
+        relevant_events.insert(id.clone(), ev);
         visited.insert(id.clone());
         for aid in ev.prev_events.iter().chain(ev.auth_events.iter()) {
             if visited.insert(aid.clone()) {
@@ -260,7 +259,7 @@ where
 
     while let Some(aid) = queue.pop_front() {
         if let Some(aev) = auth_context.get(&aid) {
-            relevant_ids.insert(aid.clone());
+            relevant_events.insert(aid.clone(), aev);
             for parent_id in aev.prev_events.iter().chain(aev.auth_events.iter()) {
                 if visited.insert(parent_id.clone()) {
                     queue.push_back(parent_id.clone());
@@ -269,7 +268,7 @@ where
         }
     }
 
-    // Topologically order the relevant closure via Kahn's algorithm over the
+    // Topologically order `relevant_events` via Kahn's algorithm over the
     // actual prev_events/auth_events edges, so the SWAR sweeps below
     // (`compute_cdo_bit_masks_chunk`) can rely on every parent sitting at a
     // strictly lower array index than every child. Do not sort by
@@ -280,15 +279,14 @@ where
     // transitive ancestor/descendant bitmasks assuming strict topological
     // order; a desynchronized order corrupts those bitmasks silently
     // instead of erroring.
-    let mut in_degree: HashMap<Id, usize> = HashMap::with_capacity(relevant_ids.len());
-    let mut children_of: HashMap<Id, Vec<Id>> = HashMap::with_capacity(relevant_ids.len());
-    for id in &relevant_ids {
+    let mut in_degree: HashMap<Id, usize> = HashMap::with_capacity(relevant_events.len());
+    let mut children_of: HashMap<Id, Vec<Id>> = HashMap::with_capacity(relevant_events.len());
+    for id in relevant_events.keys() {
         in_degree.insert(id.clone(), 0);
     }
-    for id in &relevant_ids {
-        let ev = event(id).expect("relevant event must be present in an input map");
+    for (id, &ev) in &relevant_events {
         for parent_id in ev.prev_events.iter().chain(ev.auth_events.iter()) {
-            if relevant_ids.contains(parent_id) {
+            if relevant_events.contains_key(parent_id) {
                 if let Some(deg) = in_degree.get_mut(id) {
                     *deg = deg.saturating_add(1);
                 }
@@ -308,7 +306,7 @@ where
         .filter(|&(_, &deg)| deg == 0)
         .map(|(id, _)| id.clone())
         .collect();
-    let mut sorted_ids: Vec<Id> = Vec::with_capacity(relevant_ids.len());
+    let mut sorted_ids: Vec<Id> = Vec::with_capacity(relevant_events.len());
     let mut included: BTreeSet<Id> = BTreeSet::new();
     while let Some(id) = ready.iter().next().cloned() {
         ready.remove(&id);
@@ -333,9 +331,9 @@ where
     // topological order, so the domination sweeps must not draw conclusions
     // from it (they treat them as neither dominator nor dominatee).
     let mut unordered_ids = BTreeSet::new();
-    if sorted_ids.len() < relevant_ids.len() {
-        let mut leftover: Vec<Id> = relevant_ids
-            .iter()
+    if sorted_ids.len() < relevant_events.len() {
+        let mut leftover: Vec<Id> = relevant_events
+            .keys()
             .filter(|id| !included.contains(*id))
             .cloned()
             .collect();
@@ -344,11 +342,11 @@ where
         sorted_ids.extend(leftover);
     }
 
-    let n = relevant_ids.len();
+    let n = relevant_events.len();
     let mut id_to_idx = HashMap::with_capacity(n);
     let mut sorted_events = Vec::with_capacity(n);
     for (i, id) in sorted_ids.into_iter().enumerate() {
-        let ev = event(&id).expect("relevant event must be present in an input map");
+        let ev = relevant_events[&id];
         id_to_idx.insert(id, i);
         sorted_events.push((i, ev));
     }
