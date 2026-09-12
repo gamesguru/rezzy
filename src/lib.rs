@@ -156,9 +156,12 @@ pub use hashbrown::{HashMap, HashSet};
 /// way.
 pub(crate) type FastMap<K, V> = hashbrown::HashMap<K, V, hashbrown::DefaultHashBuilder>;
 
-/// See [`FastMap`]'s documentation.
-#[allow(dead_code)]
-pub(crate) type FastSet<K> = hashbrown::HashSet<K, hashbrown::DefaultHashBuilder>;
+/// A hash set using rezzy's default randomized hasher.
+///
+/// This is public because the narrow-conflict override APIs accept it. Most
+/// callers should not need it: their state resolution entry point derives the
+/// conflicted-key set itself.
+pub type FastSet<K> = hashbrown::HashSet<K, hashbrown::DefaultHashBuilder>;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

@@ -5,7 +5,8 @@
 use crate::utils;
 
 use rezzy::resolve::semilattice::{
-    is_semilattice_winner_better, resolve_semilattice_fold, route_power_events,
+    is_semilattice_winner_better, resolve_semilattice_fold,
+    resolve_semilattice_fold_with_conflicted_keys, route_power_events,
 };
 use rezzy::{LeanEvent, StateResVersion};
 use std::collections::HashMap;
@@ -134,6 +135,37 @@ fn test_lattice_fold_resolves_conflicting_topics() {
         resolved.get(&topic_key),
         Some(&"$topic_b".to_string()),
         "Lattice fold should pick topic_b (later ts)"
+    );
+}
+
+#[test]
+fn test_lattice_fold_does_not_admit_supplemental_key() {
+    let events = utils::parse_jsonl_events(FIXTURE);
+    let map = to_event_map(&events);
+    let unconflicted = utils::build_unconflicted_state_test_helper(&map);
+
+    // These events are available as supplemental context for another conflict,
+    // but their topic key itself is not conflicted.
+    let mut supplemental_events = HashMap::new();
+    supplemental_events.insert("$topic_a".to_string(), map["$topic_a"].clone());
+    supplemental_events.insert("$topic_b".to_string(), map["$topic_b"].clone());
+    let conflicted_keys = rezzy::FastSet::default();
+
+    let resolved = resolve_semilattice_fold_with_conflicted_keys(
+        unconflicted,
+        supplemental_events,
+        &map,
+        StateResVersion::V2,
+        &conflicted_keys,
+    );
+
+    let topic_key = (
+        rezzy::basespec::event_types::EventType::from("m.room.topic"),
+        String::new(),
+    );
+    assert!(
+        !resolved.contains_key(&topic_key),
+        "an accepted supplemental event must not decide an excluded key"
     );
 }
 

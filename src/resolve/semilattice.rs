@@ -129,22 +129,7 @@ fn update_winner_if_better<'a, Id, C>(
 /// winner of its `(type, state_key)` slot in `winners`. Shared by
 /// [`fold_lattice_chunk`]'s sequential loop and each worker thread's loop in
 /// [`compute_lattice_coordinatized_winners`]'s std fan-out -- the two must
-/// stay in lockstep, since the `conflicted_keys` no-guard invariant
-/// documented on `fold_lattice_chunk` depends on both doing the exact same
-/// admission check before competing.
-///
-/// Unlike the power phase (`run_power_phase_iterative_checks`), this fold
-/// has no `conflicted_keys` guard on the winning insert below. That's safe
-/// only for as long as `ev` is drawn from a `non_power_events` built by
-/// *partitioning* the same event set `conflicted_keys` was derived from --
-/// never a set widened afterward (e.g. by an MSC4297-style subgraph
-/// supplement the way `multi.rs` widens `conflicted_events` before deriving
-/// its own `conflicted_keys`, or the way `expand_v2` grows `power_events`).
-/// `conflicted_keys` is threaded in from the caller rather than recomputed
-/// here from `sort_set` so that a caller who computed it from the *narrow*,
-/// pre-widening set (as `resolve_semilattice_fold`'s own caller must, if it
-/// ever wires this into a widened path) makes the assert below actually
-/// load-bearing instead of trivially true against the widened set.
+/// stay in lockstep on authentication and conflicted-key admission.
 #[allow(clippy::too_many_arguments)]
 fn process_lattice_event<'a, Id, C, S2: core::hash::BuildHasher, S3: core::hash::BuildHasher>(
     ev: &'a LeanEvent<Id, C>,
@@ -188,14 +173,12 @@ fn process_lattice_event<'a, Id, C, S2: core::hash::BuildHasher, S3: core::hash:
         EventType::from(ev.event_type.as_str()),
         ev.state_key.clone().unwrap(),
     );
-    debug_assert!(
-        conflicted_keys.contains(&key),
-        "process_lattice_event competed on a key ({:?}, {:?}) absent from \
-         conflicted_events -- the no-guard invariant documented above \
-         this function has been broken by a caller change",
-        key.0,
-        key.1,
-    );
+    // `conflicted_events` may contain supplemental auth-chain/subgraph events
+    // whose own state key was not conflicted. They may authenticate this
+    // candidate, but must never replace the unconflicted resolved value.
+    if !conflicted_keys.contains(&key) {
+        return;
+    }
     update_winner_if_better(winners, key, ev, mainline_distances, mainline_len);
 }
 
@@ -422,8 +405,7 @@ where
 ///
 /// This allows callers who compute `conflicted_keys` from a *narrow*,
 /// pre-widening event set (e.g. before MSC4297's conflicted subgraph supplement)
-/// to make the `debug_assert` in `fold_lattice_chunk` load-bearing against
-/// the widened set, rather than trivially true.
+/// to keep supplemental events from deciding their own state keys.
 ///
 /// When in doubt, use [`resolve_semilattice_fold`] which derives `conflicted_keys`
 /// internally.
