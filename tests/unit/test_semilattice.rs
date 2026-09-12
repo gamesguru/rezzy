@@ -139,6 +139,7 @@ fn test_lattice_fold_resolves_conflicting_topics() {
     );
 }
 
+#[test_case(StateResVersion::V2; "v2")]
 #[test_case(StateResVersion::V2_1; "v2_1")]
 #[test_case(StateResVersion::V2_1_1; "v2_1_1")]
 fn test_supplemental_key_does_not_overwrite_resolved_state(version: StateResVersion) {
