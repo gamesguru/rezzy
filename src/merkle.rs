@@ -28,9 +28,10 @@ pub type Hash = [u8; HASH_SIZE];
 /// A Merkle root that nobody has signed.
 ///
 /// Some root-computing functions in this crate return this wrapper
-/// ([`header_root`], [`CausalSet::unsigned_root`], [`StateMap::unsigned_root`]);
-/// others return a bare [`type@Hash`] ([`root`], [`CausalSet::root`],
-/// [`StateMap::root`]). The wrapper exists so a caller at a return site that
+/// ([`header_root`], [`causal::CausalSet::unsigned_root`],
+/// [`crate::state::merkle::StateMap::unsigned_root`]); others return a bare
+/// [`type@Hash`] ([`root`], [`causal::CausalSet::root`],
+/// [`crate::state::merkle::StateMap::root`]). The wrapper exists so a caller at a return site that
 /// produces `UnsignedRoot` is reminded that the value is only a *proof* of
 /// anything when it is either (a) folded into an `event_root` an event's
 /// sender actually signed (a true MSC4511C Part C proof), or (b) signed
@@ -50,7 +51,8 @@ pub type Hash = [u8; HASH_SIZE];
 /// guarantee.
 ///
 /// Callers who receive a root over federation should prefer
-/// [`verify_causal_inclusion`] / [`verify_inclusion`] only after confirming
+/// [`causal::verify_causal_inclusion`] /
+/// [`crate::state::merkle::verify_inclusion`] only after confirming
 /// the root's provenance (e.g. extracted from a signature-checked event).
 /// A bare `Hash` passed to a verifier proves nothing about who stands
 /// behind it.
@@ -755,7 +757,7 @@ pub mod causal {
     ///
     /// The side (left/right) is not stored here — it is deterministically
     /// derived from the key bit at each depth during verification
-    /// ([`verify_causal_path`]). This removes a redundant field from the
+    /// (`verify_causal_path`). This removes a redundant field from the
     /// wire format and eliminates an entire class of forgery.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct CausalProofStep {
