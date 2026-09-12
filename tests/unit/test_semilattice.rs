@@ -139,9 +139,9 @@ fn test_lattice_fold_resolves_conflicting_topics() {
     );
 }
 
-#[test_case(true; "semilattice")]
-#[test_case(false; "iterative")]
-fn test_supplemental_key_does_not_overwrite_resolved_state(use_semilattice: bool) {
+#[test_case(StateResVersion::V1; "v1")]
+#[test_case(StateResVersion::V2; "v2")]
+fn test_supplemental_key_does_not_overwrite_resolved_state(version: StateResVersion) {
     let events = utils::parse_jsonl_events(FIXTURE);
     let map = to_event_map(&events);
     let unconflicted = utils::build_unconflicted_state_test_helper(&map);
@@ -153,34 +153,35 @@ fn test_supplemental_key_does_not_overwrite_resolved_state(use_semilattice: bool
     supplemental_events.insert("$topic_b".to_string(), map["$topic_b"].clone());
     let conflicted_keys = rezzy::FastSet::default();
 
-    let resolved = if use_semilattice {
-        resolve_semilattice_fold_with_conflicted_keys(
-            unconflicted,
-            supplemental_events,
-            &map,
-            StateResVersion::V2,
-            &conflicted_keys,
-        )
-    } else {
-        rezzy::resolve::iterative::resolve_iterative_sort_with_cache(
-            &unconflicted,
-            &supplemental_events,
-            &map,
-            None,
-            StateResVersion::V2,
-            &mut HashMap::new(),
-            Some(&conflicted_keys),
-            &String::new(),
-        )
-    };
+    let semilattice = resolve_semilattice_fold_with_conflicted_keys(
+        unconflicted.clone(),
+        supplemental_events.clone(),
+        &map,
+        version,
+        &conflicted_keys,
+    );
+    let iterative = rezzy::resolve::iterative::resolve_iterative_sort_with_cache(
+        &unconflicted,
+        &supplemental_events,
+        &map,
+        None,
+        version,
+        &mut HashMap::new(),
+        Some(&conflicted_keys),
+        &String::new(),
+    );
 
     let topic_key = (
         rezzy::basespec::event_types::EventType::from("m.room.topic"),
         String::new(),
     );
     assert!(
-        !resolved.contains_key(&topic_key),
+        !semilattice.contains_key(&topic_key),
         "an accepted supplemental event must not decide an excluded key"
+    );
+    assert_eq!(
+        semilattice, iterative,
+        "semilattice and iterative resolution must agree"
     );
 }
 
