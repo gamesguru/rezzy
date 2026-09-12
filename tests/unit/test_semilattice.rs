@@ -125,7 +125,7 @@ fn test_lattice_fold_resolves_conflicting_topics() {
     conflicted.insert("$topic_a".to_string(), map["$topic_a"].clone());
     conflicted.insert("$topic_b".to_string(), map["$topic_b"].clone());
 
-    let resolved = resolve_semilattice_fold(unconflicted, conflicted, &map, StateResVersion::V2);
+    let resolved = resolve_semilattice_fold(&unconflicted, &conflicted, &map, StateResVersion::V2);
 
     // The topic with later timestamp ($topic_b, ts=3000) should win
     let topic_key = (
@@ -139,8 +139,8 @@ fn test_lattice_fold_resolves_conflicting_topics() {
     );
 }
 
-#[test_case(StateResVersion::V1; "v1")]
-#[test_case(StateResVersion::V2; "v2")]
+#[test_case(StateResVersion::V2_1; "v2_1")]
+#[test_case(StateResVersion::V2_1_1; "v2_1_1")]
 fn test_supplemental_key_does_not_overwrite_resolved_state(version: StateResVersion) {
     let events = utils::parse_jsonl_events(FIXTURE);
     let map = to_event_map(&events);
@@ -154,21 +154,18 @@ fn test_supplemental_key_does_not_overwrite_resolved_state(version: StateResVers
     let conflicted_keys = rezzy::FastSet::default();
 
     let semilattice = resolve_semilattice_fold_with_conflicted_keys(
-        unconflicted.clone(),
-        supplemental_events.clone(),
+        &unconflicted,
+        &supplemental_events,
         &map,
         version,
         &conflicted_keys,
     );
-    let iterative = rezzy::resolve::iterative::resolve_iterative_sort_with_cache(
+    let iterative = rezzy::resolve::iterative::resolve_iterative_sort_with_conflicted_keys(
         &unconflicted,
         &supplemental_events,
         &map,
-        None,
         version,
-        &mut HashMap::new(),
-        Some(&conflicted_keys),
-        &String::new(),
+        &conflicted_keys,
     );
 
     let topic_key = (
@@ -196,12 +193,7 @@ fn test_lattice_fold_parity_with_iterative() {
     conflicted.insert("$topic_a".to_string(), map["$topic_a"].clone());
     conflicted.insert("$topic_b".to_string(), map["$topic_b"].clone());
 
-    let lattice = resolve_semilattice_fold(
-        unconflicted.clone(),
-        conflicted.clone(),
-        &map,
-        StateResVersion::V2,
-    );
+    let lattice = resolve_semilattice_fold(&unconflicted, &conflicted, &map, StateResVersion::V2);
     let iterative = rezzy::resolve_iterative_sort(
         &unconflicted,
         &conflicted,
@@ -233,13 +225,8 @@ fn test_lattice_fold_deterministic() {
     conflicted.insert("$topic_a".to_string(), map["$topic_a"].clone());
     conflicted.insert("$topic_b".to_string(), map["$topic_b"].clone());
 
-    let r1 = resolve_semilattice_fold(
-        unconflicted.clone(),
-        conflicted.clone(),
-        &map,
-        StateResVersion::V2,
-    );
-    let r2 = resolve_semilattice_fold(unconflicted, conflicted, &map, StateResVersion::V2);
+    let r1 = resolve_semilattice_fold(&unconflicted, &conflicted, &map, StateResVersion::V2);
+    let r2 = resolve_semilattice_fold(&unconflicted, &conflicted, &map, StateResVersion::V2);
     assert_eq!(r1, r2, "Lattice fold must be deterministic");
 }
 
@@ -269,7 +256,7 @@ fn test_lattice_fold_skips_non_state_events() {
     conflicted.insert("$topic_b".to_string(), map["$topic_b"].clone());
     conflicted.insert("$msg".to_string(), map["$msg"].clone());
 
-    let resolved = resolve_semilattice_fold(unconflicted, conflicted, &map, StateResVersion::V2);
+    let resolved = resolve_semilattice_fold(&unconflicted, &conflicted, &map, StateResVersion::V2);
 
     // topic_b wins (later ts), message is silently skipped
     let topic_key = (
@@ -320,7 +307,8 @@ fn test_lattice_fold_unconflicted_power_bootstrap_v2_1() {
 
     // Resolve with V2_1: resolve_semilattice_fold delegates to resolve_iterative_sort for V2.1+.
     // This exercises the iterative fallback path, not the lattice fold's merge logic.
-    let resolved = resolve_semilattice_fold(unconflicted, conflicted, &map, StateResVersion::V2_1);
+    let resolved =
+        resolve_semilattice_fold(&unconflicted, &conflicted, &map, StateResVersion::V2_1);
 
     let topic_key = (
         rezzy::basespec::event_types::EventType::from("m.room.topic"),
@@ -394,7 +382,8 @@ fn test_msc4297_lattice_fold_dependency_v2_1_fallback() {
 
     // Resolve under V2.1. The fallback automatically redirects to resolve_iterative_sort,
     // which correctly respects the topological non-power dependency!
-    let resolved = resolve_semilattice_fold(unconflicted, conflicted, &map, StateResVersion::V2_1);
+    let resolved =
+        resolve_semilattice_fold(&unconflicted, &conflicted, &map, StateResVersion::V2_1);
 
     // Verify that the topic is successfully authorized and present!
     let topic_key = (

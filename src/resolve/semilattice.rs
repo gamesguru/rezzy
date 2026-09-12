@@ -378,8 +378,8 @@ pub fn resolve_semilattice_fold<
     S1: core::hash::BuildHasher + Sync + Send,
     S2: core::hash::BuildHasher + Sync + Send,
 >(
-    unconflicted_state: crate::state::at::SharedState<Id>,
-    conflicted_events: HashMap<Id, LeanEvent<Id, C>, S1>,
+    unconflicted_state: &crate::state::at::SharedState<Id>,
+    conflicted_events: &HashMap<Id, LeanEvent<Id, C>, S1>,
     auth_context: &HashMap<Id, LeanEvent<Id, C>, S2>,
     version: StateResVersion,
 ) -> crate::state::at::SharedState<Id>
@@ -390,7 +390,7 @@ where
     // jscpd:ignore-end
     let empty_key = alloc::string::String::new();
     let conflicted_keys =
-        crate::resolve::iterative::derive_all_conflicted_keys(&conflicted_events, &empty_key);
+        crate::resolve::iterative::derive_all_conflicted_keys(conflicted_events, &empty_key);
     resolve_semilattice_fold_with_conflicted_keys(
         unconflicted_state,
         conflicted_events,
@@ -417,8 +417,8 @@ pub fn resolve_semilattice_fold_with_conflicted_keys<
     S1: core::hash::BuildHasher + Sync + Send,
     S2: core::hash::BuildHasher + Sync + Send,
 >(
-    unconflicted_state: crate::state::at::SharedState<Id>,
-    conflicted_events: HashMap<Id, LeanEvent<Id, C>, S1>,
+    unconflicted_state: &crate::state::at::SharedState<Id>,
+    conflicted_events: &HashMap<Id, LeanEvent<Id, C>, S1>,
     auth_context: &HashMap<Id, LeanEvent<Id, C>, S2>,
     version: StateResVersion,
     conflicted_keys: &crate::FastSet<(EventType, String)>,
@@ -435,29 +435,28 @@ where
     let empty_key = alloc::string::String::new();
 
     if version.is_v2_1_plus() {
-        return crate::resolve::iterative::resolve_iterative_sort(
-            &unconflicted_state,
-            &conflicted_events,
+        return crate::resolve::iterative::resolve_iterative_sort_with_conflicted_keys(
+            unconflicted_state,
+            conflicted_events,
             auth_context,
             version,
-            &mut pl_cache,
-            &empty_key,
+            conflicted_keys,
         );
     }
 
     let original_conflicted_keys = crate::resolve::iterative::prepare_conflicted_and_keys(
-        &conflicted_events,
+        conflicted_events,
         auth_context,
         version,
     );
 
     let mut resolved =
-        crate::resolve::iterative::get_initial_resolved_state(&unconflicted_state, version);
+        crate::resolve::iterative::get_initial_resolved_state(unconflicted_state, version);
 
     let (sort_context, power_events, non_power_events, create_ev) =
         crate::resolve::iterative::execute_power_phase(
-            &unconflicted_state,
-            &conflicted_events,
+            unconflicted_state,
+            conflicted_events,
             auth_context,
             &original_conflicted_keys,
             version,
@@ -472,7 +471,7 @@ where
         &power_events,
         &sort_context,
         auth_context,
-        &conflicted_events,
+        conflicted_events,
         version,
         &mut local_auth_cache,
         create_ev,
@@ -480,7 +479,7 @@ where
         conflicted_keys,
     );
 
-    let sort_set = &conflicted_events;
+    let sort_set = conflicted_events;
 
     // Coordinate Projection Phase (Mainline distance mapping)
     let mainline = build_mainline(&resolved, &sort_context, &empty_key, version);
@@ -505,7 +504,7 @@ where
     );
 
     // Merge Winners into Final Resolved State
-    let mut final_resolved = unconflicted_state;
+    let mut final_resolved = unconflicted_state.clone();
     for (k, v) in resolved {
         final_resolved.insert(k, v);
     }
@@ -513,6 +512,5 @@ where
         final_resolved.insert(k, ev.event_id.clone());
     }
 
-    drop(conflicted_events);
     final_resolved
 }

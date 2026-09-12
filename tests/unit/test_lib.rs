@@ -6655,9 +6655,11 @@ fn test_coverage_sweeper_for_unreachable_edges() {
     assert!(!is_ancestor(&"A".to_string(), &"B".to_string(), &context));
 
     // Cover resolve_semilattice_fold
+    let lattice_unconflicted = imbl::OrdMap::new();
+    let lattice_conflicted = context.clone();
     let lattice_res = resolve_semilattice_fold(
-        imbl::OrdMap::new(),
-        context.clone(),
+        &lattice_unconflicted,
+        &lattice_conflicted,
         &HashMap::new(),
         StateResVersion::V2,
     );
