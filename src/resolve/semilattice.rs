@@ -57,7 +57,7 @@ use crate::{
     state::at::{compute_local_auth, iterative_auth_ok},
     HashMap,
 };
-use alloc::{string::String, vec::Vec};
+use alloc::string::String;
 
 /// Determines whether `ev` beats `current_winner` under the Least Upper Bound (LUB)
 /// tie-breaking rules.
@@ -225,12 +225,11 @@ fn compute_lattice_coordinatized_winners<
     'a,
     Id,
     C,
-    S1: core::hash::BuildHasher + Sync + Send,
     S2: core::hash::BuildHasher + Sync + Send,
     S3: core::hash::BuildHasher + Sync + Send,
 >(
     // jscpd:ignore-start
-    non_power_events: &'a HashMap<Id, LeanEvent<Id, C>, S1>,
+    events: &[&'a LeanEvent<Id, C>],
     mainline_distances: &HashMap<Id, usize>,
     mainline_len: usize,
     terminal_power_state: &crate::state::at::SharedState<Id>,
@@ -245,8 +244,6 @@ fn compute_lattice_coordinatized_winners<
     Id: crate::basespec::rezzy_types::EventId + Sync + Send,
     C: crate::basespec::rezzy_types::EventContent + Clone + Sync + Send,
 {
-    let v: Vec<&'a LeanEvent<Id, C>> = non_power_events.values().collect();
-
     #[cfg(feature = "std")]
     {
         let num_threads =
@@ -256,13 +253,12 @@ fn compute_lattice_coordinatized_winners<
         // work, so wall-clock time tracks the total work divided by total
         // threads rather than the slowest pre-partitioned chunk.
         let cursor = std::sync::atomic::AtomicUsize::new(0);
-        let len = v.len();
+        let len = events.len();
 
         let winners = std::sync::Mutex::new(HashMap::new());
         std::thread::scope(|s| {
-            let mut handles = Vec::with_capacity(num_threads);
             for _ in 0..num_threads {
-                let handle = s.spawn(|| {
+                s.spawn(|| {
                     let mut local = HashMap::new();
                     let mut local_auth_cache =
                         crate::state::at::LocalAuthCache::<Id, C>::new(version);
@@ -273,7 +269,7 @@ fn compute_lattice_coordinatized_winners<
                         }
                         // Auth-check + LUB fold for this single event.
                         process_lattice_event(
-                            v[idx],
+                            events[idx],
                             mainline_distances,
                             mainline_len,
                             terminal_power_state,
@@ -286,16 +282,17 @@ fn compute_lattice_coordinatized_winners<
                             &mut local,
                         );
                     }
-                    local
+                    let mut winners = winners.lock().unwrap();
+                    for (key, ev) in local {
+                        update_winner_if_better(
+                            &mut winners,
+                            key,
+                            ev,
+                            mainline_distances,
+                            mainline_len,
+                        );
+                    }
                 });
-                handles.push(handle);
-            }
-            for handle in handles {
-                let thread_res = handle.join().unwrap();
-                let mut guard = winners.lock().unwrap();
-                for (key, ev) in thread_res {
-                    update_winner_if_better(&mut guard, key, ev, mainline_distances, mainline_len);
-                }
             }
         });
         *key_winners = winners.into_inner().unwrap();
@@ -303,7 +300,7 @@ fn compute_lattice_coordinatized_winners<
     #[cfg(not(feature = "std"))]
     {
         *key_winners = fold_lattice_chunk(
-            &v,
+            &events,
             mainline_distances,
             mainline_len,
             terminal_power_state,
@@ -491,7 +488,7 @@ where
     // Semilattice Fold Phase
     let mut key_winners = HashMap::new();
     compute_lattice_coordinatized_winners(
-        &non_power_events,
+        &target_events,
         &mainline_distances,
         mainline_len,
         &resolved,
