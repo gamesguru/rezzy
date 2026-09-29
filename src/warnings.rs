@@ -32,6 +32,21 @@ pub enum Warning<Id = String> {
         /// The limit it exceeded (255, per spec).
         limit: usize,
     },
+    /// A `sender` (or pre-v12 `m.room.create` `creator`) is not a strictly
+    /// valid *current* MXID, but is acceptable as a historical user ID.
+    ///
+    /// The spec requires clients and servers to keep accepting these in room
+    /// events (uppercase and other non-ASCII localparts predate the current
+    /// grammar), and current room versions have not adopted MSC4303's stricter
+    /// enforcement. Rejecting them would exclude real events from resolution.
+    HistoricalMxid {
+        /// The event carrying the non-strict user ID.
+        event_id: Id,
+        /// Which field carried it (`"sender"` or `"creator"`).
+        field: &'static str,
+        /// The offending user ID.
+        mxid: String,
+    },
 }
 
 impl<Id> Warning<Id> {
@@ -42,6 +57,7 @@ impl<Id> Warning<Id> {
         match self {
             Self::UnknownPrevEvent { .. } => "W001_UNKNOWN_PREV_EVENT",
             Self::OversizedFieldPreV11 { .. } => "W002_OVERSIZED_FIELD_PRE_V11",
+            Self::HistoricalMxid { .. } => "W003_HISTORICAL_MXID",
         }
     }
 }
@@ -75,6 +91,21 @@ impl<Id: core::fmt::Display> core::fmt::Display for Warning<Id> {
                     field,
                     len,
                     limit
+                )
+            }
+            Self::HistoricalMxid {
+                event_id,
+                field,
+                mxid,
+            } => {
+                write!(
+                    f,
+                    "[{}] event {} {} '{}' is a historical (non-compliant) MXID; accepted per the \
+                     Matrix Historical User IDs rule (MSC4303 not enforced by current room versions)",
+                    self.code(),
+                    event_id,
+                    field,
+                    mxid
                 )
             }
         }
@@ -158,6 +189,14 @@ mod tests {
             oversized.to_string(),
             "[W002_OVERSIZED_FIELD_PRE_V11] event $a field 'sender' length 300 exceeds limit 255"
         );
+
+        let historical: Warning<String> = Warning::HistoricalMxid {
+            event_id: "$a".into(),
+            field: "sender",
+            mxid: "@Alice:example.com".into(),
+        };
+        assert_eq!(historical.code(), "W003_HISTORICAL_MXID");
+        assert!(historical.to_string().contains("MSC4303"));
     }
 
     #[test]

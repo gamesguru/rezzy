@@ -2691,7 +2691,7 @@ impl EventContent for Value {
             None => true,
             Some(v) => v.as_array().is_some_and(|arr| {
                 arr.iter()
-                    .all(|entry| entry.as_str().is_some_and(is_valid_mxid))
+                    .all(|entry| entry.as_str().is_some_and(is_acceptable_historical_mxid))
             }),
         }
     }
@@ -2904,13 +2904,15 @@ fn room_version_is_v12_or_later(room_version: &str) -> bool {
     RoomVersionFormat::parse(room_version).is_some_and(RoomVersionFormat::uses_v12_create_rules)
 }
 
-/// Returns `true` if `id` is a syntactically valid Matrix user ID: `@` prefix,
-/// a `:` separating localpart from domain, a non-empty localpart drawn from
-/// the restricted charset (`a-z`, `0-9`, `.`, `_`, `=`, `-`, `/`, `+`), and a
-/// non-empty domain.
+/// Returns `true` if `id` is a strictly valid *current* Matrix user ID: `@`
+/// prefix, a `:` separating localpart from domain, a non-empty localpart
+/// drawn from the restricted charset (`a-z`, `0-9`, `.`, `_`, `=`, `-`, `/`,
+/// `+`), and a non-empty domain.
 ///
-/// Shared by the `sender` check and, for V12+ rooms, `additional_creators`
-/// entries — both are held to the same grammar per MSC4289.
+/// This is the no-warning path for IDs found in room events; IDs which fail
+/// this but satisfy [`is_acceptable_historical_mxid`] are accepted with a
+/// [`crate::warnings::Warning::HistoricalMxid`] instead of being rejected.
+/// It remains suitable for callers which create a new user ID.
 pub(crate) fn is_valid_mxid(id: &str) -> bool {
     let Some((localpart, domain)) = id.strip_prefix('@').and_then(|rest| rest.split_once(':'))
     else {
@@ -2921,6 +2923,23 @@ pub(crate) fn is_valid_mxid(id: &str) -> bool {
         && localpart.bytes().all(
             |b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'=' | b'-' | b'/' | b'+'),
         )
+}
+
+/// Returns `true` if `id` can be accepted as a historical Matrix user ID in a
+/// room event.
+///
+/// The Matrix specification requires clients and servers to accept historical
+/// localparts containing any non-surrogate Unicode scalar value other than
+/// `:` and NUL. Rust strings cannot contain surrogate code points, so the
+/// localpart check only needs to exclude NUL. Unlike the current grammar, an
+/// empty localpart is accepted. The domain retains the basic non-empty
+/// structural check used by the strict grammar.
+pub(crate) fn is_acceptable_historical_mxid(id: &str) -> bool {
+    let Some((localpart, domain)) = id.strip_prefix('@').and_then(|rest| rest.split_once(':'))
+    else {
+        return false;
+    };
+    !domain.is_empty() && !localpart.contains('\0')
 }
 
 /// Extracts the domain (server name) portion of a Matrix identifier (e.g. `@user:example.com` -> `example.com`,
@@ -3043,14 +3062,22 @@ impl<Id, C, K> LeanEvent<Id, C, K> {
             return Err("event_id must start with '$'");
         }
         if !is_valid_mxid(&self.sender) {
-            return Err(
-                "sender must be a valid MXID: '@' prefix, ':' separator, non-empty domain, and a localpart of only a-z, 0-9, '.', '_', '=', '-', '/', '+'",
-            );
+            if is_acceptable_historical_mxid(&self.sender) {
+                warnings.push(crate::warnings::Warning::HistoricalMxid {
+                    event_id: self.event_id.clone(),
+                    field: "sender",
+                    mxid: self.sender.clone(),
+                });
+            } else {
+                return Err(
+                    "sender must be a valid MXID: '@' prefix, ':' separator, non-empty domain, and a localpart of only a-z, 0-9, '.', '_', '=', '-', '/', '+'",
+                );
+            }
         }
         // Rule 1.4: pre-v12 m.room.create must declare a `creator`; v12+
-        // instead derives creators from `sender` + `additional_creators`,
-        // and validates any `additional_creators` entries against the same
-        // MXID grammar as `sender`.
+        // instead derives creators from `sender` + `additional_creators`.
+        // The V12 rules apply the same historical-event grammar to
+        // additional_creators as they do to sender.
         if self.event_type == crate::basespec::event_types::M_ROOM_CREATE {
             let is_v12_plus =
                 StateResVersion::from_room_version(room_version).is_some_and(|v| v.is_v2_1_plus());
@@ -3065,7 +3092,15 @@ impl<Id, C, K> LeanEvent<Id, C, K> {
                     return Err("m.room.create content must have a 'creator' property");
                 };
                 if !is_valid_mxid(creator) {
-                    return Err("m.room.create content.creator must be a valid MXID string");
+                    if is_acceptable_historical_mxid(creator) {
+                        warnings.push(crate::warnings::Warning::HistoricalMxid {
+                            event_id: self.event_id.clone(),
+                            field: "creator",
+                            mxid: creator.to_string(),
+                        });
+                    } else {
+                        return Err("m.room.create content.creator must be a valid MXID string");
+                    }
                 }
             }
         }

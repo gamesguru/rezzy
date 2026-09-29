@@ -33,7 +33,8 @@ use crate::basespec::event_types::{
     RULE_KNOCK_RESTRICTED, RULE_PUBLIC, RULE_RESTRICTED,
 };
 use crate::basespec::rezzy_types::{
-    apply_redaction, domain_matches, is_valid_mxid, EventLike, LeanEvent, StateResVersion,
+    apply_redaction, domain_matches, is_acceptable_historical_mxid, EventLike, LeanEvent,
+    StateResVersion,
 };
 
 /// An error indicating why an event failed authorization.
@@ -594,10 +595,12 @@ pub fn check_auth_with_context<
         if !event.prev_events().is_empty() {
             return Err(AuthError::CreateWithPrevEvents);
         }
-        // Rule 1.2: Check sender MXID validity for m.room.create
-        if !is_valid_mxid(event.sender()) {
+        // Room events must accept historical MXIDs, whose localparts may use
+        // uppercase or other Unicode characters permitted by the historical
+        // grammar.
+        if !is_acceptable_historical_mxid(event.sender()) {
             return Err(AuthError::InvalidSyntax(
-                "m.room.create sender must be a valid MXID".into(),
+                "m.room.create sender must be an acceptable historical MXID".into(),
             ));
         }
         if event.content().has_malformed_room_version()

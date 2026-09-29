@@ -4654,7 +4654,21 @@ fn test_rule_1_2_create_invalid_sender_mxid() {
         json!({"room_version": "10"}),
     );
     let res = check_auth(&create_ev, &state, StateResVersion::V2, None);
-    assert!(matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("valid MXID")));
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("acceptable historical MXID"))
+    );
+
+    let historical_create = make_event(
+        "$historical",
+        M_ROOM_CREATE,
+        Some(""),
+        "@Half-Shot:half-shot.uk",
+        json!({"room_version": "12"}),
+    );
+    assert!(
+        check_auth(&historical_create, &state, StateResVersion::V2_1, None).is_ok(),
+        "historical uppercase create sender must be accepted"
+    );
 }
 
 #[test]
