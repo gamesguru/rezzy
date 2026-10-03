@@ -48,12 +48,13 @@ fn accelerated_mul() -> unsafe fn(u64, u64) -> u64 {
 
     static IMPLEMENTATION: OnceLock<unsafe fn(u64, u64) -> u64> = OnceLock::new();
     *IMPLEMENTATION.get_or_init(|| {
-        let mut func: unsafe fn(u64, u64) -> u64 = mul_portable;
-        if std::is_x86_feature_detected!("pclmulqdq") {
+        let func: unsafe fn(u64, u64) -> u64 = if std::is_x86_feature_detected!("pclmulqdq") {
             // SAFETY: the function is only selected when the CPU advertises
             // the required instruction set.
-            func = mul_pclmul;
-        }
+            mul_pclmul
+        } else {
+            mul_portable
+        };
         func
     })
 }
@@ -101,6 +102,16 @@ unsafe fn mul_pclmul(left: u64, right: u64) -> u64 {
 mod tests {
     use super::*;
 
+    fn next_pair(state: &mut u64) -> (u64, u64) {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        let left = *state;
+        *state = state.rotate_left(23) ^ 0x9e37_79b9_7f4a_7c15;
+        let right = *state;
+        (left, right)
+    }
+
     #[test]
     fn reduction_sensitive_vectors_match_minisketch() {
         assert_eq!(mul(0, u64::MAX), 0);
@@ -114,12 +125,7 @@ mod tests {
     fn multiplication_is_distributive() {
         let mut state = 0x6a09_e667_f3bc_c909_u64;
         for _ in 0..256 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let left = state;
-            state = state.rotate_left(23) ^ 0x9e37_79b9_7f4a_7c15;
-            let right = state;
+            let (left, right) = next_pair(&mut state);
             state = state.rotate_right(11) ^ 0x3c6e_f372_fe94_f82b;
             let addend = state;
             assert_eq!(
@@ -133,12 +139,7 @@ mod tests {
     fn mul_bitwise_matches_mul() {
         let mut state = 0x6a09_e667_f3bc_c909_u64;
         for _ in 0..256 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let left = state;
-            state = state.rotate_left(23) ^ 0x9e37_79b9_7f4a_7c15;
-            let right = state;
+            let (left, right) = next_pair(&mut state);
             assert_eq!(mul_bitwise(left, right), mul(left, right));
         }
     }
@@ -149,12 +150,7 @@ mod tests {
     fn mul_portable_matches_mul() {
         let mut state = 0x6a09_e667_f3bc_c909_u64;
         for _ in 0..256 {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            let left = state;
-            state = state.rotate_left(23) ^ 0x9e37_79b9_7f4a_7c15;
-            let right = state;
+            let (left, right) = next_pair(&mut state);
             // SAFETY: The portable implementation does not actually rely on any hardware features.
             assert_eq!(unsafe { mul_portable(left, right) }, mul(left, right));
         }

@@ -1,11 +1,10 @@
 // CLI-only: Multi-file event set merging.
-#![cfg(feature = "cli")]
 use crate::error::{AppError, ErrorCode};
 use std::collections::{HashMap, HashSet};
 use std::string::String;
 use std::vec::Vec;
 
-/// Per-file reference index: own event_ids plus every id the file *mentions*.
+/// Per-file reference index: own `event_ids` plus every id the file *mentions*.
 struct FileRefs {
     /// Top-level `event_id` values owned by this file.
     event_ids: HashSet<String>,
@@ -102,7 +101,7 @@ fn perform_connectivity_check(per_file_refs: &[FileRefs]) -> Result<(), AppError
 }
 
 /// Report the highest shared depths.
-fn report_highest_shared_depths(per_file_refs: &[FileRefs], merged: &[serde_json::Value]) {
+fn report_highest_shared_depths(per_file_refs: &[FileRefs], merged: &[rezzy::JsonValue]) {
     let num_files = per_file_refs.len();
     let all_sets: Vec<HashSet<&String>> = per_file_refs.iter().map(|r| r.all_ids()).collect();
     let shared_all: HashSet<&String> = {
@@ -132,10 +131,21 @@ fn report_highest_shared_depths(per_file_refs: &[FileRefs], merged: &[serde_json
     );
 }
 
-fn collect_refs(val: &serde_json::Value, refs: &mut FileRefs, event_id: &str) {
+/// Event ID of a `prev_events`/`auth_events` entry: a plain string, or the
+/// first element of a legacy `[event_id, hashes]` pair.
+fn ref_event_id(value: &rezzy::JsonValue) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value
+            .as_array()
+            .and_then(|pair| pair.first())
+            .and_then(rezzy::JsonValue::as_str)
+    })
+}
+
+fn collect_refs(val: &rezzy::JsonValue, refs: &mut FileRefs, event_id: &str) {
     if let Some(auth) = val.get("auth_events").and_then(|a| a.as_array()) {
         for ae in auth {
-            if let Some(aid) = ae.as_str() {
+            if let Some(aid) = ref_event_id(ae) {
                 refs.auth_refs.insert(aid.to_owned());
             }
         }
@@ -143,7 +153,7 @@ fn collect_refs(val: &serde_json::Value, refs: &mut FileRefs, event_id: &str) {
 
     if let Some(prev) = val.get("prev_events").and_then(|p| p.as_array()) {
         for pe in prev {
-            if let Some(pid) = pe.as_str() {
+            if let Some(pid) = ref_event_id(pe) {
                 refs.prev_refs.insert(pid.to_owned());
             }
         }
@@ -189,16 +199,82 @@ fn collect_refs(val: &serde_json::Value, refs: &mut FileRefs, event_id: &str) {
 ///
 /// Returns an error if the files describe disjoint DAGs that share no history.
 pub fn merge_event_sets(
-    file_sets: &[(String, Vec<serde_json::Value>)],
+    file_sets: &[(String, Vec<rezzy::JsonValue>)],
     debug: bool,
     quiet: bool,
-) -> Result<Vec<serde_json::Value>, AppError> {
+) -> Result<Vec<rezzy::JsonValue>, AppError> {
+    Ok(merge_event_sets_internal(file_sets, None, debug, quiet)?.events)
+}
+
+/// Details from merging borrowed event slices.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct MergeResult {
+    /// Unique events retained in merge order.
+    pub events: Vec<rezzy::JsonValue>,
+    /// Identical duplicate copies skipped during the merge.
+    pub duplicate_copies: usize,
+}
+
+/// Merge borrowed event slices for aggregation and return duplicate statistics.
+///
+/// When `room_version` is `Some`, duplicate detection compares each event's
+/// Matrix *redacted canonical* form (the reference-hash input), so sources that
+/// differ only in `unsigned` or `signatures` merge as one event. When it is
+/// `None`, the full serialized event is compared.
+///
+/// # Errors
+///
+/// Returns an error for disjoint DAGs, conflicting duplicate event IDs, or an
+/// event that cannot be canonicalized/serialized.
+pub fn merge_event_slices(
+    file_sets: &[(String, &[rezzy::JsonValue])],
+    room_version: Option<&str>,
+    debug: bool,
+    quiet: bool,
+) -> Result<MergeResult, AppError> {
+    merge_event_sets_internal(file_sets, room_version, debug, quiet)
+}
+
+fn comparison_key(
+    value: &rezzy::JsonValue,
+    room_version: Option<&str>,
+) -> Result<String, AppError> {
+    room_version.map_or_else(
+        || {
+            rezzy::json::write_string_value(value).map_err(|error| {
+                AppError::new(
+                    ErrorCode::MalformedJson,
+                    format!("cannot serialize event: {error}"),
+                )
+            })
+        },
+        |room_version| {
+            rezzy::try_canonical_redacted_json(value, room_version).map_err(|error| {
+                AppError::new(
+                    ErrorCode::MalformedJson,
+                    format!("cannot canonicalize event: {error}"),
+                )
+            })
+        },
+    )
+}
+
+fn merge_event_sets_internal<I: AsRef<[rezzy::JsonValue]>>(
+    file_sets: &[(String, I)],
+    room_version: Option<&str>,
+    debug: bool,
+    quiet: bool,
+) -> Result<MergeResult, AppError> {
     let num_files = file_sets.len();
-    let mut seen_ids: HashSet<String> = HashSet::new();
-    let mut merged: Vec<serde_json::Value> = Vec::new();
+    let mut seen_ids: HashMap<String, usize> = HashMap::new();
+    let mut merged: Vec<rezzy::JsonValue> = Vec::new();
+    let mut merged_keys: Vec<String> = Vec::new();
+    let mut duplicate_copies = 0usize;
     let mut per_file_refs: Vec<FileRefs> = Vec::with_capacity(num_files);
 
-    for (label, events) in file_sets {
+    for (label, input) in file_sets {
+        let events = input.as_ref();
         let mut refs = FileRefs::with_capacity(events.len());
         let mut added = 0usize;
         let mut dupes = 0usize;
@@ -216,11 +292,26 @@ pub fn merge_event_sets(
 
             collect_refs(val, &mut refs, &event_id);
 
-            if seen_ids.insert(event_id) {
-                merged.push(val.clone());
-                added = added.saturating_add(1);
-            } else {
+            let key = comparison_key(val, room_version)?;
+            if let Some(&first_index) = seen_ids.get(&event_id) {
+                duplicate_copies = duplicate_copies.saturating_add(1);
+                if merged_keys[first_index] != key {
+                    if !quiet {
+                        eprintln!("[warn] canonical conflict for {event_id} in input file {label}");
+                    }
+                    bail_code!(
+                        ErrorCode::AggregateConflict,
+                        "event_id {} has different payloads in input file {}",
+                        event_id,
+                        label
+                    );
+                }
                 dupes = dupes.saturating_add(1);
+            } else {
+                seen_ids.insert(event_id, merged.len());
+                merged.push(val.clone());
+                merged_keys.push(key);
+                added = added.saturating_add(1);
             }
         }
 
@@ -272,39 +363,40 @@ pub fn merge_event_sets(
         std::eprintln!("[merge] total: {} unique events", merged.len());
     }
 
-    Ok(merged)
+    Ok(MergeResult {
+        events: merged,
+        duplicate_copies,
+    })
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use rezzy::json;
+    mod shared_fixture {
+        include!("../../support/cli_event.rs");
+    }
+    use shared_fixture::event as ev;
 
-    fn ev(id: &str, depth: u64) -> serde_json::Value {
-        json!({
-            "event_id": id,
-            "type": "m.room.member",
-            "state_key": format!("@user:{id}"),
-            "origin_server_ts": 1000_u64.wrapping_add(depth),
-            "depth": depth,
-            "prev_events": [],
-            "auth_events": []
-        })
+    fn event_ids(events: &[rezzy::JsonValue]) -> Vec<&str> {
+        events
+            .iter()
+            .map(|v| v["event_id"].as_str().unwrap())
+            .collect()
+    }
+
+    fn merge_pair(a: Vec<rezzy::JsonValue>, b: Vec<rezzy::JsonValue>) -> Vec<rezzy::JsonValue> {
+        merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true).unwrap()
     }
 
     #[test]
     fn test_merge_dedup_by_event_id() {
         let a = vec![ev("$1", 1), ev("$2", 2), ev("$3", 3)];
         let b = vec![ev("$2", 2), ev("$3", 3), ev("$4", 4)];
-        let result =
-            merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true).unwrap();
+        let result = merge_pair(a, b);
 
-        let ids: Vec<&str> = result
-            .iter()
-            .map(|v| v["event_id"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, vec!["$1", "$2", "$3", "$4"]);
+        assert_eq!(event_ids(&result), vec!["$1", "$2", "$3", "$4"]);
     }
 
     #[test]
@@ -332,11 +424,7 @@ mod tests {
         )
         .unwrap();
 
-        let ids: Vec<&str> = result
-            .iter()
-            .map(|v| v["event_id"].as_str().unwrap())
-            .collect();
-        assert_eq!(ids, vec!["$1", "$2", "$3", "$4"]);
+        assert_eq!(event_ids(&result), vec!["$1", "$2", "$3", "$4"]);
     }
 
     #[test]
@@ -350,8 +438,7 @@ mod tests {
     fn test_merge_complete_overlap() {
         let a = vec![ev("$1", 1), ev("$2", 2), ev("$3", 3)];
         let b = vec![ev("$1", 1), ev("$2", 2), ev("$3", 3)];
-        let result =
-            merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true).unwrap();
+        let result = merge_pair(a, b);
         assert_eq!(result.len(), 3);
     }
 
@@ -359,12 +446,7 @@ mod tests {
     fn test_merge_subset() {
         let large = vec![ev("$1", 1), ev("$2", 2), ev("$3", 3), ev("$4", 4)];
         let small = vec![ev("$1", 1), ev("$2", 2)];
-        let result = merge_event_sets(
-            &[("large.jsonl".into(), large), ("small.jsonl".into(), small)],
-            false,
-            true,
-        )
-        .unwrap();
+        let result = merge_pair(large, small);
         assert_eq!(result.len(), 4);
     }
 
@@ -381,8 +463,7 @@ mod tests {
     fn test_merge_single_event_per_file() {
         let a = vec![ev("$1", 1)];
         let b = vec![ev("$1", 1)];
-        let result =
-            merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true).unwrap();
+        let result = merge_pair(a, b);
         assert_eq!(result.len(), 1);
     }
 
@@ -398,9 +479,25 @@ mod tests {
     fn test_merge_two_events_one_shared() {
         let a = vec![ev("$1", 1), ev("$2", 2)];
         let b = vec![ev("$2", 2), ev("$3", 3)];
-        let result =
-            merge_event_sets(&[("a.jsonl".into(), a), ("b.jsonl".into(), b)], false, true).unwrap();
+        let result = merge_pair(a, b);
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn merge_rejects_conflicting_duplicate_for_all_callers() {
+        let mut first = ev("$same", 1);
+        let mut second = first.clone();
+        first["origin_server_ts"] = json!(1000);
+        second["origin_server_ts"] = json!(2000);
+        let result = merge_event_sets(
+            &[
+                ("a.jsonl".into(), vec![first]),
+                ("b.jsonl".into(), vec![second]),
+            ],
+            false,
+            true,
+        );
+        assert_eq!(result.unwrap_err().code(), ErrorCode::AggregateConflict);
     }
 
     #[test]

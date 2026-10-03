@@ -7,7 +7,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use crate::reconcile::gf64_simd::Gf64Evaluator;
+use crate::gf64_simd::Gf64Evaluator;
 
 use super::algebraic::{gf64_mul, AlgebraicError};
 
@@ -23,52 +23,54 @@ const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 #[cfg(test)]
 const TRACE_SQUARES: usize = 63;
 // KNOWN GAP, still open: this covers observed *balanced* recursive
-// splitting, not a proven worst case.
+// splitting, not a proven worst-case recursion bound.
 //
-// Measured directly (`find_roots_with_budget`'s own consumption, not a
-// hand derivation) against both random and adversarial-consecutive-value
-// degree-256 inputs: a full successful decode costs ~9.0-9.3M, and a
-// single node's full non-splitting 72-trial ladder (the shape a genuinely
-// undecodable degree-256 sketch produces) costs ~10.0M -- both comfortably
-// inside this budget with real, if modest, headroom.
+// Measured directly via `find_roots_with_budget`'s consumption:
+// - Typical degree-256 successful decodes (over both random and structured/
+//   consecutive-value inputs) require ~9.0–9.3M work units.
+// - A single node's full non-splitting 72-trial ladder at degree 256
+//   (`single_call_work_ceiling(256)`) draws 10,092,544 units (~10.1M).
+// Both remain within this 16.0M budget with measurable headroom.
 //
-// What's still unbounded is a *chain* of nodes each needing a full
-// non-splitting ladder before finally splitting -- e.g. a degenerate
-// sequence of (1, d-1) splits. Computed from this file's own cost
-// functions (`frobenius_basis_cost` + `FACTOR_TRIALS` *
-// `factor_trial_cost_with_basis` + `split_cost`, summed over degrees
-// d, d-1, ..., 2), that chain totals ~917M at d=256 -- ~57x this budget.
-// Random locators split near-binomially in practice (matching the
-// measurements above), so this degenerate shape is not something a
-// benchmark surfaces, and it fails safe into `BudgetExhausted` (routing
-// to the same fallback ladder callers already handle) rather than
-// corrupting anything -- but "degree 256 is decodable within
-// MAX_FACTOR_WORK" remains a statement about typical inputs, not a proven
-// bound. A real worst-case bound on the recursion, or a balance guarantee
-// on the splitting itself, would be needed to close this properly.
+// What remains an open theoretical gap is a pathological *chain* of nodes
+// where each recursion step needs a full non-splitting ladder before splitting
+// off a single root (e.g. a degenerate sequence of (1, d-1) splits).
+// Evaluated using `single_call_work_ceiling(d)` summed over d = 2..=256,
+// that hypothetical worst-case chain totals exactly 916,609,400 work units
+// (~917M, ~57x this budget). Constructing an algebraic locator polynomial
+// that forces this exact split sequence is an open problem; if encountered,
+// `find_roots_with_budget` deducts cost with checked arithmetic and fails
+// safe with `AlgebraicError::BudgetExhausted` (prompting client-side fallback).
+// Thus, "degree 256 is decodable within MAX_FACTOR_WORK" applies to typical/
+// practical inputs, while the absolute worst-case bound remains an open gap.
 const MAX_FACTOR_WORK: usize = 16_000_000;
 
 pub(crate) fn decode(
     odd_syndromes: &[u64],
     max_elements: usize,
 ) -> Result<Vec<u64>, AlgebraicError> {
-    let all = reconstruct_syndromes(odd_syndromes);
-    let mut locator = berlekamp_massey(&all, max_elements).ok_or(AlgebraicError::DecodeFailure)?;
-    if locator.len() == 1 {
-        return Ok(Vec::new());
+    let roots = decode_roots(prepare_locator(odd_syndromes, max_elements)?, find_roots)?;
+    require_reencode(roots, odd_syndromes)
+}
+
+/// MSC4521 phase-1 re-encode check: re-encoding the recovered roots into a
+/// temporary sketch MUST reproduce the residual syndromes ($O(k^2)$).
+///
+/// Done here, at the one place every caller decodes through, so the bucket,
+/// `decode_elements` and strata-estimator paths all get it.
+fn require_reencode(roots: Vec<u64>, odd_syndromes: &[u64]) -> Result<Vec<u64>, AlgebraicError> {
+    let mut check = vec![0_u64; odd_syndromes.len()];
+    for &root in &roots {
+        let squared = gf64_mul(root, root);
+        let mut odd_power = root;
+        for coordinate in &mut check {
+            *coordinate ^= odd_power;
+            odd_power = gf64_mul(odd_power, squared);
+        }
     }
-    locator.reverse();
-    let expected = locator
-        .len()
-        .checked_sub(1)
-        .ok_or(AlgebraicError::DecodeFailure)?;
-    let mut roots = Vec::with_capacity(expected);
-    find_roots(locator, &mut roots)?;
-    if roots.len() != expected || roots.contains(&0) {
-        return Err(AlgebraicError::DecodeFailure);
-    }
-    roots.sort_unstable();
-    Ok(roots)
+    (check == odd_syndromes)
+        .then_some(roots)
+        .ok_or(AlgebraicError::DecodeFailure)
 }
 
 /// Like [`decode`], but draws factoring work from `budget` and leaves the
@@ -80,18 +82,50 @@ pub(crate) fn decode_with_budget(
     max_elements: usize,
     budget: &mut usize,
 ) -> Result<Vec<u64>, AlgebraicError> {
+    let roots = decode_roots(
+        prepare_locator(odd_syndromes, max_elements)?,
+        |locator, roots| find_roots_with_budget(locator, roots, budget),
+    )?;
+    require_reencode(roots, odd_syndromes)
+}
+
+/// Finds the roots of an already-prepared locator and finalizes them, or
+/// returns the empty set when `prepared` is `None`.
+fn decode_roots(
+    prepared: Option<(Polynomial, usize)>,
+    find: impl FnOnce(Polynomial, &mut Vec<u64>) -> Result<(), AlgebraicError>,
+) -> Result<Vec<u64>, AlgebraicError> {
+    let Some((locator, expected)) = prepared else {
+        return Ok(Vec::new());
+    };
+    let mut roots = Vec::with_capacity(expected);
+    find(locator, &mut roots)?;
+    finalize_roots(roots, expected)
+}
+
+/// Reconstructs syndromes, runs Berlekamp-Massey, and reverses the locator so
+/// its roots can be found. Returns `None` when the residual decodes to the
+/// empty set (`locator.len() == 1`), matching the early-return in [`decode`]
+/// and [`decode_with_budget`].
+fn prepare_locator(
+    odd_syndromes: &[u64],
+    max_elements: usize,
+) -> Result<Option<(Polynomial, usize)>, AlgebraicError> {
     let all = reconstruct_syndromes(odd_syndromes);
     let mut locator = berlekamp_massey(&all, max_elements).ok_or(AlgebraicError::DecodeFailure)?;
     if locator.len() == 1 {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     locator.reverse();
     let expected = locator
         .len()
         .checked_sub(1)
         .ok_or(AlgebraicError::DecodeFailure)?;
-    let mut roots = Vec::with_capacity(expected);
-    find_roots_with_budget(locator, &mut roots, budget)?;
+    Ok(Some((locator, expected)))
+}
+
+/// Validates the root count and distinctness, then returns them sorted.
+fn finalize_roots(mut roots: Vec<u64>, expected: usize) -> Result<Vec<u64>, AlgebraicError> {
     if roots.len() != expected || roots.contains(&0) {
         return Err(AlgebraicError::DecodeFailure);
     }
@@ -200,29 +234,17 @@ fn poly_mod(modulus: &[u64], value: &mut Polynomial) -> Option<()> {
     // trivial (branch-predicted, hoisted out of the loop in the prior
     // pass), but this removes it from the loop body entirely so the
     // compiler can optimize each backend's reduction independently.
-    match crate::reconcile::gf64_simd::get_evaluator() {
+    match crate::gf64_simd::get_evaluator() {
         #[cfg(all(target_arch = "x86_64", has_avx512_support))]
-        crate::reconcile::gf64_simd::EvaluatorBackend::Avx512 => {
-            poly_mod_reduce::<crate::reconcile::gf64_simd::Avx512Evaluator>(
-                modulus_degree,
-                modulus,
-                value,
-            )?;
+        crate::gf64_simd::EvaluatorBackend::Avx512 => {
+            poly_mod_reduce::<crate::gf64_simd::Avx512Evaluator>(modulus_degree, modulus, value)?;
         }
         #[cfg(target_arch = "x86_64")]
-        crate::reconcile::gf64_simd::EvaluatorBackend::Sse => {
-            poly_mod_reduce::<crate::reconcile::gf64_simd::SseEvaluator>(
-                modulus_degree,
-                modulus,
-                value,
-            )?;
+        crate::gf64_simd::EvaluatorBackend::Sse => {
+            poly_mod_reduce::<crate::gf64_simd::SseEvaluator>(modulus_degree, modulus, value)?;
         }
-        crate::reconcile::gf64_simd::EvaluatorBackend::Scalar => {
-            poly_mod_reduce::<crate::reconcile::gf64_simd::ScalarEvaluator>(
-                modulus_degree,
-                modulus,
-                value,
-            )?;
+        crate::gf64_simd::EvaluatorBackend::Scalar => {
+            poly_mod_reduce::<crate::gf64_simd::ScalarEvaluator>(modulus_degree, modulus, value)?;
         }
     }
     trim(value);
@@ -254,10 +276,10 @@ fn poly_div(mut dividend: Polynomial, divisor: &[u64]) -> Option<Polynomial> {
     let divisor_degree = divisor.len().checked_sub(1)?;
     // See `poly_mod` for why the backend dispatch happens once here rather
     // than once per reduction row inside a shared loop.
-    match crate::reconcile::gf64_simd::get_evaluator() {
+    match crate::gf64_simd::get_evaluator() {
         #[cfg(all(target_arch = "x86_64", has_avx512_support))]
-        crate::reconcile::gf64_simd::EvaluatorBackend::Avx512 => {
-            poly_div_reduce::<crate::reconcile::gf64_simd::Avx512Evaluator>(
+        crate::gf64_simd::EvaluatorBackend::Avx512 => {
+            poly_div_reduce::<crate::gf64_simd::Avx512Evaluator>(
                 divisor_degree,
                 divisor,
                 &mut dividend,
@@ -265,16 +287,16 @@ fn poly_div(mut dividend: Polynomial, divisor: &[u64]) -> Option<Polynomial> {
             )?;
         }
         #[cfg(target_arch = "x86_64")]
-        crate::reconcile::gf64_simd::EvaluatorBackend::Sse => {
-            poly_div_reduce::<crate::reconcile::gf64_simd::SseEvaluator>(
+        crate::gf64_simd::EvaluatorBackend::Sse => {
+            poly_div_reduce::<crate::gf64_simd::SseEvaluator>(
                 divisor_degree,
                 divisor,
                 &mut dividend,
                 &mut quotient,
             )?;
         }
-        crate::reconcile::gf64_simd::EvaluatorBackend::Scalar => {
-            poly_div_reduce::<crate::reconcile::gf64_simd::ScalarEvaluator>(
+        crate::gf64_simd::EvaluatorBackend::Scalar => {
+            poly_div_reduce::<crate::gf64_simd::ScalarEvaluator>(
                 divisor_degree,
                 divisor,
                 &mut dividend,
@@ -630,6 +652,34 @@ fn find_roots_with_budget(
 mod tests {
     use super::*;
 
+    /// Builds the odd `s1, s3, ...` syndromes for a set of field elements.
+    fn odd_syndromes(elements: &[u64]) -> Vec<u64> {
+        let mut odd = vec![0; elements.len()];
+        for value in elements {
+            let squared = gf64_mul(*value, *value);
+            let mut power = *value;
+            for syndrome in &mut odd {
+                *syndrome ^= power;
+                power = gf64_mul(power, squared);
+            }
+        }
+        odd
+    }
+
+    /// Draws `size` distinct nonzero elements from the deterministic
+    /// `next_factor_parameter` stream.
+    fn unique_random_elements(state: &mut u64, size: usize) -> Vec<u64> {
+        let mut expected = Vec::new();
+        while expected.len() < size {
+            let candidate = next_factor_parameter(*state);
+            *state = candidate;
+            if candidate != 0 && !expected.contains(&candidate) {
+                expected.push(candidate);
+            }
+        }
+        expected
+    }
+
     #[test]
     fn inverses_roundtrip() {
         for value in [1, 2, 3, 0xdead_beef, u64::MAX] {
@@ -640,15 +690,7 @@ mod tests {
     #[test]
     fn decodes_small_sets() {
         for expected in [vec![1], vec![1, 2], vec![1, 2, 3], vec![1, 2, 3, 4]] {
-            let mut odd = vec![0; expected.len()];
-            for value in &expected {
-                let squared = gf64_mul(*value, *value);
-                let mut power = *value;
-                for syndrome in &mut odd {
-                    *syndrome ^= power;
-                    power = gf64_mul(power, squared);
-                }
-            }
+            let odd = odd_syndromes(&expected);
             assert_eq!(decode(&odd, expected.len()), Ok(expected));
         }
     }
@@ -665,25 +707,9 @@ mod tests {
     fn decodes_deterministic_varied_sets() {
         let mut state = 0x6a09_e667_f3bc_c909_u64;
         for size in (1..=24).chain([32, 64]) {
-            let mut expected = Vec::new();
-            while expected.len() < size {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                if state != 0 && !expected.contains(&state) {
-                    expected.push(state);
-                }
-            }
+            let mut expected = unique_random_elements(&mut state, size);
             expected.sort_unstable();
-            let mut odd = vec![0; size];
-            for value in &expected {
-                let squared = gf64_mul(*value, *value);
-                let mut power = *value;
-                for syndrome in &mut odd {
-                    *syndrome ^= power;
-                    power = gf64_mul(power, squared);
-                }
-            }
+            let odd = odd_syndromes(&expected);
             assert_eq!(decode(&odd, size), Ok(expected));
         }
     }
@@ -709,24 +735,8 @@ mod tests {
     fn budget_exhaustion_on_a_large_decode_fails_safe() {
         let mut state = 0x243f_6a88_85a3_08d3_u64;
         let size = 256;
-        let mut expected = Vec::new();
-        while expected.len() < size {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            if state != 0 && !expected.contains(&state) {
-                expected.push(state);
-            }
-        }
-        let mut odd = vec![0; size];
-        for value in &expected {
-            let squared = gf64_mul(*value, *value);
-            let mut power = *value;
-            for syndrome in &mut odd {
-                *syndrome ^= power;
-                power = gf64_mul(power, squared);
-            }
-        }
+        let expected = unique_random_elements(&mut state, size);
+        let odd = odd_syndromes(&expected);
 
         // Nowhere near enough to complete a degree-256 decode (measured at
         // ~9-10M for a full decode/non-splitting ladder per this file's own
@@ -741,15 +751,7 @@ mod tests {
     #[test]
     fn decodes_a_triple_unsplit_by_the_mixed_parameter_prefix() {
         let expected = vec![1, 0xcd2, 0x1_d71a];
-        let mut odd = vec![0; expected.len()];
-        for value in &expected {
-            let squared = gf64_mul(*value, *value);
-            let mut power = *value;
-            for syndrome in &mut odd {
-                *syndrome ^= power;
-                power = gf64_mul(power, squared);
-            }
-        }
+        let odd = odd_syndromes(&expected);
         assert_eq!(decode(&odd, expected.len()), Ok(expected));
     }
 
@@ -771,7 +773,7 @@ mod tests {
 
         let mut empty = Vec::new();
         poly_square(&mut empty).unwrap();
-        assert_eq!(empty, [] as [u64; 0]);
+        assert!(empty.is_empty());
     }
 
     #[test]
@@ -788,7 +790,7 @@ mod tests {
     fn root_finding_handles_constant_and_inseparable_polynomials() {
         let mut roots = Vec::new();
         find_roots(vec![1], &mut roots).unwrap();
-        assert_eq!(roots, [] as [u64; 0]);
+        assert!(roots.is_empty());
         assert_eq!(
             find_roots(vec![1, 0, 1], &mut roots),
             Err(AlgebraicError::DecodeFailure)
@@ -808,7 +810,7 @@ mod tests {
             find_roots_with_budget(polynomial, &mut roots, &mut 0),
             Err(AlgebraicError::BudgetExhausted)
         );
-        assert_eq!(roots, [] as [u64; 0]);
+        assert!(roots.is_empty());
     }
 
     #[test]
@@ -870,5 +872,73 @@ mod tests {
             })
             .expect("the absolute trace is a nonzero linear map");
         assert_eq!(solve_quadratic_form(target), None);
+    }
+
+    #[test]
+    fn single_call_work_ceiling_matches_derivation() {
+        // Degree 256 single-node ceiling:
+        // frobenius_basis_cost(256) = 256^2 * 63 = 4,128,768
+        // factor_trial_cost_with_basis(256) = 64 * 256 + 256^2 = 81,920
+        // ladder (72 trials) = 72 * 81,920 = 5,898,240
+        // split_cost(256) = 256^2 = 65,536
+        // Total = 4,128,768 + 5,898,240 + 65,536 = 10,092,544 (~10.09M)
+        assert_eq!(single_call_work_ceiling(256), Some(10_092_544));
+    }
+
+    #[test]
+    fn theoretical_degenerate_chain_cost_evaluation() {
+        // Sum of single_call_work_ceiling(d) for d in 2..=256:
+        // sum_{d=2}^{256} [63 d^2 + 72 (64 d + d^2) + d^2] = 916,609,400 (~917M)
+        let total_degenerate_work: usize = (2..=256)
+            .map(|d| single_call_work_ceiling(d).expect("does not overflow"))
+            .sum();
+        assert_eq!(total_degenerate_work, 916_609_400);
+    }
+
+    #[test]
+    fn consecutive_elements_decode_within_budget() {
+        // Structured consecutive values (1..=N) produce deterministic syndromic
+        // sketches that decode within the normal work budget.
+        for count in [4, 8, 16, 32] {
+            let mut odd_syndromes = vec![0_u64; count];
+            for i in 1..=count {
+                let elem = i as u64;
+                let mut power = elem;
+                for syn in &mut odd_syndromes {
+                    *syn ^= power;
+                    power = gf64_mul(power, gf64_mul(elem, elem)); // elem^(2k+1)
+                }
+            }
+            let recovered = decode(&odd_syndromes, count).expect("decodes successfully");
+            let mut expected: Vec<u64> = (1..=count as u64).collect();
+            let mut sorted_recovered = recovered;
+            expected.sort_unstable();
+            sorted_recovered.sort_unstable();
+            assert_eq!(sorted_recovered, expected);
+        }
+    }
+
+    #[test]
+    fn reencode_accepts_the_true_set_and_rejects_anything_else() {
+        let mut odd = vec![0_u64; 4];
+        for root in [3_u64, 9] {
+            let squared = gf64_mul(root, root);
+            let mut power = root;
+            for coordinate in &mut odd {
+                *coordinate ^= power;
+                power = gf64_mul(power, squared);
+            }
+        }
+        assert_eq!(require_reencode(vec![3, 9], &odd), Ok(vec![3, 9]));
+        assert_eq!(
+            require_reencode(vec![3, 10], &odd),
+            Err(AlgebraicError::DecodeFailure)
+        );
+        // Unaccounted syndromes beyond the decoded roots are caught too.
+        assert_eq!(
+            require_reencode(vec![3], &odd),
+            Err(AlgebraicError::DecodeFailure)
+        );
+        assert_eq!(require_reencode(Vec::new(), &[0, 0]), Ok(Vec::new()));
     }
 }

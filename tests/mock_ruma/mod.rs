@@ -14,8 +14,8 @@ use rezzy::LeanEvent;
 
 fn ruma_to_lean_event<E: Event>(ev: &E) -> LeanEvent {
     use alloc::string::ToString;
-    let content_val: serde_json::Value =
-        serde_json::from_str(ev.content().get()).unwrap_or(serde_json::Value::Null);
+    let content_val: rezzy::JsonValue =
+        rezzy::JsonValue::parse(ev.content().get()).unwrap_or(rezzy::JsonValue::Null);
     let power_level = content_val
         .get("power_level")
         .and_then(rezzy::basespec::rezzy_types::coerce_json_to_i64)
@@ -258,18 +258,11 @@ where
 
     // Attempt to dynamically select V2 vs V2.1 if the inputs match the MSC4297 test scenario.
     let mut pl_cache = std::collections::HashMap::new();
-    let resolved = rezzy::resolve_iterative_sort(
-        &unconflicted_state,
-        &conflicted_events,
-        &auth_context,
-        if state_res_rules.begin_iterative_auth_checks_with_empty_state_map {
+    let resolved = rezzy::resolve_iterative_sort(rezzy::IterativeInputs::new(&unconflicted_state, &conflicted_events, &auth_context, if state_res_rules.begin_iterative_auth_checks_with_empty_state_map {
             rezzy::StateResVersion::V2_1
         } else {
             rezzy::StateResVersion::V2
-        },
-        &mut pl_cache,
-        &String::new(),
-    );
+        }, &mut pl_cache, &String::new()));
 
     let mut result = StateMap::new();
     for ((ev_type, state_key), id_str) in resolved {

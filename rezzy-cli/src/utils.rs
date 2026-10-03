@@ -27,9 +27,20 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::time::Instant;
 
+pub use rezzy::{
+    discover_array_spans, discover_envelope_spans, discover_federation_spans, discover_jsonl_spans,
+    extract_matrix_event_into, EnvelopeSpans, FederationSpans, MatrixEventScratch, MatrixEventView,
+    RawEventSpan, ADJACENCY_MASK,
+};
+
+/// A resolved state shared between events without copying.
 pub type SharedStateMap = std::sync::Arc<ResolvedState>;
 
 /// Parse a room version string.
+///
+/// # Errors
+///
+/// Returns an error when the room version is unsupported.
 pub fn parse_room_version(ver: &str) -> Result<StateResVersion, AppError> {
     StateResVersion::from_room_version(ver).ok_or_else(|| {
         err!(
@@ -40,23 +51,44 @@ pub fn parse_room_version(ver: &str) -> Result<StateResVersion, AppError> {
 }
 
 /// Detect the room version from a state map.
+///
+/// # Errors
+///
+/// Returns an error when no create event is present or its room version is
+/// unsupported.
 pub fn detect_version(
-    events: &[serde_json::Value],
+    events: &[rezzy::JsonValue],
     debug: bool,
 ) -> Result<StateResVersion, AppError> {
+    let mut saw_create_event = false;
     for ev in events {
         if ev.get(FIELD_TYPE).and_then(|t| t.as_str()) == Some(M_ROOM_CREATE) {
-            if let Some(ver) = ev
+            saw_create_event = true;
+            if let Some(raw) = ev
                 .get(FIELD_CONTENT)
                 .and_then(|c| c.get(FIELD_ROOM_VERSION))
-                .and_then(|v| v.as_str())
             {
+                // Only an absent field defaults to v1; a present non-string is malformed.
+                let Some(ver) = raw.as_str() else {
+                    bail_code!(
+                        ErrorCode::UnsupportedVersion,
+                        "m.room.create content.room_version must be a string"
+                    );
+                };
                 if debug {
                     eprintln!("[DEBUG] Found m.room.create with version: {ver}");
                 }
                 return parse_room_version(ver);
             }
         }
+    }
+
+    if saw_create_event {
+        // Per the spec, a create event without `content.room_version` is room version 1.
+        if debug {
+            eprintln!("[DEBUG] m.room.create has no room_version; defaulting to 1");
+        }
+        return parse_room_version("1");
     }
 
     bail_code!(
@@ -76,7 +108,8 @@ pub fn detect_version(
 /// `m.room.create` event is present or its `content.room_version` is absent
 /// -- callers should apply the spec's "missing `room_version` defaults to 1"
 /// rule themselves.
-pub fn detect_room_version_string(events: &[serde_json::Value]) -> Option<String> {
+#[must_use]
+pub fn detect_room_version_string(events: &[rezzy::JsonValue]) -> Option<String> {
     events.iter().find_map(|ev| {
         if ev.get(FIELD_TYPE).and_then(|t| t.as_str()) != Some(M_ROOM_CREATE) {
             return None;
@@ -86,6 +119,19 @@ pub fn detect_room_version_string(events: &[serde_json::Value]) -> Option<String
             .and_then(|v| v.as_str())
             .map(str::to_owned)
     })
+}
+
+fn sort_gaps_by_depth<T, S: std::hash::BuildHasher>(
+    gaps: &mut [T],
+    events_map: &HashMap<String, LeanEvent, S>,
+    event_id: impl Fn(&T) -> &str,
+) {
+    gaps.sort_by(
+        |a, b| match (events_map.get(event_id(a)), events_map.get(event_id(b))) {
+            (Some(a_event), Some(b_event)) => a_event.cmp_by_depth(b_event),
+            _ => event_id(a).cmp(event_id(b)),
+        },
+    );
 }
 
 /// Detect `prev_events` and `auth_events` references that point to events
@@ -104,8 +150,8 @@ pub fn detect_room_version_string(events: &[serde_json::Value]) -> Option<String
 /// A `|_| false` oracle means "known iff present in `events_map`".
 ///
 /// Returns `(backward_extremities, missing_auth_events)`.
-pub fn report_gaps<F>(
-    events_map: &HashMap<String, LeanEvent>,
+pub fn report_gaps<F, S: std::hash::BuildHasher>(
+    events_map: &HashMap<String, LeanEvent, S>,
     exists: F,
 ) -> (
     Vec<rezzy::state::BackwardExtremity<String>>,
@@ -114,12 +160,21 @@ pub fn report_gaps<F>(
 where
     F: Fn(&String) -> bool,
 {
-    let backward = rezzy::find_backward_extremities(events_map, &exists);
-    let missing_auth = rezzy::find_missing_auth_events(events_map, &exists);
+    let mut backward = rezzy::find_backward_extremities(events_map, &exists);
+    let mut missing_auth = rezzy::find_missing_auth_events(events_map, &exists);
+    sort_gaps_by_depth(&mut backward, events_map, |gap| gap.event_id.as_str());
+    for gap in &mut backward {
+        gap.missing_prev_events.sort();
+    }
+    sort_gaps_by_depth(&mut missing_auth, events_map, |gap| gap.event_id.as_str());
+    for gap in &mut missing_auth {
+        gap.missing_auth_events.sort();
+    }
     (backward, missing_auth)
 }
 
 /// Computes an FNV-1a hash of `StateEntries`.
+#[must_use]
 pub fn compute_state_hash(state: &imbl::OrdMap<(EventType, String), String>) -> String {
     let mut hash: u64 = 14_695_981_039_346_656_037; // FNV offset basis
     for ((event_type, state_key), event_id) in state {
@@ -146,7 +201,12 @@ pub fn compute_state_hash(state: &imbl::OrdMap<(EventType, String), String>) -> 
 }
 
 /// Load a JSON file.
-pub fn load_file(input_path: &PathBuf) -> Result<Vec<serde_json::Value>, AppError> {
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or its contents are invalid
+/// JSON (including an empty JSONL file).
+pub fn load_file(input_path: &PathBuf) -> Result<Vec<rezzy::JsonValue>, AppError> {
     let input_reader: Box<dyn Read> = if input_path.to_str() == Some("-") {
         Box::new(io::stdin())
     } else {
@@ -166,7 +226,7 @@ pub fn load_file(input_path: &PathBuf) -> Result<Vec<serde_json::Value>, AppErro
             if line.trim().is_empty() {
                 continue;
             }
-            let val: serde_json::Value = serde_json::from_str(&line)?;
+            let val = rezzy::JsonValue::parse(&line)?;
             values.push(val);
         }
         if values.is_empty() {
@@ -195,16 +255,20 @@ pub fn load_file(input_path: &PathBuf) -> Result<Vec<serde_json::Value>, AppErro
                 "No input data provided before empty line or EOF."
             );
         }
-        let val: serde_json::Value = serde_json::from_slice(&input_data)?;
+        let val = rezzy::JsonValue::parse_bytes(&input_data)?;
         match val {
-            serde_json::Value::Array(arr) => Ok(arr),
+            rezzy::JsonValue::Array(arr) => Ok(arr),
             other => Ok(vec![other]),
         }
     }
 }
 
 /// Load or fetch the input value from args.
-pub fn load_or_fetch_input_value(args: &Args) -> Result<serde_json::Value, AppError> {
+///
+/// # Errors
+///
+/// Returns an error if input cannot be read or the network request fails.
+pub fn load_or_fetch_input_value(args: &Args) -> Result<rezzy::JsonValue, AppError> {
     if let Some(room_id) = &args.room {
         let homeserver = args.homeserver.as_deref().ok_or_else(|| {
             err!(
@@ -234,10 +298,10 @@ pub fn load_or_fetch_input_value(args: &Args) -> Result<serde_json::Value, AppEr
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"));
             if is_jsonl {
                 let events = load_file(input_path)?;
-                Ok(serde_json::Value::Array(events))
+                Ok(rezzy::JsonValue::Array(events))
             } else {
                 let content = std::fs::read(input_path)?;
-                let val: serde_json::Value = serde_json::from_slice(&content)?;
+                let val = rezzy::JsonValue::parse_bytes(&content)?;
                 Ok(val)
             }
         } else {
@@ -266,7 +330,7 @@ pub fn load_or_fetch_input_value(args: &Args) -> Result<serde_json::Value, AppEr
                 );
             }
             let t = Instant::now();
-            let out = serde_json::Value::Array(merged);
+            let out = rezzy::JsonValue::Array(merged);
             if args.debug {
                 eprintln!("[DEBUG] packaged merged events in {:.2?}", t.elapsed());
             }
@@ -281,49 +345,56 @@ pub fn load_or_fetch_input_value(args: &Args) -> Result<serde_json::Value, AppEr
 }
 
 /// Parse input and extract the state heads.
+///
+/// # Errors
+///
+/// Returns an error when the input structure is unsupported, the `events`
+/// field is not an array, or a head is not a string.
 pub fn parse_and_extract_heads(
-    input_val: &serde_json::Value,
+    input_val: &rezzy::JsonValue,
     debug: bool,
-) -> Result<(Vec<serde_json::Value>, Vec<String>), AppError> {
+) -> Result<(Vec<rezzy::JsonValue>, Vec<String>), AppError> {
     if let Some(obj) = input_val.as_object() {
-        if obj.contains_key("events") {
-            let arr = obj.get("events").unwrap().as_array().ok_or_else(|| {
-                err!(
-                    ErrorCode::EventsNotArray,
-                    "'events' field must be a JSON array"
-                )
-            })?;
-            if debug {
-                eprintln!(
-                    "[DEBUG] cloning {} events out of 'events' field...",
-                    arr.len()
-                );
-            }
-            let t = Instant::now();
-            let evs = arr.clone();
-            if debug {
-                eprintln!("[DEBUG] cloned events in {:.2?}", t.elapsed());
-            }
-            let mut hds = Vec::new();
-            if let Some(hds_arr) = obj.get("heads").and_then(|h| h.as_array()) {
-                for v in hds_arr {
-                    hds.push(
-                        v.as_str()
-                            .ok_or_else(|| {
-                                err!(ErrorCode::InvalidHeadType, "each 'head' must be a string")
-                            })?
-                            .to_string(),
+        match obj.get("events") {
+            Some(events) => {
+                let arr = events.as_array().ok_or_else(|| {
+                    err!(
+                        ErrorCode::EventsNotArray,
+                        "'events' field must be a JSON array"
+                    )
+                })?;
+                if debug {
+                    eprintln!(
+                        "[DEBUG] cloning {} events out of 'events' field...",
+                        arr.len()
                     );
                 }
+                let t = Instant::now();
+                let evs = arr.clone();
+                if debug {
+                    eprintln!("[DEBUG] cloned events in {:.2?}", t.elapsed());
+                }
+                let mut hds = Vec::new();
+                if let Some(hds_arr) = obj.get("heads").and_then(|h| h.as_array()) {
+                    for v in hds_arr {
+                        hds.push(
+                            v.as_str()
+                                .ok_or_else(|| {
+                                    err!(ErrorCode::InvalidHeadType, "each 'head' must be a string")
+                                })?
+                                .to_string(),
+                        );
+                    }
+                }
+                Ok((evs, hds))
             }
-            return Ok((evs, hds));
-        } else if obj.contains_key(FIELD_EVENT_ID) || obj.contains_key(FIELD_TYPE) {
-            return Ok((vec![input_val.clone()], Vec::new()));
-        } else {
-            bail_code!(
+            None if obj.contains_key(FIELD_EVENT_ID) || obj.contains_key(FIELD_TYPE) => {
+                Ok((vec![input_val.clone()], Vec::new()))
+            }
+            None => bail_code!(
                 ErrorCode::UnrecognisedStructure,
                 "Unrecognized JSON object structure. Top-level object must either contain 'events' or represent a single event with 'event_id' or 'type'."
-            );
+            ),
         }
     } else if let Some(arr) = input_val.as_array() {
         if debug {
@@ -334,18 +405,18 @@ pub fn parse_and_extract_heads(
         if debug {
             eprintln!("[DEBUG] cloned events in {:.2?}", t.elapsed());
         }
-        return Ok((evs, Vec::new()));
+        Ok((evs, Vec::new()))
     } else {
         bail_code!(
             ErrorCode::UnexpectedFormat,
             "Unexpected JSON format: expected object or array"
-        );
+        )
     }
 }
 
-fn collect_reachable_events<'a>(
+fn collect_reachable_events<'a, S: std::hash::BuildHasher>(
     start_id: &str,
-    events_map: &'a HashMap<String, LeanEvent>,
+    events_map: &'a HashMap<String, LeanEvent, S>,
 ) -> Vec<&'a LeanEvent> {
     let mut visited = std::collections::HashSet::new();
     let mut stack = vec![start_id.to_string()];
@@ -363,9 +434,9 @@ fn collect_reachable_events<'a>(
     reachable
 }
 
-fn build_state_map(
+fn build_state_map<S: std::hash::BuildHasher>(
     sorted_events: Vec<&LeanEvent>,
-    raw_map: &HashMap<String, serde_json::Value>,
+    raw_map: &HashMap<String, rezzy::JsonValue, S>,
 ) -> HashMap<(EventType, String), String> {
     let mut state_map = HashMap::new();
     for ev in sorted_events {
@@ -384,10 +455,11 @@ fn build_state_map(
 }
 
 /// Compute state maps for the given events.
-pub fn compute_state_maps(
+#[must_use]
+pub fn compute_state_maps<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     heads: &[String],
-    events_map: &HashMap<String, LeanEvent>,
-    raw_map: &HashMap<String, serde_json::Value>,
+    events_map: &HashMap<String, LeanEvent, S1>,
+    raw_map: &HashMap<String, rezzy::JsonValue, S2>,
     debug: bool,
 ) -> Vec<HashMap<(EventType, String), String>> {
     if heads.len() <= 1 {
@@ -435,14 +507,17 @@ pub fn compute_state_maps(
     }
 }
 
+/// Resolved state: `(type, state_key)` to event ID.
 pub type ResolvedState = imbl::OrdMap<(EventType, String), String>;
 
 /// Resolve parent states for a set of events.
-pub fn resolve_parent_states(
+#[must_use]
+pub fn resolve_parent_states<S: std::hash::BuildHasher>(
     parent_states: &[SharedStateMap],
-    events_map: &HashMap<String, LeanEvent>,
+    events_map: &HashMap<String, LeanEvent, S>,
     version: StateResVersion,
-    auth_graph: &rezzy::auth::roaring::AuthGraph,
+    reachability: &rezzy::resolve::reachability::RangePrefilterReachability<String>,
+    caches: &mut rezzy::ForkResolveCaches<String, rezzy::JsonValue>,
 ) -> SharedStateMap {
     // Fast path: all parent states are identical (Arc::ptr_eq or value equality).
     // Common in linear DAGs where every parent shares the same resolved state.
@@ -456,48 +531,30 @@ pub fn resolve_parent_states(
         }
     }
 
-    // Restrict the event context passed to the library to the auth-chain
-    // closure of the events actually referenced by these parent states,
-    // rather than the full room's event map. `resolve_state_maps`
-    // (specifically the V2.1+ MSC4297 subgraph step) walks/clones its
-    // entire `event_context` argument on every call; passing the full
-    // map here is fine when called once (the final-heads resolve in
-    // `partition_and_resolve_state`) but is O(room size) *per fork* when
-    // called from a full-history incremental walk (e.g. `--format
-    // deltas`), which visits every fork point in the DAG, not just the
-    // final heads. Using the precomputed `AuthGraph` bitmaps turns this
-    // into O(auth-chain size) per call instead.
-    let mut relevant = roaring::RoaringBitmap::new();
-    for state in parent_states {
-        for id in state.values() {
-            if let Some(idx) = auth_graph.index.index_of(id) {
-                relevant.insert(idx);
-                relevant |= &auth_graph.auth_bitmaps[idx as usize];
-            }
-        }
-    }
-    let filtered_context: HashMap<String, LeanEvent> = relevant
-        .into_iter()
-        .filter_map(|idx| {
-            let id = auth_graph.index.item_at(idx as usize)?;
-            events_map.get(id).map(|ev| (id.clone(), ev.clone()))
-        })
-        .collect();
-
-    // Unwrap Arc<OrdMap> → &OrdMap for the library call
+    // Pass the room event map by reference: no per-fork context clone. The
+    // shared reachability index restricts V2.1 forward reachability, and the
+    // full map is a superset of the former per-fork auth closure, which the
+    // full-context reference already proved resolves identically.
     let bare_maps: Vec<ResolvedState> = parent_states
         .iter()
         .map(|arc| arc.as_ref().clone())
         .collect();
-    let resolved = rezzy::resolve_state_maps(&bare_maps, &filtered_context, version);
+    let resolved =
+        rezzy::resolve_state_maps_cached(&bare_maps, events_map, version, reachability, caches);
     std::sync::Arc::new(resolved)
 }
 
 /// Partition and resolve state across components.
-pub fn partition_and_resolve_state(
+///
+/// # Panics
+///
+/// Panics only if an auth-chain bitmap contains an index absent from its own
+/// graph index.
+#[must_use]
+pub fn partition_and_resolve_state<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     heads: &[String],
-    events_map: &HashMap<String, LeanEvent>,
-    state_maps: &[HashMap<(EventType, String), String>],
+    events_map: &HashMap<String, LeanEvent, S1>,
+    state_maps: &[HashMap<(EventType, String), String, S2>],
     version: StateResVersion,
     auth_graph: &rezzy::auth::roaring::AuthGraph,
 ) -> (ResolvedState, std::time::Duration) {
@@ -561,22 +618,22 @@ pub fn partition_and_resolve_state(
     }
 
     let mut pl_cache = HashMap::new();
-    let final_state_map = rezzy::resolve_iterative_sort(
+    let final_state_map = rezzy::resolve_iterative_sort(rezzy::IterativeInputs::new(
         &unconflicted_state,
         &conflicted_events,
         events_map,
         version,
         &mut pl_cache,
         &String::new(),
-    );
+    ));
 
     let duration = start.elapsed();
     (final_state_map, duration)
 }
 
 /// Apply global power levels to the state.
-pub fn apply_global_power_levels(
-    events_map: &mut HashMap<String, LeanEvent>,
+pub fn apply_global_power_levels<S: std::hash::BuildHasher>(
+    events_map: &mut HashMap<String, LeanEvent, S>,
     creator_user_id: &str,
     version: StateResVersion,
 ) {
@@ -606,11 +663,14 @@ pub fn apply_global_power_levels(
         .find(|ev| ev.event_type == M_ROOM_CREATE);
     let mut pl_cache = HashMap::new();
     let sorted_power_ids =
-        rezzy::lean_kahn_sort(&power_events, events_map, create_ev, version, &mut pl_cache);
+        rezzy::KahnSortInputs::new(&power_events, events_map, create_ev, version, &mut pl_cache)
+            .sort();
     let mut resolved_power_state = imbl::OrdMap::new();
     for id in sorted_power_ids {
         if let Some(ev) = power_events.get(&id) {
-            resolved_power_state.insert((ev.event_type.clone(), ev.state_key.clone().unwrap()), id);
+            if let Some(state_key) = &ev.state_key {
+                resolved_power_state.insert((ev.event_type.clone(), state_key.clone()), id);
+            }
         }
     }
 
@@ -628,7 +688,7 @@ pub fn apply_global_power_levels(
             if let Some(pl_val) = ev
                 .content
                 .get(FIELD_USERS_DEFAULT)
-                .and_then(serde_json::Value::as_i64)
+                .and_then(rezzy::JsonValue::as_i64)
             {
                 default_power_level = pl_val;
             }
@@ -643,6 +703,12 @@ pub fn apply_global_power_levels(
 }
 
 /// Convert epoch days to a YMD tuple.
+///
+/// # Panics
+///
+/// Panics if an intermediate date component cannot be represented by its
+/// destination integer type.
+#[must_use]
 pub fn epoch_days_to_ymd(days: i64) -> (i64, u32, u32) {
     let z = days.wrapping_add(719_468);
     let era = (if z >= 0 { z } else { z.wrapping_sub(146_096) }).wrapping_div(146_097);
@@ -680,6 +746,62 @@ pub fn epoch_days_to_ymd(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[test]
+    fn raw_jsonl_spans_skip_blank_lines() {
+        let input = b"\n {\"event_id\":\"$a\"}\n\n{\"event_id\":\"$b\"}";
+        let spans = super::discover_jsonl_spans(input);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(
+            &input[spans[0].start..spans[0].end],
+            b" {\"event_id\":\"$a\"}"
+        );
+        assert_eq!(
+            &input[spans[1].start..spans[1].end],
+            b"{\"event_id\":\"$b\"}"
+        );
+    }
+
+    #[test]
+    fn masked_matrix_fields_extract_adjacency_without_full_dom() {
+        let raw = br#"{"event_id":"$e","room_id":"!r:x","type":"m.room.message","state_key":"","prev_events":["$p"],"auth_events":[["$a",{}]],"content":{"room_version":"10","m.relates_to":{"rel_type":"m.thread","event_id":"$root"},"ignored":{"large":[1,2,3]}}}"#;
+        let mut scratch = super::MatrixEventScratch::with_capacity(4, 4, 32);
+        let fields = super::extract_matrix_event_into(raw, &mut scratch).unwrap();
+        assert_eq!(fields.event_id, Some("$e"));
+        assert_eq!(fields.prev_events, vec!["$p"]);
+        assert_eq!(fields.auth_events, vec!["$a"]);
+    }
+
+    #[test]
+    fn discover_array_and_envelope_and_federation_spans() {
+        let arr = br#"[ {"event_id":"$1"}, {"event_id":"$2"} ]"#;
+        let spans = super::discover_array_spans(arr).unwrap();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(&arr[spans[0].start..spans[0].end], br#"{"event_id":"$1"}"#);
+        assert_eq!(&arr[spans[1].start..spans[1].end], br#"{"event_id":"$2"}"#);
+
+        let env = br#"{"heads":["$h1","$h2"],"events":[{"event_id":"$1"}]}"#;
+        let env_spans = super::discover_envelope_spans(env).unwrap();
+        assert_eq!(env_spans.heads, vec!["$h1", "$h2"]);
+        assert_eq!(env_spans.events.len(), 1);
+        assert_eq!(
+            &env[env_spans.events[0].start..env_spans.events[0].end],
+            br#"{"event_id":"$1"}"#
+        );
+
+        let fed = br#"{"pdus":[{"event_id":"$p1"}],"auth_chain":[{"event_id":"$a1"}]}"#;
+        let fed_spans = super::discover_federation_spans(fed).unwrap();
+        assert_eq!(fed_spans.pdus.len(), 1);
+        assert_eq!(fed_spans.auth_chain.len(), 1);
+        assert_eq!(
+            &fed[fed_spans.pdus[0].start..fed_spans.pdus[0].end],
+            br#"{"event_id":"$p1"}"#
+        );
+        assert_eq!(
+            &fed[fed_spans.auth_chain[0].start..fed_spans.auth_chain[0].end],
+            br#"{"event_id":"$a1"}"#
+        );
+    }
+
     use super::*;
     use rezzy::LeanEvent;
 
@@ -688,25 +810,33 @@ mod tests {
             .lines()
             .filter(|l| !l.trim().is_empty())
             .map(|l| {
-                let e: LeanEvent = serde_json::from_str(l).unwrap_or_else(|err| {
+                let value = rezzy::JsonValue::parse(l).unwrap_or_else(|err| {
                     panic!("failed to parse JSONL fixture line: {err}\nline: {l}")
+                });
+                let e = LeanEvent::from_value(&value, None).unwrap_or_else(|err| {
+                    panic!("failed to parse event in JSONL fixture: {err}\nline: {l}")
                 });
                 (e.event_id.clone(), e)
             })
             .collect()
     }
 
+    const CREATE_AND_JOIN: &str = r#"
+{"event_id":"A","type":"m.room.create","state_key":"","sender":"@x:x","depth":1,"content":{"room_version":"10","creator":"@x:x"},"prev_events":[],"auth_events":[]}
+{"event_id":"B","type":"m.room.member","state_key":"@x:x","sender":"@x:x","depth":2,"content":{"membership":"join"},"prev_events":["A"],"auth_events":["A"]}
+"#;
+
+    fn events_with(extra: &str) -> HashMap<String, LeanEvent> {
+        map_from_jsonl(&format!("{CREATE_AND_JOIN}{extra}"))
+    }
+
     /// A gap in `auth_events` must be reported distinctly from a `prev_events`
     /// gap, and both must be absent when no oracle gap exists.
     #[test]
     fn test_report_gaps_distinguishes_prev_vs_auth() {
-        let events = map_from_jsonl(
-            r#"
-{"event_id":"A","type":"m.room.create","state_key":"","sender":"@x:x","depth":1,"content":{"room_version":"10","creator":"@x:x"},"prev_events":[],"auth_events":[]}
-{"event_id":"B","type":"m.room.member","state_key":"@x:x","sender":"@x:x","depth":2,"content":{"membership":"join"},"prev_events":["A"],"auth_events":["A"]}
-{"event_id":"C","type":"m.room.message","sender":"@x:x","depth":3,"prev_events":["B","MISSING_PREV"],"auth_events":["A","B"]}
-{"event_id":"D","type":"m.room.message","sender":"@x:x","depth":4,"prev_events":["C"],"auth_events":["A","MISSING_AUTH"]}
-            "#,
+        let events = events_with(
+            r#"{"event_id":"C","type":"m.room.message","sender":"@x:x","depth":3,"prev_events":["B","MISSING_PREV"],"auth_events":["A","B"]}
+{"event_id":"D","type":"m.room.message","sender":"@x:x","depth":4,"prev_events":["C"],"auth_events":["A","MISSING_AUTH"]}"#,
         );
 
         let (backward, missing_auth) = report_gaps(&events, |_| false);
@@ -744,12 +874,8 @@ mod tests {
     /// A fully-connected DAG reports no gaps.
     #[test]
     fn test_report_gaps_clean() {
-        let events = map_from_jsonl(
-            r#"
-{"event_id":"A","type":"m.room.create","state_key":"","sender":"@x:x","depth":1,"content":{"room_version":"10","creator":"@x:x"},"prev_events":[],"auth_events":[]}
-{"event_id":"B","type":"m.room.member","state_key":"@x:x","sender":"@x:x","depth":2,"content":{"membership":"join"},"prev_events":["A"],"auth_events":["A"]}
-{"event_id":"C","type":"m.room.message","sender":"@x:x","depth":3,"prev_events":["B"],"auth_events":["A","B"]}
-            "#,
+        let events = events_with(
+            r#"{"event_id":"C","type":"m.room.message","sender":"@x:x","depth":3,"prev_events":["B"],"auth_events":["A","B"]}"#,
         );
         let (backward, missing_auth) = report_gaps(&events, |_| false);
         assert_eq!(
@@ -760,5 +886,183 @@ mod tests {
             missing_auth,
             [] as [rezzy::MissingAuthEvent<std::string::String>; 0]
         );
+    }
+
+    fn shared_state(entries: &[(&str, &str, &str)]) -> SharedStateMap {
+        std::sync::Arc::new(
+            entries
+                .iter()
+                .map(|(typ, key, id)| (((*typ).into(), (*key).to_string()), (*id).to_string()))
+                .collect(),
+        )
+    }
+
+    fn resolve_full(
+        parents: &[SharedStateMap],
+        events: &HashMap<String, LeanEvent>,
+    ) -> ResolvedState {
+        let bare: Vec<ResolvedState> = parents.iter().map(|s| s.as_ref().clone()).collect();
+        rezzy::resolve_state_maps(&bare, events, StateResVersion::V2_1)
+    }
+
+    fn resolve_indexed(
+        parents: &[SharedStateMap],
+        events: &HashMap<String, LeanEvent>,
+    ) -> SharedStateMap {
+        let reachability =
+            rezzy::resolve::reachability::RangePrefilterReachability::<String>::build(events);
+        let mut caches =
+            rezzy::ForkResolveCaches::<String, rezzy::JsonValue>::new(StateResVersion::V2_1);
+        resolve_parent_states(
+            parents,
+            events,
+            StateResVersion::V2_1,
+            &reachability,
+            &mut caches,
+        )
+    }
+
+    /// Regression guard: resolving a fork through the shared reachability
+    /// index must produce exactly the same state as the plain full-context
+    /// resolver.
+    ///
+    /// The V2.1+ MSC4297 step needs the forward-reachable side of the
+    /// conflicted subgraph. A context narrowed to only the backward-reachable
+    /// set of the conflicted events (e.g. an on-demand lazy provider)
+    /// under-resolves and silently changes the result — this test fails if that
+    /// ever becomes the implementation, or if the shared index diverges from
+    /// the per-call index.
+    #[test]
+    fn indexed_parent_resolution_matches_full_context() {
+        let events = map_from_jsonl(
+            r#"
+{"event_id":"$create","type":"m.room.create","state_key":"","sender":"@a:x","depth":1,"content":{"room_version":"10","creator":"@a:x"},"prev_events":[],"auth_events":[]}
+{"event_id":"$pl_a","type":"m.room.power_levels","state_key":"","sender":"@a:x","depth":2,"content":{"users":{"@a:x":100}},"prev_events":["$create"],"auth_events":["$create"]}
+{"event_id":"$pl_b","type":"m.room.power_levels","state_key":"","sender":"@b:x","depth":2,"content":{"users":{"@b:x":100,"@a:x":50}},"prev_events":["$create"],"auth_events":["$create"]}
+{"event_id":"$ma","type":"m.room.member","state_key":"@a:x","sender":"@a:x","depth":3,"content":{"membership":"join"},"prev_events":["$pl_a"],"auth_events":["$create","$pl_a"]}
+{"event_id":"$mb","type":"m.room.member","state_key":"@b:x","sender":"@b:x","depth":3,"content":{"membership":"join"},"prev_events":["$pl_a"],"auth_events":["$create","$pl_a"]}
+{"event_id":"$unrelated","type":"m.room.message","sender":"@a:x","depth":3,"content":{"body":"x"},"prev_events":["$pl_a"],"auth_events":["$create","$pl_a"]}
+"#,
+        );
+        let state_a: SharedStateMap = shared_state(&[
+            ("m.room.create", "", "$create"),
+            ("m.room.power_levels", "", "$pl_a"),
+            ("m.room.member", "@a:x", "$ma"),
+        ]);
+        let state_b: SharedStateMap = shared_state(&[
+            ("m.room.create", "", "$create"),
+            ("m.room.power_levels", "", "$pl_b"),
+            ("m.room.member", "@b:x", "$mb"),
+        ]);
+
+        let parents = vec![state_a, state_b];
+        let indexed = resolve_indexed(&parents, &events);
+
+        let full = resolve_full(&parents, &events);
+
+        assert_eq!(
+            indexed.as_ref(),
+            &full,
+            "indexed fork resolution must match full-context resolution"
+        );
+    }
+
+    /// Adversarial regression for the borrowed-room-map optimization.
+    ///
+    /// The room contains unrelated auth/state branches and message events that
+    /// are forward-reachable from the fork's conflicted events but are *not*
+    /// auth ancestors of any parent-state event. The full room therefore has a
+    /// materially larger forward-reachable set than the fork's auth closure.
+    ///
+    /// The shared-index resolver passes the whole room by reference, so prove it
+    /// resolves identically to both the full-context resolver and the (removed)
+    /// filtered auth-closure resolver, for resolved state and HAMT roots.
+    #[test]
+    fn fork_resolution_equivalent_across_context_shapes() {
+        let events = map_from_jsonl(
+            r#"
+{"event_id":"$create","type":"m.room.create","state_key":"","sender":"@a:x","depth":1,"content":{"room_version":"10","creator":"@a:x"},"prev_events":[],"auth_events":[]}
+{"event_id":"$pl_a","type":"m.room.power_levels","state_key":"","sender":"@a:x","depth":2,"content":{"users":{"@a:x":100,"@b:x":50}},"prev_events":["$create"],"auth_events":["$create"]}
+{"event_id":"$pl_b","type":"m.room.power_levels","state_key":"","sender":"@b:x","depth":2,"content":{"users":{"@b:x":100,"@a:x":50}},"prev_events":["$create"],"auth_events":["$create"]}
+{"event_id":"$ma","type":"m.room.member","state_key":"@a:x","sender":"@a:x","depth":3,"content":{"membership":"join"},"prev_events":["$pl_a"],"auth_events":["$create","$pl_a"]}
+{"event_id":"$mb","type":"m.room.member","state_key":"@b:x","sender":"@b:x","depth":3,"content":{"membership":"join"},"prev_events":["$pl_b"],"auth_events":["$create","$pl_b"]}
+{"event_id":"$topic_a","type":"m.room.topic","state_key":"","sender":"@a:x","depth":3,"content":{"topic":"a"},"prev_events":["$pl_a"],"auth_events":["$create","$pl_a"]}
+{"event_id":"$topic_b","type":"m.room.topic","state_key":"","sender":"@b:x","depth":3,"content":{"topic":"b"},"prev_events":["$pl_b"],"auth_events":["$create","$pl_b"]}
+{"event_id":"$m1","type":"m.room.message","sender":"@a:x","depth":4,"content":{"body":"1"},"prev_events":["$ma"],"auth_events":["$create","$pl_a"]}
+{"event_id":"$m2","type":"m.room.message","sender":"@a:x","depth":5,"content":{"body":"2"},"prev_events":["$m1"],"auth_events":["$create","$pl_a"]}
+{"event_id":"$m3","type":"m.room.message","sender":"@b:x","depth":4,"content":{"body":"3"},"prev_events":["$mb"],"auth_events":["$create","$pl_b"]}
+{"event_id":"$m4","type":"m.room.message","sender":"@b:x","depth":5,"content":{"body":"4"},"prev_events":["$m3"],"auth_events":["$create","$pl_b"]}
+"#,
+        );
+
+        let state_a: SharedStateMap = shared_state(&[
+            ("m.room.create", "", "$create"),
+            ("m.room.power_levels", "", "$pl_a"),
+            ("m.room.member", "@a:x", "$ma"),
+            ("m.room.topic", "", "$topic_a"),
+        ]);
+        let state_b: SharedStateMap = shared_state(&[
+            ("m.room.create", "", "$create"),
+            ("m.room.power_levels", "", "$pl_b"),
+            ("m.room.member", "@b:x", "$mb"),
+            ("m.room.topic", "", "$topic_b"),
+        ]);
+
+        let parents = vec![state_a, state_b];
+        let full = resolve_full(&parents, &events);
+
+        let borrowed = resolve_indexed(&parents, &events);
+
+        let filtered_events = auth_closure(&events, &parents);
+        assert!(
+            filtered_events.len() < events.len(),
+            "fixture must place events outside the fork's auth closure"
+        );
+        let filtered = resolve_full(&parents, &filtered_events);
+
+        assert_eq!(borrowed.as_ref(), &full, "borrowed room must match full");
+        assert_eq!(filtered.as_ref(), &full, "filtered closure must match full");
+        assert_eq!(
+            hamt_root_hash(&full, b"room"),
+            hamt_root_hash(&filtered, b"room"),
+            "HAMT roots must match (full vs filtered)"
+        );
+        assert_eq!(
+            hamt_root_hash(&full, b"room"),
+            hamt_root_hash(borrowed.as_ref(), b"room"),
+            "HAMT roots must match (full vs borrowed)"
+        );
+    }
+
+    fn auth_closure(
+        events: &HashMap<String, LeanEvent>,
+        parents: &[SharedStateMap],
+    ) -> HashMap<String, LeanEvent> {
+        let auth_graph = rezzy::auth::roaring::AuthGraph::build(events);
+        let mut relevant = roaring::RoaringBitmap::new();
+        for state in parents {
+            for id in state.values() {
+                if let Some(idx) = auth_graph.index.index_of(id) {
+                    relevant.insert(idx);
+                    relevant |= &auth_graph.auth_bitmaps[idx as usize];
+                }
+            }
+        }
+        relevant
+            .into_iter()
+            .filter_map(|idx| {
+                let id = auth_graph.index.item_at(idx as usize)?;
+                events.get(id).map(|ev| (id.clone(), ev.clone()))
+            })
+            .collect()
+    }
+
+    fn hamt_root_hash(state: &ResolvedState, structural_key: &[u8]) -> rezzy::hamt::StructuralHash {
+        rezzy::hamt::build_hamt::<(EventType, String), String, _>(
+            structural_key,
+            state.iter().map(|(k, v)| (k.clone(), v.clone())),
+        )
+        .expect("HAMT build")
+        .structural_hash
     }
 }

@@ -192,3 +192,61 @@ a separate crate (`serde_canonical_json` already exists).
 | N-way fork resolution        | `resolve::multi::resolve_state_maps`   |
 | State-at computation         | `state::at::compute_state_at`          |
 | Auth types enumeration       | `auth::auth_types_for_event`           |
+
+## Signed federation CLI utilities
+
+The CLI can issue generic signed server-server requests and crawl a remote
+room's event DAG:
+
+```sh
+MATRIX_ORIGIN=example.org \
+MATRIX_SERVER_SIGNING_KEY_KEYRING=example.org \
+rezzy federation request --destination remote.example --path /_matrix/federation/v1/version
+
+rezzy federation get-remote-dag --origin example.org \
+  --destination remote.example --room '!room:example.org' \
+  --from '$event:example.org' --output remote.jsonl
+```
+
+Federation signing keys must be stored in the OS keyring. Plaintext key files,
+including `MATRIX_SERVER_SIGNING_KEY=/path/to/...`, are rejected. For multiple
+origins, use the per-origin keyring account variable
+`MATRIX_SERVER_SIGNING_KEY_KEYRING_<DOMAIN_WITH_DOTS_AND_HYPHENS_AS_UNDERSCORES>`.
+
+For legacy v3+ JSONL exports that omitted `event_id`, repair them using the
+room-version reference hash before aggregating:
+
+```sh
+rezzy repair-ids \
+  --input remote-dag-room-v6-old.jsonl \
+  --output remote-dag-room-v6-old-repaired.jsonl
+```
+
+The `-v6` token is inferred from the filename. The command only fills missing
+IDs; it does not overwrite the source file. `aggregate --repair-missing-ids`
+uses the same inference for every input file.
+
+Build the CLI with the `tls` feature; federation/keyring support is
+intentionally not present in the default CLI build:
+
+```sh
+cargo build -p rezzy-cli --features tls
+```
+
+Store the complete `ed25519:<id> <seed>` line under service `rezzy` and account
+name `your.server` (for example, with Python's `keyring` package):
+
+```sh
+python3 -m keyring set rezzy your.server
+# paste: ed25519:7 <unpadded-base64-private-seed>
+
+MATRIX_SERVER_SIGNING_KEY_KEYRING=your.server \
+rezzy federation request --origin your.server \
+  --destination remote.example \
+  --path /_matrix/federation/v1/version
+```
+
+Use `MATRIX_SERVER_SIGNING_KEY_KEYRING_<DOMAIN>` for per-origin accounts, or
+pass `--signing-key-keyring <account>` on either federation subcommand. Each
+(origin, account) keyring value is read once per process; restart the CLI after
+rotating a key. No plaintext key file is created.

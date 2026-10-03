@@ -24,12 +24,13 @@ pub trait Gf64Evaluator {
 }
 
 #[derive(Clone, Copy)]
+/// Portable evaluator using scalar GF(2^64) multiplication.
 pub struct ScalarEvaluator;
 
 impl Gf64Evaluator for ScalarEvaluator {
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
         for (i, &coefficient) in source.iter().enumerate() {
-            target[i] ^= crate::reconcile::gf64::mul(term, coefficient);
+            target[i] ^= crate::gf64::mul(term, coefficient);
         }
     }
 }
@@ -127,13 +128,13 @@ unsafe fn poly_mac_avx512(term: u64, source: &[u64], target: &mut [u64]) {
 
     // Handle remainder
     for idx in i..len {
-        target[idx] ^= crate::reconcile::gf64::mul(term, source[idx]);
+        target[idx] ^= crate::gf64::mul(term, source[idx]);
     }
 }
 
+#[allow(clippy::incompatible_msrv)]
 #[cfg(all(target_arch = "x86_64", has_avx512_support))]
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
-#[allow(clippy::incompatible_msrv)]
 #[cfg_attr(all(coverage_nightly, not(has_avx512_host_support)), coverage(off))]
 // SAFETY: Only called by `Avx512Evaluator::poly_mac` which enforces CPU feature constraints.
 unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
@@ -165,6 +166,7 @@ unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
 
 #[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
+/// `x86_64` evaluator; currently delegates to [`ScalarEvaluator`], whose multiply is already PCLMULQDQ-accelerated.
 pub struct SseEvaluator;
 
 #[cfg(target_arch = "x86_64")]
@@ -178,9 +180,12 @@ impl Gf64Evaluator for SseEvaluator {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The evaluator implementation selected for this CPU.
 pub enum EvaluatorBackend {
+    /// Portable scalar evaluator.
     Scalar,
     #[cfg(target_arch = "x86_64")]
+    /// `x86_64` evaluator.
     Sse,
     #[cfg(all(target_arch = "x86_64", has_avx512_support))]
     Avx512,
@@ -216,12 +221,13 @@ fn get_evaluator_with_cache(cache: &core::sync::atomic::AtomicU8) -> EvaluatorBa
 
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 #[must_use]
+/// Detects, and caches, the best evaluator backend for this CPU.
 pub fn get_evaluator() -> EvaluatorBackend {
     get_evaluator_with_cache(&BACKEND)
 }
 
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
-fn cached_evaluator(cached: u8, fallback: EvaluatorBackend) -> EvaluatorBackend {
+const fn cached_evaluator(cached: u8, fallback: EvaluatorBackend) -> EvaluatorBackend {
     match cached {
         1 => EvaluatorBackend::Scalar,
         2 => EvaluatorBackend::Sse,
@@ -232,7 +238,7 @@ fn cached_evaluator(cached: u8, fallback: EvaluatorBackend) -> EvaluatorBackend 
 }
 
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
-fn encode_backend(backend: EvaluatorBackend) -> u8 {
+const fn encode_backend(backend: EvaluatorBackend) -> u8 {
     match backend {
         EvaluatorBackend::Scalar => 1,
         EvaluatorBackend::Sse => 2,
@@ -307,7 +313,7 @@ fn select_evaluator_backend(has_avx512: bool, has_pclmul: bool) -> EvaluatorBack
 }
 
 #[cfg(all(feature = "std", target_arch = "x86_64", not(has_avx512_support)))]
-fn select_evaluator_backend(_has_avx512: bool, has_pclmul: bool) -> EvaluatorBackend {
+const fn select_evaluator_backend(_has_avx512: bool, has_pclmul: bool) -> EvaluatorBackend {
     if has_pclmul {
         EvaluatorBackend::Sse
     } else {
@@ -503,7 +509,7 @@ mod tests {
                 .copied()
                 .collect::<alloc::vec::Vec<_>>()
             {
-                let expected = crate::reconcile::gf64::mul_bitwise(a, b);
+                let expected = crate::gf64::mul_bitwise(a, b);
 
                 // SAFETY: gated on the same runtime feature checks used by
                 // `get_evaluator_internal`; a single-lane call is sufficient

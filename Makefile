@@ -114,8 +114,7 @@ endif
 
 .PHONY: rust/bench
 rust/bench: ##H Run benchmarks
-	#$(CARGO) bench --profile release --bench rezzy -- resolve
-	$(CARGO) bench --profile release --benches
+	$(CARGO) bench --manifest-path benches/Cargo.toml --profile release --benches
 
 
 export LLVM_COV_FLAGS = -show-region-summary=false -show-branch-summary=false
@@ -144,7 +143,7 @@ rust/clean: ##H Remove Rust build artifacts
 
 .PHONY: rust/install
 rust/install: ##H Install rezzy binary to cargo bin
-	$(CARGO) install --timings --locked --path rezzy-cli --bin rezzy
+	$(CARGO) install --timings --locked --path rezzy-cli --bin rezzy --features tls
 
 .PHONY: rust/uninstall
 rust/uninstall: ##H Uninstall rezzy binary from cargo bin

@@ -8,15 +8,15 @@
 use alloc::{
     collections::{BTreeSet, VecDeque},
     string::ToString,
+    vec::Vec,
 };
 
-use crate::basespec::rezzy_types::EventId;
-
-use alloc::vec::Vec;
+use crate::EventId;
 
 use super::{
-    algebraic::SyndromeSketch, triage::BucketRequest, AlgebraicError, ElementHash, EventIdFormat,
-    RoomAccumulator, H64_TRIE_WIDTH,
+    algebraic::SyndromeSketch,
+    triage::{BucketRequest, NodeSummary},
+    AlgebraicError, ElementHash, EventIdFormat, RoomAccumulator, RoomEventIdKind, H64_TRIE_WIDTH,
 };
 
 /// Read-only helper over a pre-sorted `h64` index.
@@ -35,7 +35,7 @@ impl<'a> H64Index<'a> {
         Self { sorted_h64 }
     }
 
-    fn bounds_unchecked(request: &BucketRequest) -> core::ops::Range<u128> {
+    pub(crate) fn bounds_unchecked(request: &BucketRequest) -> core::ops::Range<u128> {
         let depth = u32::from(request.depth);
         let shift = u32::from(H64_TRIE_WIDTH).saturating_sub(depth);
 
@@ -75,7 +75,7 @@ impl<'a> H64Index<'a> {
         &self,
         request: &BucketRequest,
     ) -> Result<core::ops::Range<usize>, AlgebraicError> {
-        crate::reconcile::triage::validate_bucket_requests(core::slice::from_ref(request))?;
+        crate::triage::validate_bucket_requests(core::slice::from_ref(request))?;
         Ok(self.bucket_range_unchecked(request))
     }
 
@@ -84,7 +84,7 @@ impl<'a> H64Index<'a> {
     /// # Errors
     /// Returns an error when the request is malformed.
     pub fn bucket_slice(&self, request: &BucketRequest) -> Result<&'a [u64], AlgebraicError> {
-        crate::reconcile::triage::validate_bucket_requests(core::slice::from_ref(request))?;
+        crate::triage::validate_bucket_requests(core::slice::from_ref(request))?;
         let range = self.bucket_range_unchecked(request);
         Ok(&self.sorted_h64[range])
     }
@@ -101,21 +101,38 @@ impl<'a> H64Index<'a> {
 /// state: it avoids threading the graph, anchors, and sorted index separately
 /// through every call site.
 #[derive(Debug, Clone, Copy)]
-pub struct ReconciliationContext<'a, Id: EventId, G: ForwardGraph<Id>> {
+pub struct ReconciliationContext<
+    'a,
+    Id: EventId,
+    G: ForwardGraph<Id>,
+    P: Population = SortedPopulation,
+> {
     graph: &'a G,
     frame_anchors: &'a [Id],
-    h64_index: H64Index<'a>,
+    population: &'a P,
 }
 
-impl<'a, Id: EventId, G: ForwardGraph<Id>> ReconciliationContext<'a, Id, G> {
+impl<'a, Id: EventId, G: ForwardGraph<Id>, P: Population> ReconciliationContext<'a, Id, G, P> {
     /// Creates a reusable context for one room/frame snapshot.
-    #[must_use]
-    pub const fn new(graph: &'a G, frame_anchors: &'a [Id], sorted_h64: &'a [u64]) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::UnsupportedRoomVersion`] for a room whose
+    /// event IDs are not reference hashes: an `event_ids` frame MUST NOT be
+    /// constructed for it.
+    pub const fn new(
+        kind: RoomEventIdKind,
+        graph: &'a G,
+        frame_anchors: &'a [Id],
+        population: &'a P,
+    ) -> Result<Self, AlgebraicError> {
+        if let Err(error) = kind.require_event_ids_frame() {
+            return Err(error);
+        }
+        Ok(Self {
             graph,
             frame_anchors,
-            h64_index: H64Index::new(sorted_h64),
-        }
+            population,
+        })
     }
 
     /// Returns the negotiated frame digest for this room snapshot.
@@ -124,9 +141,34 @@ impl<'a, Id: EventId, G: ForwardGraph<Id>> ReconciliationContext<'a, Id, G> {
     /// Returns an error if any frame event IDs violate format rules or element
     /// hashing limits.
     pub fn frame_digest(&self) -> Result<RoomAccumulator, AlgebraicError> {
-        compute_frame_digest(self.graph, self.frame_anchors)
+        compute_frame_digest(
+            RoomEventIdKind::ReferenceHash,
+            self.graph,
+            self.frame_anchors,
+        )
     }
 
+    /// Like `bucket_sketches`, but also returns each
+    /// node's [`NodeSummary`], from the same population object.
+    ///
+    /// # Errors
+    /// Returns an error if any sketches exceed capacity limits or if requests
+    /// are invalid.
+    pub fn bucket_nodes(
+        &self,
+        requests: &[BucketRequest],
+    ) -> Result<Vec<(SyndromeSketch, NodeSummary)>, AlgebraicError> {
+        build_bucket_nodes(self.population, requests)
+    }
+
+    /// The population this context serves.
+    #[must_use]
+    pub const fn population(&self) -> &'a P {
+        self.population
+    }
+}
+
+impl<'a, Id: EventId, G: ForwardGraph<Id>> ReconciliationContext<'a, Id, G, SortedPopulation> {
     /// Returns the `h64` range covered by one bucket request.
     ///
     /// # Errors
@@ -135,7 +177,7 @@ impl<'a, Id: EventId, G: ForwardGraph<Id>> ReconciliationContext<'a, Id, G> {
         &self,
         request: &BucketRequest,
     ) -> Result<core::ops::Range<usize>, AlgebraicError> {
-        self.h64_index.bucket_range(request)
+        self.population.index().bucket_range(request)
     }
 
     /// Returns the `h64` slice covered by one bucket request.
@@ -143,7 +185,7 @@ impl<'a, Id: EventId, G: ForwardGraph<Id>> ReconciliationContext<'a, Id, G> {
     /// # Errors
     /// Returns an error when the request is malformed.
     pub fn bucket_slice(&self, request: &BucketRequest) -> Result<&'a [u64], AlgebraicError> {
-        self.h64_index.bucket_slice(request)
+        self.population.index().bucket_slice(request)
     }
 
     /// Constructs bucket sketches over the room's sorted `h64` index.
@@ -154,7 +196,7 @@ impl<'a, Id: EventId, G: ForwardGraph<Id>> ReconciliationContext<'a, Id, G> {
         &self,
         requests: &[BucketRequest],
     ) -> Result<Vec<SyndromeSketch>, AlgebraicError> {
-        build_bucket_sketches(self.h64_index.sorted_h64, requests)
+        build_bucket_sketches(self.population.h64s(), requests)
     }
 }
 
@@ -205,11 +247,10 @@ pub trait ForwardGraph<Id: EventId> {
     /// Returns an error if the event ID format is invalid or hashing fails.
     fn event_hash(&self, id: &Id) -> Result<ElementHash, AlgebraicError> {
         let format = self.event_format(id);
-        if let Some(s) = self.event_id_str(id) {
-            ElementHash::from_matrix_event_id(s, format)
-        } else {
-            ElementHash::from_matrix_event_id(&id.to_string(), format)
-        }
+        self.event_id_str(id).map_or_else(
+            || ElementHash::from_matrix_event_id(&id.to_string(), format),
+            |s| ElementHash::from_matrix_event_id(s, format),
+        )
     }
 }
 
@@ -221,12 +262,15 @@ pub trait ForwardGraph<Id: EventId> {
 /// precede the anchor, such as pre-join history, are excluded.
 ///
 /// # Errors
-/// Returns an error if any frame event IDs violate format rules or element
-/// hashing limits.
+/// Returns [`AlgebraicError::UnsupportedRoomVersion`] for a room whose event
+/// IDs are not reference hashes (checked once, before any work), or an error
+/// if any frame event IDs violate format rules or element hashing limits.
 pub fn compute_frame_digest<Id: EventId, G: ForwardGraph<Id>>(
+    kind: RoomEventIdKind,
     graph: &G,
     frame_anchors: &[Id],
 ) -> Result<RoomAccumulator, AlgebraicError> {
+    kind.require_event_ids_frame()?;
     let mut accumulator = RoomAccumulator::new();
     let mut queue = VecDeque::new();
     let mut visited = BTreeSet::new();
@@ -266,7 +310,7 @@ pub fn build_bucket_sketches(
     sorted_h64: &[u64],
     requests: &[BucketRequest],
 ) -> Result<Vec<SyndromeSketch>, AlgebraicError> {
-    crate::reconcile::triage::validate_bucket_requests(requests)?;
+    crate::triage::validate_bucket_requests(requests)?;
     let index = H64Index::new(sorted_h64);
 
     let mut sketches = Vec::with_capacity(requests.len());
@@ -284,10 +328,147 @@ pub fn build_bucket_sketches(
     Ok(sketches)
 }
 
+/// A population sorted by `(h64, h128)`, with the two columns kept aligned.
+///
+/// Building it from [`ElementHash`]es sorts once, so a node's elements are a
+/// contiguous slice of both columns and the `h64 -> h128` map is multi-valued
+/// by construction: [`candidates`](Self::candidates) returns every element
+/// sharing an `h64`. There is no way to construct it with misaligned columns.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SortedPopulation {
+    h64: Vec<u64>,
+    h128: Vec<u128>,
+}
+
+impl SortedPopulation {
+    /// Sorts `elements` by `(h64, h128)`.
+    #[must_use]
+    pub fn new(mut elements: Vec<ElementHash>) -> Self {
+        elements.sort_unstable_by_key(|e| (e.h64, e.h128));
+        Self {
+            h64: elements.iter().map(|e| e.h64).collect(),
+            h128: elements.iter().map(|e| e.h128).collect(),
+        }
+    }
+
+    /// Number of elements.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.h64.len()
+    }
+
+    /// Whether the population is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.h64.is_empty()
+    }
+
+    /// The sorted `h64` column.
+    #[must_use]
+    pub fn h64s(&self) -> &[u64] {
+        &self.h64
+    }
+
+    /// The `h128` column, aligned with [`h64s`](Self::h64s).
+    #[must_use]
+    pub fn h128s(&self) -> &[u128] {
+        &self.h128
+    }
+
+    /// An [`H64Index`] over this population's `h64` column.
+    #[must_use]
+    pub fn index(&self) -> H64Index<'_> {
+        H64Index::new(&self.h64)
+    }
+
+    fn node_range(&self, node: (u8, u64)) -> core::ops::Range<usize> {
+        self.index()
+            .bucket_range_unchecked(&BucketRequest::new(node.0, node.1, 1))
+    }
+
+    /// The `h128` of every element whose `h64` is `root`, in order; empty when
+    /// the root is absent.
+    #[must_use]
+    pub fn candidates(&self, root: u64) -> &[u128] {
+        let start = self.h64.partition_point(|&x| x < root);
+        let end = self.h64.partition_point(|&x| x <= root);
+        &self.h128[start..end]
+    }
+}
+
+/// A room's population as the reconciliation exchange reads it: per-node
+/// summaries, the `h64`s of a node, and the `h128`s behind a decoded root.
+///
+/// An in-memory [`SortedPopulation`] implements it, and a persisted store can
+/// serve the same reads from a pinned snapshot. Nodes are `(depth, prefix)`;
+/// callers validate them (see `validate_bucket_requests`) before asking.
+pub trait Population {
+    /// The count and `h128` XOR of the elements inside `node`.
+    ///
+    /// # Errors
+    /// Returns an error if the count overflows.
+    fn node_summary(&self, node: (u8, u64)) -> Result<NodeSummary, AlgebraicError>;
+
+    /// Calls `f` with the `h64` of every element inside `node`, in no
+    /// particular order: toggling a sketch is an XOR, so order never matters,
+    /// and a persisted store need not merge its runs to promise one.
+    fn for_each_h64_in(&self, node: (u8, u64), f: &mut dyn FnMut(u64));
+
+    /// Appends to `out` the `h128` of every element whose `h64` is `root`, in
+    /// no particular order (the verifier XORs them).
+    fn candidates_into(&self, root: u64, out: &mut Vec<u128>);
+}
+
+impl Population for SortedPopulation {
+    fn node_summary(&self, node: (u8, u64)) -> Result<NodeSummary, AlgebraicError> {
+        let range = self.node_range(node);
+        NodeSummary::from_h128s(&self.h128[range])
+    }
+
+    fn for_each_h64_in(&self, node: (u8, u64), f: &mut dyn FnMut(u64)) {
+        for &h64 in &self.h64[self.node_range(node)] {
+            f(h64);
+        }
+    }
+
+    fn candidates_into(&self, root: u64, out: &mut Vec<u128>) {
+        out.extend_from_slice(self.candidates(root));
+    }
+}
+
+/// Like [`build_bucket_sketches`], but also returns each node's
+/// [`NodeSummary`] (count and `h128` XOR), computed over the same slice that
+/// is toggled into the sketch.
+///
+/// # Errors
+/// Returns an error if a sketch exceeds capacity limits or the requests are
+/// invalid.
+pub fn build_bucket_nodes<P: Population + ?Sized>(
+    population: &P,
+    requests: &[BucketRequest],
+) -> Result<Vec<(SyndromeSketch, NodeSummary)>, AlgebraicError> {
+    crate::triage::validate_bucket_requests(requests)?;
+    let mut nodes = Vec::with_capacity(requests.len());
+    for request in requests {
+        let node = (request.depth, request.prefix);
+        let mut sketch = SyndromeSketch::new(request.capacity)?;
+        let mut toggled = Ok(());
+        population.for_each_h64_in(node, &mut |h64| {
+            if toggled.is_ok() {
+                toggled = sketch.toggle(h64);
+            }
+        });
+        toggled?;
+        nodes.push((sketch, population.node_summary(node)?));
+    }
+    Ok(nodes)
+}
+
 // =========================================================================
 // Sketch Builder and Budget Planner Logic
 // =========================================================================
 
+/// Work limits applied while building sketches for a request.
 pub struct SketchPolicy {
     /// Maximum total elements to process across all returned sketches.
     pub max_aggregate_work: usize,
@@ -295,8 +476,11 @@ pub struct SketchPolicy {
     pub hard_fallback_threshold: usize,
 }
 
+/// Outcome of building sketches for a set of bucket requests.
 pub enum SketchResult {
+    /// A sketch for every request, in order.
     Success(Vec<(SyndromeSketch, BucketRequest)>),
+    /// The difference is too large to sketch; fall back to range sync.
     FallbackToRangeSync,
 }
 
@@ -308,6 +492,7 @@ pub struct SketchBuilder<'a> {
 
 impl<'a> SketchBuilder<'a> {
     #[must_use]
+    /// Builds a sketch builder over `index` under `policy`.
     pub const fn new(index: &'a H64Index<'a>, policy: SketchPolicy) -> Self {
         Self { index, policy }
     }
@@ -323,7 +508,7 @@ impl<'a> SketchBuilder<'a> {
     ) -> Result<SketchResult, AlgebraicError> {
         let mut total_work: usize = 0;
 
-        crate::reconcile::triage::validate_bucket_requests(initial_requests)?;
+        crate::triage::validate_bucket_requests(initial_requests)?;
         for req in initial_requests {
             let range = self.index.bucket_range_unchecked(req);
             let slice_len = range.len();
@@ -407,12 +592,63 @@ mod tests {
         }
 
         fn event_format(&self, _id: &MockId) -> EventIdFormat {
-            EventIdFormat::Legacy
+            EventIdFormat::V4Plus
+        }
+
+        fn event_hash(&self, id: &MockId) -> Result<ElementHash, AlgebraicError> {
+            Ok(ElementHash::from_opaque_bytes(id.0.as_bytes()))
         }
     }
 
     fn id(s: &str) -> MockId {
         MockId(s.to_string())
+    }
+
+    fn hash1() -> ElementHash {
+        ElementHash::from_opaque_bytes(b"$1")
+    }
+
+    fn hash2() -> ElementHash {
+        ElementHash::from_opaque_bytes(b"$2")
+    }
+
+    fn four_entry_index() -> [u64; 4] {
+        [
+            0x0000_0001_0000_0001,
+            0x0000_0001_0000_0002,
+            0x0000_0002_0000_0001,
+            0x0000_0003_0000_0001,
+        ]
+    }
+
+    fn sketch_builder<'a>(
+        index: &'a H64Index<'a>,
+        max_aggregate_work: usize,
+        hard_fallback_threshold: usize,
+    ) -> SketchBuilder<'a> {
+        SketchBuilder::new(
+            index,
+            SketchPolicy {
+                max_aggregate_work,
+                hard_fallback_threshold,
+            },
+        )
+    }
+
+    fn single_bucket_roots(
+        sorted_h64: &[u64],
+        request: BucketRequest,
+        capacity: usize,
+    ) -> Vec<u64> {
+        let requests = [request];
+        let sketches = build_bucket_sketches(sorted_h64, &requests).unwrap();
+        assert_eq!(sketches.len(), 1);
+        sketches[0].clone().decode_elements(capacity).unwrap()
+    }
+
+    fn assert_fallback(builder: &SketchBuilder<'_>, requests: &[BucketRequest]) {
+        let result = builder.build(requests).unwrap();
+        assert!(matches!(result, SketchResult::FallbackToRangeSync));
     }
 
     #[test]
@@ -436,7 +672,11 @@ mod tests {
             }
 
             fn event_format(&self, _id: &MockId) -> EventIdFormat {
-                EventIdFormat::Legacy
+                EventIdFormat::V4Plus
+            }
+
+            fn event_hash(&self, id: &MockId) -> Result<ElementHash, AlgebraicError> {
+                Ok(ElementHash::from_opaque_bytes(id.0.as_bytes()))
             }
         }
 
@@ -445,10 +685,7 @@ mod tests {
         assert_eq!(StringIdGraph.children(&event_id).next(), None);
 
         let hash = StringIdGraph.event_hash(&event_id).unwrap();
-        assert_eq!(
-            hash,
-            ElementHash::from_matrix_event_id("$anchor", EventIdFormat::Legacy).unwrap()
-        );
+        assert_eq!(hash, ElementHash::from_opaque_bytes(b"$anchor"));
     }
 
     #[test]
@@ -473,10 +710,9 @@ mod tests {
                 // Deliberately distinct from the default legacy hash of `id.0`
                 // (which would hash "$child") so the assertion below can only
                 // pass if traversal actually dispatches through this override.
-                ElementHash::from_matrix_event_id(
-                    &alloc::format!("$custom-{}", id.0),
-                    EventIdFormat::Legacy,
-                )
+                Ok(ElementHash::from_opaque_bytes(
+                    alloc::format!("$custom-{}", id.0).as_bytes(),
+                ))
             }
         }
 
@@ -486,16 +722,19 @@ mod tests {
 
         assert_eq!(
             custom_graph.event_format(&id("$anchor")),
-            EventIdFormat::Legacy
+            EventIdFormat::V4Plus
         );
 
-        let digest = compute_frame_digest(&custom_graph, &[id("$anchor")]).unwrap();
+        let digest = compute_frame_digest(
+            RoomEventIdKind::ReferenceHash,
+            &custom_graph,
+            &[id("$anchor")],
+        )
+        .unwrap();
 
         let mut expected = RoomAccumulator::new();
         expected
-            .insert(
-                ElementHash::from_matrix_event_id("$custom-$child", EventIdFormat::Legacy).unwrap(),
-            )
+            .insert(ElementHash::from_opaque_bytes(b"$custom-$child"))
             .unwrap();
 
         assert_eq!(digest.digest(), expected.digest());
@@ -514,19 +753,18 @@ mod tests {
         graph.add_edge("$child1", "$grandchild");
         graph.add_edge("$child2", "$grandchild");
 
-        let digest = compute_frame_digest(&graph, &[id("$anchor")]).unwrap();
+        let digest =
+            compute_frame_digest(RoomEventIdKind::ReferenceHash, &graph, &[id("$anchor")]).unwrap();
 
         let mut expected = RoomAccumulator::new();
         expected
-            .insert(ElementHash::from_matrix_event_id("$child1", EventIdFormat::Legacy).unwrap())
+            .insert(ElementHash::from_opaque_bytes(b"$child1"))
             .unwrap();
         expected
-            .insert(ElementHash::from_matrix_event_id("$child2", EventIdFormat::Legacy).unwrap())
+            .insert(ElementHash::from_opaque_bytes(b"$child2"))
             .unwrap();
         expected
-            .insert(
-                ElementHash::from_matrix_event_id("$grandchild", EventIdFormat::Legacy).unwrap(),
-            )
+            .insert(ElementHash::from_opaque_bytes(b"$grandchild"))
             .unwrap();
 
         assert_eq!(digest.digest(), expected.digest());
@@ -541,11 +779,12 @@ mod tests {
         // Disconnected outlier
         graph.known_events.insert(id("$outlier"));
 
-        let digest = compute_frame_digest(&graph, &[id("$anchor")]).unwrap();
+        let digest =
+            compute_frame_digest(RoomEventIdKind::ReferenceHash, &graph, &[id("$anchor")]).unwrap();
 
         let mut expected = RoomAccumulator::new();
         expected
-            .insert(ElementHash::from_matrix_event_id("$child", EventIdFormat::Legacy).unwrap())
+            .insert(ElementHash::from_opaque_bytes(b"$child"))
             .unwrap();
 
         assert_eq!(digest.digest(), expected.digest());
@@ -553,31 +792,21 @@ mod tests {
 
     #[test]
     fn test_build_bucket_sketches_exact_match() {
-        use crate::reconcile::triage::BucketRequest;
-        let h1 = ElementHash::from_matrix_event_id("$1", EventIdFormat::Legacy).unwrap();
+        use crate::triage::BucketRequest;
+        let h1 = hash1();
 
         let bucket_idx = h1.h64 >> 56;
-        let requests = [BucketRequest::new(8, bucket_idx, 4)];
+        let roots = single_bucket_roots(&[h1.h64], BucketRequest::new(8, bucket_idx, 4), 4);
 
-        let sorted_h64 = vec![h1.h64];
-        let sketches = build_bucket_sketches(&sorted_h64, &requests).unwrap();
-
-        assert_eq!(sketches.len(), 1);
-        let roots = sketches[0].clone().decode_elements(4).unwrap();
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0], h1.h64);
     }
 
     #[test]
     fn test_h64_index_bucket_slice() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
 
-        let sorted_h64 = vec![
-            0x0000_0001_0000_0001,
-            0x0000_0001_0000_0002,
-            0x0000_0002_0000_0001,
-            0x0000_0003_0000_0001,
-        ];
+        let sorted_h64 = four_entry_index();
         let index = H64Index::new(&sorted_h64);
         let request = BucketRequest::new(32, 1, 4);
 
@@ -585,16 +814,48 @@ mod tests {
         assert_eq!(slice, &[0x0000_0001_0000_0001, 0x0000_0001_0000_0002]);
     }
 
+    /// Two events sharing an `h64` (a 64-bit collision) occupy adjacent slots
+    /// in the sorted index. `bucket_slice` returns both -- the index is a
+    /// multiset -- but toggling an element twice is the identity in
+    /// characteristic two, so the pair contributes nothing to the sketch and
+    /// can never be decoded as a root. Only the 128-bit residual can notice.
+    #[test]
+    fn duplicate_h64_is_returned_twice_but_cancels_in_the_sketch() {
+        use crate::triage::BucketRequest;
+
+        let shared = 0x0000_0001_0000_0002;
+        let sorted_h64 = [0x0000_0001_0000_0001, shared, shared, 0x0000_0002_0000_0001];
+        let request = BucketRequest::new(32, 1, 4);
+
+        let slice = H64Index::new(&sorted_h64).bucket_slice(&request).unwrap();
+        assert_eq!(slice, &[0x0000_0001_0000_0001, shared, shared]);
+
+        let sketch = &build_bucket_sketches(&sorted_h64, &[request]).unwrap()[0];
+        let mut singleton = SyndromeSketch::new(4).unwrap();
+        singleton.toggle(0x0000_0001_0000_0001).unwrap();
+        assert_eq!(sketch, &singleton, "the colliding pair must cancel out");
+        assert_eq!(
+            sketch.decode_elements(4).unwrap(),
+            vec![0x0000_0001_0000_0001]
+        );
+    }
+
+    #[test]
+    fn duplicate_h64_alone_leaves_an_empty_sketch() {
+        use crate::triage::BucketRequest;
+
+        let sorted_h64 = [7, 7];
+        let sketch =
+            &build_bucket_sketches(&sorted_h64, &[BucketRequest::new(0, 0, 2)]).unwrap()[0];
+        assert_eq!(sketch, &SyndromeSketch::new(2).unwrap());
+        assert_eq!(sketch.decode_elements(2).unwrap(), Vec::<u64>::new());
+    }
+
     #[test]
     fn test_h64_index_bucket_range() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
 
-        let sorted_h64 = vec![
-            0x0000_0001_0000_0001,
-            0x0000_0001_0000_0002,
-            0x0000_0002_0000_0001,
-            0x0000_0003_0000_0001,
-        ];
+        let sorted_h64 = four_entry_index();
         let index = H64Index::new(&sorted_h64);
         let request = BucketRequest::new(32, 1, 4);
 
@@ -604,20 +865,25 @@ mod tests {
 
     #[test]
     fn test_reconciliation_context_delegates_room_lookups() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
 
         let mut graph = MockGraph::new();
         graph.add_edge("$anchor", "$child");
         graph.add_edge("$child", "$grandchild");
 
-        let child = ElementHash::from_matrix_event_id("$child", EventIdFormat::Legacy).unwrap();
-        let grandchild =
-            ElementHash::from_matrix_event_id("$grandchild", EventIdFormat::Legacy).unwrap();
-        let mut sorted_h64 = vec![grandchild.h64, child.h64];
-        sorted_h64.sort_unstable();
+        let child = ElementHash::from_opaque_bytes(b"$child");
+        let grandchild = ElementHash::from_opaque_bytes(b"$grandchild");
+        let population = SortedPopulation::new(vec![grandchild, child]);
+        let sorted_h64 = population.h64s().to_vec();
         let anchors = [id("$anchor")];
 
-        let context = ReconciliationContext::new(&graph, &anchors, &sorted_h64);
+        let context = ReconciliationContext::new(
+            RoomEventIdKind::ReferenceHash,
+            &graph,
+            &anchors,
+            &population,
+        )
+        .unwrap();
         let digest = context.frame_digest().unwrap();
 
         let mut expected = RoomAccumulator::new();
@@ -635,16 +901,16 @@ mod tests {
         assert_eq!(sketches.len(), 1);
         let mut roots = sketches[0].clone().decode_elements(4).unwrap();
         roots.sort_unstable();
-        let mut expected_roots = sorted_h64.clone();
+        let mut expected_roots = sorted_h64;
         expected_roots.sort_unstable();
         assert_eq!(roots, expected_roots);
     }
 
     #[test]
     fn test_build_bucket_sketches_dynamic_summation() {
-        use crate::reconcile::triage::BucketRequest;
-        let h1 = ElementHash::from_matrix_event_id("$1", EventIdFormat::Legacy).unwrap();
-        let h2 = ElementHash::from_matrix_event_id("$2", EventIdFormat::Legacy).unwrap();
+        use crate::triage::BucketRequest;
+        let h1 = hash1();
+        let h2 = hash2();
 
         // Depth 0 encompasses everything
         let requests = [BucketRequest::new(0, 0, 4)];
@@ -665,9 +931,9 @@ mod tests {
 
     #[test]
     fn test_build_bucket_sketches_deep_extraction() {
-        use crate::reconcile::triage::BucketRequest;
-        let h1 = ElementHash::from_matrix_event_id("$1", EventIdFormat::Legacy).unwrap();
-        let h2 = ElementHash::from_matrix_event_id("$2", EventIdFormat::Legacy).unwrap();
+        use crate::triage::BucketRequest;
+        let h1 = hash1();
+        let h2 = hash2();
 
         let depth: u8 = 16;
         let shift = u32::from(H64_TRIE_WIDTH) - u32::from(depth);
@@ -688,7 +954,7 @@ mod tests {
 
     #[test]
     fn test_build_bucket_sketches_invalid_indices() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
         let sorted_h64 = vec![];
         let requests = [BucketRequest::new(8, 256, 4)];
         assert_eq!(
@@ -705,32 +971,20 @@ mod tests {
 
     #[test]
     fn test_build_bucket_sketches_depth_0_slow_path() {
-        use crate::reconcile::triage::BucketRequest;
-        let h1 = ElementHash::from_matrix_event_id("$1", EventIdFormat::Legacy).unwrap();
+        use crate::triage::BucketRequest;
+        let h1 = hash1();
 
-        let requests = [BucketRequest::new(0, 0, 10)];
-
-        let sorted_h64 = vec![h1.h64];
-        let sketches = build_bucket_sketches(&sorted_h64, &requests).unwrap();
-
-        assert_eq!(sketches.len(), 1);
-        let roots = sketches[0].clone().decode_elements(10).unwrap();
+        let roots = single_bucket_roots(&[h1.h64], BucketRequest::new(0, 0, 10), 10);
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0], h1.h64);
     }
 
     #[test]
     fn test_sketch_builder_build_success_no_split() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
         let sorted_h64 = vec![0x1000_0000_0000_0000, 0x2000_0000_0000_0000];
         let index = H64Index::new(&sorted_h64);
-
-        let policy = SketchPolicy {
-            max_aggregate_work: 1000,
-            hard_fallback_threshold: 1000,
-        };
-
-        let builder = SketchBuilder::new(&index, policy);
+        let builder = sketch_builder(&index, 1000, 1000);
         let requests = [BucketRequest::new(0, 0, 10)];
 
         let result = builder.build(&requests).unwrap();
@@ -744,16 +998,10 @@ mod tests {
 
     #[test]
     fn test_sketch_builder_build_materializes_large_slice_at_small_capacity() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
         let sorted_h64 = vec![0x0000_0000_0000_0001, 0x8000_0000_0000_0002];
         let index = H64Index::new(&sorted_h64);
-
-        let policy = SketchPolicy {
-            max_aggregate_work: 1000,
-            hard_fallback_threshold: 1000,
-        };
-
-        let builder = SketchBuilder::new(&index, policy);
+        let builder = sketch_builder(&index, 1000, 1000);
         let requests = [BucketRequest::new(0, 0, 1)];
 
         let result = builder.build(&requests).unwrap();
@@ -762,75 +1010,47 @@ mod tests {
 
     #[test]
     fn test_sketch_builder_build_hard_fallback() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
         let sorted_h64 = vec![1, 2, 3];
         let index = H64Index::new(&sorted_h64);
-
-        let policy = SketchPolicy {
-            max_aggregate_work: 1000,
-            hard_fallback_threshold: 2, // 3 > 2, triggers hard fallback
-        };
-
-        let builder = SketchBuilder::new(&index, policy);
-        let requests = [BucketRequest::new(0, 0, 1)];
-
-        let result = builder.build(&requests).unwrap();
-        assert!(matches!(result, SketchResult::FallbackToRangeSync));
+        // 3 > 2, triggers hard fallback
+        let builder = sketch_builder(&index, 1000, 2);
+        assert_fallback(&builder, &[BucketRequest::new(0, 0, 1)]);
     }
 
     #[test]
     fn test_sketch_builder_build_budget_exhausted() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
         // Two elements, capacity 1, will split.
         // Splitting creates two slices of length 1.
         // Aggregate work will be 1 + 1 = 2.
         let sorted_h64 = vec![0x0000_0000_0000_0001, 0x8000_0000_0000_0002];
         let index = H64Index::new(&sorted_h64);
-
-        let policy = SketchPolicy {
-            max_aggregate_work: 1, // Budget of 1 will be exhausted since 2 work is needed
-            hard_fallback_threshold: 1000,
-        };
-
-        let builder = SketchBuilder::new(&index, policy);
-        let requests = [BucketRequest::new(0, 0, 1)];
-
-        let result = builder.build(&requests).unwrap();
-        assert!(matches!(result, SketchResult::FallbackToRangeSync));
+        // Budget of 1 will be exhausted since 2 work is needed
+        let builder = sketch_builder(&index, 1, 1000);
+        assert_fallback(&builder, &[BucketRequest::new(0, 0, 1)]);
     }
 
     #[test]
     fn test_sketch_builder_build_falls_back_on_aggregate_work_limit() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
 
         let sorted_h64 = vec![0x1000_0000_0000_0000, 0x9000_0000_0000_0000];
         let index = H64Index::new(&sorted_h64);
-
-        let policy = SketchPolicy {
-            max_aggregate_work: 1,
-            hard_fallback_threshold: 1000,
-        };
-
-        let builder = SketchBuilder::new(&index, policy);
-        let requests = [BucketRequest::new(1, 0, 1), BucketRequest::new(1, 1, 1)];
-
-        let result = builder.build(&requests).unwrap();
-        assert!(matches!(result, SketchResult::FallbackToRangeSync));
+        let builder = sketch_builder(&index, 1, 1000);
+        assert_fallback(
+            &builder,
+            &[BucketRequest::new(1, 0, 1), BucketRequest::new(1, 1, 1)],
+        );
     }
 
     #[test]
     fn test_sketch_builder_build_propagates_bucket_materialization_errors() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
 
         let sorted_h64 = vec![0, 0x1000_0000_0000_0000];
         let index = H64Index::new(&sorted_h64);
-
-        let policy = SketchPolicy {
-            max_aggregate_work: 1000,
-            hard_fallback_threshold: 1000,
-        };
-
-        let builder = SketchBuilder::new(&index, policy);
+        let builder = sketch_builder(&index, 1000, 1000);
         let requests = [BucketRequest::new(0, 0, 2)];
 
         assert!(matches!(
@@ -841,16 +1061,10 @@ mod tests {
 
     #[test]
     fn test_sketch_builder_build_rejects_malformed_request_before_localization() {
-        use crate::reconcile::triage::BucketRequest;
+        use crate::triage::BucketRequest;
         let sorted_h64 = vec![0x1000_0000_0000_0000, 0x2000_0000_0000_0000];
         let index = H64Index::new(&sorted_h64);
-
-        let policy = SketchPolicy {
-            max_aggregate_work: 1000,
-            hard_fallback_threshold: 1000,
-        };
-
-        let builder = SketchBuilder::new(&index, policy);
+        let builder = sketch_builder(&index, 1000, 1000);
         // Zero capacity is rejected by `validate_bucket_requests` before any
         // range localization is attempted.
         let requests = [BucketRequest::new(0, 0, 0)];
@@ -865,22 +1079,205 @@ mod tests {
     fn test_sketch_builder_rejects_depth_above_maximum() {
         let sorted_h64 = [1_u64];
         let index = H64Index::new(&sorted_h64);
-        let builder = SketchBuilder::new(
-            &index,
-            SketchPolicy {
-                max_aggregate_work: 1_000,
-                hard_fallback_threshold: 1_000,
-            },
-        );
-        let requests = [BucketRequest::new(
-            crate::reconcile::MAX_DEPTH.saturating_add(1),
-            0,
-            1,
-        )];
+        let builder = sketch_builder(&index, 1_000, 1_000);
+        let requests = [BucketRequest::new(crate::MAX_DEPTH.saturating_add(1), 0, 1)];
 
         assert!(matches!(
             builder.build(&requests),
             Err(AlgebraicError::InvalidBucketIndex)
         ));
+    }
+
+    fn element(h128: u128, h64: u64) -> ElementHash {
+        ElementHash { h128, h64 }
+    }
+
+    #[test]
+    fn sorted_population_keeps_columns_aligned_and_ordered() {
+        let population =
+            SortedPopulation::new(vec![element(0xC, 30), element(0xA, 10), element(0xB, 20)]);
+        assert_eq!(population.h64s(), &[10, 20, 30]);
+        assert_eq!(population.h128s(), &[0xA, 0xB, 0xC]);
+        assert_eq!(population.len(), 3);
+        assert!(!population.is_empty());
+    }
+
+    #[test]
+    fn sorted_population_candidates_are_multi_valued_and_deterministic() {
+        let population = SortedPopulation::new(vec![
+            element(0x9, 7),
+            element(0x1, 7),
+            element(0x5, 3),
+            element(0x2, 9),
+        ]);
+        // Equal h64 values sort by h128, so the order is input-independent.
+        assert_eq!(population.candidates(7), &[0x1, 0x9]);
+        assert_eq!(population.candidates(3), &[0x5]);
+        assert!(population.candidates(8).is_empty());
+        assert!(population.candidates(u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn empty_sorted_population_has_no_candidates_and_empty_nodes() {
+        let population = SortedPopulation::default();
+        assert!(population.is_empty());
+        assert!(population.candidates(1).is_empty());
+        let nodes = build_bucket_nodes(&population, &[BucketRequest::new(0, 0, 4)]).unwrap();
+        assert_eq!(nodes[0].1, NodeSummary::default());
+    }
+
+    #[test]
+    fn bucket_nodes_summarize_exactly_the_slice_they_sketch() {
+        let population = SortedPopulation::new(vec![
+            element(0x1, 5),
+            element(0x2, 6),
+            element(0x4, (1_u64 << 63) | 5),
+        ]);
+        let nodes = build_bucket_nodes(
+            &population,
+            &[BucketRequest::new(1, 0, 4), BucketRequest::new(1, 1, 4)],
+        )
+        .unwrap();
+        assert_eq!(
+            nodes[0].1,
+            NodeSummary {
+                count: 2,
+                digest: 0x3
+            }
+        );
+        assert_eq!(
+            nodes[1].1,
+            NodeSummary {
+                count: 1,
+                digest: 0x4
+            }
+        );
+        // The two children sum to the level-0 pair.
+        let whole = build_bucket_nodes(&population, &[BucketRequest::new(0, 0, 4)]).unwrap();
+        assert_eq!(
+            whole[0].1,
+            NodeSummary {
+                count: 3,
+                digest: 0x7
+            }
+        );
+    }
+
+    /// Room versions 1 and 2 have sender-chosen event IDs, so no `event_ids`
+    /// frame may be built for them, and the rejection is explicit rather than
+    /// a side effect of an ID that happens not to be valid base64.
+    #[test]
+    fn sender_chosen_rooms_cannot_construct_an_event_ids_frame() {
+        let mut graph = MockGraph::new();
+        graph.add_edge("$anchor", "$child");
+        let anchors = [id("$anchor")];
+        assert_eq!(
+            compute_frame_digest(RoomEventIdKind::SenderChosen, &graph, &anchors),
+            Err(AlgebraicError::UnsupportedRoomVersion)
+        );
+        let population = SortedPopulation::default();
+        assert_eq!(
+            ReconciliationContext::new(
+                RoomEventIdKind::SenderChosen,
+                &graph,
+                &anchors,
+                &population
+            )
+            .err(),
+            Some(AlgebraicError::UnsupportedRoomVersion)
+        );
+    }
+
+    /// A population that is not a `SortedPopulation`: it answers from an
+    /// unordered list, as a persisted store reading runs would.
+    struct ScanPopulation(Vec<ElementHash>);
+
+    impl Population for ScanPopulation {
+        fn node_summary(&self, node: (u8, u64)) -> Result<NodeSummary, AlgebraicError> {
+            let range = H64Index::bounds_unchecked(&BucketRequest::new(node.0, node.1, 1));
+            let h128s: Vec<u128> = self
+                .0
+                .iter()
+                .filter(|e| range.contains(&u128::from(e.h64)))
+                .map(|e| e.h128)
+                .collect();
+            NodeSummary::from_h128s(&h128s)
+        }
+
+        fn for_each_h64_in(&self, node: (u8, u64), f: &mut dyn FnMut(u64)) {
+            let range = H64Index::bounds_unchecked(&BucketRequest::new(node.0, node.1, 1));
+            let mut h64s: Vec<u64> = self
+                .0
+                .iter()
+                .map(|e| e.h64)
+                .filter(|h| range.contains(&u128::from(*h)))
+                .collect();
+            h64s.sort_unstable();
+            h64s.into_iter().for_each(f);
+        }
+
+        fn candidates_into(&self, root: u64, out: &mut Vec<u128>) {
+            let mut found: Vec<u128> = self
+                .0
+                .iter()
+                .filter(|e| e.h64 == root)
+                .map(|e| e.h128)
+                .collect();
+            found.sort_unstable();
+            out.extend(found);
+        }
+    }
+
+    #[test]
+    fn build_bucket_nodes_serves_any_population_identically() {
+        let elements = vec![
+            element(0x9, 7),
+            element(0x3, 7),
+            element(0x5, 1 << 63),
+            element(0x6, u64::MAX),
+            element(0x1, 40),
+        ];
+        let sorted = SortedPopulation::new(elements.clone());
+        let scan = ScanPopulation(elements);
+        let requests = [
+            BucketRequest::new(3, 0, 8),
+            BucketRequest::new(2, 1, 8),
+            BucketRequest::new(1, 1, 8),
+        ];
+        let nodes = build_bucket_nodes(&sorted, &requests).unwrap();
+        assert_eq!(nodes, build_bucket_nodes(&scan, &requests).unwrap());
+        assert_eq!(nodes[0].1.count, 3);
+        assert_eq!(nodes[2].1.count, 2);
+        let whole = [BucketRequest::new(0, 0, 8)];
+        assert_eq!(
+            build_bucket_nodes(&sorted, &whole).unwrap(),
+            build_bucket_nodes(&scan, &whole).unwrap()
+        );
+    }
+
+    #[test]
+    fn candidates_into_appends_and_leaves_existing_entries() {
+        let population =
+            SortedPopulation::new(vec![element(0x9, 7), element(0x3, 7), element(0x4, 8)]);
+        let mut out = vec![0xFF];
+        population.candidates_into(7, &mut out);
+        assert_eq!(out, [0xFF, 0x3, 0x9]);
+        population.candidates_into(99, &mut out);
+        assert_eq!(out, [0xFF, 0x3, 0x9]);
+    }
+
+    #[test]
+    fn node_summary_matches_the_nodes_slice() {
+        let population = SortedPopulation::new(vec![
+            element(0x5, 1),
+            element(0x6, 2),
+            element(0x7, 1 << 63),
+        ]);
+        let root = population.node_summary((0, 0)).unwrap();
+        assert_eq!(root.count, 3);
+        assert_eq!(root.digest, 0x5 ^ 0x6 ^ 0x7);
+        let right = population.node_summary((1, 1)).unwrap();
+        assert_eq!((right.count, right.digest), (1, 0x7));
+        assert_eq!(population.node_summary((1, 0)).unwrap().count, 2);
     }
 }

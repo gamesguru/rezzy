@@ -2,7 +2,7 @@ use base64::{
     engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD},
     Engine as _,
 };
-use rezzy::reconcile::{
+use rezzy_recon::{
     verify_residual, AlgebraicError, ElementHash, EventIdFormat, RoomAccumulator, SyndromeSketch,
     MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_SKETCH_CAPACITY,
 };
@@ -18,9 +18,9 @@ fn generic_digest32_feeds_all_resident_layers() {
     let first = ElementHash::from_digest32(first_bytes);
     let second = ElementHash::from_digest32(second_bytes);
 
-    assert_eq!(first.h128, 0x0001_0203_0405_0607_0809_0a0b_0c0d_0e0f);
+    assert_eq!(first.h128, 0x1011_1213_1415_1617_1819_1a1b_1c1d_1e1f);
     assert_eq!(first.h64, 0x0001_0203_0405_0607);
-    assert_eq!(second.h128, 0xfffe_fdfc_fbfa_f9f8_f7f6_f5f4_f3f2_f1f0);
+    assert_eq!(second.h128, 0xefee_edec_ebea_e9e8_e7e6_e5e4_e3e2_e1e0);
     assert_eq!(second.h64, 0xfffe_fdfc_fbfa_f9f8);
 
     let mut accumulator = RoomAccumulator::new();
@@ -44,14 +44,13 @@ fn matrix_hash_derived_event_ids_use_decoded_digest32() {
 }
 
 #[test]
-fn legacy_ids_use_the_full_sha256_digest() {
+fn opaque_bytes_use_sha256() {
     let digest = [
         0xa2, 0xd4, 0x1f, 0x14, 0x4e, 0x8e, 0xcf, 0x9f, 0xf5, 0x00, 0x4f, 0xe8, 0xcb, 0xc6, 0x01,
         0xb4, 0x39, 0xe4, 0x51, 0x7c, 0x1a, 0x05, 0xf0, 0x8f, 0x47, 0x17, 0x54, 0xd4, 0x63, 0x0d,
         0x70, 0xc8,
     ];
-    let hash =
-        ElementHash::from_matrix_event_id("$opaque:example.org", EventIdFormat::Legacy).unwrap();
+    let hash = ElementHash::from_opaque_bytes(b"$opaque:example.org");
     assert_eq!(hash, ElementHash::from_digest32(digest));
 }
 
@@ -227,8 +226,8 @@ fn accumulator_residual_is_the_digest_xor() {
 
 #[test]
 fn multi_round_bucket_transition_flow() {
-    use rezzy::reconcile::triage::MAX_BUCKET_SKETCH_CAPACITY;
-    use rezzy::{
+    use rezzy_recon::triage::MAX_BUCKET_SKETCH_CAPACITY;
+    use rezzy_recon::{
         BucketDecodeBatch, BucketDecodeSuccess, BucketRequest, ClientAction, ReconciliationClient,
     };
 
@@ -293,6 +292,7 @@ fn multi_round_bucket_transition_flow() {
         final_action,
         ClientAction::ResolveRoots {
             roots: vec![10, 20, 30, 40],
+            ladder_failed: vec![],
         }
     );
 }

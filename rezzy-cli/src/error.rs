@@ -52,6 +52,16 @@ pub enum ErrorCode {
     InvalidHeadType,
     /// Network / HTTP error when fetching room state.
     NetworkError,
+    /// A federation destination could not be reached at all (DNS, connect,
+    /// TLS or timeout). Distinct from an HTTP error because the peer never
+    /// answered, so per-event fallback would not help.
+    RemoteUnavailable,
+    /// An aggregate does not match its raw inputs or manifest.
+    AggregateStale,
+    /// Raw inputs contain different payloads for one event ID.
+    AggregateConflict,
+    /// Signing key configuration or parsing failure.
+    SigningKey,
 }
 
 impl ErrorCode {
@@ -74,6 +84,10 @@ impl ErrorCode {
             Self::EventsNotArray => "E012_EVENTS_NOT_ARRAY",
             Self::InvalidHeadType => "E013_INVALID_HEAD_TYPE",
             Self::NetworkError => "E014_NETWORK_ERROR",
+            Self::RemoteUnavailable => "E018_REMOTE_UNAVAILABLE",
+            Self::AggregateStale => "E015_AGGREGATE_STALE",
+            Self::AggregateConflict => "E016_AGGREGATE_CONFLICT",
+            Self::SigningKey => "E017_SIGNING_KEY",
         }
     }
 }
@@ -104,7 +118,7 @@ impl AppError {
 
     /// The error code.
     #[must_use]
-    pub fn code(&self) -> ErrorCode {
+    pub const fn code(&self) -> ErrorCode {
         self.code
     }
 }
@@ -123,8 +137,8 @@ impl From<std::io::Error> for AppError {
     }
 }
 
-impl From<serde_json::Error> for AppError {
-    fn from(e: serde_json::Error) -> Self {
+impl From<rezzy::JsonError> for AppError {
+    fn from(e: rezzy::JsonError) -> Self {
         Self::new(ErrorCode::MalformedJson, e.to_string())
     }
 }
@@ -182,6 +196,7 @@ mod tests {
         assert_eq!(ErrorCode::EventsNotArray.code(), "E012_EVENTS_NOT_ARRAY");
         assert_eq!(ErrorCode::InvalidHeadType.code(), "E013_INVALID_HEAD_TYPE");
         assert_eq!(ErrorCode::NetworkError.code(), "E014_NETWORK_ERROR");
+        assert_eq!(ErrorCode::AggregateStale.code(), "E015_AGGREGATE_STALE");
     }
 
     #[test]

@@ -7,8 +7,8 @@ use alloc::{
 };
 use core::fmt;
 
+use crate::json::Value;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use serde_json::Value;
 use sha3::{Digest, Sha3_256};
 
 /// SHA3-256 digest size used by MSC4511.
@@ -565,7 +565,7 @@ fn append_canonical_value(out: &mut Vec<u8>, value: &Value) -> Result<(), Merkle
     Ok(())
 }
 
-fn append_number(out: &mut Vec<u8>, number: &serde_json::Number) -> Result<(), MerkleError> {
+fn append_number(out: &mut Vec<u8>, number: &crate::json::Number) -> Result<(), MerkleError> {
     if let Some(n) = number.as_i64() {
         if !(MIN_CANONICAL_INT..=MAX_CANONICAL_INT).contains(&n) {
             return Err(MerkleError::IntegerRange);
@@ -607,7 +607,7 @@ fn append_string(out: &mut Vec<u8>, string: &str) {
     out.push(b'"');
 }
 
-fn hash_parts(parts: &[&[u8]]) -> Hash {
+pub(crate) fn hash_parts(parts: &[&[u8]]) -> Hash {
     let mut hasher = Sha3_256::new();
     for part in parts {
         hasher.update(part);
@@ -1888,8 +1888,7 @@ pub mod causal {
             let child = std::thread::Builder::new()
                 .stack_size(16 * 1024 * 1024)
                 .spawn(move || {
-                    for (label, keys) in
-                        [("bit", &bit_keys as &[Hash]), ("dense", &dense as &[Hash])]
+                    for (label, keys) in [("bit", bit_keys.as_slice()), ("dense", dense.as_slice())]
                     {
                         let mut forward = CausalSet::empty();
                         for &k in keys {

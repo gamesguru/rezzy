@@ -52,8 +52,11 @@ const OVER_CAPACITY_DELTA_FLOOR: u64 = (STRATUM_CAPACITY as u64) + 1;
 /// One localized sketch request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BucketRequest {
+    /// Prefix depth of the bucket, in bits.
     pub depth: u8,
+    /// The bucket's prefix.
     pub prefix: u64,
+    /// Sketch capacity requested for the bucket.
     pub capacity: usize,
     /// Explicit overflow marker. Must be set to `true` only after the overflow
     /// request validation path passes. Never infer from `capacity` alone.
@@ -63,7 +66,7 @@ pub struct BucketRequest {
 impl BucketRequest {
     /// Standard bucket request (overflow = false).
     #[must_use]
-    pub fn new(depth: u8, prefix: u64, capacity: usize) -> Self {
+    pub const fn new(depth: u8, prefix: u64, capacity: usize) -> Self {
         Self {
             depth,
             prefix,
@@ -74,7 +77,7 @@ impl BucketRequest {
 
     /// Overflow bucket request (overflow = true).
     #[must_use]
-    pub fn with_overflow(depth: u8, prefix: u64, capacity: usize) -> Self {
+    pub const fn with_overflow(depth: u8, prefix: u64, capacity: usize) -> Self {
         Self {
             depth,
             prefix,
@@ -84,17 +87,85 @@ impl BucketRequest {
     }
 }
 
+/// Serialized length of a [`NodeSummary`]: a 16-byte digest then an 8-byte
+/// count, both big-endian (the digest matches the level-0 accumulator wire
+/// order).
+pub const NODE_SUMMARY_LEN: usize = 24;
+
+/// Per-node accumulator carried with each bucket sketch: the count of the
+/// node's population and the XOR of `h128` over it.
+///
+/// This is the node-scoped counterpart of the level-0 `(digest, count)` pair,
+/// and is what lets each node be verified, split or discarded on its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NodeSummary {
+    /// Number of elements in the node.
+    pub count: u64,
+    /// XOR of `h128` over the node's elements.
+    pub digest: u128,
+}
+
+impl NodeSummary {
+    /// Summarizes the `h128` values of one node's elements.
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::CountOverflow`] if the count exceeds `u64`.
+    pub fn from_h128s(h128s: &[u128]) -> Result<Self, AlgebraicError> {
+        Ok(Self {
+            count: u64::try_from(h128s.len()).map_err(|_| AlgebraicError::CountOverflow)?,
+            digest: h128s.iter().fold(0, |acc, h| acc ^ h),
+        })
+    }
+
+    /// Serializes as digest (16 bytes) then count (8 bytes), big-endian.
+    #[must_use]
+    pub fn to_bytes(self) -> [u8; NODE_SUMMARY_LEN] {
+        let mut out = [0_u8; NODE_SUMMARY_LEN];
+        out[..16].copy_from_slice(&self.digest.to_be_bytes());
+        out[16..].copy_from_slice(&self.count.to_be_bytes());
+        out
+    }
+
+    /// Parses the [`to_bytes`](Self::to_bytes) encoding.
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::InvalidSketchLength`] unless `bytes` is
+    /// exactly [`NODE_SUMMARY_LEN`] long.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, AlgebraicError> {
+        let bytes: &[u8; NODE_SUMMARY_LEN] = bytes
+            .try_into()
+            .map_err(|_| AlgebraicError::InvalidSketchLength)?;
+        let (digest, count) = bytes.split_at(16);
+        Ok(Self {
+            digest: u128::from_be_bytes(
+                digest
+                    .try_into()
+                    .map_err(|_| AlgebraicError::InvalidSketchLength)?,
+            ),
+            count: u64::from_be_bytes(
+                count
+                    .try_into()
+                    .map_err(|_| AlgebraicError::InvalidSketchLength)?,
+            ),
+        })
+    }
+}
+
 /// Roots recovered from one independently decoded bucket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketDecodeSuccess {
+    /// Prefix depth of the bucket, in bits.
     pub depth: u8,
+    /// The bucket's prefix.
     pub prefix: u64,
+    /// Short identifiers recovered from the bucket.
     pub roots: Vec<u64>,
 }
 
 /// Partial result of decoding a concatenated bucket sketch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BucketDecodeBatch {
+    /// Buckets that decoded.
     pub successful_buckets: Vec<BucketDecodeSuccess>,
     /// Each entry is `(depth, prefix)` — the full bucket identifier, not prefix alone.
     pub failed_buckets: Vec<(u8, u64)>,
@@ -413,7 +484,7 @@ fn validate_bucket_requests_with_limit(
             return Err(AlgebraicError::InvalidBucketIndex);
         }
 
-        if request.depth < MAX_DEPTH && request.prefix >= (1_u64 << request.depth) {
+        if request.prefix >= (1_u64 << request.depth) {
             return Err(AlgebraicError::InvalidBucketIndex);
         }
 
@@ -444,7 +515,7 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use crate::reconcile::{ElementHash, ResidentKernel};
+    use crate::{ElementHash, ResidentKernel};
 
     #[test]
     fn test_validate_bucket_requests_rejects_overlap() {
@@ -492,7 +563,21 @@ mod tests {
 
     #[test]
     fn test_validate_bucket_requests_accepts_full_h64_depth() {
-        assert!(validate_bucket_requests(&[BucketRequest::new(MAX_DEPTH, u64::MAX, 4)]).is_ok());
+        assert!(validate_bucket_requests(&[BucketRequest::new(
+            MAX_DEPTH,
+            (1_u64 << MAX_DEPTH) - 1,
+            4
+        )])
+        .is_ok());
+        // One bit past the cap, and one level past it, are both rejected.
+        assert_eq!(
+            validate_bucket_requests(&[BucketRequest::new(MAX_DEPTH, 1_u64 << MAX_DEPTH, 4)]),
+            Err(AlgebraicError::InvalidBucketIndex)
+        );
+        assert_eq!(
+            validate_bucket_requests(&[BucketRequest::new(MAX_DEPTH + 1, 0, 4)]),
+            Err(AlgebraicError::InvalidBucketIndex)
+        );
     }
 
     #[test]
