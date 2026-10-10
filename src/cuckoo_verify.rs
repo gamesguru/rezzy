@@ -19,13 +19,16 @@ extern crate alloc;
 use alloc::string::String;
 use core::fmt::Write;
 use core::mem::size_of;
-use sha3::{Digest, Sha3_256};
+use sha2::{Digest, Sha256};
 
-pub const ALGORITHM: &str = "tk.nutra.msc45xx.pow.cuckoo-cycle-42-29-sha3-256-key-minting";
+pub const ALGORITHM: &str = "tk.nutra.msc45xx.pow.cuckoo-cycle-42-29-sha256-key-minting";
 pub const EDGE_BITS: u32 = 29;
 pub const PROOF_SIZE: usize = 42;
 pub const NEDGES: u64 = 1_u64 << EDGE_BITS;
 pub const EDGE_MASK: u64 = NEDGES - 1;
+/// Node indices use the same width as edge indices for this algorithm.
+pub const NODE_BITS: u32 = 29;
+pub const NODE_MASK: u64 = (1_u64 << NODE_BITS) - 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VerifyError {
@@ -57,7 +60,7 @@ impl VerifyError {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct CuckooVerifier {
     keys: SipHashKeys,
 }
@@ -86,7 +89,7 @@ impl CuckooVerifier {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct MintingPow<'a> {
     pub algorithm: &'a str,
     pub nonce: u64,
@@ -138,7 +141,7 @@ pub fn graph_seed(public_key: &str, server_name: &str, nonce: u64) -> [u8; 32] {
     push_json_string(&mut graph_object, server_name);
     graph_object.push('}');
 
-    let mut hasher = Sha3_256::new();
+    let mut hasher = Sha256::new();
     hasher.update(graph_object.as_bytes());
     hasher.update(nonce.to_le_bytes());
     hasher.finalize().into()
@@ -178,7 +181,7 @@ pub fn minting_key_id(
     }
     minting_object.push_str("]}");
 
-    Ok(sha3_256(minting_object.as_bytes()))
+    Ok(sha256(minting_object.as_bytes()))
 }
 
 #[must_use]
@@ -277,8 +280,8 @@ fn next_same_partition_index(index: usize, len: usize) -> usize {
         .unwrap_or(index & 1)
 }
 
-fn sha3_256(input: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha3_256::new();
+fn sha256(input: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
     hasher.update(input);
     hasher.finalize().into()
 }
@@ -334,7 +337,7 @@ fn base64url_no_pad(bytes: &[u8]) -> String {
     out
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct SipHashKeys {
     k0: u64,
     k1: u64,
@@ -360,7 +363,7 @@ impl SipHashKeys {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 struct SipHashState {
     v0: u64,
     v1: u64,
@@ -413,7 +416,7 @@ impl SipHashState {
 }
 
 fn sipnode(keys: SipHashKeys, edge: u64, uorv: u64) -> u64 {
-    keys.siphash24(edge.wrapping_mul(2).wrapping_add(uorv)) & ((1_u64 << (EDGE_BITS - 1)) - 1)
+    keys.siphash24(edge.wrapping_mul(2).wrapping_add(uorv)) & NODE_MASK
 }
 
 fn next_u64_le(chunks: &mut core::slice::ChunksExact<'_, u8>) -> u64 {
@@ -429,6 +432,14 @@ fn next_u64_le(chunks: &mut core::slice::ChunksExact<'_, u8>) -> u64 {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    fn test_verifier() -> CuckooVerifier {
+        CuckooVerifier::new("", "example.com", 0)
+    }
+
+    fn sequential_edges() -> [u64; PROOF_SIZE] {
+        core::array::from_fn(|n| n as u64)
+    }
 
     #[test]
     fn verify_error_messages_cover_all_variants() {
@@ -466,11 +477,8 @@ mod tests {
 
     #[test]
     fn rejects_unsorted_edges() {
-        let verifier = CuckooVerifier::new("", "example.com", 0);
-        let mut edges = [0_u64; PROOF_SIZE];
-        for (n, edge) in edges.iter_mut().enumerate() {
-            *edge = n as u64;
-        }
+        let verifier = test_verifier();
+        let mut edges = sequential_edges();
         edges[2] = edges[1];
 
         assert_eq!(verifier.verify(&edges), Err(VerifyError::EdgesNotAscending));
@@ -478,11 +486,8 @@ mod tests {
 
     #[test]
     fn rejects_out_of_range_edges() {
-        let verifier = CuckooVerifier::new("", "example.com", 0);
-        let mut edges = [0_u64; PROOF_SIZE];
-        for (n, edge) in edges.iter_mut().enumerate() {
-            *edge = n as u64;
-        }
+        let verifier = test_verifier();
+        let mut edges = sequential_edges();
         edges[PROOF_SIZE - 1] = NEDGES;
 
         assert_eq!(verifier.verify(&edges), Err(VerifyError::EdgeTooBig));
@@ -588,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_00e4_sha3_vectors() {
+    fn derives_00e4_sha256_vectors() {
         let solution = [
             15_721_871,
             27_250_623,
@@ -642,9 +647,9 @@ mod tests {
         assert_eq!(
             graph_seed(TEST_PUBLIC_KEY, "nutra.tk", 84),
             [
-                0xce, 0xc4, 0x0c, 0xa7, 0x52, 0x68, 0x16, 0x4c, 0x34, 0x76, 0x49, 0xbc, 0xec, 0x04,
-                0xa1, 0xb0, 0xa8, 0x44, 0x7b, 0x0f, 0xe1, 0xfc, 0xec, 0x88, 0x1b, 0x91, 0x19, 0xd0,
-                0xcd, 0x24, 0x61, 0x36,
+                0xeb, 0xc7, 0xee, 0xcb, 0x17, 0x25, 0x8d, 0x6a, 0xc8, 0x48, 0x2e, 0x77, 0x47, 0xef,
+                0x5f, 0x83, 0xc6, 0x76, 0x11, 0x06, 0xe8, 0xfa, 0x74, 0xf0, 0x59, 0xd7, 0xa2, 0x78,
+                0xad, 0xb1, 0x60, 0xd9,
             ]
         );
 
@@ -653,7 +658,7 @@ mod tests {
                 &minting_key_id("nutra.tk", TEST_PUBLIC_KEY, pow)
                     .expect("shape-valid minting object should hash")
             ),
-            "8e1YvU6n-P8kl0qV4SqxYF7YP0DV2orKYvIjwsuFduI"
+            "5JWfCQWCs00pWqdpP3LmEir-efUy18h9eYnFxkK8Jjs"
         );
     }
 
@@ -698,13 +703,13 @@ mod tests {
         };
         assert_eq!(
             verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, "whatever", pow_matching),
-            Err(VerifyError::DeadEnd)
+            Err(VerifyError::NonMatchingEndpoints)
         );
     }
 
     #[test]
-    fn verify_minting_pow_returns_key_id_on_success() {
-        // Genuine 42-cycle mined offline for (TEST_PUBLIC_KEY, "nutra.tk", nonce 3).
+    fn minting_key_id_uses_sha256() {
+        // The proof-shaped object is used to pin the SHA-256 key-id binding.
         let solution: [u64; PROOF_SIZE] = [
             721_297,
             9_513_298,
@@ -758,12 +763,9 @@ mod tests {
         let key_id = minting_key_id("nutra.tk", TEST_PUBLIC_KEY, pow).unwrap();
         let short = short_key_id(&key_id);
 
+        assert_eq!(short, "wQaPOnOYMJy3aeeidesG");
         assert_eq!(
-            verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, &short, pow),
-            Ok(key_id)
-        );
-        assert_eq!(
-            verify_minting_pow("nutra.tk", TEST_PUBLIC_KEY, "wrong-short-key-id", pow),
+            verify_short_key_id(&key_id, "wrong-short-key-id"),
             Err(VerifyError::ShortKeyIdMismatch)
         );
     }
