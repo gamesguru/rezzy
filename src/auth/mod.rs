@@ -33,8 +33,8 @@ use crate::basespec::event_types::{
     RULE_KNOCK_RESTRICTED, RULE_PUBLIC, RULE_RESTRICTED,
 };
 use crate::basespec::rezzy_types::{
-    apply_redaction, domain_matches, is_valid_mxid, EventContent, EventId, EventLike,
-    EventProvider, EventVerifier, LeanEvent, StateKey, StateResVersion,
+    apply_redaction, domain_matches, is_acceptable_historical_mxid, is_valid_mxid, EventContent,
+    EventId, EventLike, EventProvider, EventVerifier, LeanEvent, StateKey, StateResVersion,
 };
 
 /// An error indicating why an event failed authorization.
@@ -599,8 +599,10 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
         if !event.prev_events().is_empty() {
             return Err(AuthError::CreateWithPrevEvents);
         }
-        // Rule 1.2: Check sender MXID validity for m.room.create.
-        if !is_valid_mxid(event.sender()) {
+        // Rule 1.2: Check sender MXID validity for m.room.create. Historical
+        // localparts (including uppercase) must remain acceptable for events
+        // that already exist.
+        if !is_acceptable_historical_mxid(event.sender()) {
             return Err(AuthError::InvalidSyntax(
                 "m.room.create sender must be a valid MXID".into(),
             ));
@@ -658,6 +660,11 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
                     "m.room.aliases state_key domain must match sender domain".into(),
                 ));
             }
+            // Rule 4 is the complete aliases rule for v1-v5: after the
+            // domain check, allow without running the generic power-level
+            // rule (Rule 8). From v6 the special rule is gone and aliases
+            // events use the ordinary state-event checks.
+            return Ok(());
         }
     }
 
@@ -2867,6 +2874,67 @@ mod tests {
         assert!(
             result.is_ok(),
             "aliases event should still auth OK with default room version: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_aliases_rule_v1_v5_allows_matching_domain_without_power_level() {
+        let mut state: RoomState = RoomState::new();
+        let mut create = make_test_event(
+            "$create",
+            M_ROOM_CREATE,
+            "@admin:example.com",
+            json!({ "room_version": "5" }),
+        );
+        create.state_key = Some("".into());
+        state.insert((M_ROOM_CREATE.into(), String::new()), create);
+        // Power level 0 for the sender: Rule 4 must allow the event before
+        // the generic state-event power-level check runs.
+        state.insert(
+            (M_ROOM_POWER_LEVELS.into(), String::new()),
+            make_test_event(
+                "$pl",
+                M_ROOM_POWER_LEVELS,
+                "@admin:example.com",
+                json!({ "state_default": 50, "users": {} }),
+            ),
+        );
+        state.insert(
+            (M_ROOM_MEMBER.into(), "@alice:example.com".into()),
+            make_test_event(
+                "$member",
+                M_ROOM_MEMBER,
+                "@alice:example.com",
+                json!({ "membership": "join" }),
+            ),
+        );
+        let aliases = LeanEvent {
+            event_id: "$aliases".into(),
+            event_type: M_ROOM_ALIASES.into(),
+            state_key: Some("#test:example.com".into()),
+            sender: "@alice:example.com".into(),
+            content: json!({}),
+            ..Default::default()
+        };
+        let result = check_auth_with_context(&aliases, &state, StateResVersion::V2, None, None);
+        assert!(
+            result.is_ok(),
+            "v5 aliases with a matching domain must not need power level 50: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_create_accepts_historical_uppercase_mxid() {
+        let create = make_test_event(
+            "$create",
+            M_ROOM_CREATE,
+            "@Milan:tchncs.de",
+            json!({ "room_version": "10" }),
+        );
+        let result = check_auth(&create, &RoomState::new(), StateResVersion::V2, None);
+        assert!(
+            result.is_ok(),
+            "historical uppercase localparts must be accepted on create: {result:?}"
         );
     }
 
