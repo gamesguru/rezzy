@@ -286,19 +286,9 @@ wide_bitmap!(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use super::super::tests::Rng;
     use super::*;
     use std::collections::BTreeSet;
-
-    struct Rng(u64);
-
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0
-        }
-    }
 
     /// `groups` high-bit groups of 40k low values at ~`pm`/1000 density.
     fn gen(rng: &mut Rng, groups: u64, pm: u64, stride: u64) -> BTreeSet<u128> {

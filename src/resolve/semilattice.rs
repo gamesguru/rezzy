@@ -194,8 +194,9 @@ fn process_lattice_event<'a, Id, C, K, S2: BuildHasher, S3: BuildHasher>(
     );
     // `conflicted_events` may contain supplemental auth-chain/subgraph events
     // whose own state key was not conflicted. They may authenticate this
-    // candidate, but must never replace the unconflicted resolved value.
-    if !ctx.conflicted_keys.contains(&key) {
+    // candidate. After V1, any accepted event may decide its key; V1 restricts
+    // updates to genuinely conflicted keys.
+    if !crate::resolve::iterative::decides_key(ctx.version, ctx.conflicted_keys, &key) {
         return;
     }
     update_winner_if_better(winners, key, ev, ctx.mainline_distances, ctx.mainline_len);
@@ -290,8 +291,8 @@ fn compute_lattice_coordinatized_winners<
 /// - `m.room.create`
 /// - `m.room.power_levels`
 /// - `m.room.join_rules`
-/// - `m.room.member` events that are bans or kicks (V2.1+ only; V2 treats
-///   **all** member events as power events)
+/// - V1: all `m.room.member` events (its separate membership-conflict pass)
+/// - V2 and later: member events that are bans or kicks
 ///
 /// Non-power events are everything else (messages, topics, `m.room.third_party_invite`, etc.).
 pub fn route_power_events<
@@ -373,10 +374,15 @@ where
 ///
 /// This allows callers who compute `conflicted_keys` from a *narrow*,
 /// pre-widening event set (e.g. before MSC4297's conflicted subgraph supplement)
-/// to keep supplemental events from deciding their own state keys.
+/// to restrict V1 updates to those keys. Later versions allow supplemental
+/// events to update working state. Unconflicted values take precedence in
+/// the final result for every version.
 ///
 /// When in doubt, use [`resolve_semilattice_fold`] which derives `conflicted_keys`
 /// internally.
+///
+/// # Panics
+/// Panics if `inputs.version` is [`StateResVersion::V3`].
 #[must_use]
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_semilattice_fold_with_conflicted_keys<Id, C, S1, S2>(
@@ -470,6 +476,12 @@ where
     }
     for (k, ev) in key_winners {
         final_resolved.insert(k, ev.event_id.clone());
+    }
+    // Auth-difference events may update agreed keys during checks (see
+    // `decides_key`); the final step restores unconflicted values for every
+    // version.
+    for (k, v) in inputs.unconflicted_state {
+        final_resolved.insert(k.clone(), v.clone());
     }
 
     final_resolved

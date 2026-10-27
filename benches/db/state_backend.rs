@@ -73,11 +73,7 @@ pub(crate) fn make_entries(n: usize, seed: u64) -> Vec<(Key, Value)> {
                 // 10%: custom event type, e.g. a third-party MSC.
                 // Scale the key space with the fixture size so the custom tail
                 // stays stable even for the largest benchmarks.
-                let idx = rng.next_u64() % ((n.max(1) as u64) * 10);
-                (
-                    EventType::from(format!("org.example.msc{idx}")),
-                    format!("key{idx}"),
-                )
+                crate::common::custom_msc_key(rng, n)
             }
         },
         |rng| format!("$event{}:example.org", rng.next_u64()),
@@ -336,21 +332,29 @@ fn bench_fork_and_diverge(n: usize, entries: &[(Key, Value)]) {
     const REPS: u32 = 50;
     let op_count = REPS * BRANCHES as u32 * EDITS_PER_BRANCH as u32;
 
-    let ordmap_elapsed = time_once(&format!("OrdMap fork+diverge (n={n})"), op_count, || {
+    /// Exercises repeated fork-and-edit batches using the same deterministic
+    /// membership edits for each backend on clones of `base`.
+    fn fork_cloned<M: Clone>(base: &M, mut insert: impl FnMut(&mut M, Key, Value)) {
         let mut rng = Xorshift128::new(0xABCD);
         for _ in 0..REPS {
             for b in 0..BRANCHES {
-                let mut branch = ordmap.clone();
+                let mut branch = base.clone();
                 for _ in 0..EDITS_PER_BRANCH {
                     let key = (
                         EventType::RoomMember,
                         format!("@branch{b}user{}:example.org", rng.next_u64()),
                     );
-                    branch.insert(key, "$edit:example.org".to_string());
+                    insert(&mut branch, key, "$edit:example.org".to_string());
                 }
                 black_box(branch);
             }
         }
+    }
+
+    let ordmap_elapsed = time_once(&format!("OrdMap fork+diverge (n={n})"), op_count, || {
+        fork_cloned(&ordmap, |branch, key, val| {
+            branch.insert(key, val);
+        });
     });
 
     let hamt_elapsed = time_once(&format!("hamt fork+diverge (n={n})"), op_count, || {
@@ -383,20 +387,9 @@ fn bench_fork_and_diverge(n: usize, entries: &[(Key, Value)]) {
         &format!("PersistentOrdMap fork+diverge (n={n})"),
         op_count,
         || {
-            let mut rng = Xorshift128::new(0xABCD);
-            for _ in 0..REPS {
-                for b in 0..BRANCHES {
-                    let mut branch = persistent.clone();
-                    for _ in 0..EDITS_PER_BRANCH {
-                        let key = (
-                            EventType::RoomMember,
-                            format!("@branch{b}user{}:example.org", rng.next_u64()),
-                        );
-                        branch.insert(key, "$edit:example.org".to_string());
-                    }
-                    black_box(branch);
-                }
-            }
+            fork_cloned(&persistent, |branch, key, val| {
+                branch.insert(key, val);
+            });
         },
     );
 
@@ -441,28 +434,29 @@ fn bench_diff(n: usize, entries: &[(Key, Value)]) {
     ]);
 }
 
+/// Hashes concatenated event-type, state-key, and event-ID bytes in iterator
+/// order. No sorting or field delimiters are added.
+#[inline]
+fn hash_entries<'a>(iter: impl IntoIterator<Item = (&'a Key, &'a Value)>) -> blake3::Hash {
+    let mut hash = blake3::Hasher::new();
+    for ((event_type, state_key), event_id) in iter {
+        hash.update(event_type.as_str().as_bytes());
+        hash.update(state_key.as_bytes());
+        hash.update(event_id.as_bytes());
+    }
+    hash.finalize()
+}
+
 /// Measures full state-hash recomputation for the current backends.
 fn bench_state_hash(n: usize, entries: &[(Key, Value)]) {
     println!("full state hash (n={n}):");
     let (ordmap, persistent, _) = build_maps(entries);
     let ordmap_elapsed = time_repeated(&format!("OrdMap state hash (n={n})"), 20, || {
-        let mut hash = blake3::Hasher::new();
-        for ((event_type, state_key), event_id) in &ordmap {
-            hash.update(event_type.as_str().as_bytes());
-            hash.update(state_key.as_bytes());
-            hash.update(event_id.as_bytes());
-        }
-        black_box(hash.finalize());
+        black_box(hash_entries(&ordmap));
     });
     let persistent_elapsed =
         time_repeated(&format!("PersistentOrdMap state hash (n={n})"), 20, || {
-            let mut hash = blake3::Hasher::new();
-            for ((event_type, state_key), event_id) in &persistent {
-                hash.update(event_type.as_str().as_bytes());
-                hash.update(state_key.as_bytes());
-                hash.update(event_id.as_bytes());
-            }
-            black_box(hash.finalize());
+            black_box(hash_entries(&persistent));
         });
     report_timings(&[
         ("imbl", ordmap_elapsed),

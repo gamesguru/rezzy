@@ -307,15 +307,9 @@ pub(crate) fn run_power_phase_iterative_checks<Id, C, S2, S3, S4, Spl, K>(
                 continue;
             };
             let key = (EventType::from(event.event_type.as_str()), sk.clone());
-            // Only a genuinely conflicted key may be decided by the
-            // power phase. `power_events` can also contain events
-            // pulled in purely as auth-chain context (the
-            // `auth(C) \ auth(U)` supplement, or the MSC4297
-            // conflicted subgraph) — those exist so *other*, actually
-            // conflicting events' auth chains can be validated, not
-            // so their own (possibly stale, superseded) key can win
-            // over a value every merge parent already agreed on.
-            if !conflicted_keys.contains(&key) {
+            // V2/V2.1 auth-difference events may update working state during
+            // checks; their final merge restores unconflicted values.
+            if !decides_key(version, conflicted_keys, &key) {
                 continue;
             }
             resolved.insert(key, event.event_id.clone());
@@ -907,6 +901,12 @@ where
 /// loop in [`crate::state::at::run_state_pipeline_streaming`]) can thread
 /// across calls, so `build_mainline`'s BFS-per-call turns into an `O(M)`
 /// cache-hit walk instead of restarting from scratch every time.
+/// Unconflicted values take precedence in the final returned state. The
+/// `conflicted_keys` restriction applies only to V1; later versions allow
+/// supplemental events to update working state during authorization.
+///
+/// # Panics
+/// Panics if `version` is [`StateResVersion::V3`].
 pub(crate) fn resolve_iterative_sort_with_all_caches<
     Id: EventId,
     C: EventContent + Clone,
@@ -1017,49 +1017,36 @@ where
         ) {
             if let Some(sk) = &ev.state_key {
                 let key = (EventType::from(ev.event_type.as_str()), sk.clone());
-                // Same guard as the power phase: only a genuinely conflicted
-                // key may be decided here.
-                if caches.conflicted_keys.contains(&key) {
+                // V2/V2.1 auth-difference events may update working state
+                // during checks; their final merge restores unconflicted values.
+                if decides_key(version, caches.conflicted_keys, &key) {
                     resolved.insert(key, ev.event_id.clone());
                 }
             }
         }
     }
 
-    // Final step (Matrix v2 spec): "Update the result of step 5 with the
-    // unconflicted state." The correct merge direction depends on what
-    // `resolved` already contains, which differs by version:
-    //
-    // - V1/V2: `get_initial_resolved_state` seeds `resolved` as a *clone* of
-    //   `unconflicted_state`, so every unconflicted value is already present.
-    //   Applying unconflicted last is then a no-op for every legitimately
-    //   resolved key, and only matters where an auth-diff-supplied power
-    //   event (pulled into `conflicted_events` purely to supply auth context
-    //   for a genuinely conflicting *other* key) incorrectly overwrote a key
-    //   that was never actually in conflict — which it must not be allowed
-    //   to do. So unconflicted must win here.
-    // - V2.1+: `resolved` starts *empty*, and `merge_unconflicted_power_events`
-    //   deliberately re-admits only power_levels/join_rules/create (via
-    //   `or_insert_with`, never overwriting). Other keys — notably
-    //   membership — are intentionally left for the power/non-power phases
-    //   to populate from scratch, which is how MSC4297 ban/kick
-    //   supplementation works: a validly-authorized ban pulled in via the
-    //   auth diff must be able to override a stale "unconflicted" join,
-    //   and federation convergence requires matching other MSC4297
-    //   implementations here. So `resolved` must win.
-
-    merge_final_resolved(version, unconflicted_state.clone(), resolved)
+    // Final step (Matrix v2 / MSC4297): apply unconflicted state after the
+    // iterative result. Auth-difference events participate in authorization,
+    // but agreed values take precedence in the final output.
+    merge_final_resolved(unconflicted_state.clone(), resolved)
 }
 
-/// Performs the version-gated final merge of `resolved` over
-/// `unconflicted_state`.
+/// Whether an accepted event may update `key` in the partially resolved state.
 ///
-/// For V1/V2, `resolved` already contains a clone of `unconflicted_state`, so
-/// the unconflicted values are applied last and win. For V2.1+, `resolved`
-/// starts empty and must win over the unconflicted base (see the longer
-/// comment at the call site).
-fn merge_final_resolved<Id, K>(
+/// Every post-V1 algorithm applies auth-difference events during iterative
+/// authorization checks. The final merge restores unconflicted values.
+pub(crate) fn decides_key<K: Ord + core::hash::Hash>(
     version: StateResVersion,
+    conflicted_keys: &crate::FastSet<(EventType, K)>,
+    key: &(EventType, K),
+) -> bool {
+    version != StateResVersion::V1 || conflicted_keys.contains(key)
+}
+
+/// Merges the iterative result over the unconflicted base, then restores
+/// unconflicted values in the final output for every version.
+fn merge_final_resolved<Id, K>(
     unconflicted_state: SharedState<Id, K>,
     resolved: SharedState<Id, K>,
 ) -> SharedState<Id, K>
@@ -1067,19 +1054,13 @@ where
     Id: Clone,
     K: Clone + Ord,
 {
-    if version.is_v2_1_plus() {
-        let mut f = unconflicted_state;
-        for (k, v) in resolved {
+    let mut f = unconflicted_state;
+    for (k, v) in resolved {
+        if !f.contains_key(&k) {
             f.insert(k, v);
         }
-        f
-    } else {
-        let mut f = resolved;
-        for (k, v) in unconflicted_state {
-            f.insert(k, v);
-        }
-        f
     }
+    f
 }
 
 /// Like [`resolve_iterative_sort`], but also returns per-event
@@ -1132,15 +1113,14 @@ where
 ///
 /// When `conflicted_keys_override` is `Some`, the caller-supplied set is used
 /// instead of deriving `conflicted_keys` from `conflicted_events` (see
-/// `resolve_iterative_sort_with_cache` for motivation).
+/// `resolve_iterative_sort_with_cache` for motivation). This restricts state
+/// updates only for V1; later versions may apply supplemental events to any
+/// key during authorization. The final state restores unconflicted values;
+/// the deltas describe processing steps and do not include that final merge.
+/// Power events missing from both event maps or lacking a state key are skipped.
 ///
 /// # Panics
-/// Panics (with a descriptive message) if an invariant of the power phase is
-/// violated: a topologically-sorted power event id is missing from both
-/// `conflicted_events` and `auth_context`, or a power event lacks a
-/// `state_key`. Both are structural guarantees — power events are always
-/// drawn from those two maps and are always state events — so these panics
-/// indicate a routing bug rather than a caller-input condition.
+/// Panics if `version` is [`StateResVersion::V3`].
 #[must_use]
 #[allow(
     clippy::type_complexity,
@@ -1232,7 +1212,7 @@ where
             },
             true,
         );
-        let replaced = if accepted && conflicted_keys.contains(&key) {
+        let replaced = if accepted && decides_key(version, conflicted_keys, &key) {
             let old = resolved.get(&key).cloned();
             resolved.insert(key.clone(), event.event_id.clone());
             old
@@ -1299,7 +1279,7 @@ where
             },
             false,
         );
-        let replaced = if accepted && conflicted_keys.contains(&key) {
+        let replaced = if accepted && decides_key(version, conflicted_keys, &key) {
             let old = resolved.get(&key).cloned();
             resolved.insert(key.clone(), ev.event_id.clone());
             old
@@ -1315,10 +1295,8 @@ where
         });
     }
 
-    // Same version-gated fix as resolve_iterative_sort_with_all_caches: see
-    // the comment there for why V1/V2 and V2.1+ need opposite merge
-    // directions for this final step.
-    let final_resolved = merge_final_resolved(version, unconflicted_state.clone(), resolved);
+    // Apply the same final unconflicted-state merge as the main resolver.
+    let final_resolved = merge_final_resolved(unconflicted_state.clone(), resolved);
     (final_resolved, deltas)
 }
 

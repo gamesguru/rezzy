@@ -30,30 +30,21 @@
 //!
 //! Run with: `cargo bench --manifest-path benches/Cargo.toml -- lthash_backends`
 
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::items_after_statements,
-    clippy::doc_markdown
-)]
-
-use std::collections::HashMap;
-use std::hint::black_box;
-use std::time::{Duration, Instant};
-
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
 use rezzy::incremental::LtHash;
 use sha3::Shake256;
+use std::time::{Duration, Instant};
 
+use crate::common::prelude::*;
 use crate::common::{
-    generate_state_ops, generate_unique_entries, random_member_key, StateKey, StateOp, Xorshift128,
+    generate_state_ops, generate_unique_entries, random_event_id, random_member_key, StateKey,
+    StateOp, Xorshift128,
 };
 
-use super::expansion_backends;
+use super::expansion_backends::{self, hex, unpack_lanes};
 
 /// Lattice width of the MSC4500 instantiation: 1024 little-endian 16-bit lanes.
 const LANES: usize = 1024;
@@ -238,17 +229,12 @@ fn feed_element(
 /// Truncates a string to the 65535-byte `u16` length-prefix limit, exactly as
 /// `rezzy::incremental::lthash` does (event IDs are streamed untruncated).
 fn truncate_to_u16_limit(s: &str) -> (&str, u16) {
-    let limit = usize::from(u16::MAX);
-    let s_len = s.len();
-    if s_len > limit {
-        let mut end = limit;
-        while !s.is_char_boundary(end) {
-            end = end.saturating_sub(1);
-        }
-        (&s[..end], u16::try_from(end).unwrap())
-    } else {
-        (s, u16::try_from(s_len).unwrap())
-    }
+    let cap = s.len().min(usize::from(u16::MAX));
+    let end = (0..=cap)
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(0);
+    (&s[..end], end as u16)
 }
 
 /// Byte-buffer twin of [`feed_element`]: writes the identical framing bytes
@@ -273,15 +259,6 @@ fn frame_element<'a>(
     buf
 }
 
-/// Unpacks `2 * LANES` bytes into little-endian 16-bit lanes.
-fn unpack_lanes(bytes: &[u8]) -> [u16; LANES] {
-    let mut out = [0u16; LANES];
-    for (lane, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        *lane = u16::from_le_bytes([pair[0], pair[1]]);
-    }
-    out
-}
-
 /// Input-size categories: a short `$0`-style ID, a real `$ev:domain` ID, and a
 /// ~400-byte ID — the realistic upper bound for an event ID. (The framing
 /// format tolerates up to 65535 bytes; no real event ID comes close, so this
@@ -302,25 +279,13 @@ impl Size {
         }
     }
 
+    /// Uses `idx` for small/medium fixture IDs, or draws 400 alphanumeric bytes
+    /// after a `$` prefix for large IDs.
     fn event_id(self, rng: &mut Xorshift128, idx: usize) -> String {
         match self {
             Size::Small => format!("${idx}"),
             Size::Medium => format!("$event{idx}:example.org"),
-            Size::Large => {
-                // ~400 bytes: the realistic worst case for an event ID.
-                let len = 400;
-                let mut s = String::with_capacity(len + 2);
-                s.push('$');
-                for i in 0..len {
-                    let c = ((rng.next_u64() >> (i % 8)) & 0xFF) as u8;
-                    if c.is_ascii_alphanumeric() {
-                        s.push(c as char);
-                    } else {
-                        s.push('a');
-                    }
-                }
-                s
-            }
+            Size::Large => random_event_id(400, rng),
         }
     }
 }
@@ -406,14 +371,6 @@ fn lanes_prefix(lt: &LtHash, n: usize) -> Vec<u8> {
         .iter()
         .flat_map(|lane| lane.to_le_bytes())
         .collect()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(String::new(), |mut s, b| {
-        use std::fmt::Write;
-        let _ = write!(s, "{b:02x}");
-        s
-    })
 }
 
 /// Proves the measured stacks are the algorithms they claim to be:

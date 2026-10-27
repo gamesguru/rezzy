@@ -368,10 +368,62 @@ through the cracks.
   non-integers) — silent auth-semantics deviation.
 - Bench `>>> REZZY SPEEDUP <<<` line still printed (methodology reframed as
   parity oracle but the all-caps number remains).
-- `compare_bench.py` ratchets baseline to the all-time-luckiest run;
-  missing-label and sentinel-regex issues.
+- `compare_bench.py` missing-label and sentinel-regex issues.
 - CLI `render_timeline` defaults `room_version` to `"1"` (fail-open);
   `format.rs` reads `redacts` from `content` (v1–10 top-level) not
   `get_redacts()`.
 - `screened` delta list unordered; `MSC3089` → `MSC3083` typos;
   `reference_hash`/ `compute_content_hash` `Result` + `expect` coexistence.
+
+## 24 Oct 2026 (HAMT delta benchmark, `benches/db/hamt_delta.rs`)
+
+The fully resident cases compare their output with the reference diff. This is a
+parity check using the same `diff_hamt_nodes` implementation, not an independent
+correctness oracle. The benchmark also includes Linux disk-backed `O_DIRECT`
+cases, which are described separately below.
+
+- `isolate_delta` and `diff_hamt_nodes` had similar timings in one run; this
+  does not establish that wrapper overhead is within measurement noise.
+- Cost grows with edit count and varies modestly across the tested state sizes.
+  This is not a precise complexity claim.
+- Limits: there is no before/after comparison for the leaf/subtree fix
+  (`4def5acf`), and nothing confirms that any edit triggered the cross-kind
+  path. Fifteen changed entries for ten edits follows from a mix of overwrites
+  and inserts; it does not show a leaf split.
+
+The benchmark does not isolate the fix's performance cost: the no-transition and
+cross-kind cases traverse different HAMT shapes. Compare identical cross-kind
+inputs before and after `4def5acf`, retaining an independent oracle and a check
+that the cross-kind path is exercised.
+
+## Auth difference: large-room resolution paths (2026-10-25)
+
+Commit `7954d139`.
+`cargo +1.90.0 bench --manifest-path benches/Cargo.toml --bench rezzy -- auth_difference`
+and `--features mtxdb -- auth_difference_mtxdb`; rustc 1.90.0, Linux
+6.18.55-1-lts, Intel i5-8600K. Load average was ~13 during the run, so timings
+are noisy (±20% across runs); lookup and read counts are exact. Fixture: 10,000
+common members, 64 auth-chain events per branch, 2 forks. Each branch
+contributes 64 auth events (128 branch auth events total); the full conflicted
+set also contains the two conflicting topic events, for 130 events. The lazy
+auth-difference paths report the 128 branch auth events, while the full
+resolution paths handle all 130.
+
+| Path                                               |              ms/op | Provider lookups / mtxdb reads |
+| -------------------------------------------------- | -----------------: | -----------------------------: |
+| Concrete, computed diff                            |               26.7 |                            n/a |
+| Lazy, computed diff (in-memory provider)           |               30.6 |                         10,268 |
+| Lazy, fixture's precomputed diff (floor)           |               15.5 |                            135 |
+| Lazy + rezzy `AuthGraph` diff                      |               22.3 |                            135 |
+| Lazy + hybrid diff, 0% / 10% / 100% unindexed      | 21.8 / 20.6 / 34.9 |           135 / 1,149 / 10,270 |
+| Lazy, mtxdb provider, computed diff                |               66.4 |                         10,135 |
+| Lazy, mtxdb provider + mtxdb closure diff (merged) |               62.5 |                            135 |
+| Lazy, mtxdb provider + rezzy `AuthGraph` diff      |               25.1 |                            135 |
+
+- `AuthGraph`: build 14.9 ms once; insert 0.82 us/event; 245.9 KiB encoded
+  bitmaps (~25 B/event, a lower bound on resident size; shallow chains).
+- mtxdb: write 653 ms, closure rebuild 98 ms, 15.2 MiB on disk; reads ~4-5 us
+  each (warm page cache). Its closure diff (45.7 ms merged) is dominated by ~10k
+  persisted closure reads for the unconflicted state.
+- Takeaway: an in-memory `AuthGraph` beside the event store (mtxdb or other) is
+  the cheap path; reading every unconflicted closure from disk is not.

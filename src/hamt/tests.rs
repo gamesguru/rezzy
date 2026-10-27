@@ -3963,6 +3963,29 @@ fn assert_delta_matches_oracle(root_a: &Arc<HamtNode<u32, u32>>, root_b: &Arc<Ha
     );
 }
 
+#[test]
+fn test_isolate_delta_leaf_subtree_transition() {
+    let key = b"leaf_subtree_delta";
+    let leaf_root = rebuild_node(key, 1, 0, vec![(1_u32, 10_u32)], vec![]);
+    let child = rebuild_node(key, 0b11, 0, vec![(1_u32, 10_u32), (2_u32, 20_u32)], vec![]);
+    let subtree_root = rebuild_node(key, 0, 1, vec![], vec![NodeRef::Resolved(child)]);
+
+    assert_delta_matches_oracle(&leaf_root, &subtree_root);
+    assert_delta_matches_oracle(&subtree_root, &leaf_root);
+
+    let changed_child = rebuild_node(key, 0b11, 0, vec![(1_u32, 11_u32), (2_u32, 20_u32)], vec![]);
+    let changed_root = rebuild_node(key, 0, 1, vec![], vec![NodeRef::Resolved(changed_child)]);
+    assert_delta_matches_oracle(&leaf_root, &changed_root);
+    assert_delta_matches_oracle(&changed_root, &leaf_root);
+
+    // The leaf's key is absent from the subtree: the leaf is wholly removed
+    // (or added) and every subtree entry belongs to the other side.
+    let absent_child = rebuild_node(key, 0b11, 0, vec![(2_u32, 20_u32), (3_u32, 30_u32)], vec![]);
+    let absent_root = rebuild_node(key, 0, 1, vec![], vec![NodeRef::Resolved(absent_child)]);
+    assert_delta_matches_oracle(&leaf_root, &absent_root);
+    assert_delta_matches_oracle(&absent_root, &leaf_root);
+}
+
 /// A single HAMT node deliberately built to straddle all three bitmask
 /// classes at once, at both the datamap and the nodemap level, so a
 /// slot-major (single 0..32 pass) consumer and a class-major

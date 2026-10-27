@@ -806,19 +806,11 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
     let sender_member_event = state.get_event(M_ROOM_MEMBER, event.sender());
 
     // Determine the effective membership string
-    let mut membership = sender_member_event
+    // No version exempts the room creator: a creator with no membership event
+    // is not joined (spec auth rules; Synapse `_check_joined_room`).
+    let membership = sender_member_event
         .and_then(EventLike::get_membership)
         .unwrap_or(MEM_LEAVE);
-
-    // Exceptions: Room v11 implied creator join only applies when there is no membership event
-    if sender_member_event.is_none() {
-        let is_creator = state
-            .get_event(M_ROOM_CREATE, "")
-            .is_some_and(|create_ev| create_ev.sender() == event.sender());
-        if is_creator {
-            membership = MEM_JOIN;
-        }
-    }
 
     if membership == MEM_BAN {
         return Err(banned_user(event.sender(), event.event_id()));
@@ -3178,6 +3170,18 @@ mod tests {
         );
         let mut state = RoomState::new();
         state.insert((M_ROOM_CREATE.into(), String::new()), create);
+        let mut alice_join = make_test_event(
+            "$alice_join",
+            M_ROOM_MEMBER,
+            "@alice:example.com",
+            json!({ "membership": MEM_JOIN }),
+        );
+        alice_join.state_key = Some("@alice:example.com".into());
+        alice_join.room_id = Some("!QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE".into());
+        state.insert(
+            (M_ROOM_MEMBER.into(), "@alice:example.com".into()),
+            alice_join,
+        );
 
         // Matches the accepted create event's own hash-derived ID: accepted.
         let mut good = make_test_event(
@@ -3186,6 +3190,7 @@ mod tests {
             "@alice:example.com",
             json!({ "users": { "@bob:example.com": 50 } }),
         );
+        good.auth_events = vec!["$alice_join".into()];
         good.room_id = Some("!QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE".into());
 
         let (accepted, rejected) = check_auth_chain(&[good], &state, StateResVersion::V2_1);
@@ -3203,6 +3208,7 @@ mod tests {
             "@alice:example.com",
             json!({ "users": { "@bob:example.com": 50 } }),
         );
+        bad.auth_events = vec!["$alice_join".into()];
         bad.room_id = Some("!QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI".into());
 
         let (accepted, rejected) = check_auth_chain(&[bad], &state, StateResVersion::V2_1);

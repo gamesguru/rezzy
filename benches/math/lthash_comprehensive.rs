@@ -13,22 +13,12 @@
 //! - Expansion cost: the BLAKE3 XOF that seeds a lane, and the BLAKE3 collapse
 //! - Lattice arithmetic
 
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::items_after_statements,
-    clippy::doc_markdown
-)]
-
-use std::collections::HashMap;
-use std::hint::black_box;
+use rezzy::incremental::LtHash;
 use std::time::{Duration, Instant};
 
-use rezzy::incremental::LtHash;
-
+use crate::common::prelude::*;
 use crate::common::{
-    apply_state_op_lthash, generate_state_ops, generate_unique_entries, lthash_of,
+    apply_state_op_lthash, generate_unique_entries, prepare_incremental_state, random_event_id,
     random_member_key, StateKey, Xorshift128,
 };
 
@@ -72,21 +62,6 @@ impl InputSize {
             InputSize::Stress => random_event_id(65535, rng),
         }
     }
-}
-
-/// Random alphanumeric event ID of `len` bytes behind a `$` prefix.
-fn random_event_id(len: usize, rng: &mut Xorshift128) -> String {
-    let mut s = String::with_capacity(len + 2);
-    s.push('$');
-    for i in 0..len {
-        let c = ((rng.next_u64() >> (i % 8)) & 0xFF) as u8;
-        if c.is_ascii_alphanumeric() {
-            s.push(c as char);
-        } else {
-            s.push('a');
-        }
-    }
-    s
 }
 
 /// Generate entries with configurable input size
@@ -348,14 +323,7 @@ fn bench_incremental_mutations(size: InputSize) {
             continue;
         }
         let base_entries = make_entries_with_size(n, 0x5EED_0000 + n as u64, size);
-        let mut state: HashMap<StateKey, String> = base_entries.into_iter().collect();
-
-        let mut lt = lthash_of(&state);
-
-        let mut rng = Xorshift128::new(0xBEEF);
-        let existing_keys: Vec<StateKey> = state.keys().cloned().collect();
-
-        let ops = generate_state_ops(&mut rng, &existing_keys, steps);
+        let (mut state, mut lt, ops) = prepare_incremental_state(base_entries, steps);
 
         // LtHash incremental
         let lt_start = Instant::now();

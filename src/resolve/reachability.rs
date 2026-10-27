@@ -1107,41 +1107,34 @@ fn reach_from_index(
     }
 }
 
-impl<Id> Reachability for RangePrefilterReachability<Id>
-where
-    Id: EventId + Ord,
-{
-    type Id = Id;
+macro_rules! impl_reachability_via_index {
+    ($ty:ident, $exclude_self:expr, |$self:ident, $from_idx:ident, $to_idx:ident| $check:expr) => {
+        impl<Id: EventId + Ord> Reachability for $ty<Id> {
+            type Id = Id;
 
-    fn reaches(&self, from: &Self::Id, to: &Self::Id) -> Reach {
-        reaches_with(
-            &self.index,
-            &self.cyclic_nodes,
-            from,
-            to,
-            false,
-            |from_idx, to_idx| self.reaches_index(from_idx, to_idx),
-        )
-    }
+            fn reaches(&$self, from: &Self::Id, to: &Self::Id) -> Reach {
+                reaches_with(
+                    &$self.index,
+                    &$self.cyclic_nodes,
+                    from,
+                    to,
+                    $exclude_self,
+                    |$from_idx, $to_idx| $check,
+                )
+            }
+        }
+    };
 }
 
-impl<Id> Reachability for ForwardReachabilityIndex<Id>
-where
-    Id: EventId + Ord,
-{
-    type Id = Id;
+impl_reachability_via_index!(
+    RangePrefilterReachability,
+    false,
+    |self, from_idx, to_idx| self.reaches_index(from_idx, to_idx)
+);
 
-    fn reaches(&self, from: &Self::Id, to: &Self::Id) -> Reach {
-        reaches_with(
-            &self.index,
-            &self.cyclic_nodes,
-            from,
-            to,
-            true,
-            |from_idx, to_idx| self.descendant_bitmaps[from_idx as usize].contains(to_idx),
-        )
-    }
-}
+impl_reachability_via_index!(ForwardReachabilityIndex, true, |self, from_idx, to_idx| {
+    self.descendant_bitmaps[from_idx as usize].contains(to_idx)
+});
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]

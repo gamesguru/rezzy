@@ -8,3 +8,4 @@ tests/critique_data/
 tests/fixtures/
 .mypy_cache/
 .claude*
+docs/chats/

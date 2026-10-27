@@ -898,25 +898,31 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bucket_decoder_isolates_per_bucket_budget_exhaustion() {
-        let requests = [BucketRequest::new(8, 1, 32), BucketRequest::new(8, 9, 4)];
-        let mut over_capacity = SyndromeSketch::new(32).unwrap();
-        for value in 1..=33 {
-            over_capacity.toggle(value).unwrap();
+    fn encoded_sketch(
+        capacity: usize,
+        overflow: bool,
+        values: impl IntoIterator<Item = u64>,
+    ) -> Vec<u8> {
+        let mut sketch = if overflow {
+            SyndromeSketch::new_overflow(capacity).unwrap()
+        } else {
+            SyndromeSketch::new(capacity).unwrap()
+        };
+        for value in values {
+            sketch.toggle(value).unwrap();
         }
-        let mut encoded = over_capacity
+        sketch
             .coordinates()
             .iter()
             .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
-        let mut easy = SyndromeSketch::new(4).unwrap();
-        easy.toggle(7).unwrap();
-        encoded.extend(
-            easy.coordinates()
-                .iter()
-                .flat_map(|value| value.to_le_bytes()),
-        );
+            .collect()
+    }
+
+    #[test]
+    fn bucket_decoder_isolates_per_bucket_budget_exhaustion() {
+        let requests = [BucketRequest::new(8, 1, 32), BucketRequest::new(8, 9, 4)];
+        let mut encoded = encoded_sketch(32, false, 1..=33);
+        encoded.extend(encoded_sketch(4, false, [7]));
 
         let budget = pinsketch::single_call_work_ceiling(32)
             .unwrap()
@@ -932,15 +938,7 @@ mod tests {
     #[test]
     fn bucket_decoder_returns_error_when_shared_budget_is_exhausted() {
         let requests = [BucketRequest::new(8, 1, 4)];
-        let mut sketch = SyndromeSketch::new(4).unwrap();
-        for value in [7, 11, 19] {
-            sketch.toggle(value).unwrap();
-        }
-        let encoded = sketch
-            .coordinates()
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
+        let encoded = encoded_sketch(4, false, [7, 11, 19]);
 
         assert_eq!(
             decode_bucket_sketches(&encoded, &requests, 0),
@@ -948,21 +946,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn overflow_bucket_above_standard_capacity_round_trips_over_the_wire() {
-        let requests = [BucketRequest::with_overflow(8, 1, 64)];
-        let mut sketch = SyndromeSketch::new_overflow(64).unwrap();
-        let expected: Vec<u64> = (1..=40_u64).map(|i| i * 2 + 1).collect();
-        for &value in &expected {
-            sketch.toggle(value).unwrap();
-        }
-        let encoded = sketch
-            .coordinates()
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
-
-        let batch = decode_bucket_sketches(&encoded, &requests, MAX_BATCH_FACTOR_WORK).unwrap();
+    fn assert_overflow_round_trip(request: BucketRequest, count: usize, budget: usize) {
+        let expected: Vec<u64> = (1..=count as u64)
+            .map(|value| value.saturating_mul(2).saturating_add(1))
+            .collect();
+        let encoded = encoded_sketch(request.capacity, true, expected.iter().copied());
+        let batch = decode_bucket_sketches(&encoded, &[request], budget).unwrap();
         assert!(batch.failed_buckets.is_empty(), "{batch:?}");
         let mut roots = batch.successful_buckets[0].roots.clone();
         roots.sort_unstable();
@@ -970,27 +959,22 @@ mod tests {
     }
 
     #[test]
-    fn capacity_256_overflow_request_decodes_with_its_single_call_ceiling() {
-        let request = BucketRequest::with_overflow(0, 0, MAX_OVERFLOW_BUCKET_CAPACITY);
-        let mut sketch = SyndromeSketch::new_overflow(MAX_OVERFLOW_BUCKET_CAPACITY).unwrap();
-        let expected: Vec<u64> = (1..=MAX_OVERFLOW_BUCKET_CAPACITY as u64)
-            .map(|value| value * 2 + 1)
-            .collect();
-        for &value in &expected {
-            sketch.toggle(value).unwrap();
-        }
-        let encoded = sketch
-            .coordinates()
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
+    fn overflow_bucket_above_standard_capacity_round_trips_over_the_wire() {
+        assert_overflow_round_trip(
+            BucketRequest::with_overflow(8, 1, 64),
+            40,
+            MAX_BATCH_FACTOR_WORK,
+        );
+    }
 
+    #[test]
+    fn capacity_256_overflow_request_decodes_with_its_single_call_ceiling() {
         let budget = pinsketch::single_call_work_ceiling(MAX_OVERFLOW_BUCKET_CAPACITY).unwrap();
-        let batch = decode_bucket_sketches(&encoded, &[request], budget).unwrap();
-        assert!(batch.failed_buckets.is_empty(), "{batch:?}");
-        let mut roots = batch.successful_buckets[0].roots.clone();
-        roots.sort_unstable();
-        assert_eq!(roots, expected);
+        assert_overflow_round_trip(
+            BucketRequest::with_overflow(0, 0, MAX_OVERFLOW_BUCKET_CAPACITY),
+            MAX_OVERFLOW_BUCKET_CAPACITY,
+            budget,
+        );
     }
 
     #[test]
@@ -1014,22 +998,8 @@ mod tests {
         // deliberately engineered locator to reproduce deterministically
         // and isn't covered by this test.
         let requests = [BucketRequest::new(8, 1, 2), BucketRequest::new(8, 9, 2)];
-        let mut over_capacity = SyndromeSketch::new(2).unwrap();
-        for value in [1, 2, 3] {
-            over_capacity.toggle(value).unwrap();
-        }
-        let mut encoded = over_capacity
-            .coordinates()
-            .iter()
-            .flat_map(|value| value.to_le_bytes())
-            .collect::<Vec<_>>();
-        let mut easy = SyndromeSketch::new(2).unwrap();
-        easy.toggle(7).unwrap();
-        encoded.extend(
-            easy.coordinates()
-                .iter()
-                .flat_map(|value| value.to_le_bytes()),
-        );
+        let mut encoded = encoded_sketch(2, false, [1, 2, 3]);
+        encoded.extend(encoded_sketch(2, false, [7]));
 
         let ceiling = pinsketch::single_call_work_ceiling(2).unwrap();
         let budget = ceiling.saturating_add(1_000);

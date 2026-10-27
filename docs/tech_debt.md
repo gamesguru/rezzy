@@ -200,6 +200,29 @@ alongside each event through `route_power_events`/`power_events`/
 
 ## Correctness-adjacent / completeness
 
+### Auth-difference depth pruning trusts event depth metadata
+
+`auth_difference` in `src/resolve/multi.rs` and `compute_auth_chain_diff` in
+`src/state/at.rs` advance the unconflicted walk by event depth. Both assume an
+auth event has smaller depth than the event that cites it. A malformed or
+adversarial graph that violates this assumption can make the walk prune too
+early and produce an incomplete auth difference. Treat event depths as trusted
+metadata until this assumption is validated or the traversal no longer relies on
+it.
+
+### `m.room.create` is routed as a power event
+
+`LeanEvent::is_power_event` returns true for `m.room.create`, although the
+Matrix v2 definition does not classify it as a power event. This is an
+implementation detail of rezzy's resolution pipeline. It is harmless for
+well-formed rooms because the create key cannot be conflicted.
+
+### V2.2 auth traversal rule needs confirmation
+
+`src/state/at.rs` recurses through auth edges for V2.1.1 and V2.2. The V2.2
+traversal rule has not been checked against MSC4242, so treat V2.2 as
+experimental until that behavior is confirmed.
+
 ### `is_sender_banned` only checks bans, not under-powered senders
 
 The resolved-state screening pass (`is_sender_banned`,

@@ -1009,14 +1009,14 @@ impl Sub for Bitmap {
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    struct Rng(u64);
+    pub(in crate::bitmap) struct Rng(pub(in crate::bitmap) u64);
 
     impl Rng {
-        fn next(&mut self) -> u64 {
+        pub(in crate::bitmap) fn next(&mut self) -> u64 {
             self.0 ^= self.0 << 13;
             self.0 ^= self.0 >> 7;
             self.0 ^= self.0 << 17;

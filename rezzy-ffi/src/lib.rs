@@ -38,21 +38,27 @@ fn guard(out: *mut *mut u8, out_len: *mut usize, body: impl FnOnce() -> i32) -> 
     })
 }
 
-/// Parses a room version and JSON event, resetting output storage first.
-/// Returns `BAD_ARG` without a buffer for null arguments or a non-UTF-8
-/// version, or `ERR` with an allocated message for invalid JSON.
+/// Resets the output slots and validates the common `(room_version, input)`
+/// pointer arguments, returning the room-version string and input slice.
+///
+/// # Errors
+/// Returns `BAD_ARG` without allocating an output buffer if any pointer is
+/// null or the room-version string is not UTF-8. Non-null output slots are
+/// reset even when validation fails.
 ///
 /// # Safety
-/// `room_version` must be NUL-terminated and `event_json` must point to
-/// `event_len` readable bytes, whenever they are non-null. Non-null `out`
-/// and `out_len` must point to writable storage.
-unsafe fn parse_args(
+/// `room_version` must be NUL-terminated and `input` must point to `input_len`
+/// readable bytes, whenever they are non-null. Non-null `out` and `out_len`
+/// must point to writable storage. The room-version and input storage must
+/// remain valid and unchanged for the lifetime of the returned borrows. Neither
+/// may overlap either output slot.
+unsafe fn unpack_raw_args<'a>(
     room_version: *const c_char,
-    event_json: *const u8,
-    event_len: usize,
+    input: *const u8,
+    input_len: usize,
     out: *mut *mut u8,
     out_len: *mut usize,
-) -> Result<(String, JsonValue), i32> {
+) -> Result<(&'a str, &'a [u8]), i32> {
     if !out.is_null() {
         // SAFETY: non-null `out` is required to point to writable storage.
         unsafe { *out = ptr::null_mut() };
@@ -61,130 +67,129 @@ unsafe fn parse_args(
         // SAFETY: non-null `out_len` is required to point to writable storage.
         unsafe { *out_len = 0 };
     }
-    if room_version.is_null() || event_json.is_null() || out.is_null() || out_len.is_null() {
+    if room_version.is_null() || input.is_null() || out.is_null() || out_len.is_null() {
         return Err(BAD_ARG);
     }
     // SAFETY: non-null and NUL-terminated per the contract.
     let version = unsafe { CStr::from_ptr(room_version) }
         .to_str()
-        .map_err(|_| BAD_ARG)?
-        .to_owned();
-    // SAFETY: non-null, `event_len` readable bytes per the contract.
-    let bytes = unsafe { std::slice::from_raw_parts(event_json, event_len) };
-    match JsonValue::parse_bytes(bytes) {
-        Ok(event) => Ok((version, event)),
-        Err(error) => {
-            hand_over(error.to_string().into_bytes(), out, out_len);
-            Err(ERR)
-        }
-    }
+        .map_err(|_| BAD_ARG)?;
+    // SAFETY: non-null, `input_len` readable bytes per the contract.
+    let bytes = unsafe { std::slice::from_raw_parts(input, input_len) };
+    Ok((version, bytes))
 }
 
-/// Writes `$` followed by the event reference hash to `out`.
+/// Validates and parses the single-event FFI arguments inside a panic guard,
+/// normalizes the wire event for `room_version`, and hands over any output or
+/// error bytes.
 ///
-/// Ignores an exported `event_id` for versions without opaque IDs. Returns
-/// 0 on success, 1 with an error message for parsing or hashing failures
-/// (including opaque-ID and unsupported versions), or 2 without a buffer
-/// for null arguments or a non-UTF-8 room version. Output bytes are not
-/// NUL-terminated; release any returned buffer with [`rezzy_free`].
+/// Returns `OK` on success; `op` returning `None` leaves output null with zero
+/// length. Null pointers or a non-UTF-8 version return `BAD_ARG` without a
+/// buffer. JSON errors, operation errors, and caught panics return `ERR` with
+/// an allocated message, released with [`rezzy_free`].
 ///
 /// # Safety
-/// See `include/rezzy.h`: the room version must be NUL-terminated, input
-/// pointers must be readable for the stated byte lengths, and non-null
-/// `out`/`out_len` must point to writable storage.
-#[no_mangle]
-pub unsafe extern "C" fn rezzy_event_id(
+/// Same pointer validity requirements as [`rezzy_event_id`].
+unsafe fn guarded_with_wire_event<F>(
     room_version: *const c_char,
     event_json: *const u8,
     event_len: usize,
     out: *mut *mut u8,
     out_len: *mut usize,
-) -> i32 {
+    op: F,
+) -> i32
+where
+    F: FnOnce(&JsonValue, &str) -> Result<Option<Vec<u8>>, String>,
+{
     // SAFETY: forwarded from this function's contract.
     guard(out, out_len, || unsafe {
-        rezzy_event_id_inner(room_version, event_json, event_len, out, out_len)
+        let (version, bytes) =
+            match unpack_raw_args(room_version, event_json, event_len, out, out_len) {
+                Ok(unpacked) => unpacked,
+                Err(status) => return status,
+            };
+        let event = match JsonValue::parse_bytes(bytes) {
+            Ok(event) => event,
+            Err(error) => {
+                hand_over(error.to_string().into_bytes(), out, out_len);
+                return ERR;
+            }
+        };
+        let wire = rezzy::event_report::wire_event(&event, version);
+        match op(&wire, version) {
+            Ok(Some(bytes)) => {
+                hand_over(bytes, out, out_len);
+                OK
+            }
+            Ok(None) => OK,
+            Err(error) => {
+                hand_over(error.into_bytes(), out, out_len);
+                ERR
+            }
+        }
     })
 }
 
-/// Unguarded body of [`rezzy_event_id`].
-///
-/// # Safety
-/// Same contract as [`rezzy_event_id`].
-unsafe fn rezzy_event_id_inner(
-    room_version: *const c_char,
-    event_json: *const u8,
-    event_len: usize,
-    out: *mut *mut u8,
-    out_len: *mut usize,
-) -> i32 {
-    // SAFETY: forwarded from this function's contract.
-    let (version, event) =
-        match unsafe { parse_args(room_version, event_json, event_len, out, out_len) } {
-            Ok(parsed) => parsed,
-            Err(status) => return status,
-        };
-    match rezzy::reference_hash(&rezzy::event_report::wire_event(&event, &version), &version) {
-        Ok(hash) => {
-            hand_over(format!("${hash}").into_bytes(), out, out_len);
-            OK
+macro_rules! define_wire_event_ffi {
+    ($(#[$meta:meta])* $name:ident, |$wire:ident, $version:ident| $body:expr) => {
+        $(#[$meta])*
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(
+            room_version: *const c_char,
+            event_json: *const u8,
+            event_len: usize,
+            out: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            // SAFETY: forwarded from this function's contract.
+            unsafe {
+                guarded_with_wire_event(
+                    room_version,
+                    event_json,
+                    event_len,
+                    out,
+                    out_len,
+                    |$wire, $version| $body,
+                )
+            }
         }
-        Err(error) => {
-            hand_over(error.into_bytes(), out, out_len);
-            ERR
-        }
-    }
+    };
 }
 
-/// Checks an event's `hashes.sha256` against its content.
-///
-/// Returns 0 with null output and zero length on success, 1 with an allocated
-/// message for parsing or verification errors, or 2 without a buffer for null
-/// arguments or a non-UTF-8 room version. An exported `event_id` is removed
-/// for versions without opaque IDs. Release error buffers with [`rezzy_free`].
-///
-/// # Safety
-/// See `include/rezzy.h`: the room version must be NUL-terminated, input
-/// pointers must be readable for the stated byte lengths, and non-null
-/// `out`/`out_len` must point to writable storage.
-#[no_mangle]
-pub unsafe extern "C" fn rezzy_verify_content_hash(
-    room_version: *const c_char,
-    event_json: *const u8,
-    event_len: usize,
-    out: *mut *mut u8,
-    out_len: *mut usize,
-) -> i32 {
-    // SAFETY: forwarded from this function's contract.
-    guard(out, out_len, || unsafe {
-        rezzy_verify_content_hash_inner(room_version, event_json, event_len, out, out_len)
-    })
-}
-
-/// Unguarded body of [`rezzy_verify_content_hash`].
-///
-/// # Safety
-/// Same contract as [`rezzy_verify_content_hash`].
-unsafe fn rezzy_verify_content_hash_inner(
-    room_version: *const c_char,
-    event_json: *const u8,
-    event_len: usize,
-    out: *mut *mut u8,
-    out_len: *mut usize,
-) -> i32 {
-    // SAFETY: forwarded from this function's contract.
-    let (version, event) =
-        match unsafe { parse_args(room_version, event_json, event_len, out, out_len) } {
-            Ok(parsed) => parsed,
-            Err(status) => return status,
-        };
-    match rezzy::verify_content_hash(&rezzy::event_report::wire_event(&event, &version), &version) {
-        Ok(()) => OK,
-        Err(error) => {
-            hand_over(error.into_bytes(), out, out_len);
-            ERR
-        }
+define_wire_event_ffi!(
+    /// Writes `$` followed by the event reference hash to `out`.
+    ///
+    /// Ignores an exported `event_id` for versions without opaque IDs. Returns
+    /// 0 on success, 1 with an error message for parsing or hashing failures
+    /// (including opaque-ID and unsupported versions) or a caught panic, or 2
+    /// without a buffer for null arguments or a non-UTF-8 room version. Output bytes are not
+    /// NUL-terminated; release any returned buffer with [`rezzy_free`].
+    ///
+    /// # Safety
+    /// See `include/rezzy.h`: the room version must be NUL-terminated, input
+    /// pointers must be readable for the stated byte lengths, and non-null
+    /// `out`/`out_len` must point to writable storage.
+    rezzy_event_id,
+    |wire, version| {
+        rezzy::reference_hash(wire, version).map(|hash| Some(format!("${hash}").into_bytes()))
     }
-}
+);
+
+define_wire_event_ffi!(
+    /// Checks an event's `hashes.sha256` against its content.
+    ///
+    /// Returns 0 with null output and zero length on success, 1 with an allocated
+    /// message for parsing or verification errors or a caught panic, or 2 without
+    /// a buffer for null arguments or a non-UTF-8 room version. An exported `event_id` is removed
+    /// for versions without opaque IDs. Release error buffers with [`rezzy_free`].
+    ///
+    /// # Safety
+    /// See `include/rezzy.h`: the room version must be NUL-terminated, input
+    /// pointers must be readable for the stated byte lengths, and non-null
+    /// `out`/`out_len` must point to writable storage.
+    rezzy_verify_content_hash,
+    |wire, version| rezzy::verify_content_hash(wire, version).map(|()| None)
+);
 
 /// Describes every event in a JSONL buffer.
 ///
@@ -227,23 +232,12 @@ unsafe fn rezzy_hash_events_inner(
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if !out.is_null() {
-        // SAFETY: non-null `out` is required to point to writable storage.
-        unsafe { *out = ptr::null_mut() };
-    }
-    if !out_len.is_null() {
-        // SAFETY: non-null `out_len` is required to point to writable storage.
-        unsafe { *out_len = 0 };
-    }
-    if room_version.is_null() || jsonl.is_null() || out.is_null() || out_len.is_null() {
-        return BAD_ARG;
-    }
-    // SAFETY: non-null and NUL-terminated per the contract.
-    let Ok(version) = unsafe { CStr::from_ptr(room_version) }.to_str() else {
-        return BAD_ARG;
-    };
-    // SAFETY: non-null, `jsonl_len` readable bytes per the contract.
-    let bytes = unsafe { std::slice::from_raw_parts(jsonl, jsonl_len) };
+    // SAFETY: forwarded from this function's contract.
+    let (version, bytes) =
+        match unsafe { unpack_raw_args(room_version, jsonl, jsonl_len, out, out_len) } {
+            Ok(unpacked) => unpacked,
+            Err(status) => return status,
+        };
     let Ok(text) = std::str::from_utf8(bytes) else {
         hand_over(b"input is not valid UTF-8".to_vec(), out, out_len);
         return ERR;

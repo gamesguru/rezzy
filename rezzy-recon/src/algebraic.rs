@@ -21,18 +21,17 @@ use sha2::{Digest as Sha2Digest, Sha256};
 
 pub use super::gf64::mul as gf64_mul;
 
+/// Encodes bytes using an engine configured to omit padding.
+///
+/// # Panics
+/// Panics on encoded-length overflow or an encoding or UTF-8 conversion failure.
 fn encode_base64<E: base64::Engine + ?Sized>(engine: &E, input: &[u8]) -> String {
-    let capacity = input
-        .len()
-        .checked_add(2)
-        .and_then(|length| length.checked_mul(4))
-        .map(|length| length / 3)
-        .expect("base64 output length overflow");
-    let mut output = vec![0; capacity];
-    let length = engine
+    let len = base64::encoded_len(input.len(), false).expect("base64 output length overflow");
+    let mut output = vec![0; len];
+    let written = engine
         .encode_slice(input, &mut output)
         .expect("base64 output buffer is sufficiently sized");
-    output.truncate(length);
+    output.truncate(written);
     String::from_utf8(output).expect("base64 output is ASCII")
 }
 
@@ -518,24 +517,53 @@ impl SyndromeSketch {
         max_elements: usize,
         budget: &mut usize,
     ) -> Result<Vec<u64>, AlgebraicError> {
-        self.validate_decode_capacity(max_elements, MAX_LOCAL_SKETCH_DECODE_CAPACITY)?;
-        if self.coordinates.iter().all(|&coordinate| coordinate == 0) {
-            return Ok(Vec::new());
-        }
-        let decoded = super::pinsketch::decode_with_budget(
-            &self.coordinates[..max_elements],
+        self.decode_with_shared_budget(
             max_elements,
             budget,
-        )?;
-        self.validate_decoded_elements(decoded)
+            MAX_LOCAL_SKETCH_DECODE_CAPACITY,
+            Self::new,
+        )
     }
 
+    /// Decodes an overflow sketch using and updating a caller-owned factoring
+    /// work budget. After capacity validation, an empty residual returns no
+    /// elements without spending it.
+    ///
+    /// # Errors
+    /// Same as [`Self::decode_elements_overflow_budget`]. The budget may have
+    /// been partially spent when decoding fails.
     pub(crate) fn decode_elements_overflow_with_shared_budget(
         &self,
         max_elements: usize,
         budget: &mut usize,
     ) -> Result<Vec<u64>, AlgebraicError> {
-        self.validate_decode_capacity(max_elements, MAX_OVERFLOW_SKETCH_CAPACITY)?;
+        self.decode_with_shared_budget(
+            max_elements,
+            budget,
+            MAX_OVERFLOW_SKETCH_CAPACITY,
+            Self::new_overflow,
+        )
+    }
+
+    /// Decodes at most `max_elements`, bounded by `limit`, and checks the
+    /// recovered elements against every coordinate using `new_check`.
+    /// `budget` holds the remaining factoring work and may decrease on error;
+    /// after capacity validation, an all-zero sketch returns no elements
+    /// without spending it.
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::InvalidSketchCapacity`] for zero or excessive
+    /// `max_elements`, or if `new_check` rejects the sketch capacity;
+    /// [`AlgebraicError::DecodeFailure`] if decoding or re-encoding fails; and
+    /// [`AlgebraicError::BudgetExhausted`] if factoring exceeds the budget.
+    fn decode_with_shared_budget(
+        &self,
+        max_elements: usize,
+        budget: &mut usize,
+        limit: usize,
+        new_check: fn(usize) -> Result<Self, AlgebraicError>,
+    ) -> Result<Vec<u64>, AlgebraicError> {
+        self.validate_decode_capacity(max_elements, limit)?;
         if self.coordinates.iter().all(|&coordinate| coordinate == 0) {
             return Ok(Vec::new());
         }
@@ -544,7 +572,7 @@ impl SyndromeSketch {
             max_elements,
             budget,
         )?;
-        self.validate_decoded_overflow(decoded)
+        self.validate_decoded(decoded, new_check)
     }
 
     const fn validate_decode_capacity(
@@ -701,29 +729,17 @@ impl SyndromeSketch {
     ///
     /// # Errors
     /// Returns [`AlgebraicError::InvalidSketchCapacity`] when `max_elements`
-    /// exceeds the sketch capacity or the overflow capacity limit, and
+    /// is zero or exceeds the sketch capacity or the overflow capacity limit, and
     /// [`AlgebraicError::BudgetExhausted`] when root finding reaches its work
-    /// limit.
+    /// limit. Returns [`AlgebraicError::DecodeFailure`] if the residual cannot
+    /// be decoded or the recovered elements do not reproduce the sketch.
     pub fn decode_elements_overflow_budget(
         &self,
         max_elements: usize,
         budget: usize,
     ) -> Result<Vec<u64>, AlgebraicError> {
-        self.validate_decode_capacity(max_elements, MAX_OVERFLOW_SKETCH_CAPACITY)?;
-        if self.coordinates.iter().all(|&coordinate| coordinate == 0) {
-            return Ok(Vec::new());
-        }
         let mut remaining = budget;
-        let decoded = super::pinsketch::decode_with_budget(
-            &self.coordinates[..max_elements],
-            max_elements,
-            &mut remaining,
-        )?;
-        self.validate_decoded_overflow(decoded)
-    }
-
-    fn validate_decoded_overflow(&self, decoded: Vec<u64>) -> Result<Vec<u64>, AlgebraicError> {
-        self.validate_decoded(decoded, Self::new_overflow)
+        self.decode_elements_overflow_with_shared_budget(max_elements, &mut remaining)
     }
 }
 

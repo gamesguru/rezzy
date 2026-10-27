@@ -16,6 +16,7 @@ blake3 = { version = "1.5", default-features = false }
 ed25519-dalek = { version = "3", default-features = false, features = ["alloc", "batch"] }
 imbl = { version = "7.0", default-features = false }
 libc = "0.2"
+mtxdb = { git = "https://github.com/Wombat-Foundation/mtxdb.git", rev = "3d33168f6e3c5d20d8c3674b6548b7be38026f0b", optional = true }
 rezzy = { path = "..", features = ["signing", "signing-consensus"] }
 rezzy-recon = { path = "../rezzy-recon", version = "0.6.0-rc.1" }
 roaring = { version = "0.11", default-features = false, features = ["std"] }
@@ -32,6 +33,10 @@ sha3 = { version = "0.10", default-features = false }
 ed25519-consensus = { version = "2.1", default-features = false, features = ["std"] }
 rand_08 = { package = "rand", version = "0.8" }
 simd-json = { version = "0.18", features = ["serde_impl", "runtime-detection", "swar-number-parsing"] }
+
+[features]
+default = []
+mtxdb = ["dep:mtxdb"]
 
 [[bench]]
 name = "rezzy"
@@ -56,3 +61,7 @@ harness = false
 [[test]]
 name = "aesctr_crosscheck"
 path = "aesctr_crosscheck.rs"
+
+# mtxdb takes rezzy-recon from git; use this checkout's so there is one copy.
+[patch."https://gitlab.com/wombat-foundation/rezzy.git"]
+rezzy-recon = { path = "../rezzy-recon" }

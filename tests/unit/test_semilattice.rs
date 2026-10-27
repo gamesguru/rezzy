@@ -139,11 +139,11 @@ fn test_route_power_events_classification() {
     let mut non_power = HashMap::new();
     route_power_events(&map, &mut power, &mut non_power, StateResVersion::V2);
 
-    // create, PL, join_rules, and member events are power events
+    // create, PL, join_rules, and kicks/bans are power events
     assert!(power.contains_key("$create"));
     assert!(power.contains_key("$pl"));
     assert!(power.contains_key("$jr"));
-    assert!(power.contains_key("$alice_join"));
+    assert!(non_power.contains_key("$alice_join"));
     // topics are non-power
     assert!(non_power.contains_key("$topic_a"));
     assert!(non_power.contains_key("$topic_b"));
@@ -166,7 +166,7 @@ fn test_lattice_fold_resolves_conflicting_topics() {
     assert_topic_b(&resolved, "Lattice fold should pick topic_b (later ts)");
 }
 
-fn test_supplemental_key_does_not_overwrite_resolved_state(version: StateResVersion) {
+fn test_supplemental_key_resolution_by_version(version: StateResVersion) {
     let events = utils::parse_jsonl_events(FIXTURE);
     let map = to_event_map(&events);
     let unconflicted = utils::build_unconflicted_state_test_helper(&map);
@@ -196,9 +196,10 @@ fn test_supplemental_key_does_not_overwrite_resolved_state(version: StateResVers
     );
 
     let topic_key = topic_key();
-    assert!(
-        !semilattice.contains_key(&topic_key),
-        "an accepted supplemental event must not decide an excluded key"
+    assert_eq!(
+        semilattice.get(&topic_key).map(String::as_str),
+        Some("$topic_b"),
+        "an accepted supplemental event decides a key absent from unconflicted_state"
     );
     assert_eq!(
         semilattice, iterative,
@@ -206,7 +207,7 @@ fn test_supplemental_key_does_not_overwrite_resolved_state(version: StateResVers
     );
 }
 
-cases!(test_supplemental_key_does_not_overwrite_resolved_state:
+cases!(test_supplemental_key_resolution_by_version:
     v2 = StateResVersion::V2,
     v2_1 = StateResVersion::V2_1,
     v2_1_1 = StateResVersion::V2_1_1,

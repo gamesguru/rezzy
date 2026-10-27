@@ -545,11 +545,14 @@ pub fn resolve_parent_states<S: std::hash::BuildHasher>(
 }
 
 /// Partition and resolve state across components.
+/// Returns the resolved state and elapsed partitioning/resolution time.
+/// After V1, supplements conflicts with the auth-chain difference of `heads`;
+/// heads absent from `auth_graph` and events absent from `events_map` are skipped.
 ///
 /// # Panics
 ///
-/// Panics only if an auth-chain bitmap contains an index absent from its own
-/// graph index.
+/// Panics if an auth-chain bitmap contains an index absent from its own
+/// graph index, or if `version` is [`StateResVersion::V3`].
 #[must_use]
 pub fn partition_and_resolve_state<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     heads: &[String],
@@ -563,7 +566,7 @@ pub fn partition_and_resolve_state<S1: std::hash::BuildHasher, S2: std::hash::Bu
         rezzy::partition_state_maps(state_maps, state_maps.len());
 
     let mut auth_difference = std::collections::HashSet::new();
-    if !heads.is_empty() {
+    if version != StateResVersion::V1 && !heads.is_empty() {
         let mut union = rezzy::bitmap::Bitmap::new();
         let mut intersection = rezzy::bitmap::Bitmap::new();
         let mut first = true;
@@ -751,62 +754,6 @@ pub fn epoch_days_to_ymd(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    #[test]
-    fn raw_jsonl_spans_skip_blank_lines() {
-        let input = b"\n {\"event_id\":\"$a\"}\n\n{\"event_id\":\"$b\"}";
-        let spans = super::discover_jsonl_spans(input);
-        assert_eq!(spans.len(), 2);
-        assert_eq!(
-            &input[spans[0].start..spans[0].end],
-            b" {\"event_id\":\"$a\"}"
-        );
-        assert_eq!(
-            &input[spans[1].start..spans[1].end],
-            b"{\"event_id\":\"$b\"}"
-        );
-    }
-
-    #[test]
-    fn masked_matrix_fields_extract_adjacency_without_full_dom() {
-        let raw = br#"{"event_id":"$e","room_id":"!r:x","type":"m.room.message","state_key":"","prev_events":["$p"],"auth_events":[["$a",{}]],"content":{"room_version":"10","m.relates_to":{"rel_type":"m.thread","event_id":"$root"},"ignored":{"large":[1,2,3]}}}"#;
-        let mut scratch = super::MatrixEventScratch::with_capacity(4, 4, 32);
-        let fields = super::extract_matrix_event_into(raw, &mut scratch).unwrap();
-        assert_eq!(fields.event_id, Some("$e"));
-        assert_eq!(fields.prev_events, vec!["$p"]);
-        assert_eq!(fields.auth_events, vec!["$a"]);
-    }
-
-    #[test]
-    fn discover_array_and_envelope_and_federation_spans() {
-        let arr = br#"[ {"event_id":"$1"}, {"event_id":"$2"} ]"#;
-        let spans = super::discover_array_spans(arr).unwrap();
-        assert_eq!(spans.len(), 2);
-        assert_eq!(&arr[spans[0].start..spans[0].end], br#"{"event_id":"$1"}"#);
-        assert_eq!(&arr[spans[1].start..spans[1].end], br#"{"event_id":"$2"}"#);
-
-        let env = br#"{"heads":["$h1","$h2"],"events":[{"event_id":"$1"}]}"#;
-        let env_spans = super::discover_envelope_spans(env).unwrap();
-        assert_eq!(env_spans.heads, vec!["$h1", "$h2"]);
-        assert_eq!(env_spans.events.len(), 1);
-        assert_eq!(
-            &env[env_spans.events[0].start..env_spans.events[0].end],
-            br#"{"event_id":"$1"}"#
-        );
-
-        let fed = br#"{"pdus":[{"event_id":"$p1"}],"auth_chain":[{"event_id":"$a1"}]}"#;
-        let fed_spans = super::discover_federation_spans(fed).unwrap();
-        assert_eq!(fed_spans.pdus.len(), 1);
-        assert_eq!(fed_spans.auth_chain.len(), 1);
-        assert_eq!(
-            &fed[fed_spans.pdus[0].start..fed_spans.pdus[0].end],
-            br#"{"event_id":"$p1"}"#
-        );
-        assert_eq!(
-            &fed[fed_spans.auth_chain[0].start..fed_spans.auth_chain[0].end],
-            br#"{"event_id":"$a1"}"#
-        );
-    }
-
     use super::*;
     use rezzy::LeanEvent;
 
@@ -1036,6 +983,67 @@ mod tests {
             hamt_root_hash(&full, b"room"),
             hamt_root_hash(borrowed.as_ref(), b"room"),
             "HAMT roots must match (full vs borrowed)"
+        );
+    }
+
+    #[test]
+    fn v1_partition_and_resolve_state_skips_auth_difference() {
+        let events = map_from_jsonl(
+            r#"
+{"event_id":"$create","type":"m.room.create","state_key":"","sender":"@alice:a.com","depth":0,"origin_server_ts":1000,"content":{"creator":"@alice:a.com","room_version":"1"},"prev_events":[],"auth_events":[]}
+{"event_id":"$alice_join","type":"m.room.member","state_key":"@alice:a.com","sender":"@alice:a.com","depth":1,"origin_server_ts":1001,"content":{"membership":"join"},"prev_events":["$create"],"auth_events":["$create"]}
+{"event_id":"$pl","type":"m.room.power_levels","state_key":"","sender":"@alice:a.com","depth":2,"origin_server_ts":1002,"content":{"users":{"@alice:a.com":100},"events_default":0,"state_default":50,"ban":50,"kick":50,"invite":0},"prev_events":["$alice_join"],"auth_events":["$create","$alice_join"]}
+{"event_id":"$bob_join","type":"m.room.member","state_key":"@bob:b.com","sender":"@bob:b.com","depth":3,"origin_server_ts":1003,"content":{"membership":"join"},"prev_events":["$pl"],"auth_events":["$create","$alice_join","$pl"]}
+{"event_id":"$pl_diff","type":"m.room.power_levels","state_key":"","sender":"@alice:a.com","depth":4,"origin_server_ts":1500,"content":{"users":{"@alice:a.com":100},"events_default":0,"state_default":0,"ban":50,"kick":50,"invite":0},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
+{"event_id":"$name_alice","type":"m.room.name","state_key":"","sender":"@alice:a.com","depth":5,"origin_server_ts":1600,"content":{"name":"alice"},"prev_events":["$bob_join"],"auth_events":["$create","$alice_join","$pl"]}
+{"event_id":"$name_bob","type":"m.room.name","state_key":"","sender":"@bob:b.com","depth":6,"origin_server_ts":1700,"content":{"name":"bob"},"prev_events":["$pl_diff"],"auth_events":["$create","$bob_join","$pl_diff"]}
+"#,
+        );
+        let mut state_alice: std::collections::HashMap<(EventType, String), String> =
+            std::collections::HashMap::new();
+        state_alice.insert(
+            (EventType::from("m.room.create"), String::new()),
+            "$create".into(),
+        );
+        state_alice.insert(
+            (EventType::from("m.room.member"), "@alice:a.com".into()),
+            "$alice_join".into(),
+        );
+        state_alice.insert(
+            (EventType::from("m.room.member"), "@bob:b.com".into()),
+            "$bob_join".into(),
+        );
+        state_alice.insert(
+            (EventType::from("m.room.power_levels"), String::new()),
+            "$pl".into(),
+        );
+        state_alice.insert(
+            (EventType::from("m.room.name"), String::new()),
+            "$name_alice".into(),
+        );
+
+        let mut state_bob = state_alice.clone();
+        state_bob.insert(
+            (EventType::from("m.room.name"), String::new()),
+            "$name_bob".into(),
+        );
+
+        let auth_graph = rezzy::auth::roaring::AuthGraph::build(&events);
+        let heads = vec!["$name_alice".to_string(), "$name_bob".to_string()];
+        let state_maps = vec![state_alice, state_bob];
+
+        let (resolved, _) = partition_and_resolve_state(
+            &heads,
+            &events,
+            &state_maps,
+            StateResVersion::V1,
+            &auth_graph,
+        );
+        let name_key = (EventType::from("m.room.name"), String::new());
+        assert_eq!(
+            resolved.get(&name_key).map(String::as_str),
+            Some("$name_alice"),
+            "V1 skips the auth difference, so $name_bob's auth-only $pl_diff grants Bob no power"
         );
     }
 

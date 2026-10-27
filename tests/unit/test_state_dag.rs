@@ -104,6 +104,18 @@ fn root_create(sender: &str) -> LeanEvent {
     )
 }
 
+fn creator_join_after(prev_state_events: Vec<&str>) -> LeanEvent {
+    make_state_event(
+        "$creator_join",
+        M_ROOM_MEMBER,
+        "@creator:example.com",
+        "@creator:example.com",
+        prev_state_events,
+        json!({ "membership": "join" }),
+        None,
+    )
+}
+
 fn alice_pl() -> LeanEvent {
     make_state_event(
         "$pl",
@@ -705,13 +717,14 @@ fn test_compute_state_from_dag_fork_resolution() {
     let empty_key = String::new();
 
     let create = root_create("@creator:example.com");
+    let creator_join = creator_join_after(vec!["$create"]);
 
     let mut pl_root = make_state_event(
         "$pl_root",
         M_ROOM_POWER_LEVELS,
         "",
         "@creator:example.com",
-        vec!["$create"],
+        vec!["$creator_join"],
         json!({ "users": { "@creator:example.com": 100 } }),
         None,
     );
@@ -768,6 +781,7 @@ fn test_compute_state_from_dag_fork_resolution() {
     merge.depth = 4;
 
     events.insert("$create".to_string(), create);
+    events.insert("$creator_join".to_string(), creator_join);
     events.insert("$pl_root".to_string(), pl_root);
     events.insert("$jr".to_string(), join_rules);
     events.insert("$topic_a".to_string(), topic_a);
@@ -802,12 +816,13 @@ fn test_compute_state_from_dag_fork_resolution() {
 fn test_compute_state_from_dag_is_deterministic_across_storage_order() {
     let empty_key = String::new();
     let create = root_create("@creator:example.com");
+    let creator_join = creator_join_after(vec!["$create"]);
     let mut name_a = make_state_event(
         "$name_a",
         "m.room.name",
         "",
         "@creator:example.com",
-        vec!["$create"],
+        vec!["$creator_join"],
         json!({ "name": "A" }),
         None,
     );
@@ -816,7 +831,7 @@ fn test_compute_state_from_dag_is_deterministic_across_storage_order() {
         "m.room.name",
         "",
         "@creator:example.com",
-        vec!["$create"],
+        vec!["$creator_join"],
         json!({ "name": "B" }),
         None,
     );
@@ -835,7 +850,7 @@ fn test_compute_state_from_dag_is_deterministic_across_storage_order() {
         None,
     );
 
-    let all_events = [create, name_a, name_b, merge.clone()];
+    let all_events = [create, creator_join, name_a, name_b, merge.clone()];
     let mut forward = HashMap::new();
     let mut reverse = HashMap::new();
     for event in &all_events {
@@ -896,15 +911,7 @@ fn test_derive_auth_events_for_membership() {
         json!({ "join_rule": "public" }),
         None,
     );
-    let creator_join = make_state_event(
-        "$creator_join",
-        M_ROOM_MEMBER,
-        "@creator:example.com",
-        "@creator:example.com",
-        vec!["$jr"],
-        json!({ "membership": "join" }),
-        None,
-    );
+    let creator_join = creator_join_after(vec!["$jr"]);
 
     events.insert("$create".to_string(), create);
     events.insert("$pl".to_string(), pl);

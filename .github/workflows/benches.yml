@@ -55,23 +55,37 @@ jobs:
           set -o pipefail; cargo bench --manifest-path benches/Cargo.toml
           --profile release --benches 2>&1 | tee bench-output.txt
 
-      - name: Fetch previous best metrics
-        # Previous best is tracked as bench.json on the `_metadata/badges` branch.
+      - name: Fetch recent baseline metrics
+        # Recent raw runs live in bench-history.json; published all-time bests
+        # in bench.json bootstrap the median when history is unavailable.
         run: |
           set -e
+          rm -rf bench-history
+          mkdir -p bench-history
+          echo '{}' > bench-history-data.json
           if git ls-remote --heads origin _metadata/badges | grep -q '_metadata/badges'; then
-            git fetch origin _metadata/badges:_metadata/badges
-            git show _metadata/badges:bench.json > bench.json 2>/dev/null || echo '{}' > bench.json
-          else
-            echo '{}' > bench.json
+            git fetch --no-tags --depth=100 origin _metadata/badges:_metadata/badges
+            git show _metadata/badges:bench-history.json > bench-history-data.json 2>/dev/null || true
+            i=0
+            for sha in $(git log --format=%H -n 2 _metadata/badges -- bench.json); do
+              if git cat-file -e "${sha}:bench.json" 2>/dev/null; then
+                git show "${sha}:bench.json" > "bench-history/${i}.json"
+                i=$((i + 1))
+              fi
+            done
+          fi
+          if [ "$(find bench-history -type f | wc -l)" -eq 0 ]; then
+            echo '{}' > bench-history/0.json
           fi
 
-      - name: Compare against previous best (10/50/85% tiers, 50us floor)
+      - name: Compare against recent baseline (10/50/85% tiers, 50us floor)
         run: |
           python3 scripts/compare_bench.py \
             --current bench-output.txt \
-            --best bench.json \
+            --best bench-history/*.json \
+            --history bench-history-data.json \
             --out bench-new.json \
+            --history-out bench-history-new.json \
             --notice-margin 0.10 \
             --warning-margin 0.50 \
             --failure-margin 0.85 \
@@ -82,7 +96,9 @@ jobs:
         uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
         with:
           name: benchmark-metrics
-          path: bench-new.json
+          path: |
+            bench-new.json
+            bench-history-new.json
 
   publish:
     needs: bench
@@ -95,7 +111,7 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: benchmark-metrics
-      - name: Publish new best to _metadata/badges
+      - name: Publish new best and recent history to _metadata/badges
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -103,10 +119,11 @@ jobs:
           git fetch origin _metadata/badges 2>/dev/null || true
           git checkout -B _metadata/badges origin/_metadata/badges 2>/dev/null || git checkout -b _metadata/badges
           cp "${GITHUB_WORKSPACE}/bench-new.json" bench.json
-          git add bench.json
+          cp "${GITHUB_WORKSPACE}/bench-history-new.json" bench-history.json
+          git add bench.json bench-history.json
           if git diff --cached --quiet; then
             echo "no metric change to publish"
           else
-            git commit -m "bench: update best metrics"
+            git commit -m "bench: update best metrics and recent history"
             git push origin _metadata/badges
           fi

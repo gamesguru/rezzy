@@ -261,6 +261,17 @@ impl Fixture {
         self.gap_fill_room(destination, ROOM, insecure, rounds, extra)
     }
 
+    fn rezzy_cmd(insecure: bool) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rezzy"));
+        cmd.env("REZZY_KEY_PASSPHRASE", "test");
+        if insecure {
+            cmd.env("REZZY_ALLOW_INSECURE_HTTP", "1");
+        } else {
+            cmd.env_remove("REZZY_ALLOW_INSECURE_HTTP");
+        }
+        cmd
+    }
+
     fn gap_fill_room(
         &self,
         destination: &str,
@@ -269,13 +280,7 @@ impl Fixture {
         rounds: &str,
         extra: &[&str],
     ) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rezzy"));
-        cmd.env("REZZY_KEY_PASSPHRASE", "test");
-        if insecure {
-            cmd.env("REZZY_ALLOW_INSECURE_HTTP", "1");
-        } else {
-            cmd.env_remove("REZZY_ALLOW_INSECURE_HTTP");
-        }
+        let mut cmd = Self::rezzy_cmd(insecure);
         if extra.contains(&"--debug") {
             cmd.arg("--debug");
         }
@@ -299,10 +304,8 @@ impl Fixture {
 
     /// `federation state-diff` at the event `$child`, which the fixture holds.
     fn state_diff(&self, destinations: &[&str], room: &str, extra: &[&str]) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rezzy"));
-        cmd.env("REZZY_KEY_PASSPHRASE", "test")
-            .env("REZZY_ALLOW_INSECURE_HTTP", "1")
-            .args(["federation", "state-diff", "--room", room])
+        let mut cmd = Self::rezzy_cmd(true);
+        cmd.args(["federation", "state-diff", "--room", room])
             .args(["--event", "$child", "--origin", "test.example", "--known"])
             .arg(self.dir.join("base.jsonl"))
             .arg("--signing-key")
@@ -326,13 +329,7 @@ impl Fixture {
         room: &str,
         extra: &[&str],
     ) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_rezzy"));
-        cmd.env("REZZY_KEY_PASSPHRASE", "test");
-        if insecure {
-            cmd.env("REZZY_ALLOW_INSECURE_HTTP", "1");
-        } else {
-            cmd.env_remove("REZZY_ALLOW_INSECURE_HTTP");
-        }
+        let mut cmd = Self::rezzy_cmd(insecure);
         cmd.args([
             "federation",
             "get-remote-dag",
@@ -401,17 +398,21 @@ fn backfill_is_tried_first_and_its_events_are_used() {
     assert!(fx.fetched().contains(TARGET), "target not written");
 }
 
-#[test]
-fn blank_backfill_falls_back_to_fetching_by_event_id() {
-    let (mock, fx, out) = run("blank-backfill", Backfill::Blank, EventShape::Pdus);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    assert!(mock.count("/backfill/") >= 1);
+fn assert_fetched_target_by_id(mock: &Mock, fx: &Fixture) {
     assert!(
         mock.count(&format!("/event/{TARGET}")) >= 1,
         "{:?}",
         mock.requests()
     );
     assert!(fx.fetched().contains(TARGET));
+}
+
+#[test]
+fn blank_backfill_falls_back_to_fetching_by_event_id() {
+    let (mock, fx, out) = run("blank-backfill", Backfill::Blank, EventShape::Pdus);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(mock.count("/backfill/") >= 1);
+    assert_fetched_target_by_id(&mock, &fx);
 }
 
 #[test]
@@ -487,13 +488,17 @@ fn every_request_is_signed() {
     );
 }
 
-#[test]
-fn unfetchable_events_are_reported_not_fatal() {
-    let (_mock, _fx, out) = run("incomplete", Backfill::Blank, EventShape::Pdus);
+fn assert_incomplete_report(out: &Output) {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let stdout = text(&out.stdout);
     assert!(stdout.contains("incomplete"), "{stdout}");
     assert!(stdout.contains(STILL_MISSING), "{stdout}");
+}
+
+#[test]
+fn unfetchable_events_are_reported_not_fatal() {
+    let (_mock, _fx, out) = run("incomplete", Backfill::Blank, EventShape::Pdus);
+    assert_incomplete_report(&out);
     assert!(
         text(&out.stderr).contains("[warn]"),
         "{}",
@@ -778,10 +783,7 @@ fn resume_does_not_mistake_the_request_log_for_events() {
         .status
         .success());
     let out = fx.gap_fill_with(&mock.url, true, "1", &["--debug", "--resume"]);
-    assert!(out.status.success(), "{}", text(&out.stderr));
-    let stdout = text(&out.stdout);
-    assert!(stdout.contains("incomplete"), "{stdout}");
-    assert!(stdout.contains(STILL_MISSING), "{stdout}");
+    assert_incomplete_report(&out);
 }
 
 #[test]
@@ -791,12 +793,7 @@ fn no_backfill_never_calls_backfill() {
     let out = fx.gap_fill_with(&mock.url, true, "1", &["--no-backfill"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(mock.count("/backfill/"), 0, "{:?}", mock.requests());
-    assert!(
-        mock.count(&format!("/event/{TARGET}")) >= 1,
-        "{:?}",
-        mock.requests()
-    );
-    assert!(fx.fetched().contains(TARGET));
+    assert_fetched_target_by_id(&mock, &fx);
 }
 
 #[test]
@@ -850,11 +847,7 @@ fn a_room_id_without_the_sigil_is_rejected_before_any_request() {
     assert!(mock.requests().is_empty(), "{:?}", mock.requests());
 }
 
-#[test]
-fn get_remote_dag_also_rejects_a_room_without_the_sigil() {
-    let mock = spawn_mock(Backfill::Events, EventShape::Pdus);
-    let fx = Fixture::new("bad-room-dag");
-    let out = fx.get_remote_dag_with(&mock.url, true, "clearR", &[]);
+fn assert_rejects_room_without_sigil(out: &Output, mock: &Mock) {
     assert!(!out.status.success());
     assert!(
         text(&out.stderr).contains("must be a Matrix room ID"),
@@ -862,6 +855,14 @@ fn get_remote_dag_also_rejects_a_room_without_the_sigil() {
         text(&out.stderr)
     );
     assert!(mock.requests().is_empty(), "{:?}", mock.requests());
+}
+
+#[test]
+fn get_remote_dag_also_rejects_a_room_without_the_sigil() {
+    let mock = spawn_mock(Backfill::Events, EventShape::Pdus);
+    let fx = Fixture::new("bad-room-dag");
+    let out = fx.get_remote_dag_with(&mock.url, true, "clearR", &[]);
+    assert_rejects_room_without_sigil(&out, &mock);
 }
 
 #[test]
@@ -1165,13 +1166,17 @@ fn state_diff_reports_a_refusing_server_and_still_compares_the_rest() {
     );
 }
 
-#[test]
-fn state_diff_fetch_gets_the_missing_events_by_id() {
+fn spawn_only_target_mock() -> Mock {
     let only_target = StateIds {
         pdu_ids: vec![TARGET],
         auth_chain_ids: vec![],
     };
-    let a = spawn_mock_with(Backfill::Events, EventShape::Pdus, Some(only_target));
+    spawn_mock_with(Backfill::Events, EventShape::Pdus, Some(only_target))
+}
+
+#[test]
+fn state_diff_fetch_gets_the_missing_events_by_id() {
+    let a = spawn_only_target_mock();
     let fx = Fixture::new("sd-fetch");
     let out = fx.state_diff(&[&a.url], ROOM, &["--fetch"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
@@ -1228,11 +1233,7 @@ fn state_diff_fetch_fails_when_every_event_request_fails() {
 
 #[test]
 fn state_diff_fetch_does_not_crawl_unknown_parents() {
-    let only_target = StateIds {
-        pdu_ids: vec![TARGET],
-        auth_chain_ids: vec![],
-    };
-    let a = spawn_mock_with(Backfill::Events, EventShape::Pdus, Some(only_target));
+    let a = spawn_only_target_mock();
     let fx = Fixture::without_parent("sd-fetch-no-crawl");
     let out = fx.state_diff(&[&a.url], ROOM, &["--fetch"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
@@ -1298,11 +1299,7 @@ fn state_diff_fetch_refuses_to_overwrite_a_known_file() {
 
 #[test]
 fn state_diff_without_fetch_fetches_nothing() {
-    let only_target = StateIds {
-        pdu_ids: vec![TARGET],
-        auth_chain_ids: vec![],
-    };
-    let a = spawn_mock_with(Backfill::Events, EventShape::Pdus, Some(only_target));
+    let a = spawn_only_target_mock();
     let fx = Fixture::new("sd-nofetch");
     assert!(fx.state_diff(&[&a.url], ROOM, &[]).status.success());
     assert_eq!(a.count("/event/"), 0, "{:?}", a.requests());
@@ -1314,11 +1311,5 @@ fn state_diff_rejects_a_room_without_the_sigil_before_any_request() {
     let (a, _b) = two_servers();
     let fx = Fixture::new("sd-bad-room");
     let out = fx.state_diff(&[&a.url], "clearR", &[]);
-    assert!(!out.status.success());
-    assert!(
-        text(&out.stderr).contains("must be a Matrix room ID"),
-        "{}",
-        text(&out.stderr)
-    );
-    assert!(a.requests().is_empty(), "{:?}", a.requests());
+    assert_rejects_room_without_sigil(&out, &a);
 }

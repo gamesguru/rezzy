@@ -263,6 +263,7 @@ fn assert_pl_users_rejected(users: &rezzy::JsonValue) {
             "@admin:x.com",
             json!({"room_version": version_str}),
         );
+        insert_join(&mut state, "$j", "@admin:x.com");
         let pl = make_event(
             "$pl",
             rezzy::basespec::event_types::M_ROOM_POWER_LEVELS,
@@ -943,10 +944,9 @@ fn test_iterative_auth_chain_room_id_none_on_citing_side_is_never_checked() {
     // Not a create event -- citing *any* m.room.create in auth_events is
     // independently forbidden under V2.1+ (v12+ drops create from
     // auth_events entirely), which would trip that unrelated rule first and
-    // defeat this test's isolation. Sender is alice (not a fresh mallory) so
-    // the implicit-creator-is-joined rule (matched against the *local*
-    // $create's sender) lets it pass its own auth check without needing a
-    // separate join event. room_id stays None: whether this event's own
+    // defeat this test's isolation. Sender is alice, the creator, who joins
+    // first (no version treats a creator without a join as joined). room_id
+    // stays None: whether this event's own
     // room tag would agree with anything is irrelevant to what this test
     // isolates -- msg (below) never even looks at it, since msg's own
     // room_id is None and Rule 2.5 is opt-in on the *citing* side. (Giving
@@ -954,13 +954,20 @@ fn test_iterative_auth_chain_room_id_none_on_citing_side_is_never_checked() {
     // spec/rooms/v12.txt:98, which checks every non-create V2.1+ event's
     // room_id against the real accepted create -- an unrelated rejection
     // this test isn't about.)
-    let foreign_pl = make_event(
+    let alice_join = make_member(
+        "$alice_join",
+        "@alice:example.com",
+        "@alice:example.com",
+        "join",
+    );
+    let mut foreign_pl = make_event(
         "$foreign_pl",
         "m.room.power_levels",
         Some(""),
         "@alice:example.com",
         json!({}),
     );
+    foreign_pl.auth_events = vec!["$alice_join".into()];
 
     let mut msg = make_event(
         "$msg",
@@ -971,15 +978,18 @@ fn test_iterative_auth_chain_room_id_none_on_citing_side_is_never_checked() {
     );
     // msg.room_id stays None -- caller never populated it, so rule 2.5
     // never activates for this event regardless of what it cites.
-    msg.auth_events = vec!["$foreign_pl".into()];
+    msg.auth_events = vec!["$foreign_pl".into(), "$alice_join".into()];
 
     let (accepted, rejected) = check_auth_chain(
-        &[create, foreign_pl, msg],
+        &[create, alice_join, foreign_pl, msg],
         &RoomState::new(),
         rezzy::basespec::rezzy_types::StateResVersion::V2_1,
     );
 
-    assert_eq!(accepted, vec!["$create", "$foreign_pl", "$msg"]);
+    assert_eq!(
+        accepted,
+        vec!["$create", "$alice_join", "$foreign_pl", "$msg"]
+    );
     assert_eq!(rejected, Vec::<(String, rezzy::auth::AuthError)>::new());
 }
 
@@ -1475,6 +1485,49 @@ fn test_msc4289_v2_1_creator_immune_to_pl_wipeout() {
         "V2.1 creator must retain infinite PL even with users:{{}} — immune to PL wipeout: {result:?}"
     );
 }
+
+/// No room version treats the creator as joined without a membership event:
+/// the sender of any non-membership event must be joined (Synapse
+/// `_check_joined_room`), and the creator's only exemption is its own first
+/// join.
+#[test]
+fn test_creator_without_membership_is_not_joined() {
+    for (room_version, state_res) in [
+        ("1", rezzy::StateResVersion::V1),
+        ("11", rezzy::StateResVersion::V2),
+        ("12", rezzy::StateResVersion::V2_1),
+    ] {
+        let mut state = RoomState::new();
+        insert_create(
+            &mut state,
+            "$create",
+            "@admin:example.com",
+            json!({ "room_version": room_version, "creator": "@admin:example.com" }),
+        );
+        let pl = make_event(
+            "$pl",
+            M_ROOM_POWER_LEVELS,
+            Some(""),
+            "@admin:example.com",
+            json!({ "users": {} }),
+        );
+        assert!(
+            matches!(
+                check_auth(&pl, &state, state_res, None),
+                Err(AuthError::NotMember { .. })
+            ),
+            "room v{room_version}: a creator who never joined cannot send power levels"
+        );
+
+        insert_join(&mut state, "$admin_join", "@admin:example.com");
+        let result = check_auth(&pl, &state, state_res, None);
+        assert!(
+            result.is_ok(),
+            "room v{room_version}: the joined creator can: {result:?}"
+        );
+    }
+}
+
 /// MSC4289 (V12+): creators have spec-mandated infinite power level, immutable
 /// and not representable in the PL event. This test verifies the implicit PL
 /// for the primary creator and `additional_creators` in V2.1 (room version 12).
@@ -1508,7 +1561,8 @@ fn test_msc4289_creator_implicit_power_level() {
     // Target user
     insert_join(&mut state, "$join_target", "@target:example.com");
 
-    // Additional creator must be joined (only primary creator has implicit join in v11)
+    // Creators get no implicit join: every creator must be joined.
+    insert_join(&mut state, "$join_creator", "@creator:example.com");
     insert_join(&mut state, "$join_additional", "@additional:example.com");
 
     // Normal user must be joined
@@ -3327,6 +3381,7 @@ fn test_pl_users_non_integer_across_versions() {
 
         let mut state = RoomState::new();
         insert_event(&mut state, M_ROOM_CREATE, "", coercible[0].clone());
+        insert_join(&mut state, "$j", "@admin:x.com");
 
         let result = check_auth(&coercible[1], &state, state_res, None);
         if coercible_allowed {
@@ -3351,6 +3406,7 @@ fn test_pl_users_non_integer_across_versions() {
 
         let mut state2 = RoomState::new();
         insert_event(&mut state2, M_ROOM_CREATE, "", non_coercible[0].clone());
+        insert_join(&mut state2, "$j", "@admin:x.com");
 
         let result2 = check_auth(&non_coercible[1], &state2, state_res, None);
         assert!(
@@ -4113,6 +4169,7 @@ fn test_v2_2_auth_context_skips_auth_events_selection_rules() {
     );
     let mut state = RoomState::new();
     state.insert((M_ROOM_CREATE.to_string(), String::new()), create);
+    insert_join(&mut state, "$admin_join:example.com", "@admin:example.com");
 
     let event = LeanEvent {
         event_id: "$msg:example.com".to_string(),

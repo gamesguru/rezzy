@@ -723,11 +723,23 @@ mod tests {
         let env_spans = discover_envelope_spans(env).unwrap();
         assert_eq!(env_spans.events.len(), 1);
         assert_eq!(env_spans.heads, vec!["$h1".to_owned(), "$h2".to_owned()]);
+        assert_eq!(
+            &env[env_spans.events[0].start..env_spans.events[0].end],
+            br#"{"event_id":"$1"}"#
+        );
 
         let fed = br#"{"pdus":[{"event_id":"$pdu1"}],"auth_chain":[{"event_id":"$ac1"}]}"#;
         let fed_spans = discover_federation_spans(fed).unwrap();
         assert_eq!(fed_spans.pdus.len(), 1);
         assert_eq!(fed_spans.auth_chain.len(), 1);
+        assert_eq!(
+            &fed[fed_spans.pdus[0].start..fed_spans.pdus[0].end],
+            br#"{"event_id":"$pdu1"}"#
+        );
+        assert_eq!(
+            &fed[fed_spans.auth_chain[0].start..fed_spans.auth_chain[0].end],
+            br#"{"event_id":"$ac1"}"#
+        );
     }
 
     #[test]

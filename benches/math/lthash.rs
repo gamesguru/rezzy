@@ -37,8 +37,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::common::{
-    apply_state_op, apply_state_op_lthash, generate_state_ops, generate_unique_entries, lthash_of,
-    random_member_key, sha256_sorted_hash, xor_fold_sha256, StateKey, Xorshift128,
+    apply_state_op, apply_state_op_lthash, generate_unique_entries, random_member_key,
+    sha256_sorted_hash, xor_fold_sha256, StateKey,
 };
 
 fn make_entries(n: usize, seed: u64) -> Vec<(StateKey, String)> {
@@ -94,13 +94,7 @@ fn bench_incremental_hash(n: usize, steps: usize) {
     println!("incremental state hash after each mutation (n={n}, steps={steps}):");
 
     let base_entries = make_entries(n, 0x5EED_0000 + n as u64);
-    let mut state: HashMap<StateKey, String> = base_entries.into_iter().collect();
-
-    let mut lt = lthash_of(&state);
-
-    let mut rng = Xorshift128::new(0xBEEF);
-    let existing_keys: Vec<StateKey> = state.keys().cloned().collect();
-    let ops = generate_state_ops(&mut rng, &existing_keys, steps);
+    let (mut state, mut lt, ops) = crate::common::prepare_incremental_state(base_entries, steps);
 
     let mut conduwuit_state = state.clone();
     let conduwuit_start = Instant::now();

@@ -10,14 +10,21 @@ use std::time::Instant;
 use rezzy::bitmap::{Bitmap, Bitmap128, Bitmap64};
 use roaring::{RoaringBitmap, RoaringTreemap};
 
-struct Rng(u64);
+use crate::common::Xorshift64;
+
+/// Uses `Xorshift64`, not `Xorshift128`: changing this sequence would make new
+/// results incomparable with prior bitmap benchmark runs.
+struct Rng(Xorshift64);
 
 impl Rng {
+    /// Starts a repeatable sequence of benchmark samples from `seed`.
+    fn new(seed: u64) -> Self {
+        Self(Xorshift64::new(seed))
+    }
+
+    /// Advances the seeded sequence and returns the next sample.
     fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
+        self.0.next_u64()
     }
 }
 
@@ -292,7 +299,7 @@ fn wide_cases(rng: &mut Rng) {
 /// Entry point for the bitmap comparison benchmark.
 pub fn run() {
     println!("Bitmap vs roaring (ratio < 1 means Bitmap is faster)");
-    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let mut rng = Rng::new(0x2545_f491_4f6c_dd1d);
 
     for &(span, pm, label) in &[
         (200_000u32, 5u64, "sparse"),

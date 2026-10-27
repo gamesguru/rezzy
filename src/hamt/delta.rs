@@ -136,6 +136,13 @@ fn diff_short_circuit<K, V, E>(
 }
 
 /// Recursively compute the structural diff between two HAMT nodes.
+/// Appends entries present only in B to `added` and entries present only in A
+/// to `removed`; a changed value appears in both with its respective value.
+///
+/// # Errors
+/// Propagates resolver failures as [`HamtTraversalError::Resolve`] and reports
+/// [`HamtTraversalError::MaxDepthExceeded`] at the routing limit. Output
+/// buffers may contain partial changes on error.
 fn diff_nodes<K, V, F, E>(
     node_a: &NodePtr<K, V>,
     node_b: &NodePtr<K, V>,
@@ -159,7 +166,15 @@ where
     let d_a = node_a.datamap;
     let d_b = node_b.datamap;
 
-    let union = d_a | d_b;
+    let n_a = node_a.nodemap;
+    let n_b = node_b.nodemap;
+    // A leaf can become a subtree when an insertion shares its slot. Handle
+    // those slots together so an unchanged leaf is not reported twice.
+    let leaf_a_sub_b = d_a & n_b;
+    let sub_a_leaf_b = n_a & d_b;
+    let cross = leaf_a_sub_b | sub_a_leaf_b;
+
+    let union = (d_a | d_b) & !cross;
     for slot in set_bits(union) {
         let bit = 1 << slot;
         let in_a = (d_a & bit) != 0;
@@ -191,10 +206,7 @@ where
     }
 
     // Traverse nodemaps
-    let n_a = node_a.nodemap;
-    let n_b = node_b.nodemap;
-
-    for (slot, in_a, in_b) in union_nodemaps(n_a, n_b) {
+    for (slot, in_a, in_b) in union_nodemaps(n_a & !cross, n_b & !cross) {
         if in_a && in_b {
             if let Some(children) = resolve_changed_pair(node_a, node_b, n_a, n_b, slot, resolver)?
             {
@@ -225,6 +237,104 @@ where
         })?;
     }
 
+    for slot in set_bits(leaf_a_sub_b) {
+        diff_leaf_subtree(
+            &CrossKindSlot {
+                leaf_node: node_a,
+                subtree_node: node_b,
+                leaf_datamap: d_a,
+                subtree_nodemap: n_b,
+                slot,
+                leaf_is_a: true,
+            },
+            added,
+            removed,
+            resolver,
+            next_depth,
+        )?;
+    }
+
+    for slot in set_bits(sub_a_leaf_b) {
+        diff_leaf_subtree(
+            &CrossKindSlot {
+                leaf_node: node_b,
+                subtree_node: node_a,
+                leaf_datamap: d_b,
+                subtree_nodemap: n_a,
+                slot,
+                leaf_is_a: false,
+            },
+            added,
+            removed,
+            resolver,
+            next_depth,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Diffs a leaf on one side against a child subtree on the other side.
+/// Entries in the subtree matching the leaf exactly cancel; all other
+/// subtree entries belong to the subtree side's delta direction.
+struct CrossKindSlot<'a, K, V> {
+    leaf_node: &'a NodePtr<K, V>,
+    subtree_node: &'a NodePtr<K, V>,
+    leaf_datamap: u32,
+    subtree_nodemap: u32,
+    slot: usize,
+    leaf_is_a: bool,
+}
+
+/// Appends the changes for a slot holding a leaf on one side and a subtree
+/// on the other. `cross.leaf_is_a` selects the leaf's side; exact key/value
+/// matches are omitted, while changed values are removed and added.
+/// `depth` is the subtree root's depth in the full HAMT.
+///
+/// # Errors
+/// Returns [`HamtTraversalError::Resolve`] on a resolver failure or
+/// [`HamtTraversalError::MaxDepthExceeded`] at the routing limit. Output
+/// buffers may contain partial changes on error.
+fn diff_leaf_subtree<K: DeltaElem, V: DeltaElem, E>(
+    cross: &CrossKindSlot<'_, K, V>,
+    added: &mut Vec<(K, V)>,
+    removed: &mut Vec<(K, V)>,
+    resolver: &mut impl FnMut(&StructuralHash) -> Result<NodePtr<K, V>, E>,
+    depth: usize,
+) -> Result<(), HamtTraversalError<E>> {
+    let CrossKindSlot {
+        leaf_node,
+        subtree_node,
+        leaf_datamap,
+        subtree_nodemap,
+        slot,
+        leaf_is_a,
+    } = cross;
+    let (key, value) = &leaf_node.leaves[map_index(*leaf_datamap, *slot)];
+    let child = resolve_only_child(subtree_node, *subtree_nodemap, *slot, resolver)?;
+    let subtree_delta = if *leaf_is_a {
+        &mut *added
+    } else {
+        &mut *removed
+    };
+    let mut unchanged = false;
+    walk_subtree(&child, resolver, depth, &mut |node| {
+        for (other_key, other_value) in &node.leaves {
+            if other_key == key && other_value == value {
+                unchanged = true;
+            } else {
+                subtree_delta.push((other_key.clone(), other_value.clone()));
+            }
+        }
+    })?;
+    if !unchanged {
+        let leaf_delta = if *leaf_is_a {
+            &mut *removed
+        } else {
+            &mut *added
+        };
+        leaf_delta.push((key.clone(), value.clone()));
+    }
     Ok(())
 }
 

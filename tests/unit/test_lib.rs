@@ -777,7 +777,7 @@ mod tests {
                 rezzy::basespec::event_types::EventType::from("m.room.member"),
                 "@bob:example.com".into()
             )),
-            Some(&"id2_new".into()) // id2_new wins because voluntary joins are non-power events sorted chronologically.
+            Some(&"id2".into()) // The agreed unconflicted value is restored by the final merge.
         );
     }
 
@@ -2002,20 +2002,26 @@ mod tests {
             })
         );
 
-        // Creator should be allowed implied join if no member event is present
+        // The creator gets no implied join: without a member event it is not
+        // joined either (spec auth rules; Synapse `_check_joined_room`).
         let creator_name_change: LeanEvent = LeanEvent {
             event_id: "$name2".into(),
             event_type: "m.room.name".into(),
             sender: "@alice:example.com".into(),
             ..Default::default()
         };
-        assert!(check_auth(
-            &creator_name_change,
-            &state,
-            rezzy::basespec::rezzy_types::StateResVersion::V2_1,
-            None
-        )
-        .is_ok());
+        assert_eq!(
+            check_auth(
+                &creator_name_change,
+                &state,
+                rezzy::basespec::rezzy_types::StateResVersion::V2_1,
+                None
+            ),
+            Err(AuthError::NotMember {
+                sender: "@alice:example.com".into(),
+                event_id: "$name2".into()
+            })
+        );
 
         // Banned user membership transition
         let mut state2 = RoomState::new();
@@ -2034,6 +2040,17 @@ mod tests {
         state2.insert(
             ("m.room.member".to_string(), "@bob:example.com".into()),
             banned_member.clone(),
+        );
+        // The creator has joined, so the membership checks below are reached.
+        state2.insert(
+            ("m.room.member".to_string(), "@alice:example.com".into()),
+            super::make_event(
+                "$alice_join",
+                "m.room.member",
+                Some("@alice:example.com"),
+                "@alice:example.com",
+                json!({ "membership": "join" }),
+            ),
         );
 
         // A banned user cannot join or send events
@@ -5454,18 +5471,18 @@ fn test_v2_vs_v2_1_member_power_event_classification() {
         "V2 should route message to non-power events"
     );
 
-    // In V2, ALL member events are power events.
+    // In V2, only kicks and bans are member power events.
     assert!(
-        set1_v2_power.contains_key("$self_join"),
-        "V2 should treat self-join as power event"
+        set1_v2_non_power.contains_key("$self_join"),
+        "V2 should route self-join to non-power events"
     );
     assert!(
         set1_v2_power.contains_key("$kick"),
         "V2 should treat kick as power event"
     );
     assert!(
-        set1_v2_power.contains_key("$self_leave"),
-        "V2 should treat self-leave as power event"
+        set1_v2_non_power.contains_key("$self_leave"),
+        "V2 should route self-leave to non-power events"
     );
     assert!(
         set1_v2_non_power.contains_key("$msg"),

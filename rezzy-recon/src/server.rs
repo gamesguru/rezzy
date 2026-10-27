@@ -686,18 +686,18 @@ mod tests {
             fn event_format(&self, _id: &MockId) -> EventIdFormat {
                 EventIdFormat::V4Plus
             }
-
-            fn event_hash(&self, id: &MockId) -> Result<ElementHash, AlgebraicError> {
-                Ok(ElementHash::from_opaque_bytes(id.0.as_bytes()))
-            }
         }
 
-        let event_id = id("$anchor");
+        let valid_v4_id = "$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let event_id = id(valid_v4_id);
         assert!(StringIdGraph.is_known(&event_id));
         assert_eq!(StringIdGraph.children(&event_id).next(), None);
 
         let hash = StringIdGraph.event_hash(&event_id).unwrap();
-        assert_eq!(hash, ElementHash::from_opaque_bytes(b"$anchor"));
+        assert_eq!(
+            hash,
+            ElementHash::from_matrix_event_id(valid_v4_id, EventIdFormat::V4Plus).unwrap()
+        );
     }
 
     #[test]

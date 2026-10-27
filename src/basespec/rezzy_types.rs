@@ -938,7 +938,9 @@ pub fn reference_hash(
     let encoded = core::str::from_utf8(&encoded[..length]).map_err(|error| {
         alloc::format!("reference hash encoder returned invalid UTF-8: {error}")
     })?;
-    let mut hash = String::with_capacity(43);
+    // One spare byte lets `from_value` prepend the `$` event-ID sigil without
+    // reallocating the returned hash.
+    let mut hash = String::with_capacity(44);
     hash.push_str(encoded);
     Ok(hash)
 }
@@ -3531,18 +3533,9 @@ impl LeanEvent<String, Value, String> {
         let event_id = if let Some(id) = value.get(FIELD_EVENT_ID).and_then(|v| v.as_str()) {
             String::from(id)
         } else if let Some(ver) = room_version {
-            let digest = reference_hash_digest(value, ver)?;
-            let mut encoded = [0_u8; 43];
-            let length = hash_base64_engine(ver)
-                .encode_slice(digest, &mut encoded)
-                .map_err(|error| alloc::format!("failed to encode reference hash: {error}"))?;
-            let encoded = core::str::from_utf8(&encoded[..length]).map_err(|error| {
-                alloc::format!("reference hash encoder returned invalid UTF-8: {error}")
-            })?;
-            let mut id = String::with_capacity(44);
-            id.push('$');
-            id.push_str(encoded);
-            id
+            let mut hash = reference_hash(value, ver)?;
+            hash.insert(0, '$');
+            hash
         } else {
             return Err(String::from(
                 "event_id is required; pass `room_version` to `from_value` to derive it via the reference hash",
@@ -3749,27 +3742,23 @@ impl<Id, C: EventContent, K: AsRef<str>> LeanEvent<Id, C, K> {
     /// room's administrative state and must go through the full power-phase
     /// resolution pipeline.
     ///
-    /// Power events are:
-    /// - `m.room.create`
+    /// Spec power events are:
     /// - `m.room.power_levels`
     /// - `m.room.join_rules`
-    /// - `m.room.member` events that are bans or kicks (V2.1+), or
-    ///   **all** member events (V2 and below)
+    /// - For V1, all `m.room.member` events (the V1 membership-conflict pass)
+    /// - For V2 and later, events with `ban` or `leave` membership and a
+    ///   `state_key` different from the sender
+    ///
+    /// `m.room.create` is included for rezzy's resolution pipeline; the Matrix
+    /// spec does not classify it as a power event. It cannot be conflicted in
+    /// a well-formed room.
     #[must_use]
-    pub fn is_power_event(&self, version: crate::basespec::rezzy_types::StateResVersion) -> bool {
+    pub fn is_power_event(&self, version: crate::StateResVersion) -> bool {
         self.event_type == crate::basespec::event_types::M_ROOM_CREATE
             || self.event_type == crate::basespec::event_types::M_ROOM_POWER_LEVELS
             || self.event_type == crate::basespec::event_types::M_ROOM_JOIN_RULES
-            || if matches!(
-                version,
-                crate::basespec::rezzy_types::StateResVersion::V2_1
-                    | crate::basespec::rezzy_types::StateResVersion::V2_1_1
-                    | crate::basespec::rezzy_types::StateResVersion::V2_2
-            ) {
-                self.is_ban_or_kick()
-            } else {
-                self.event_type == crate::basespec::event_types::M_ROOM_MEMBER
-            }
+            || (self.event_type == crate::basespec::event_types::M_ROOM_MEMBER
+                && (version == crate::StateResVersion::V1 || self.is_ban_or_kick()))
     }
 
     /// Returns `true` if this is a `m.room.power_levels` event (a potential demotion).

@@ -72,3 +72,4 @@ mod test_state_dag;
 mod test_tombstone;
 mod test_traversal;
 mod test_utils;
+mod test_v2_power_events;

@@ -3,12 +3,7 @@ use base64::Engine;
 
 /// Encodes base64 without relying on the `base64` crate's `alloc` feature.
 pub(crate) fn encode<E: Engine + ?Sized>(engine: &E, input: &[u8]) -> String {
-    let capacity = input
-        .len()
-        .checked_add(2)
-        .and_then(|length| length.checked_mul(4))
-        .map(|length| length / 3)
-        .expect("base64 output length overflow");
+    let capacity = base64::encoded_len(input.len(), true).expect("base64 output length overflow");
     let mut output = vec![0; capacity];
     let length = engine
         .encode_slice(input, &mut output)

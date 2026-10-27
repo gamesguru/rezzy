@@ -125,125 +125,36 @@ fn check_child_payload(
     Ok(())
 }
 
-impl HamtCodec for u8 {
-    #[inline]
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
+macro_rules! impl_le_hamt_codec {
+    ($($ty:ty => $len:literal),+ $(,)?) => {
+        $(
+            impl HamtCodec for $ty {
+                #[inline]
+                fn encode_hamt(&self, out: &mut Vec<u8>) {
+                    out.extend_from_slice(&self.to_le_bytes());
+                }
 
-    #[inline]
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        Ok(Self::from_le_bytes(read_fixed::<1>(input, cursor)?))
-    }
+                #[inline]
+                fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
+                    Ok(Self::from_le_bytes(read_fixed::<$len>(input, cursor)?))
+                }
+            }
+        )+
+    };
 }
 
-impl HamtCodec for u16 {
-    #[inline]
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
-
-    #[inline]
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        Ok(Self::from_le_bytes(read_fixed::<2>(input, cursor)?))
-    }
-}
-
-impl HamtCodec for u32 {
-    #[inline]
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
-
-    #[inline]
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        Ok(Self::from_le_bytes(read_fixed::<4>(input, cursor)?))
-    }
-}
-
-impl HamtCodec for u64 {
-    #[inline]
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
-
-    #[inline]
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        Ok(Self::from_le_bytes(read_fixed::<8>(input, cursor)?))
-    }
-}
-
-impl HamtCodec for u128 {
-    #[inline]
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
-
-    #[inline]
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        Ok(Self::from_le_bytes(read_fixed::<16>(input, cursor)?))
-    }
-}
-
-impl HamtCodec for i8 {
-    #[inline]
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
-
-    #[inline]
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        Ok(Self::from_le_bytes(read_fixed::<1>(input, cursor)?))
-    }
-}
-
-impl HamtCodec for i16 {
-    #[inline]
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
-
-    #[inline]
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        Ok(Self::from_le_bytes(read_fixed::<2>(input, cursor)?))
-    }
-}
-
-impl HamtCodec for i32 {
-    #[inline]
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
-
-    #[inline]
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        Ok(Self::from_le_bytes(read_fixed::<4>(input, cursor)?))
-    }
-}
-
-impl HamtCodec for i64 {
-    #[inline]
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
-
-    #[inline]
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        Ok(Self::from_le_bytes(read_fixed::<8>(input, cursor)?))
-    }
-}
-
-impl HamtCodec for i128 {
-    #[inline]
-    fn encode_hamt(&self, out: &mut Vec<u8>) {
-        out.extend_from_slice(&self.to_le_bytes());
-    }
-
-    #[inline]
-    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
-        Ok(Self::from_le_bytes(read_fixed::<16>(input, cursor)?))
-    }
-}
+impl_le_hamt_codec!(
+    u8 => 1,
+    u16 => 2,
+    u32 => 4,
+    u64 => 8,
+    u128 => 16,
+    i8 => 1,
+    i16 => 2,
+    i32 => 4,
+    i64 => 8,
+    i128 => 16,
+);
 
 impl HamtCodec for usize {
     #[inline]

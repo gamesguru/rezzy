@@ -541,23 +541,13 @@ fn colliding_h64_is_narrowed_not_the_whole_frame() {
     let local = Side::new(shared.clone());
     let remote = Side::new([shared, vec![twin, extra]].concat());
 
-    let (action, exchange) = run_verified(&local, &remote);
-    let ClientAction::ResolveRoots {
-        roots,
-        ladder_failed,
-    } = action
-    else {
-        panic!("expected a partial resolve, got {action:?}");
-    };
-    assert_eq!(ladder_failed.len(), 1);
+    let (roots, failed, exchange) = assert_single_failed_prefix(&local, &remote, collided.h64);
     assert!(
-        ladder_failed[0].0 > 0,
-        "must be narrower than the whole frame: {ladder_failed:?}"
+        failed.0 > 0,
+        "must be narrower than the whole frame: {failed:?}"
     );
-    assert!(in_node(collided.h64, ladder_failed[0]));
     assert!(roots.contains(&extra.h64), "the honest element is resolved");
-    assert!(roots.iter().all(|&r| !in_node(r, ladder_failed[0])));
-    assert_eq!(exchange.ladder_failed(), ladder_failed.as_slice());
+    assert_eq!(exchange.ladder_failed(), &[failed]);
     assert!(
         exchange.rounds_emitted() <= 6,
         "a few levels, not the whole ladder: {}",
@@ -582,7 +572,28 @@ fn collision_in_one_bucket_leaves_siblings_resolved() {
     let local = Side::new([shared.clone(), local_extra.clone()].concat());
     let remote = Side::new([shared, remote_extra.clone(), vec![twin]].concat());
 
-    let (action, exchange) = run_verified(&local, &remote);
+    let (roots, failed, exchange) = assert_single_failed_prefix(&local, &remote, collided.h64);
+
+    // Every honest root outside the failed prefix was resolved.
+    let honest: Vec<u64> = local_extra
+        .iter()
+        .chain(&remote_extra)
+        .map(|e| e.h64)
+        .filter(|&h| !in_node(h, failed))
+        .collect();
+    assert!(!honest.is_empty(), "siblings must hold honest roots");
+    for root in &honest {
+        assert!(roots.contains(root), "sibling root {root:#x} lost");
+    }
+    assert_ne!(exchange.classified().len(), 0);
+}
+
+fn assert_single_failed_prefix(
+    local: &Side,
+    remote: &Side,
+    collided_h64: u64,
+) -> (Vec<u64>, (u8, u64), BucketExchange) {
+    let (action, exchange) = run_verified(local, remote);
     let ClientAction::ResolveRoots {
         roots,
         ladder_failed,
@@ -591,21 +602,10 @@ fn collision_in_one_bucket_leaves_siblings_resolved() {
         panic!("expected a partial resolve, got {action:?}");
     };
     assert_eq!(ladder_failed.len(), 1);
-    assert!(in_node(collided.h64, ladder_failed[0]));
-
-    // Every honest root outside the failed prefix was resolved.
-    let honest: Vec<u64> = local_extra
-        .iter()
-        .chain(&remote_extra)
-        .map(|e| e.h64)
-        .filter(|&h| !in_node(h, ladder_failed[0]))
-        .collect();
-    assert!(!honest.is_empty(), "siblings must hold honest roots");
-    for root in &honest {
-        assert!(roots.contains(root), "sibling root {root:#x} lost");
-    }
-    assert!(roots.iter().all(|&r| !in_node(r, ladder_failed[0])));
-    assert_ne!(exchange.classified().len(), 0);
+    let failed = ladder_failed[0];
+    assert!(in_node(collided_h64, failed));
+    assert!(roots.iter().all(|&r| !in_node(r, failed)));
+    (roots, failed, exchange)
 }
 
 /// Whether `h64` falls in the node `(depth, prefix)`.
@@ -613,15 +613,16 @@ fn in_node(h64: u64, (depth, prefix): (u8, u64)) -> bool {
     depth == 0 || h64.checked_shr(64_u32.saturating_sub(u32::from(depth))) == Some(prefix)
 }
 
-/// The opposite-sides collision: X is held only locally, Y only remotely, and
-/// they share an `h64` (mocked). The pair cancels in the sketch, the counts
-/// balance, and an honest remote-only element in the same node keeps the early
-/// residual check from running, so phase 1 admits the node. Only phase 2 can
-/// catch it -- after the exchange has ended with `ResolveRoots` -- and that
-/// failure is the caller's per-prefix fallback, not something the exchange can
-/// split or retry. Every other node still verifies.
-#[test]
-fn split_pair_collision_is_admitted_by_phase_one_and_caught_by_phase_two() {
+fn build_split_pair_sides(
+    z_xor: u64,
+) -> (
+    Side,
+    Side,
+    Vec<ElementHash>,
+    Vec<ElementHash>,
+    ElementHash,
+    ElementHash,
+) {
     let mut generator = Xorshift128::new(13);
     let shared: Vec<ElementHash> = (0..200).map(|_| generator.hash()).collect();
     // Enough honest differences to force several buckets, so siblings exist.
@@ -634,16 +635,28 @@ fn split_pair_collision_is_admitted_by_phase_one_and_caught_by_phase_two() {
         h64: x.h64,
         q3: x.q3,
     };
-    // An honest remote-only element in the same node as the colliding pair.
     let z = ElementHash {
         h128: generator.hash().h128,
-        h64: x.h64 ^ 1,
+        h64: x.h64 ^ z_xor,
         q3: 1,
     };
     remote_extra.push(z);
 
-    let local = Side::new([shared.clone(), local_extra, vec![x]].concat());
+    let local = Side::new([shared.clone(), local_extra.clone(), vec![x]].concat());
     let remote = Side::new([shared, remote_extra.clone(), vec![y]].concat());
+    (local, remote, local_extra, remote_extra, x, y)
+}
+
+/// The opposite-sides collision: X is held only locally, Y only remotely, and
+/// they share an `h64` (mocked). The pair cancels in the sketch, the counts
+/// balance, and an honest remote-only element in the same node keeps the early
+/// residual check from running, so phase 1 admits the node. Only phase 2 can
+/// catch it -- after the exchange has ended with `ResolveRoots` -- and that
+/// failure is the caller's per-prefix fallback, not something the exchange can
+/// split or retry. Every other node still verifies.
+#[test]
+fn split_pair_collision_is_admitted_by_phase_one_and_caught_by_phase_two() {
+    let (local, remote, _local_extra, remote_extra, x, _y) = build_split_pair_sides(1);
 
     let (action, exchange) = run_verified(&local, &remote);
     let ClientAction::ResolveRoots { roots, .. } = action else {
@@ -703,25 +716,7 @@ fn phase_two<'a>(
 /// ends up isolated at a prefix deeper than the node.
 #[test]
 fn phase_two_failure_is_narrowed_by_rerunning_the_children() {
-    let mut generator = Xorshift128::new(13);
-    let shared: Vec<ElementHash> = (0..200).map(|_| generator.hash()).collect();
-    let local_extra: Vec<ElementHash> = (0..22).map(|_| generator.hash()).collect();
-    let mut remote_extra: Vec<ElementHash> = (0..22).map(|_| generator.hash()).collect();
-    let x = generator.hash();
-    let y = ElementHash {
-        h128: x.h128 ^ 0xfeed_face,
-        h64: x.h64,
-        q3: x.q3,
-    };
-    // An honest remote-only element in the same half as the pair.
-    remote_extra.push(ElementHash {
-        h128: generator.hash().h128,
-        h64: x.h64 ^ (1_u64 << 62),
-        q3: 1,
-    });
-
-    let local = Side::new([shared.clone(), local_extra.clone(), vec![x]].concat());
-    let remote = Side::new([shared, remote_extra.clone(), vec![y]].concat());
+    let (local, remote, local_extra, remote_extra, x, _y) = build_split_pair_sides(1_u64 << 62);
     let (action, exchange) = run_verified(&local, &remote);
     assert!(matches!(action, ClientAction::ResolveRoots { .. }));
 

@@ -2085,14 +2085,28 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn test_hamt_live_walk_multi_parent_fork_non_first_parent_winner() {
+        let sender = "@alice:example.com";
         let ev_create: LeanEvent = LeanEvent {
             event_id: "$create".into(),
             event_type: "m.room.create".into(),
             state_key: Some(String::new()),
-            sender: "@alice:example.com".into(),
-            content: rezzy::json!({ "creator": "@alice:example.com" }),
+            sender: sender.into(),
+            content: rezzy::json!({ "creator": sender }),
             depth: 1,
             origin_server_ts: 10,
+            ..Default::default()
+        };
+        // The creator must be joined before sending state (no implied join).
+        let ev_join: LeanEvent = LeanEvent {
+            event_id: "$alice_join".into(),
+            event_type: "m.room.member".into(),
+            state_key: Some(sender.into()),
+            sender: sender.into(),
+            content: rezzy::json!({ "membership": "join" }),
+            prev_events: vec!["$create".into()],
+            auth_events: vec!["$create".into()],
+            depth: 2,
+            origin_server_ts: 20,
             ..Default::default()
         };
         let branch = |id: &str, event_type: &str, ts: u64| -> LeanEvent {
@@ -2101,9 +2115,9 @@ mod tests {
                 event_type: event_type.into(),
                 state_key: Some(String::new()),
                 sender: "@alice:example.com".into(),
-                prev_events: vec!["$create".into()],
-                auth_events: vec!["$create".into()],
-                depth: 2,
+                prev_events: vec!["$alice_join".into()],
+                auth_events: vec!["$create".into(), "$alice_join".into()],
+                depth: 3,
                 origin_server_ts: ts,
                 ..Default::default()
             }
@@ -2121,14 +2135,15 @@ mod tests {
             state_key: None,
             sender: "@alice:example.com".into(),
             prev_events: vec!["$name_a".into(), "$name_b".into(), "$topic_c".into()],
-            auth_events: vec!["$create".into()],
-            depth: 3,
+            auth_events: vec!["$create".into(), "$alice_join".into()],
+            depth: 4,
             origin_server_ts: 300,
             ..Default::default()
         };
 
         let mut events_map: HashMap<String, LeanEvent> = HashMap::new();
         events_map.insert(ev_create.event_id.clone(), ev_create);
+        events_map.insert(ev_join.event_id.clone(), ev_join);
         events_map.insert(ev_branch_a.event_id.clone(), ev_branch_a);
         events_map.insert(ev_branch_b.event_id.clone(), ev_branch_b);
         events_map.insert(ev_branch_c.event_id.clone(), ev_branch_c);
@@ -2145,7 +2160,7 @@ mod tests {
         let hamt_ctx = formatting_context(
             None,
             std::time::Duration::ZERO,
-            5,
+            6,
             &hamt_args,
             &events_map,
             &raw_map,
@@ -2170,6 +2185,13 @@ mod tests {
                 (
                     (EventType::from("m.room.create"), String::new()),
                     String::from("$create"),
+                ),
+                (
+                    (
+                        EventType::from("m.room.member"),
+                        "@alice:example.com".to_string(),
+                    ),
+                    String::from("$alice_join"),
                 ),
                 (
                     (EventType::from("m.room.name"), String::new()),

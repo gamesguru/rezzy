@@ -44,6 +44,20 @@ const BENCHMARKS: &[BenchmarkEntry] = &[
     // --- state (Matrix State Resolution & Traversal) ---
     BenchmarkEntry {
         domain: "state",
+        name: "auth_difference",
+        description: "Large-room concrete/lazy resolution with computed or precomputed auth diff",
+        run_fn: state::auth_difference::run,
+    },
+    #[cfg(feature = "mtxdb")]
+    BenchmarkEntry {
+        domain: "state",
+        name: "auth_difference_mtxdb",
+        description:
+            "auth_difference fixture stored in mtxdb: provider reads and persisted closures",
+        run_fn: state::auth_difference_mtxdb::run,
+    },
+    BenchmarkEntry {
+        domain: "state",
         name: "resolve",
         description: "State resolution v1, v2, v2.1 benchmark matrix",
         run_fn: state::resolve::run,

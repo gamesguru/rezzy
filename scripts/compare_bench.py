@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Extract labeled wall-clock metrics from a `cargo bench` tee file and compare
-them against the previous best. Regressions use three tiers:
+them against a historical baseline. Regressions use three tiers:
 
     10–50%  blue notice
     50–85%  yellow warning
@@ -13,10 +13,17 @@ than criterion, and print labeled millisecond metrics in a couple of shapes:
     label: <value> ms/op
 
 This script extracts those into `{label: milliseconds}`, compares each current
-value against the previous best (`--best`, a JSON object), FAILS if any metric
-regressed by at least `--failure-margin` (default 85%), warns above
-`--warning-margin` (default 50%), notices above `--notice-margin` (default 10%),
-and writes the running best (the fastest value seen for each label) to `--out`.
+value against a historical baseline (`--best`, one or more JSON snapshots),
+FAILS if any metric regressed by at least `--failure-margin` (default 85%),
+warns above `--warning-margin` (default 50%), notices above `--notice-margin`
+(default 10%), and writes the all-time best (the fastest value seen for each
+label) to `--out`.
+
+The regression baseline is the median of the most recent successful raw runs
+(`--history`, up to five values per label). When history is not available yet,
+it falls back to the median of the supplied published-best snapshots. This
+keeps one lucky run on a faster host from setting an unreachable baseline while
+still retaining the all-time best for the published record.
 
 Regressions whose absolute delta is below `--min-absolute-delta` (default
 0.05ms) are ignored entirely. Shared-CI jitter on single-digit-microsecond
@@ -41,7 +48,10 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import statistics
 import sys
+
+HISTORY_LEN = 5
 
 # `label: <number> ms` or `label: <number> ms/op` or `label: <number> ns/op`.
 # Deliberately does NOT match the ratio lines ("=> foo is 1.23x faster than
@@ -93,8 +103,22 @@ def parse_args() -> argparse.Namespace:
     """Parse the benchmark comparison command line."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--current", required=True, help="tee'd bench output")
-    ap.add_argument("--best", required=True, help="previous best JSON (bench.json)")
+    ap.add_argument(
+        "--best",
+        required=True,
+        nargs="+",
+        metavar="JSON",
+        help="one or more previous benchmark JSON snapshots (bench.json)",
+    )
     ap.add_argument("--out", required=True, help="path to write the running best JSON")
+    ap.add_argument(
+        "--history",
+        help="JSON of recent raw-run metrics (optional; bootstraps from --best)",
+    )
+    ap.add_argument(
+        "--history-out",
+        help="path to write recent raw-run metrics (optional)",
+    )
     ap.add_argument(
         "--notice-margin",
         type=float,
@@ -132,13 +156,47 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
-def load_best(path: str) -> dict[str, float]:
-    """Load prior best metrics, treating missing or invalid JSON as empty."""
+def load_best(paths: list[str]) -> dict[str, list[float]]:
+    """Load prior benchmark snapshots, treating missing or invalid JSON as empty."""
+    history: dict[str, list[float]] = {}
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                snapshot = json.load(fh)
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+        if not isinstance(snapshot, dict):
+            continue
+        for label, value in snapshot.items():
+            if isinstance(value, (int, float)):
+                history.setdefault(label, []).append(float(value))
+    return history
+
+
+def load_history(path: str | None) -> dict[str, list[float]]:
+    """Load recent raw-run values, keeping only the newest samples per label."""
+    if path is None:
+        return {}
     try:
         with open(path, encoding="utf-8") as fh:
-            return json.load(fh)
+            snapshot = json.load(fh)
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    if not isinstance(snapshot, dict):
+        return {}
+    history: dict[str, list[float]] = {}
+    for label, values in snapshot.items():
+        if isinstance(values, (int, float)):
+            samples = [float(values)]
+        elif isinstance(values, list):
+            samples = [
+                float(value) for value in values if isinstance(value, (int, float))
+            ]
+        else:
+            continue
+        if samples:
+            history[label] = samples[-HISTORY_LEN:]
+    return history
 
 
 def legacy_label_counts(current: dict[str, float]) -> dict[str, int]:
@@ -150,57 +208,101 @@ def legacy_label_counts(current: dict[str, float]) -> dict[str, int]:
     return counts
 
 
-def previous_best(
-    label: str, best: dict[str, float], suffix_counts: dict[str, int]
-) -> float | None:
-    """Find the baseline, migrating a bare legacy label only when unambiguous."""
-    if label in best:
-        return best[label]
+def previous_values(
+    label: str, history: dict[str, list[float]], suffix_counts: dict[str, int]
+) -> list[float]:
+    """Find historical values, migrating a bare legacy label only when unambiguous."""
+    if label in history:
+        return history[label]
     suffix = label.rsplit(": ", 1)[-1]
-    return best.get(suffix) if suffix_counts.get(suffix) == 1 else None
+    return history.get(suffix, []) if suffix_counts.get(suffix) == 1 else []
 
 
 def compare_metrics(
     current: dict[str, float],
-    best: dict[str, float],
+    snapshots: dict[str, list[float]],
+    history: dict[str, list[float]],
     notice_margin: float,
     warning_margin: float,
     failure_margin: float,
     min_absolute_delta: float,
-) -> tuple[dict[str, float], list[str], list[str], list[str]]:
-    """Update best values and classify regressions as notices, warnings, or failures."""
+) -> tuple[
+    dict[str, float],
+    dict[str, list[float]],
+    dict[str, float],
+    list[str],
+    list[str],
+    list[str],
+]:
+    """Update best/history values and classify regressions."""
     suffix_counts = legacy_label_counts(current)
-    new_best = dict(best)
+    new_best = {label: min(values) for label, values in snapshots.items() if values}
+    for label, values in history.items():
+        if values:
+            new_best[label] = min(new_best.get(label, values[0]), *values)
+    # Only keep metrics present in this run. A missing label breaks the run
+    # sequence, so values from before that gap must not become its baseline if
+    # the metric later reappears.
+    new_history: dict[str, list[float]] = {}
+    baselines: dict[str, float] = {}
     notices: list[str] = []
     warnings: list[str] = []
     failures: list[str] = []
     for label, value in sorted(current.items()):
-        prior = previous_best(label, best, suffix_counts)
+        history_values = previous_values(label, history, suffix_counts)
+        snapshot_values = previous_values(label, snapshots, suffix_counts)
+        if history_values:
+            # Median of recent raw runs tolerates a slow or fast host without
+            # ratcheting to the all-time luckiest run.
+            prior = statistics.median(history_values)
+        elif snapshot_values:
+            # Bootstrap: without raw history, use the median published best.
+            prior = statistics.median(snapshot_values)
+        else:
+            prior = None
+
+        all_values = [value, *history_values, *snapshot_values]
+        new_best[label] = min(all_values)
+
         if prior is None:
-            new_best[label] = value
+            new_history[label] = [value]
             continue
+        baselines[label] = prior
         if value < prior:
-            new_best[label] = value
+            new_history[label] = [*history_values, value][-HISTORY_LEN:]
             continue
         delta = value - prior
         # Sub-floor deltas are pure runner jitter on microbenches: skip
         # classification entirely (the new-best ratchet above already ran).
         if delta < min_absolute_delta:
+            new_history[label] = [*history_values, value][-HISTORY_LEN:]
             continue
         increase = (
             value / prior - 1.0 if prior > 0 else (float("inf") if value > 0 else 0.0)
         )
         message = (
-            f"{label}: {value:.4f}ms is {increase * 100:.1f}% above best "
+            f"{label}: {value:.4f}ms is {increase * 100:.1f}% above baseline "
             f"{prior:.4f}ms (+{delta:.4f}ms)"
         )
-        if increase >= failure_margin:
+        bootstrap_failure = increase >= failure_margin and len(history_values) < 3
+        if increase >= failure_margin and not bootstrap_failure:
             failures.append(message)
+        elif increase >= failure_margin:
+            warnings.append(
+                f"{message} (baseline bootstrap: {len(history_values)}/3 raw runs)"
+            )
         elif increase >= warning_margin:
             warnings.append(message)
         elif increase > notice_margin:
             notices.append(message)
-    return new_best, notices, warnings, failures
+
+        # Do not let a failure-sized bootstrap outlier become the raw-run
+        # baseline. It remains a warning until comparable runs establish a
+        # baseline, rather than normalizing a persistent slowdown.
+        if not bootstrap_failure:
+            samples = [*history_values, value]
+            new_history[label] = samples[-HISTORY_LEN:]
+    return new_best, new_history, baselines, notices, warnings, failures
 
 
 def write_best(path: str, metrics: dict[str, float]) -> None:
@@ -210,21 +312,27 @@ def write_best(path: str, metrics: dict[str, float]) -> None:
         fh.write("\n")
 
 
+def write_history(path: str, history: dict[str, list[float]]) -> None:
+    """Write recent raw-run metrics as formatted JSON."""
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(history, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+
+
 def report_results(
     current: dict[str, float],
-    best: dict[str, float],
+    baselines: dict[str, float],
     notices: list[str],
     warnings: list[str],
     failures: list[str],
 ) -> None:
     """Print the metrics and GitHub notice/warning/error annotations."""
-    suffix_counts = legacy_label_counts(current)
     print(
-        f"parsed {len(current)} metrics, comparing against {len(best)} previous bests"
+        f"parsed {len(current)} metrics, comparing against {len(baselines)} historical baselines"
     )
     for label, value in sorted(current.items()):
-        prior = previous_best(label, best, suffix_counts)
-        suffix = "" if prior is None else f" (best {prior:.4f}ms)"
+        prior = baselines.get(label)
+        suffix = "" if prior is None else f" (baseline {prior:.4f}ms)"
         print(f"  {label}: {value:.4f}ms{suffix}")
     if notices:
         print("\nBLUE NOTICES (10–50%):")
@@ -254,17 +362,21 @@ def main() -> int:
     if not current:
         print("no benchmark metrics parsed", file=sys.stderr)
         return 1
-    best = load_best(args.best)
-    new_best, notices, warnings, failures = compare_metrics(
+    snapshots = load_best(args.best)
+    history = load_history(args.history)
+    new_best, new_history, baselines, notices, warnings, failures = compare_metrics(
         current,
-        best,
+        snapshots,
+        history,
         args.notice_margin,
         args.warning_margin,
         args.failure_margin,
         args.min_absolute_delta,
     )
     write_best(args.out, new_best)
-    report_results(current, best, notices, warnings, failures)
+    if args.history_out:
+        write_history(args.history_out, new_history)
+    report_results(current, baselines, notices, warnings, failures)
     if failures:
         return 1
 

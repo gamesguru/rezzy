@@ -14,23 +14,16 @@
 //! Each fetch count is printed alongside the time.
 //!
 //! Run with: `cargo bench --bench rezzy -- hamt_delta`
-#![allow(
-    clippy::arithmetic_side_effects,
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::items_after_statements,
-    clippy::doc_markdown
-)]
 
-use std::collections::HashMap;
-use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Instant;
 
-use rezzy::hamt::delta::diff_hamt_nodes;
+use rezzy::hamt::delta::{diff_hamt_nodes, isolate_delta};
 use rezzy::hamt::hash::StructuralHash;
 use rezzy::hamt::{self, HamtNode, NodeRef};
+use rezzy::incremental::LtHash;
 
+use crate::common::prelude::*;
 use crate::common::{make_string_entries, unreachable_resolver};
 
 type Key = String;
@@ -142,8 +135,36 @@ fn mutate(base: &Node, entries: &[(Key, Value)], edits: usize, variant: usize) -
 
 type Delta = (Vec<(Key, Value)>, Vec<(Key, Value)>);
 
-/// Fully-resident reference delta between `a` and `b`, used to check that
-/// every resolver-backed variant returns the identical ordered pair.
+/// Counts slots where one side holds a leaf and the other a child subtree
+/// (the cross-kind case in `diff_nodes`), over every pair of resident nodes
+/// the diff would visit. Lazy children are not followed.
+fn count_cross_kind(a: &Node, b: &Node) -> usize {
+    if a.structural_hash == b.structural_hash {
+        return 0;
+    }
+    let cross = (a.datamap & b.nodemap) | (a.nodemap & b.datamap);
+    let mut count = cross.count_ones() as usize;
+    let both = a.nodemap & b.nodemap;
+    for slot in 0..32u32 {
+        if both & (1 << slot) == 0 {
+            continue;
+        }
+        let below = |m: u32| (m & ((1u32 << slot) - 1)).count_ones() as usize;
+        if let (NodeRef::Resolved(ca), NodeRef::Resolved(cb)) =
+            (&a.children[below(a.nodemap)], &b.children[below(b.nodemap)])
+        {
+            count += count_cross_kind(ca, cb);
+        }
+    }
+    count
+}
+
+/// Fully-resident delta from `diff_hamt_nodes` itself, used only to check that
+/// every resolver-backed variant and `isolate_delta` return the identical
+/// ordered pair. This is a consistency check, NOT an independent oracle: a bug
+/// in `diff_hamt_nodes` would be reproduced here. Independent correctness
+/// (including the leaf<->subtree case) is covered by the oracle tests in
+/// `src/hamt/tests.rs`.
 fn reference_delta(a: &Node, b: &Node) -> Delta {
     let mut none = |_: &StructuralHash| -> Result<Node, ()> { Err(()) };
     diff_hamt_nodes(a, b, &mut none).expect("reference diff")
@@ -189,6 +210,34 @@ fn run_one(label: &str, a: &Node, b: &Node, store: &Store, reference: &Delta, re
     );
 }
 
+/// Times fully resident [`isolate_delta`] (the public entry point that wraps
+/// `diff_hamt_nodes` with the lattice/root short-circuit) from `a` to `b`.
+/// Both lattices are `ZERO`; the roots differ, so the short-circuit never
+/// fires and the full diff runs. The result is checked against `reference`
+/// before timing.
+///
+/// # Panics
+/// Panics if `reps` is zero, the diff fails, or the delta differs from `reference`.
+fn run_isolate_delta(a: &Node, b: &Node, reference: &Delta, reps: u32, n: usize, delta: usize) {
+    let leaves = reference.0.len() + reference.1.len();
+    let lattice = LtHash::ZERO;
+    let mut none = |_: &StructuralHash| -> Result<Node, ()> { Err(()) };
+    let got = isolate_delta(a, &lattice, b, &lattice, &mut none).expect("isolate_delta");
+    assert_eq!(&got, reference, "isolate_delta mismatch (n={n}, d={delta})");
+
+    let start = Instant::now();
+    for _ in 0..reps {
+        let mut none = |_: &StructuralHash| -> Result<Node, ()> { Err(()) };
+        black_box(isolate_delta(a, &lattice, b, &lattice, &mut none).expect("isolate_delta"));
+    }
+    let per = start.elapsed() / reps;
+    let ns = per.as_nanos() as f64;
+    println!(
+        "  isolate_delta in-memory (n={n}, d={delta}): {ns:.1} ns/op ({leaves} delta leaves, {:.1} ns/leaf)",
+        ns / leaves.max(1) as f64
+    );
+}
+
 /// Reports fully resident and RAM-resolved diff timings for an `n`-entry base
 /// with `delta` mutations, varying the number of cached child layers.
 ///
@@ -201,9 +250,12 @@ fn bench(n: usize, delta: usize) {
     let next = mutate(&base, &entries, delta, 0);
     let depth = tree_depth(&base).max(tree_depth(&next));
     let reference = reference_delta(&base, &next);
-    println!("hamt delta (n={n}, edits={delta}, depth={depth}):");
+    let cross_kind = count_cross_kind(&base, &next);
+    println!("hamt delta (n={n}, edits={delta}, depth={depth}, cross-kind slots={cross_kind}):");
 
-    let reps = if n >= 65536 { 2000 } else { 5000 };
+    // Scale reps down as edits grow so total work per row stays comparable.
+    let base_reps: u32 = if n >= 65536 { 2000 } else { 5000 };
+    let reps = (base_reps * 64 / u32::try_from(delta.max(64)).unwrap_or(u32::MAX)).max(100);
     run_one(
         &format!("in-memory (n={n}, d={delta})"),
         &base,
@@ -212,6 +264,8 @@ fn bench(n: usize, delta: usize) {
         &reference,
         reps,
     );
+
+    run_isolate_delta(&base, &next, &reference, reps, n, delta);
 
     let mut store = Store::new();
     store_all(&base, &mut store);
@@ -547,11 +601,29 @@ mod disk {
             samples.sort_by_key(|s| s.0);
             let (med, fetches, delta_len) = samples[SAMPLES / 2];
             warm.sort();
+            let no_disk_fetches = samples.iter().all(|sample| sample.1 == 0);
             if let Some(w) = warm.get(warm.len() / 2) {
                 println!(
                     "  disk, {layers} cached layers (n={n}, d={delta}): warm steady-state (1000 reps) {:.3} us",
                     w.as_secs_f64() * 1e6
                 );
+            }
+            if no_disk_fetches {
+                // With no resolver calls, this case measures only the
+                // in-memory diff. Use the repeated steady-state measurement
+                // as the comparable metric; the single cold invocation is
+                // dominated by timer and CPU-frequency startup overhead.
+                let steady = warm[warm.len() / 2];
+                println!(
+                    "  disk, {layers} cached layers (n={n}, d={delta}): {:.3} ms/op (0 fetches, {delta_len} delta leaves; 1000-repetition median)",
+                    steady.as_secs_f64() * 1e3
+                );
+                println!(
+                    "    one-shot samples ranged {:.3}–{:.3} ms (diagnostic)",
+                    samples[0].0.as_secs_f64() * 1e3,
+                    samples[SAMPLES - 1].0.as_secs_f64() * 1e3
+                );
+                continue;
             }
             println!(
                 "  disk, {layers} cached layers (n={n}, d={delta}): {:.3} ms/op ({fetches} fetches, {:.2} ms/fetch, {delta_len} delta leaves; min {:.3}, max {:.3} ms)",

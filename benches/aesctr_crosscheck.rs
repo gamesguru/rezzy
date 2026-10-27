@@ -13,7 +13,7 @@
 #[path = "math/expansion_backends.rs"]
 mod expansion_backends;
 
-use expansion_backends::{expand_aes_ctr, DST_AES_CTR, SEED_BYTES};
+use expansion_backends::{expand_aes_ctr, unpack_lanes, DST_AES_CTR, SEED_BYTES};
 
 const LANES: usize = SEED_BYTES / 2;
 
@@ -26,14 +26,6 @@ fn frame_element(dst: &[u8], event_type: &str, state_key: &str, event_id: &str) 
     buf.extend_from_slice(state_key.as_bytes());
     buf.extend_from_slice(event_id.as_bytes());
     buf
-}
-
-fn unpack_lanes(bytes: &[u8]) -> [u16; LANES] {
-    let mut out = [0u16; LANES];
-    for (lane, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        *lane = u16::from_le_bytes([pair[0], pair[1]]);
-    }
-    out
 }
 
 fn seed(event_type: &str, state_key: &str, event_id: &str, ni: bool) -> [u16; LANES] {

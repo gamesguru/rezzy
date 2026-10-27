@@ -29,31 +29,27 @@
 //! owned inputs are cloned before the timed region so each variant measures
 //! only the map operation itself.
 
-use std::hint::black_box;
+use crate::common::prelude::*;
+use crate::common::{custom_msc_key, generate_unique_entries, random_member_key, Xorshift128};
+use rezzy::basespec::event_types::EventType;
+use rezzy::{InternedKey, PersistentOrdMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rezzy::basespec::event_types::EventType;
-use rezzy::{InternedKey, PersistentOrdMap};
-
-use crate::common::{generate_unique_entries, Xorshift128};
-
 type Raw = ((EventType, String), String);
 
+/// Builds `n` distinct seeded state entries, drawing mostly membership keys
+/// with a smaller share of custom MSC keys.
 fn make_entries(n: usize, seed: u64) -> Vec<Raw> {
     generate_unique_entries(
         n,
         seed,
         |rng| {
             if rng.next_u64() % 10 < 9 {
-                let uid = rng.next_u64() % 1_000_000;
-                (EventType::RoomMember, format!("@user{uid}:example.org"))
+                let (_, sk) = random_member_key(rng);
+                (EventType::RoomMember, sk)
             } else {
-                let idx = rng.next_u64() % ((n.max(1) as u64) * 10);
-                (
-                    EventType::from(format!("org.example.msc{idx}")),
-                    format!("key{idx}"),
-                )
+                custom_msc_key(rng, n)
             }
         },
         |rng| format!("$event{}:example.org", rng.next_u64()),

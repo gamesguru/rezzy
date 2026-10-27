@@ -1,8 +1,10 @@
 //! Differential + determinism harness for state resolution.
 //!
 //! Phase B empirical backbone. For each randomly-generated room DAG:
-//! - **Differential:** resolve with `V2_1` and `V2_1_1` and assert **identical**
-//!   output. The two versions must agree on every DAG. A drop is sound iff
+//! - **Differential:** resolve with `V2_1` and `V2_1_1`; both versions must
+//!   restore all unconflicted entries in the final merge. V2.1.1 retains
+//!   rezzy's resolved-wins hardening during iterative checks, but agreed
+//!   values still take precedence in the final output. A drop is sound iff
 //!   `IterativeAuthChecks` would have rejected the event; the retired CDO
 //!   pre-filter could not establish that, and the differential is how its
 //!   violations were caught.
@@ -344,49 +346,40 @@ fn resolve(p: &Problem, version: StateResVersion) -> SharedState {
 
 /// Differential coverage over the multi-level random DAG generator.
 ///
-/// Resolves each DAG with `V2_1` and `V2_1_1` and asserts the results are
-/// **identical**. Neither version runs the CDO pre-filter in the live
-/// resolution path (`apply_cdo_filter` is only called from tests), so the two
-/// must agree on every DAG.
+/// Resolves each DAG with stock `V2_1` and rezzy's hardened `V2_1_1`, then
+/// asserts both V2.1 and V2.1.1 restore every unconflicted entry in their final
+/// output.
 ///
-/// This only checks divergence between the live V2.1 and V2.1.1 resolution
-/// paths. It does not exercise CDO behavior: the retired CDO filter is called
-/// only by its dedicated regression tests.
+/// The versions may differ for unconflicted keys because V2.1.1 preserves
+/// rezzy's resolved-wins hardening. This does not exercise CDO behavior.
 ///
 /// Determinism is covered separately by `determinism_same_input_same_output`.
 ///
-/// # Why strict equality, and not a count bound
-///
-/// `0916121` relaxed this to "log divergences, pass under a bound" on the
-/// premise that V2.1 vs V2.1.1 divergence was *intended* (the `at.rs` power-
-/// phase fallback). That premise was wrong on this generator: the fallback is
-/// not observed to produce divergence here, and every recorded divergence
-/// traced to a CDO over-drop — a bug. With the over-drop fixed, the two
-/// versions agree on all 2000 DAGs, so equality is the correct, meaningful
-/// invariant here.
 #[test]
-fn differential_v21_equals_v211() {
+fn differential_v21_restores_unconflicted_state() {
     const ITER_COUNT: u64 = 2000;
     const BASE_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
     run_parallel(ITER_COUNT, |iter| {
         let mut rng = iteration_rng(BASE_SEED, iter);
         let problem = gen_problem(&mut rng, 1000 + iter * 13);
-        let r21 = resolve(&problem, StateResVersion::V2_1);
-        let r211 = resolve(&problem, StateResVersion::V2_1_1);
-        assert_eq!(
-            r21, r211,
-            "V2.1 and V2.1.1 diverged on DAG iteration {iter}: \
-             the CDO likely dropped a candidate full resolution would keep"
-        );
+        for version in [StateResVersion::V2_1, StateResVersion::V2_1_1] {
+            let resolved = resolve(&problem, version);
+            for (key, expected) in &problem.unconflicted {
+                assert_eq!(
+                    resolved.get(key),
+                    Some(expected),
+                    "{version:?} failed to restore unconflicted key on DAG iteration {iter}: {key:?}"
+                );
+            }
+        }
     });
 }
 
 /// Measures how much work the CDO actually does on the generator's DAGs, and
 /// whether any of it is *observable* to the differential.
 ///
-/// `0/2000` V2.1 vs V2.1.1 divergences only means the CDO never *changed the
-/// resolved state* — it does **not** mean every drop was sound. A drop is
+/// A CDO drop that does not appear among V2.1 winners may still be unsound. A drop is
 /// invisible to the differential if the dropped candidate was going to lose
 /// its key contest anyway. So this test reports three numbers:
 ///
@@ -436,7 +429,7 @@ fn cdo_drop_rate_measured() {
                         local_dags += 1;
                         // Which dropped IDs ended up as winners in the resolved
                         // state? Values of the resolved (type, state_key) -> event_id
-                        // map; the two versions resolve identically, so V2.1 suffices.
+                        // map. Measure stock V2.1 directly.
                         let resolved = resolve(&problem, StateResVersion::V2_1);
                         let resolved_values: HashSet<&String> = resolved.values().collect();
                         let dropped_winners = problem

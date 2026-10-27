@@ -23,14 +23,13 @@
 //! Keys/values are built once up front (as `intern_events` would at ingest);
 //! timed inputs are cloned (refcount bumps) from those prebuilt vectors.
 
-use std::hint::black_box;
+use rezzy::basespec::event_types::EventType;
+use rezzy::{InternedKey, PersistentOrdMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rezzy::basespec::event_types::EventType;
-use rezzy::{InternedKey, PersistentOrdMap};
-
 use super::state_backend::make_entries;
+use crate::common::prelude::*;
 use crate::common::Xorshift128;
 
 type K = (EventType, InternedKey);
@@ -46,43 +45,31 @@ trait Backend: Clone {
     fn diff_count(&self, other: &Self) -> usize;
 }
 
-impl Backend for imbl::OrdMap<K, V> {
-    const NAME: &'static str = "imbl";
-    fn build(entries: &[(K, V)]) -> Self {
-        entries.iter().cloned().collect()
-    }
-    fn get_(&self, k: &K) -> bool {
-        self.get(k).is_some()
-    }
-    fn insert_(&mut self, k: K, v: V) {
-        self.insert(k, v);
-    }
-    fn remove_(&mut self, k: &K) {
-        self.remove(k);
-    }
-    fn diff_count(&self, other: &Self) -> usize {
-        self.diff(other).count()
-    }
+macro_rules! impl_backend {
+    ($ty:ty, $name:literal) => {
+        impl Backend for $ty {
+            const NAME: &'static str = $name;
+            fn build(entries: &[(K, V)]) -> Self {
+                entries.iter().cloned().collect()
+            }
+            fn get_(&self, k: &K) -> bool {
+                self.get(k).is_some()
+            }
+            fn insert_(&mut self, k: K, v: V) {
+                self.insert(k, v);
+            }
+            fn remove_(&mut self, k: &K) {
+                self.remove(k);
+            }
+            fn diff_count(&self, other: &Self) -> usize {
+                self.diff(other).count()
+            }
+        }
+    };
 }
 
-impl Backend for PersistentOrdMap<K, V> {
-    const NAME: &'static str = "Persistent";
-    fn build(entries: &[(K, V)]) -> Self {
-        entries.iter().cloned().collect()
-    }
-    fn get_(&self, k: &K) -> bool {
-        self.get(k).is_some()
-    }
-    fn insert_(&mut self, k: K, v: V) {
-        self.insert(k, v);
-    }
-    fn remove_(&mut self, k: &K) {
-        self.remove(k);
-    }
-    fn diff_count(&self, other: &Self) -> usize {
-        self.diff(other).count()
-    }
-}
+impl_backend!(imbl::OrdMap<K, V>, "imbl");
+impl_backend!(PersistentOrdMap<K, V>, "Persistent");
 
 fn ns(total: Duration, ops: u32) -> f64 {
     total.as_nanos() as f64 / f64::from(ops)
@@ -90,6 +77,9 @@ fn ns(total: Duration, ops: u32) -> f64 {
 
 /// ns/op for [bulk build, cold lookup, warm lookup, insert, fork+diverge,
 /// remove, diff].
+///
+/// # Panics
+/// Panics if `entries` is empty.
 fn measure<B: Backend>(entries: &[(K, V)]) -> [f64; 7] {
     // bulk build
     let reps = (200_000 / entries.len()).clamp(2, 200) as u32;
@@ -104,14 +94,17 @@ fn measure<B: Backend>(entries: &[(K, V)]) -> [f64; 7] {
 
     // lookup, 50% hit / 50% miss
     let mut rng = Xorshift128::new(0xF00D);
+    let empty_sk = InternedKey::new("");
     let lookups: Vec<K> = (0..5000)
         .map(|_| {
-            if rng.next_u64().is_multiple_of(2) {
-                entries[(rng.next_u64() as usize) % entries.len()].0.clone()
+            let hit = rng.next_u64() & 1 == 0;
+            let roll = rng.next_u64();
+            if hit {
+                entries[(roll as usize) % entries.len()].0.clone()
             } else {
                 (
-                    EventType::from(format!("org.example.miss{}", rng.next_u64())),
-                    InternedKey::new(""),
+                    EventType::from(format!("org.example.miss{roll}")),
+                    empty_sk.clone(),
                 )
             }
         })

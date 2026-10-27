@@ -2244,21 +2244,35 @@ mod tests {
         }
     }
 
+    fn advance_single_symmetric(
+        exchange: &mut BucketExchange,
+        batch: BucketDecodeBatch,
+        request: BucketRequest,
+        node_summary: NodeSummary,
+    ) -> ClientAction {
+        exchange
+            .advance_verified(
+                batch,
+                &[request],
+                &[node_summary],
+                &[node_summary],
+                None,
+                |_| vec![],
+            )
+            .unwrap()
+    }
+
     /// A phase-1 failure is not a capacity problem: the node is split, never
     /// re-requested at a bigger capacity.
     #[test]
     fn phase_one_failure_splits_instead_of_bumping_capacity() {
         let mut exchange = fresh_exchange();
-        let action = exchange
-            .advance_verified(
-                success(0, 0, &[5]),
-                &[BucketRequest::new(0, 0, 8)],
-                &[summary(0, 0)],
-                &[summary(0, 0)],
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let action = advance_single_symmetric(
+            &mut exchange,
+            success(0, 0, &[5]),
+            BucketRequest::new(0, 0, 8),
+            summary(0, 0),
+        );
         let ClientAction::BucketSketches { requests, .. } = action else {
             panic!("expected a retry round, got {action:?}");
         };
@@ -2275,34 +2289,20 @@ mod tests {
     #[test]
     fn failed_small_overflow_retry_ladder_fails_local_prefix() {
         let mut exchange = fresh_exchange();
-        let requests = [BucketRequest::new(0, 0, 8)];
-        let small = [summary(40, 0)];
-        let action = exchange
-            .advance_verified(
-                undecodable(0, 0),
-                &requests,
-                &small,
-                &small,
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let small = summary(40, 0);
+        let action = advance_single_symmetric(
+            &mut exchange,
+            undecodable(0, 0),
+            BucketRequest::new(0, 0, 8),
+            small,
+        );
         let ClientAction::BucketSketches { requests, .. } = action else {
             panic!("expected overflow retry, got {action:?}");
         };
         assert_eq!(requests.len(), 1);
         assert!(requests[0].overflow);
 
-        let action = exchange
-            .advance_verified(
-                undecodable(0, 0),
-                &requests,
-                &small,
-                &small,
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let action = advance_single_symmetric(&mut exchange, undecodable(0, 0), requests[0], small);
         assert_eq!(
             action,
             ClientAction::ResolveRoots {
@@ -2315,22 +2315,12 @@ mod tests {
     #[test]
     fn phase_one_failure_on_small_overflow_splits_instead_of_giving_up() {
         let mut exchange = fresh_exchange();
-        let requests = [BucketRequest::with_overflow(
-            0,
-            0,
-            super::super::triage::MAX_OVERFLOW_BUCKET_CAPACITY,
-        )];
-        let empty = [summary(0, 0)];
-        let action = exchange
-            .advance_verified(
-                success(0, 0, &[5]),
-                &requests,
-                &empty,
-                &empty,
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let action = advance_single_symmetric(
+            &mut exchange,
+            success(0, 0, &[5]),
+            BucketRequest::with_overflow(0, 0, super::super::triage::MAX_OVERFLOW_BUCKET_CAPACITY),
+            summary(0, 0),
+        );
         let ClientAction::BucketSketches { requests, .. } = action else {
             panic!("expected a split after a phase-1 failure, got {action:?}");
         };
@@ -2374,19 +2364,12 @@ mod tests {
     #[test]
     fn overflow_retry_requires_residual_population_to_fit() {
         let mut exchange = fresh_exchange();
-        let requests = [BucketRequest::new(0, 0, 8)];
-        let local = [summary(200, 0)];
-        let remote = [summary(200, 0)];
-        let action = exchange
-            .advance_verified(
-                undecodable(0, 0),
-                &requests,
-                &local,
-                &remote,
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let action = advance_single_symmetric(
+            &mut exchange,
+            undecodable(0, 0),
+            BucketRequest::new(0, 0, 8),
+            summary(200, 0),
+        );
         let ClientAction::BucketSketches { requests, .. } = action else {
             panic!("expected fan-out, got {action:?}");
         };
@@ -2397,19 +2380,12 @@ mod tests {
     #[test]
     fn overflow_retry_respects_aggregate_capacity() {
         let mut exchange = BucketExchange::new(vec![], MAX_RECONCILIATION_ROUNDS, 128, 128);
-        let requests = [BucketRequest::new(0, 0, 8)];
-        let local = [summary(20, 0)];
-        let remote = [summary(20, 0)];
-        let action = exchange
-            .advance_verified(
-                undecodable(0, 0),
-                &requests,
-                &local,
-                &remote,
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let action = advance_single_symmetric(
+            &mut exchange,
+            undecodable(0, 0),
+            BucketRequest::new(0, 0, 8),
+            summary(20, 0),
+        );
         let ClientAction::BucketSketches { requests, .. } = action else {
             panic!("expected fan-out under the aggregate cap, got {action:?}");
         };
@@ -2429,16 +2405,12 @@ mod tests {
     #[test]
     fn phase_one_failure_at_the_depth_cap_ladder_fails_that_prefix() {
         let mut exchange = fresh_exchange();
-        let action = exchange
-            .advance_verified(
-                success(crate::MAX_DEPTH, 0, &[5]),
-                &[BucketRequest::new(crate::MAX_DEPTH, 0, 8)],
-                &[summary(0, 0)],
-                &[summary(0, 0)],
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let action = advance_single_symmetric(
+            &mut exchange,
+            success(crate::MAX_DEPTH, 0, &[5]),
+            BucketRequest::new(crate::MAX_DEPTH, 0, 8),
+            summary(0, 0),
+        );
         assert_eq!(
             action,
             ClientAction::ResolveRoots {
@@ -2458,16 +2430,12 @@ mod tests {
             MAX_BUCKETS_PER_ROUND,
             MAX_BUCKETED_SKETCH_CAPACITY,
         );
-        let action = exchange
-            .advance_verified(
-                success(0, 0, &[5]),
-                &[BucketRequest::new(0, 0, 8)],
-                &[summary(0, 0)],
-                &[summary(0, 0)],
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let action = advance_single_symmetric(
+            &mut exchange,
+            success(0, 0, &[5]),
+            BucketRequest::new(0, 0, 8),
+            summary(0, 0),
+        );
         assert_eq!(
             action,
             ClientAction::ResolveRoots {
@@ -2681,49 +2649,47 @@ mod tests {
         assert_eq!(exchange.ladder_failed(), []);
     }
 
+    fn start_root_split_exchange() -> BucketExchange {
+        let mut exchange = fresh_exchange();
+        let _ = advance_single_symmetric(
+            &mut exchange,
+            undecodable(0, 0),
+            BucketRequest::new(0, 0, MAX_BUCKET_SKETCH_CAPACITY),
+            summary(4, 0xF),
+        );
+        exchange
+    }
+
+    fn admit_children(exchange: &mut BucketExchange, depth: u8, children: &[(u64, u64, u128)]) {
+        for &(prefix, count, digest) in children {
+            let _ = advance_single_symmetric(
+                exchange,
+                success(depth, prefix, &[]),
+                BucketRequest::new(depth, prefix, 8),
+                summary(count, digest),
+            );
+        }
+    }
+
     /// The children of a split may arrive in different rounds. When they do not
     /// add up to the parent the responder is inconsistent, which no capacity
     /// bump or split can fix: the parent goes straight to ladder-failed, and
     /// the child already admitted is withdrawn.
     #[test]
     fn inconsistent_split_children_across_rounds_ladder_fail_the_parent() {
-        let mut exchange = fresh_exchange();
-        let max = MAX_BUCKET_SKETCH_CAPACITY;
         // Round 1: the parent cannot be decoded; remember its summary.
-        let _ = exchange
-            .advance_verified(
-                undecodable(0, 0),
-                &[BucketRequest::new(0, 0, max)],
-                &[summary(4, 0xF)],
-                &[summary(4, 0xF)],
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let mut exchange = start_root_split_exchange();
         // Round 2: one child verifies and is admitted.
-        let _ = exchange
-            .advance_verified(
-                success(1, 0, &[]),
-                &[BucketRequest::new(1, 0, 8)],
-                &[summary(2, 0x3)],
-                &[summary(2, 0x3)],
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        admit_children(&mut exchange, 1, &[(0, 2, 0x3)]);
         assert_eq!(exchange.classified().len(), 1);
         assert_eq!(exchange.ladder_failed(), []);
         // Round 3: the sibling arrives and the pair no longer sums to the parent.
-        let action = exchange
-            .advance_verified(
-                success(1, 1, &[]),
-                &[BucketRequest::new(1, 1, 8)],
-                &[summary(3, 0xC)],
-                &[summary(3, 0xC)],
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let action = advance_single_symmetric(
+            &mut exchange,
+            success(1, 1, &[]),
+            BucketRequest::new(1, 1, 8),
+            summary(3, 0xC),
+        );
         assert_eq!(exchange.ladder_failed(), &[(0, 0)]);
         assert!(exchange.classified().is_empty(), "admitted child withdrawn");
         assert_eq!(
@@ -2737,30 +2703,8 @@ mod tests {
 
     #[test]
     fn consistent_split_children_across_rounds_are_admitted() {
-        let mut exchange = fresh_exchange();
-        let max = MAX_BUCKET_SKETCH_CAPACITY;
-        let _ = exchange
-            .advance_verified(
-                undecodable(0, 0),
-                &[BucketRequest::new(0, 0, max)],
-                &[summary(4, 0xF)],
-                &[summary(4, 0xF)],
-                None,
-                |_| vec![],
-            )
-            .unwrap();
-        for (prefix, count, digest) in [(0_u64, 2_u64, 0x3_u128), (1, 2, 0xC)] {
-            let _ = exchange
-                .advance_verified(
-                    success(1, prefix, &[]),
-                    &[BucketRequest::new(1, prefix, 8)],
-                    &[summary(count, digest)],
-                    &[summary(count, digest)],
-                    None,
-                    |_| vec![],
-                )
-                .unwrap();
-        }
+        let mut exchange = start_root_split_exchange();
+        admit_children(&mut exchange, 1, &[(0, 2, 0x3), (1, 2, 0xC)]);
         assert_eq!(exchange.ladder_failed(), []);
         assert_eq!(exchange.classified().len(), 2);
     }
@@ -2770,43 +2714,17 @@ mod tests {
     /// them are in; a mismatch ladder-fails the parent.
     #[test]
     fn inconsistent_wide_split_children_ladder_fail_the_parent() {
-        let mut exchange = fresh_exchange();
-        let max = MAX_BUCKET_SKETCH_CAPACITY;
-        let _ = exchange
-            .advance_verified(
-                undecodable(0, 0),
-                &[BucketRequest::new(0, 0, max)],
-                &[summary(4, 0xF)],
-                &[summary(4, 0xF)],
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let mut exchange = start_root_split_exchange();
         // Three of four depth-2 children arrive first; nothing can be judged yet.
-        for (prefix, count, digest) in [(0_u64, 1_u64, 0x1_u128), (1, 1, 0x2), (2, 1, 0x4)] {
-            let _ = exchange
-                .advance_verified(
-                    success(2, prefix, &[]),
-                    &[BucketRequest::new(2, prefix, 8)],
-                    &[summary(count, digest)],
-                    &[summary(count, digest)],
-                    None,
-                    |_| vec![],
-                )
-                .unwrap();
-        }
+        admit_children(&mut exchange, 2, &[(0, 1, 0x1), (1, 1, 0x2), (2, 1, 0x4)]);
         assert_eq!(exchange.ladder_failed(), []);
         // The last child makes the sum 5, not the parent's 4.
-        let action = exchange
-            .advance_verified(
-                success(2, 3, &[]),
-                &[BucketRequest::new(2, 3, 8)],
-                &[summary(2, 0x8)],
-                &[summary(2, 0x8)],
-                None,
-                |_| vec![],
-            )
-            .unwrap();
+        let action = advance_single_symmetric(
+            &mut exchange,
+            success(2, 3, &[]),
+            BucketRequest::new(2, 3, 8),
+            summary(2, 0x8),
+        );
         assert_eq!(exchange.ladder_failed(), &[(0, 0)]);
         assert!(exchange.classified().is_empty());
         assert_eq!(
@@ -2820,35 +2738,12 @@ mod tests {
 
     #[test]
     fn consistent_wide_split_children_across_rounds_are_admitted() {
-        let mut exchange = fresh_exchange();
-        let max = MAX_BUCKET_SKETCH_CAPACITY;
-        let _ = exchange
-            .advance_verified(
-                undecodable(0, 0),
-                &[BucketRequest::new(0, 0, max)],
-                &[summary(4, 0xF)],
-                &[summary(4, 0xF)],
-                None,
-                |_| vec![],
-            )
-            .unwrap();
-        for (prefix, count, digest) in [
-            (0_u64, 1_u64, 0x1_u128),
-            (1, 1, 0x2),
-            (2, 1, 0x4),
-            (3, 1, 0x8),
-        ] {
-            let _ = exchange
-                .advance_verified(
-                    success(2, prefix, &[]),
-                    &[BucketRequest::new(2, prefix, 8)],
-                    &[summary(count, digest)],
-                    &[summary(count, digest)],
-                    None,
-                    |_| vec![],
-                )
-                .unwrap();
-        }
+        let mut exchange = start_root_split_exchange();
+        admit_children(
+            &mut exchange,
+            2,
+            &[(0, 1, 0x1), (1, 1, 0x2), (2, 1, 0x4), (3, 1, 0x8)],
+        );
         assert_eq!(exchange.ladder_failed(), []);
         assert_eq!(exchange.classified().len(), 4);
     }

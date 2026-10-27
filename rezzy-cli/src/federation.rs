@@ -6,7 +6,7 @@ use base64::{
     Engine as _,
 };
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use ed25519_zebra::SigningKey;
+use ed25519_zebra::{SigningKey, VerificationKey};
 use rezzy::JsonValue;
 mod state_diff;
 
@@ -628,6 +628,13 @@ fn encrypt_key_file_with_origin(
 fn parse_signing_key(text: &str) -> Result<SigningKeySpec, String> {
     let mut fields = text.split_whitespace().filter(|s| !s.starts_with('#'));
     let first = fields.next().ok_or("signing key file is empty")?;
+    // A bare base64 seed is 43 characters, so a long all-hex `0x` token cannot be one.
+    if let Some(digits) = first
+        .strip_prefix("0x")
+        .filter(|digits| digits.len() > 64 && digits.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return parse_conduwuit_keypair(digits);
+    }
     let (key_id, encoded) = if first.starts_with("ed25519:") {
         (
             first.to_owned(),
@@ -651,6 +658,55 @@ fn parse_signing_key(text: &str) -> Result<SigningKeySpec, String> {
     Ok(SigningKeySpec {
         key_id,
         key: SigningKey::from(bytes),
+    })
+}
+
+/// The 16 bytes that precede the seed in a PKCS#8 v2 Ed25519 private key.
+const PKCS8_ED25519_PREFIX: [u8; 16] = [
+    0x30, 0x51, 0x02, 0x01, 0x01, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
+];
+
+/// Reads a conduwuit `keypair` value dumped as `0x<hex>`: the key version as
+/// ASCII (which becomes the key ID), a `0xff` separator, then a PKCS#8 v2
+/// Ed25519 private key whose seed follows the fixed 16-byte header.
+fn parse_conduwuit_keypair(hex: &str) -> Result<SigningKeySpec, String> {
+    if hex.len() % 2 != 0 {
+        return Err("odd number of hex digits in conduwuit keypair".to_owned());
+    }
+    let bytes = hex
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            let digits = std::str::from_utf8(pair).map_err(|e| e.to_string())?;
+            u8::from_str_radix(digits, 16).map_err(|e| format!("invalid hex digits: {e}"))
+        })
+        .collect::<Result<Vec<u8>, String>>()?;
+    let split = bytes
+        .iter()
+        .position(|byte| *byte == 0xff)
+        .ok_or("conduwuit keypair has no 0xff version separator")?;
+    let version = std::str::from_utf8(&bytes[..split])
+        .ok()
+        .filter(|version| {
+            !version.is_empty() && version.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        .ok_or("conduwuit keypair has no ASCII key version")?;
+    let malformed = "conduwuit keypair is not a PKCS#8 Ed25519 private key";
+    let rest = bytes[split + 1..]
+        .strip_prefix(&PKCS8_ED25519_PREFIX)
+        .ok_or(malformed)?;
+    // seed, then the `[1]` public-key field `81 21 00 <pub>`, and nothing after.
+    let (seed, public) = rest
+        .split_first_chunk::<32>()
+        .and_then(|(seed, tail)| Some((seed, tail.strip_prefix(&[0x81, 0x21, 0x00])?)))
+        .ok_or(malformed)?;
+    let key = SigningKey::from(*seed);
+    if public != <[u8; 32]>::from(VerificationKey::from(&key)) {
+        return Err("conduwuit keypair public key does not match its seed".to_owned());
+    }
+    Ok(SigningKeySpec {
+        key_id: format!("ed25519:{version}"),
+        key,
     })
 }
 
@@ -1103,11 +1159,41 @@ fn opt_str(value: Option<&str>) -> JsonValue {
 
 /// Append one JSON line per attempt. Only error text and statuses are logged,
 /// never signing keys or the `Authorization` header.
+///
+/// # Errors
+/// Propagates file I/O and record-serialization errors.
 fn append_attempts(
     path: &Path,
     round: u32,
     tried: &HashSet<String>,
     dag_request: &DagRequest<'_>,
+    attempts: &[Attempt],
+) -> Result<(), AppError> {
+    append_attempt_records(
+        path,
+        round,
+        dag_request.origin,
+        dag_request.destination,
+        dag_request.room_id,
+        tried,
+        attempts,
+    )
+}
+
+/// Appends request-attempt records as JSONL, creating the file if needed.
+/// Empty `attempts` leaves the file untouched. Timestamps use Unix seconds;
+/// `tried` identifies repeated event requests.
+///
+/// # Errors
+/// Propagates file I/O errors and returns [`ErrorCode::MalformedJson`] for
+/// serialization failures. Earlier records may already have been written.
+fn append_attempt_records(
+    path: &Path,
+    round: u32,
+    origin: &str,
+    destination: &str,
+    room_id: &str,
+    tried: &HashSet<String>,
     attempts: &[Attempt],
 ) -> Result<(), AppError> {
     if attempts.is_empty() {
@@ -1121,15 +1207,7 @@ fn append_attempts(
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
     for a in attempts {
-        let line = attempt_record(
-            when,
-            round,
-            dag_request.room_id,
-            dag_request.origin,
-            dag_request.destination,
-            tried,
-            a,
-        );
+        let line = attempt_record(when, round, room_id, origin, destination, tried, a);
         let text = rezzy::json::write_string_value(&line)
             .map_err(|e| AppError::new(ErrorCode::MalformedJson, e.to_string()))?;
         writeln!(file, "{text}")?;
@@ -1611,22 +1689,8 @@ pub(super) fn get_remote_events_by_id(
         if !found && state.unreachable.is_none() {
             state.unresolved.push(id.clone());
         }
-        for pdu in pdus {
-            if !write_dag_event(&pdu, dag_request.room_version, max, &mut state)? {
-                state.unresolved.extend(
-                    dag_request
-                        .starts
-                        .iter()
-                        .skip(index.saturating_add(1))
-                        .filter(|remaining| !known.is_some_and(|held| held.contains(*remaining)))
-                        .cloned(),
-                );
-                break 'ids;
-            }
-        }
-        state.output_writer.flush()?;
-        if let Some(error) = state.unreachable.take() {
-            state.unresolved.extend(
+        let extend_remaining = |unresolved: &mut Vec<String>| {
+            unresolved.extend(
                 dag_request
                     .starts
                     .iter()
@@ -1634,6 +1698,16 @@ pub(super) fn get_remote_events_by_id(
                     .filter(|remaining| !known.is_some_and(|held| held.contains(*remaining)))
                     .cloned(),
             );
+        };
+        for pdu in pdus {
+            if !write_dag_event(&pdu, dag_request.room_version, max, &mut state)? {
+                extend_remaining(&mut state.unresolved);
+                break 'ids;
+            }
+        }
+        state.output_writer.flush()?;
+        if let Some(error) = state.unreachable.take() {
+            extend_remaining(&mut state.unresolved);
             if state.event_count == 0 {
                 return Err(error);
             }
@@ -2334,26 +2408,15 @@ fn append_auth_attempt(
     auth_tried: &HashSet<String>,
     attempt: &Attempt,
 ) -> Result<(), AppError> {
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    let when = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
-    let line = attempt_record(
-        when,
+    append_attempt_records(
+        path,
         round,
-        room_id,
         origin,
         destination,
+        room_id,
         auth_tried,
-        attempt,
-    );
-    let encoded = rezzy::json::write_string_value(&line)
-        .map_err(|error| AppError::new(ErrorCode::MalformedJson, error.to_string()))?;
-    writeln!(file, "{encoded}")?;
-    Ok(())
+        std::slice::from_ref(attempt),
+    )
 }
 
 /// Builds a request record with `when` in Unix seconds and duration in
@@ -2426,7 +2489,29 @@ fn write_frontier_checkpoint(path: &Path, frontier: &[String]) -> Result<(), App
 
 #[cfg(test)]
 mod tests {
-    use super::{domain_env_suffix, parse_signing_key, AppError, ErrorCode, FetchFailures};
+    use super::{
+        domain_env_suffix, parse_signing_key, AppError, ErrorCode, FetchFailures, SigningKey,
+        VerificationKey, PKCS8_ED25519_PREFIX,
+    };
+
+    fn test_dag_request<'a>(
+        starts: &'a [String],
+        output: &'a std::path::Path,
+        emit_missing: Option<&'a std::path::Path>,
+    ) -> super::DagRequest<'a> {
+        super::DagRequest {
+            origin: "o",
+            destination: "d",
+            room_id: "!r",
+            starts,
+            room_version: "12",
+            limit: -1,
+            output,
+            key_path: None,
+            no_fallback: false,
+            emit_missing,
+        }
+    }
 
     #[test]
     fn crawl_skips_known_events_and_does_not_requeue_their_ids() {
@@ -2436,18 +2521,7 @@ mod tests {
         let out = dir.join("dag.jsonl");
         let starts = vec!["$new".to_owned()];
         let known: HashSet<String> = HashSet::from(["$have".to_owned()]);
-        let request = super::DagRequest {
-            origin: "o",
-            destination: "d",
-            room_id: "!r",
-            starts: &starts,
-            room_version: "12",
-            limit: -1,
-            output: &out,
-            key_path: None,
-            no_fallback: false,
-            emit_missing: None,
-        };
+        let request = test_dag_request(&starts, &out, None);
         let (mut state, max) = super::initialize_dag(&request, Some(&known)).unwrap();
         // A fetched event whose parents are one we hold and one we do not.
         let fetched = rezzy::json!({"event_id": "$new", "prev_events": ["$have", "$gap"]});
@@ -2478,6 +2552,51 @@ mod tests {
         assert_eq!(key.key_id, "ed25519:7");
     }
 
+    fn conduwuit_keypair_dump(version: &str, seed: [u8; 32]) -> String {
+        let mut bytes = version.as_bytes().to_vec();
+        bytes.push(0xff);
+        bytes.extend_from_slice(&PKCS8_ED25519_PREFIX);
+        bytes.extend_from_slice(&seed);
+        bytes.extend_from_slice(&[0x81, 0x21, 0x00]);
+        bytes.extend_from_slice(&<[u8; 32]>::from(VerificationKey::from(&SigningKey::from(
+            seed,
+        ))));
+        let digits: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        format!("0x{digits}")
+    }
+
+    #[test]
+    fn parses_a_conduwuit_keypair_dump() {
+        let seed = [9_u8; 32];
+        let key = parse_signing_key(&conduwuit_keypair_dump("0vhRKHKw", seed)).unwrap();
+        assert_eq!(key.key_id, "ed25519:0vhRKHKw");
+        assert_eq!(<[u8; 32]>::from(key.key), seed);
+    }
+
+    #[test]
+    fn refuses_a_conduwuit_keypair_that_is_not_pkcs8_ed25519() {
+        let mut dump = conduwuit_keypair_dump("0vhRKHKw", [9; 32]);
+        dump.replace_range(2 + 9 * 2..2 + 10 * 2, "ff");
+        assert!(parse_signing_key(&dump).is_err());
+        assert!(parse_signing_key("0xabc").is_err());
+        assert!(parse_signing_key("0x6161").is_err());
+    }
+
+    #[test]
+    fn refuses_a_truncated_or_mismatched_conduwuit_keypair() {
+        let dump = conduwuit_keypair_dump("0vhRKHKw", [9; 32]);
+        // Truncated public key, trailing byte, and a public key for another seed.
+        assert!(parse_signing_key(&dump[..dump.len() - 2]).is_err());
+        assert!(parse_signing_key(&format!("{dump}00")).is_err());
+        let mut wrong = dump.clone();
+        wrong.replace_range(dump.len() - 2.., "00");
+        assert!(parse_signing_key(&wrong).is_err());
+        // The DER sequence declares 81 content bytes; reject a different length.
+        let mut wrong_length = dump.clone();
+        wrong_length.replace_range(2 + 9 * 2 + 2..2 + 9 * 2 + 4, "00");
+        assert!(parse_signing_key(&wrong_length).is_err());
+    }
+
     #[test]
     fn fetch_failures_collapse_repeated_errors_into_one_summary() {
         let mut failures = FetchFailures::default();
@@ -2504,18 +2623,7 @@ mod tests {
         let out = dir.join("dag.jsonl");
         let starts = vec!["$a".to_owned()];
         let alias = dir.join(".").join("dag.jsonl");
-        let request = super::DagRequest {
-            origin: "o",
-            destination: "d",
-            room_id: "!r",
-            starts: &starts,
-            room_version: "12",
-            limit: -1,
-            output: &out,
-            key_path: None,
-            no_fallback: false,
-            emit_missing: Some(&alias),
-        };
+        let request = test_dag_request(&starts, &out, Some(&alias));
         assert!(super::initialize_dag(&request, None).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
