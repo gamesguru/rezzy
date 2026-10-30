@@ -231,8 +231,9 @@ In decentralized event replication (Matrix / `rezzy` DAGs), **reconstructing
 - After Option A: 2 RTT (sketch → bodies). Never 1 RTT for event replication.
 
 Unless the reconciliation sketch carries the event bodies themselves
-(prohibitive for algebraic sketches), eliminating Phase 2 ID resolution saves
-zero network round trips in practice.
+(prohibitive for algebraic sketches), eliminating Phase 2 ID resolution saves at
+most one round trip—zero if IDs and bodies are already batched—and never reaches
+1 RTT for event replication.
 
 ---
 
