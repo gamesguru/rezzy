@@ -2434,6 +2434,19 @@ mod tests {
         }
     }
 
+    /// An `m.room.aliases` event for `#test:example.com`, used by the aliases
+    /// rule tests.
+    fn make_aliases_event() -> LeanEvent {
+        LeanEvent {
+            event_id: "$aliases".into(),
+            event_type: M_ROOM_ALIASES.into(),
+            state_key: Some("#test:example.com".into()),
+            sender: "@alice:example.com".into(),
+            content: json!({}),
+            ..Default::default()
+        }
+    }
+
     /// A membership event for `@evil:x`, used by the direct-rule ban tests.
     fn evil_member_event(id: &str, membership: &str) -> LeanEvent<String> {
         LeanEvent {
@@ -2860,14 +2873,7 @@ mod tests {
 
         // An m.room.aliases event triggers Rule 4. With no create state the
         // room-version helper uses the spec-defined v1 default.
-        let aliases_ev = LeanEvent {
-            event_id: "$aliases".into(),
-            event_type: M_ROOM_ALIASES.into(),
-            state_key: Some("#test:example.com".into()),
-            sender: "@alice:example.com".into(),
-            content: json!({}),
-            ..Default::default()
-        };
+        let aliases_ev = make_aliases_event();
         let result = check_auth_with_context(&aliases_ev, &state, StateResVersion::V1, None, None);
         // Rule 4 fires for v1-v5 and the default passes the aliases domain
         // check; missing create state is not itself an authorization error.
@@ -2908,14 +2914,7 @@ mod tests {
                 json!({ "membership": "join" }),
             ),
         );
-        let aliases = LeanEvent {
-            event_id: "$aliases".into(),
-            event_type: M_ROOM_ALIASES.into(),
-            state_key: Some("#test:example.com".into()),
-            sender: "@alice:example.com".into(),
-            content: json!({}),
-            ..Default::default()
-        };
+        let aliases = make_aliases_event();
         let result = check_auth_with_context(&aliases, &state, StateResVersion::V2, None, None);
         assert!(
             result.is_ok(),
