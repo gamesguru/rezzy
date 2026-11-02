@@ -19,6 +19,7 @@ pub use rezzy_log::{debug, error, info, trace, warn};
 pub mod algebraic;
 pub mod bitmap;
 pub mod client;
+pub(crate) mod field;
 pub mod gf64;
 pub mod gf64_simd;
 mod pinsketch;

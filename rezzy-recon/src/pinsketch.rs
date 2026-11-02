@@ -7,6 +7,7 @@
 
 use alloc::{vec, vec::Vec};
 
+use crate::field::Field;
 use crate::gf64_simd::Gf64Evaluator;
 
 use super::algebraic::{gf64_mul, AlgebraicError};
@@ -58,14 +59,17 @@ pub(crate) fn decode(
 ///
 /// Done here, at the one place every caller decodes through, so the bucket,
 /// `decode_elements` and strata-estimator paths all get it.
-fn require_reencode(roots: Vec<u64>, odd_syndromes: &[u64]) -> Result<Vec<u64>, AlgebraicError> {
-    let mut check = vec![0_u64; odd_syndromes.len()];
+fn require_reencode<F: Field>(
+    roots: Vec<F>,
+    odd_syndromes: &[F],
+) -> Result<Vec<F>, AlgebraicError> {
+    let mut check = vec![F::ZERO; odd_syndromes.len()];
     for &root in &roots {
-        let squared = gf64_mul(root, root);
+        let squared = root.mul(root);
         let mut odd_power = root;
         for coordinate in &mut check {
-            *coordinate ^= odd_power;
-            odd_power = gf64_mul(odd_power, squared);
+            *coordinate = coordinate.add(odd_power);
+            odd_power = odd_power.mul(squared);
         }
     }
     (check == odd_syndromes)
@@ -133,20 +137,20 @@ fn finalize_roots(mut roots: Vec<u64>, expected: usize) -> Result<Vec<u64>, Alge
     Ok(roots)
 }
 
-fn reconstruct_syndromes(odd: &[u64]) -> Vec<u64> {
-    let mut all = vec![0; odd.len().saturating_mul(2)];
+fn reconstruct_syndromes<F: Field>(odd: &[F]) -> Vec<F> {
+    let mut all = vec![F::ZERO; odd.len().saturating_mul(2)];
     for (index, value) in odd.iter().copied().enumerate() {
         all[index.saturating_mul(2)] = value;
         // Earlier iterations have already reconstructed the source at `index`.
-        all[index.saturating_mul(2).saturating_add(1)] = gf64_mul(all[index], all[index]);
+        all[index.saturating_mul(2).saturating_add(1)] = all[index].mul(all[index]);
     }
     all
 }
 
-fn berlekamp_massey(syndromes: &[u64], max_degree: usize) -> Option<Polynomial> {
-    let mut current = vec![1];
-    let mut previous = vec![1];
-    let mut previous_discrepancy = 1;
+fn berlekamp_massey<F: Field>(syndromes: &[F], max_degree: usize) -> Option<Vec<F>> {
+    let mut current = vec![F::ONE];
+    let mut previous = vec![F::ONE];
+    let mut previous_discrepancy = F::ONE;
 
     for (n, syndrome) in syndromes.iter().copied().enumerate() {
         let mut discrepancy = syndrome;
@@ -154,9 +158,9 @@ fn berlekamp_massey(syndromes: &[u64], max_degree: usize) -> Option<Polynomial> 
             let Some(syndrome_index) = n.checked_sub(i) else {
                 continue;
             };
-            discrepancy ^= gf64_mul(syndromes[syndrome_index], coefficient);
+            discrepancy = discrepancy.add(syndromes[syndrome_index].mul(coefficient));
         }
-        if discrepancy == 0 {
+        if discrepancy == F::ZERO {
             continue;
         }
 
@@ -173,35 +177,23 @@ fn berlekamp_massey(syndromes: &[u64], max_degree: usize) -> Option<Polynomial> 
             if new_len.checked_sub(1)? > max_degree {
                 return None;
             }
-            current.resize(new_len, 0);
+            current.resize(new_len, F::ZERO);
         }
-        let scale = gf64_mul(discrepancy, gf64_inv(previous_discrepancy)?);
+        let scale = discrepancy.mul(previous_discrepancy.inv()?);
         for (i, coefficient) in previous.iter().copied().enumerate() {
             let target = i.checked_add(shift)?;
-            current[target] ^= gf64_mul(scale, coefficient);
+            current[target] = current[target].add(scale.mul(coefficient));
         }
         if swap {
             previous = old_current;
             previous_discrepancy = discrepancy;
         }
     }
-    (current.last().copied().unwrap_or(0) != 0).then_some(current)
+    (current.last().copied().unwrap_or(F::ZERO) != F::ZERO).then_some(current)
 }
 
 fn gf64_inv(value: u64) -> Option<u64> {
-    if value == 0 {
-        return None;
-    }
-    // a^(2^64-2), using a fixed square-and-multiply schedule.
-    let mut result = 1;
-    let exponent = u64::MAX - 1;
-    for bit in (0..64).rev() {
-        result = gf64_mul(result, result);
-        if exponent & (1_u64 << bit) != 0 {
-            result = gf64_mul(result, value);
-        }
-    }
-    Some(result)
+    Field::inv(value)
 }
 
 fn trim(poly: &mut Polynomial) {
