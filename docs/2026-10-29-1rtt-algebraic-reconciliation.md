@@ -138,8 +138,8 @@ The entire 32-byte digest is treated as an element of $\mathrm{GF}(2^{256})$.
 
 - **Topology:** Bucket placement and resident strata stay at 64 bits (`h64`).
   Only the bucket sketch element is widened to 256 bits.
-- **Semantics:** Decoded roots _are_ the full IDs. There are zero collision
-  buckets ($x \oplus x = 0$ only if the full 256-bit digests match).
+- **Semantics:** Decoded roots _are_ the full IDs. There are no locator
+  collisions ($x \oplus x = 0$ only if the full 256-bit digests match).
   `verify_follow_up`, `m_roots`, and `SortedPopulation::candidates` disappear
   entirely.
 - **Zero-Element Invariant:** PinSketch requires non-zero elements ($x \ne 0$).

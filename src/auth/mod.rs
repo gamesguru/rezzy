@@ -33,8 +33,8 @@ use crate::basespec::event_types::{
     RULE_KNOCK_RESTRICTED, RULE_PUBLIC, RULE_RESTRICTED,
 };
 use crate::basespec::rezzy_types::{
-    apply_redaction, domain_matches, is_acceptable_historical_mxid, is_valid_mxid, EventContent,
-    EventId, EventLike, EventProvider, EventVerifier, LeanEvent, StateKey, StateResVersion,
+    apply_redaction, domain_matches, is_acceptable_historical_mxid, EventContent, EventId,
+    EventLike, EventProvider, EventVerifier, LeanEvent, StateKey, StateResVersion,
 };
 
 /// An error indicating why an event failed authorization.
@@ -2886,7 +2886,7 @@ mod tests {
             "@admin:example.com",
             json!({ "room_version": "5" }),
         );
-        create.state_key = Some("".into());
+        create.state_key = Some(String::new());
         state.insert((M_ROOM_CREATE.into(), String::new()), create);
         // Power level 0 for the sender: Rule 4 must allow the event before
         // the generic state-event power-level check runs.

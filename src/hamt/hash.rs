@@ -20,10 +20,10 @@ use core::hash::Hasher;
 /// and known in advance to anyone who can address the room. This is safe for
 /// HAMT routing because:
 ///
-/// - **BLAKE3 is collision-resistant** at 128-bit security. Grinding
-///   a shallow-prefix collision (k levels of 5-bit agreement) costs
-///   `2^(5k)` hash evaluations; for k ≤ ~10 this is practical (seconds),
-///   but only causes O(depth) slowdown — the tree still terminates.
+/// - **BLAKE3 is collision-resistant** at 128-bit security. Targeting a fixed
+///   key's prefix of k levels costs about `2^(5k)` hash evaluations; finding
+///   any colliding pair costs about `2^(5k/2)`. Even k = 10 (2^50 for a fixed
+///   target) only causes O(depth) slowdown — the tree still terminates.
 /// - **Full-depth exhaustion** (52 levels = 2^260 hashes) is
 ///   computationally infeasible.
 /// - `HamtBuildError::HashCollision` at max depth is a safe error return,
@@ -37,10 +37,10 @@ use core::hash::Hasher;
 ///    re-keying via `key_path_hash(structural_key, key)`.
 ///
 /// Because the key is public and fixed to `room_id`, an attacker can precompute
-/// shallow collisions against a known room. That residual cost (seconds of compute
-/// for a handful of extra tree levels) is bounded and accepted; defending against
-/// deliberate depth spam within a single room is an admission / rate-limiting
-/// concern at the homeserver level.
+/// shallow collisions against a known room. That residual cost (from minutes to
+/// days of compute for a handful of extra tree levels) is bounded and accepted;
+/// defending against deliberate depth spam within a single room is an admission
+/// / rate-limiting concern at the homeserver level.
 pub type StructuralHash = [u8; 32];
 
 /// A 32-byte state-group identifier derived from the full root lattice.

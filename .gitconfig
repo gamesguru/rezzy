@@ -1,0 +1,7 @@
+# Enable in each clone with:
+#   git config --local include.path ../.gitconfig
+
+[remote "helio"]
+	pushurl = git@nutra.tk:gamesguru/rezzy.git
+	pushurl = git@gitlab.com:gamesguru/rezzy.git
+	pushurl = git@gitlab.com:Wombat-Foundation/rezzy.git
