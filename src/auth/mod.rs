@@ -640,34 +640,6 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
         }
     }
 
-    // Rule 4 (V1–V5): m.room.aliases domain mismatch check. Removed starting
-    // v6 (v6.txt: "Rule 4 ... is removed"). This must be read from the
-    // m.room.create event's actual `content.room_version` (defaulting to "1"
-    // per spec when absent), not the collapsed `StateResVersion` enum:
-    // `StateResVersion::V2` covers real room versions 2-11 uniformly, so
-    // gating on `version == StateResVersion::V1` would only ever match real
-    // room version "1" and silently skip versions 2-5.
-    if event_type == crate::basespec::event_types::M_ROOM_ALIASES {
-        let room_version = room_version_str_or_v1(state)?;
-        if matches!(room_version, "1" | "2" | "3" | "4" | "5") {
-            let Some(state_key) = event.state_key() else {
-                return Err(AuthError::InvalidSyntax(
-                    "m.room.aliases event must have a state_key".into(),
-                ));
-            };
-            if !crate::basespec::rezzy_types::domain_matches(state_key, event.sender()) {
-                return Err(AuthError::InvalidSyntax(
-                    "m.room.aliases state_key domain must match sender domain".into(),
-                ));
-            }
-            // Rule 4 is the complete aliases rule for v1-v5: after the
-            // domain check, allow without running the generic power-level
-            // rule (Rule 8). From v6 the special rule is gone and aliases
-            // events use the ordinary state-event checks.
-            return Ok(());
-        }
-    }
-
     // Rule 11 (V1–V2): m.room.redaction — allow if sender PL >= redact
     // level, or if the redaction event and the event it redacts share a
     // domain; otherwise reject. Removed starting v3 (v3-auth-rules.txt has
@@ -806,6 +778,38 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
                     });
                 }
             }
+        }
+    }
+
+    // Rule 4 (V1–V5): m.room.aliases domain mismatch check. Removed starting
+    // v6 (v6.txt: "Rule 4 ... is removed"). Evaluated after auth_context
+    // validation (so missing/duplicate citations or missing create event are
+    // caught), but before the generic sender-joined and power-level rules
+    // (Rule 8), matching the historical v1-v5 exemption. This must be read
+    // from the m.room.create event's actual `content.room_version` (defaulting
+    // to "1" per spec when absent), not the collapsed `StateResVersion` enum:
+    // `StateResVersion::V2` covers real room versions 2-11 uniformly, so
+    // gating on `version == StateResVersion::V1` would only ever match real
+    // room version "1" and silently skip versions 2-5.
+    if event_type == crate::basespec::event_types::M_ROOM_ALIASES {
+        let room_version = room_version_str_or_v1(state)?;
+        if matches!(room_version, "1" | "2" | "3" | "4" | "5") {
+            let Some(state_key) = event.state_key() else {
+                return Err(AuthError::InvalidSyntax(
+                    "m.room.aliases event must have a state_key".into(),
+                ));
+            };
+            if !crate::basespec::rezzy_types::domain_matches(state_key, event.sender()) {
+                return Err(AuthError::InvalidSyntax(
+                    "m.room.aliases state_key domain must match sender domain".into(),
+                ));
+            }
+            // Rule 4 is the complete aliases rule for v1-v5: after the
+            // domain check, allow without running the generic power-level
+            // rule (Rule 8) or requiring joined sender membership. From v6
+            // the special rule is gone and aliases events use the ordinary
+            // state-event checks.
+            return Ok(());
         }
     }
 

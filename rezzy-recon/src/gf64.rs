@@ -79,9 +79,7 @@ unsafe fn clmul_raw_portable(left: u64, right: u64) -> [u64; 2] {
 #[allow(unsafe_code)]
 unsafe fn clmul_raw_pclmul(left: u64, right: u64) -> [u64; 2] {
     #[cfg(target_arch = "x86")]
-    use core::arch::x86::{
-        _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_set_epi64x, _mm_srli_si128,
-    };
+    use core::arch::x86::{_mm_clmulepi64_si128, _mm_set_epi64x, _mm_storeu_si128};
     #[cfg(target_arch = "x86_64")]
     use core::arch::x86_64::{
         _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_set_epi64x, _mm_srli_si128,
@@ -90,12 +88,21 @@ unsafe fn clmul_raw_pclmul(left: u64, right: u64) -> [u64; 2] {
     let left = _mm_set_epi64x(0, i64::from_ne_bytes(left.to_ne_bytes()));
     let right = _mm_set_epi64x(0, i64::from_ne_bytes(right.to_ne_bytes()));
     let product = _mm_clmulepi64_si128(left, right, 0x00);
-    let low = _mm_cvtsi128_si64(product);
-    let high = _mm_cvtsi128_si64(_mm_srli_si128::<8>(product));
-    [
-        u64::from_ne_bytes(low.to_ne_bytes()),
-        u64::from_ne_bytes(high.to_ne_bytes()),
-    ]
+    #[cfg(target_arch = "x86_64")]
+    {
+        let low = _mm_cvtsi128_si64(product);
+        let high = _mm_cvtsi128_si64(_mm_srli_si128::<8>(product));
+        [
+            u64::from_ne_bytes(low.to_ne_bytes()),
+            u64::from_ne_bytes(high.to_ne_bytes()),
+        ]
+    }
+    #[cfg(target_arch = "x86")]
+    {
+        let mut words = [0_u64; 2];
+        _mm_storeu_si128(words.as_mut_ptr().cast(), product);
+        words
+    }
 }
 
 /// Multiplies two elements of the MSC4521 64-bit binary field.

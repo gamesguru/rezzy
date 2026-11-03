@@ -71,6 +71,17 @@ impl WorkModel {
     /// 232,591,912 units for consecutive roots and 36,127,278 for
     /// pseudorandom roots. The ceiling leaves headroom over those samples but
     /// is not a worst-case factorization bound; exhaustion fails safely.
+    ///
+    /// # Expected `no_std` Software Multiplication Cost
+    /// On `no_std` platforms (or targets lacking hardware PCLMULQDQ / AVX-512),
+    /// carry-less multiplication falls back to software bitwise algorithms
+    /// (`clmul_raw_bitwise`), which is roughly 10–20× slower per operation.
+    /// While hardware-accelerated decode reaches 300M units in ~3.6–7.5 CPU
+    /// seconds, the same ceiling in `no_std` software can require several
+    /// tens of seconds to minutes of CPU time before either completing or
+    /// failing with `AlgebraicError::BudgetExhausted`. Integrations running in
+    /// `no_std` or synchronous event loops must account for these long decode
+    /// times or configure caller-side timeouts / fallback selection accordingly.
     pub(crate) const GF256: Self = Self {
         bits: 256,
         mixed_trials: MIXED_FACTOR_TRIALS,

@@ -283,10 +283,37 @@ pub fn get_evaluator() -> EvaluatorBackend {
     EvaluatorBackend::Scalar
 }
 
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+fn get_dispatch_evaluator() -> EvaluatorBackend {
+    use core::sync::atomic::{AtomicU8, Ordering};
+
+    static DISPATCH_BACKEND: AtomicU8 = AtomicU8::new(0);
+    let val = DISPATCH_BACKEND.load(Ordering::Relaxed);
+    if val != 0 {
+        return cached_evaluator(val, EvaluatorBackend::Scalar);
+    }
+
+    let backend = get_evaluator_internal();
+    let encoded = encode_backend(backend);
+    if DISPATCH_BACKEND
+        .compare_exchange(0, encoded, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let cached = DISPATCH_BACKEND.load(Ordering::Acquire);
+        return cached_evaluator(cached, backend);
+    }
+    backend
+}
+
+#[cfg(any(not(feature = "std"), not(target_arch = "x86_64")))]
+fn get_dispatch_evaluator() -> EvaluatorBackend {
+    EvaluatorBackend::Scalar
+}
+
 /// Dispatches a polynomial multiply-accumulate to the best available
-/// evaluator backend.
+/// evaluator backend without emitting diagnostic warnings to stderr.
 pub(crate) fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
-    match get_evaluator() {
+    match get_dispatch_evaluator() {
         #[cfg(all(target_arch = "x86_64", has_avx512_support))]
         EvaluatorBackend::Avx512 => Avx512Evaluator::poly_mac(term, source, target),
         #[cfg(target_arch = "x86_64")]

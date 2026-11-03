@@ -113,7 +113,7 @@ authorization rules. Three distinct rule sets exist:
 | `m.room.create`             | all      | [x]   | v11+: all content keys preserved; v1–v10: preserves `creator`                                                         |
 | `m.room.member`             | all      | [x]   | v11+ adds `third_party_invite.signed`; v9+ adds `join_authorised_via_users_server`; v1–v8 preserves `membership` only |
 | `m.room.power_levels`       | all      | [x]   | v11+ adds `invite` to preserved keys                                                                                  |
-| `m.room.join_rules`         | all      | [x]   | v9+ adds `allow`                                                                                                      |
+| `m.room.join_rules`         | all      | [x]   | v8+ adds `allow`                                                                                                      |
 | `m.room.history_visibility` | all      | [x]   | preserves `history_visibility`                                                                                        |
 | `m.room.aliases`            | V1–V5    | [x]   | preserves `aliases`; removed entirely v6+ (`RedactionRule::None`)                                                     |
 | `m.room.redaction`          | V11+     | [x]   | preserves `redacts` (moved into `content` in v11); none pre-v11                                                       |

@@ -37,8 +37,8 @@ use core::hash::Hasher;
 ///    re-keying via `key_path_hash(structural_key, key)`.
 ///
 /// Because the key is public and fixed to `room_id`, an attacker can precompute
-/// shallow collisions against a known room. That residual cost (from minutes to
-/// days of compute for a handful of extra tree levels) is bounded and accepted;
+/// shallow collisions against a known room. That residual cost (seconds of
+/// compute for a handful of extra tree levels) is bounded and accepted;
 /// defending against deliberate depth spam within a single room is an admission
 /// / rate-limiting concern at the homeserver level.
 pub type StructuralHash = [u8; 32];

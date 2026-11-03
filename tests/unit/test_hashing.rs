@@ -205,7 +205,10 @@ fn test_v8_join_rules_allow_survives_redaction_and_hashing() {
     assert_eq!(redacted["content"]["join_rule"], "restricted");
     assert_eq!(redacted["content"]["allow"], pdu["content"]["allow"]);
     assert!(redacted["content"].get("extra").is_none());
-    assert_eq!(reference_hash(&pdu, "8"), reference_hash(&redacted, "8"));
+    assert_eq!(
+        reference_hash(&pdu, "8").unwrap(),
+        reference_hash(&redacted, "8").unwrap()
+    );
 }
 
 /// Coverage: `split_redaction_content`'s complement of

@@ -3601,6 +3601,47 @@ fn test_rule_4_aliases_missing_state_key_rejected() {
     );
 }
 
+#[test]
+fn test_check_auth_chain_aliases_v5_requires_create_citation_and_valid_auth_events() {
+    let create_ev = make_create("$c", "@admin:example.com", json!({"room_version": "5"}));
+    let mut state = RoomState::new();
+    insert_event(&mut state, M_ROOM_CREATE, "", create_ev);
+
+    // 1. Alias event with empty auth_events (missing m.room.create citation)
+    // even though state_key domain matches sender domain.
+    let bad_alias = make_event(
+        "$alias_bad",
+        "m.room.aliases",
+        Some("example.com"),
+        "@admin:example.com",
+        json!({"aliases": ["#test:example.com"]}),
+    );
+    let (accepted, rejected) = check_auth_chain(&[bad_alias], &state, StateResVersion::V2);
+    assert!(
+        accepted.is_empty(),
+        "Alias event missing create in auth_events must not be accepted"
+    );
+    assert_eq!(rejected.len(), 1);
+    assert!(
+        matches!(&rejected[0].1, AuthError::InvalidSyntax(msg) if msg.contains("auth_events must contain m.room.create")),
+        "Expected missing create rejection, got: {:?}",
+        rejected[0].1
+    );
+
+    // 2. Alias event properly citing m.room.create is accepted without requiring joined membership.
+    let mut good_alias = make_event(
+        "$alias_good",
+        "m.room.aliases",
+        Some("example.com"),
+        "@admin:example.com",
+        json!({"aliases": ["#test:example.com"]}),
+    );
+    good_alias.auth_events.push("$c".to_string());
+    let (accepted, rejected) = check_auth_chain(&[good_alias], &state, StateResVersion::V2);
+    assert_eq!(accepted, vec!["$alias_good"]);
+    assert!(rejected.is_empty());
+}
+
 /// Builds room state (v1 by default) with a creator and a joined `@bob:domain1.com`.
 fn rule_11_base_state(room_version: &str) -> RoomState {
     let mut state = RoomState::new();

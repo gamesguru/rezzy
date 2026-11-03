@@ -42,8 +42,9 @@ pub(crate) trait BinaryField: Copy + Eq {
     /// this is lossless for the deterministic trial seed.
     fn from_u64(value: u64) -> Self {
         debug_assert!(Self::BYTES >= 8, "from_u64 needs a 64-bit-wide field");
-        <Self as BinaryField>::from_le_bytes(&value.to_le_bytes())
-            .expect("an eight-byte prefix always fits")
+        let mut bytes = alloc::vec![0u8; Self::BYTES];
+        bytes[..8].copy_from_slice(&value.to_le_bytes());
+        <Self as BinaryField>::from_le_bytes(&bytes).expect("a zero-padded prefix always fits")
     }
 
     /// Reads bit `index` of the little-endian representation.
@@ -79,7 +80,7 @@ pub(crate) trait BinaryField: Copy + Eq {
         let mut result = Self::ONE;
         let mut square = self;
         for _ in 1..Self::BITS {
-            square = square.mul(square);
+            square = square.square();
             result = result.mul(square);
         }
         Some(result)

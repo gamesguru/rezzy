@@ -184,9 +184,12 @@ The entire 32-byte digest is treated as an element of $\mathrm{GF}(2^{256})$.
 
 This ratio applies _before_ accounting for multi-limb multiplication overhead (4
 limbs vs. native 64-bit PCLMULQDQ / AVX-512). `MAX_BATCH_FACTOR_WORK` would
-increase from $\sim 36.7\text{M}$ to $\sim 345\text{M}$. The d = 256 entry is a
-model estimate: the measured consecutive case is 232.6M units, about 4.5x
-higher, so this table is a lower bound, not a budget calibration.
+increase from $\sim 36.7\text{M}$ to $\sim 345\text{M}$. The $d = 256$ entry is
+a single-call model estimate: actual consumption depends heavily on root
+structure (Section 8.3 reports 36,127,278 units for pseudorandom roots and
+232,591,912 units for consecutive roots). Thus, the formula values represent
+single-call model estimates rather than universal lower bounds across all
+workloads, and cannot serve as direct budget calibrations.
 
 ### Option B: Correlated Payload Moments (Interleaved Reed-Solomon)
 
@@ -221,6 +224,14 @@ If paying $\sim 4\times$ wire is acceptable:
 4. **Collision Boundary:** Pushes the adversarial birthday floor to $2^{64}$,
    rendering attacks infeasible without ASIC-scale investment, while retaining
    an explicit fallback path for correctness.
+5. **Zero-Locator Invariant:** Option B2 requires nonzero locator keys
+   ($k_i \ne 0$) because root zero is rejected by the algebraic decoder and
+   cannot be evaluated in Forney's formula ($k_i^{-1}$ is undefined). Insertion
+   must reject digests whose 16 locator bytes (`digest[0..16]`) are all zero, or
+   route them to a non-algebraic fallback ladder. This is distinct from Option
+   A, where only the full 32-byte digest cannot be all zero
+   (`digest[0..32] == 0`) and zero prefixes in `digest[0..16]` remain valid
+   field elements.
 
 ---
 
@@ -268,12 +279,12 @@ most one round trip—zero if IDs and bodies are already batched—and never rea
 
 ## 6. Decision Matrix
 
-| Consumer / Workload                             | Recommendation                                    | Rationale                                                                                                                                 |
-| :---------------------------------------------- | :------------------------------------------------ | :---------------------------------------------------------------------------------------------------------------------------------------- |
-| **Event / DAG Replication** (`rezzy`)           | **Retain Two-Phase MSC4521**                      | Body fetch dominates total time; avoids $4\times$ wire and extraction penalty on sketches.                                                |
-| **ID-Only Sync (Strict No-Collision-Fallback)** | **Option A ($\mathrm{GF}(2^{256})$)**             | No locator collisions; guarantees one RTT when $d \le C$, with no collision-resolution fetch. Capacity overflow can still require splits. |
-| **ID-Only Sync (Practical)**                    | **Option B2 ($128/128$, $\mathrm{GF}(2^{128})$)** | Reuses `h128` residual as $V_0$; $2^{64}$ adversarial floor; avoids degree-256 root finding.                                              |
-| **GF($2^{64}$)-Only Hardware Constraint**       | **Option B1 ($64/192$, $\mathrm{GF}(2^{64})$)**   | Preserves existing SIMD paths; must document $2^{32}$ adversarial collision fallback.                                                     |
+| Consumer / Workload                             | Recommendation                                    | Rationale                                                                                                                                                                                   |
+| :---------------------------------------------- | :------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Event / DAG Replication** (`rezzy`)           | **Retain Two-Phase MSC4521**                      | Body fetch dominates total time; avoids $4\times$ wire and extraction penalty on sketches.                                                                                                  |
+| **ID-Only Sync (Strict No-Collision-Fallback)** | **Option A ($\mathrm{GF}(2^{256})$)**             | No locator collisions; avoids collision-resolution fetches when decoding completes within budget for $d \le C$. Capacity overflow or budget exhaustion can still require splits / fallback. |
+| **ID-Only Sync (Practical)**                    | **Option B2 ($128/128$, $\mathrm{GF}(2^{128})$)** | Reuses `h128` residual as $V_0$; $2^{64}$ adversarial floor; avoids degree-256 root finding.                                                                                                |
+| **GF($2^{64}$)-Only Hardware Constraint**       | **Option B1 ($64/192$, $\mathrm{GF}(2^{64})$)**   | Preserves existing SIMD paths; must document $2^{32}$ adversarial collision fallback.                                                                                                       |
 
 ---
 
@@ -343,8 +354,11 @@ degree-256 inputs were 232,591,912 units for consecutive roots and 36,127,278
 for pseudorandom roots. This is a practical ceiling, not a proven worst case:
 the work model's full binary recursion bound is 5,148,287,480 units (a chain of
 `(1, d-1)` splits maximizes the model), and constructing an input that reaches
-it is still open. Exhaustion returns `BudgetExhausted` and falls back to the
-non-algebraic path.
+it is still open. When the budget is exhausted, `Gf256Decoder::decode` returns
+`AlgebraicError::BudgetExhausted`; fallback selection (such as falling back to
+the non-algebraic path or the fallback ladder) is the responsibility of the
+caller / integration layer, as the decoder does not invoke a fallback internally
+and the wide-field profile is not yet wired into bucket exchange.
 
 Before the reduce/square optimization, the 232.6M consecutive case took about
 4.78 s and the 36.1M random case about 1.54 s. Those imply different observed
@@ -356,6 +370,16 @@ and the 5.15B model bound near 61–128 seconds, depending on which workload rat
 is used. These are rough risk estimates, not runtime guarantees: work units are
 an accounting model, not a uniform measure of CPU time. The ceiling is a DoS
 surface, so keep it per attempt and never calibrate it from random roots alone.
+
+On `no_std` platforms or architectures without hardware carry-less
+multiplication (PCLMULQDQ / AVX-512), multiplication falls back to software
+bitwise algorithms (`clmul_raw_bitwise`), which are roughly 10–20× slower. While
+hardware-accelerated decode handles up to 300M units in ~3.6–7.5 seconds,
+unaccelerated software multiplication on `no_std` can cause long synchronous
+decode times (tens of seconds to minutes) before reaching either success or
+`BudgetExhausted`. Callers deploying on `no_std` or within synchronous event
+loops must account for this latency by configuring tighter work allowances or
+explicit timeouts.
 
 The 6.4x consecutive-versus-random gap in work units at F = 256 is not
 explained. No comparable gap has been observed in the tested F = 64 workloads,
@@ -440,8 +464,8 @@ been released, so its name has no version suffix. Use `algebraic_gf256` as a
 wire identifier if the transport needs an explicit format discriminator.
 
 The field polynomial, element mapping, byte order, and syndrome encoding below
-define this format. A future incompatible format may receive another name if
-and when one exists.
+define this format. A future incompatible format may receive another name if and
+when one exists.
 
 **1. Element mapping.** For room-version 3 and later, use the raw 32-byte
 base64-decoded event-ID digest: `Gf256::from_le_bytes(digest[0..32])`, with no
@@ -506,6 +530,6 @@ bucket sketches and extract a full-digest symmetric difference. The existing
 MSC0501 client state machine and network adapter still use the GF(2^64) bucket
 path; replacing it with the GF(2^256) path and wiring the payload into the
 transport remain pending. No profile negotiation is needed while only
-`algebraic_gf256` is supported. Keep a small format header only if the
-transport needs to reject legacy payloads explicitly; place it with wire
-framing, not in profile negotiation machinery.
+`algebraic_gf256` is supported. Keep a small format header only if the transport
+needs to reject legacy payloads explicitly; place it with wire framing, not in
+profile negotiation machinery.

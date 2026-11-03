@@ -112,8 +112,9 @@ impl<T: Clone + Eq + core::hash::Hash + Ord + AsRef<str>> StateKey for T {}
 /// | Fragment | Room Versions | Delta from previous |
 /// |----------|:---:|---|
 /// | `v1-redactions.txt` | 1–5 | Baseline. PL: `ban`, `events`, `events_default`, `kick`, `redact`, `state_default`, `users`, `users_default`. Member: `membership`. |
-/// | `v6-redactions.txt` | 6–8 | Removes `m.room.aliases`. |
-/// | `v9-redactions.txt` | 9–10 | Member: adds `join_authorised_via_users_server`. Join rules: adds `allow`. |
+/// | `v6-redactions.txt` | 6–7 | Removes `m.room.aliases`. |
+/// | `v8-redactions.txt` | 8 | Join rules: adds `allow`. |
+/// | `v9-redactions.txt` | 9–10 | Member: adds `join_authorised_via_users_server`. |
 /// | `v11-redactions.txt` | 11+ | PL: adds `invite`. Create: allows ALL keys. Member: adds `third_party_invite.signed`. Drops top-level `prev_state`, `origin`, `membership`. Adds `m.room.redaction` preserving `redacts`. |
 ///
 /// **Key invariant:** `users` in `m.room.power_levels` is preserved on redaction
