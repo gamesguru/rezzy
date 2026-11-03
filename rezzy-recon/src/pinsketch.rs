@@ -7,7 +7,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use crate::field::Field;
+use crate::binary_field::BinaryField;
 use crate::gf64_simd::Gf64Evaluator;
 
 use super::algebraic::{gf64_mul, AlgebraicError};
@@ -59,7 +59,7 @@ pub(crate) fn decode(
 ///
 /// Done here, at the one place every caller decodes through, so the bucket,
 /// `decode_elements` and strata-estimator paths all get it.
-fn require_reencode<F: Field>(
+fn require_reencode<F: BinaryField>(
     roots: Vec<F>,
     odd_syndromes: &[F],
 ) -> Result<Vec<F>, AlgebraicError> {
@@ -137,7 +137,7 @@ fn finalize_roots(mut roots: Vec<u64>, expected: usize) -> Result<Vec<u64>, Alge
     Ok(roots)
 }
 
-fn reconstruct_syndromes<F: Field>(odd: &[F]) -> Vec<F> {
+fn reconstruct_syndromes<F: BinaryField>(odd: &[F]) -> Vec<F> {
     let mut all = vec![F::ZERO; odd.len().saturating_mul(2)];
     for (index, value) in odd.iter().copied().enumerate() {
         all[index.saturating_mul(2)] = value;
@@ -147,7 +147,7 @@ fn reconstruct_syndromes<F: Field>(odd: &[F]) -> Vec<F> {
     all
 }
 
-fn berlekamp_massey<F: Field>(syndromes: &[F], max_degree: usize) -> Option<Vec<F>> {
+fn berlekamp_massey<F: BinaryField>(syndromes: &[F], max_degree: usize) -> Option<Vec<F>> {
     let mut current = vec![F::ONE];
     let mut previous = vec![F::ONE];
     let mut previous_discrepancy = F::ONE;
@@ -193,7 +193,7 @@ fn berlekamp_massey<F: Field>(syndromes: &[F], max_degree: usize) -> Option<Vec<
 }
 
 fn gf64_inv(value: u64) -> Option<u64> {
-    Field::inv(value)
+    BinaryField::inv(value)
 }
 
 fn trim(poly: &mut Polynomial) {

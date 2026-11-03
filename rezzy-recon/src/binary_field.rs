@@ -3,14 +3,18 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
-//! Field abstraction for `PinSketch` decoding.
+//! Binary-field abstraction for `PinSketch` decoding.
 //!
-//! The decoder is written against [`Field`] so a wider binary field (for
+//! The decoder is written against [`BinaryField`] so a wider binary field (for
 //! example GF(2^256) for bucket sketches) can reuse it. `u64` is the MSC4521
 //! GF(2^64) profile and must stay byte-identical to the pre-trait behavior.
 
-/// A binary extension field GF(2^`BITS`). Addition is XOR.
-pub(crate) trait Field: Copy + Eq {
+/// A binary field GF(2^`BITS`): characteristic 2, so addition is XOR.
+///
+/// That invariant is what makes the odd-power syndrome trick and the
+/// `a^(2^BITS - 2)` inverse schedule valid; do not implement this for a
+/// prime field.
+pub(crate) trait BinaryField: Copy + Eq {
     /// Extension degree `m` of GF(2^m).
     const BITS: usize;
     const ZERO: Self;
@@ -36,7 +40,7 @@ pub(crate) trait Field: Copy + Eq {
 }
 
 /// GF(2^64) in the MSC4521 representation.
-impl Field for u64 {
+impl BinaryField for u64 {
     const BITS: usize = 64;
     const ZERO: Self = 0;
     const ONE: Self = 1;
@@ -55,7 +59,7 @@ impl Field for u64 {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::Field;
+    use super::BinaryField;
 
     #[test]
     fn gf64_inverse_round_trips() {
