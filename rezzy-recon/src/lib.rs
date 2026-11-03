@@ -51,9 +51,9 @@ pub const MAX_DEPTH: u8 = 32;
 pub const H64_TRIE_WIDTH: u8 = 64;
 
 pub use algebraic::{
-    gf64_mul, verify_residual, AlgebraicError, ElementHash, EventIdFormat, FixedWindowElementHash,
-    RoomAccumulator, RoomEventIdKind, SyndromeSketch, MAX_LOCAL_SKETCH_DECODE_CAPACITY,
-    MAX_OVERFLOW_SKETCH_CAPACITY, MAX_SKETCH_CAPACITY,
+    gf64_mul, verify_residual, AccumulatedElement, AlgebraicError, ElementHash, EventIdFormat,
+    FixedWindowElementHash, RoomAccumulator, RoomEventIdKind, SyndromeSketch,
+    MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_OVERFLOW_SKETCH_CAPACITY, MAX_SKETCH_CAPACITY,
 };
 pub use client::{
     should_narrow, BucketExchange, ClientAction, ReconciliationClient, RemoteDigest,
@@ -67,8 +67,9 @@ pub use resident::{
 };
 pub use server::{
     build_bucket_nodes, build_bucket_sketches, build_gf256_bucket_nodes,
-    build_gf256_bucket_sketches, compute_frame_digest, FixedWindowPopulation, ForwardGraph,
-    H64Index, Population, ReconciliationContext, SortedPopulation,
+    build_gf256_bucket_sketches, compute_fixed_window_frame_digest, compute_frame_digest,
+    FixedWindowPopulation, ForwardGraph, H64Index, Population, ReconciliationContext,
+    SortedPopulation,
 };
 pub use triage::{
     bucket_prefix, decode_bucket_sketches, decode_gf256_bucket_sketches, estimate_strata,

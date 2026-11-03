@@ -331,6 +331,57 @@ impl ElementHash {
     }
 }
 
+/// An element that can be folded into the room accumulator and the strata
+/// estimator: the legacy [`ElementHash`] or the full-digest
+/// [`FixedWindowElementHash`].
+pub trait AccumulatedElement: Copy {
+    /// The value folded by xor into the level-0 digest and node summaries (128 bits).
+    fn residual128(self) -> u128;
+    /// The raw 64-bit strata key, before the nonzero alias is applied.
+    fn strata_key(self) -> u64;
+    /// Rejects values outside the element universe.
+    ///
+    /// # Errors
+    /// Returns a zero-identifier error for an unusable element.
+    fn validate(self) -> Result<(), AlgebraicError>;
+}
+
+impl AccumulatedElement for ElementHash {
+    fn residual128(self) -> u128 {
+        self.h128
+    }
+
+    fn strata_key(self) -> u64 {
+        self.q3
+    }
+
+    fn validate(self) -> Result<(), AlgebraicError> {
+        if self.h64 == 0 {
+            // Defensive guard: normal construction should never yield a zero short id.
+            return Err(AlgebraicError::ZeroShortIdentifier);
+        }
+        Ok(())
+    }
+}
+
+impl AccumulatedElement for FixedWindowElementHash {
+    fn residual128(self) -> u128 {
+        self.residual()
+    }
+
+    fn strata_key(self) -> u64 {
+        Self::strata_key(self)
+    }
+
+    /// Only the all-zero 32-byte digest is rejected; zero in any window is legal.
+    fn validate(self) -> Result<(), AlgebraicError> {
+        if self.digest == [0; 32] {
+            return Err(AlgebraicError::ZeroSketchElement);
+        }
+        Ok(())
+    }
+}
+
 /// Incrementally maintained level-0 set digest and exact element count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RoomAccumulator {
@@ -371,12 +422,12 @@ impl RoomAccumulator {
     ///
     /// # Errors
     /// Returns [`AlgebraicError::CountOverflow`] at `u64::MAX` events.
-    pub fn insert(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
+    pub fn insert(&mut self, hash: impl AccumulatedElement) -> Result<(), AlgebraicError> {
         self.count = self
             .count
             .checked_add(1)
             .ok_or(AlgebraicError::CountOverflow)?;
-        self.digest ^= hash.h128;
+        self.digest ^= hash.residual128();
         Ok(())
     }
 
@@ -384,12 +435,12 @@ impl RoomAccumulator {
     ///
     /// # Errors
     /// Returns [`AlgebraicError::CountUnderflow`] when the accumulator is empty.
-    pub fn remove(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
+    pub fn remove(&mut self, hash: impl AccumulatedElement) -> Result<(), AlgebraicError> {
         self.count = self
             .count
             .checked_sub(1)
             .ok_or(AlgebraicError::CountUnderflow)?;
-        self.digest ^= hash.h128;
+        self.digest ^= hash.residual128();
         Ok(())
     }
 

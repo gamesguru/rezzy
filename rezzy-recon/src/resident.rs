@@ -6,7 +6,7 @@
 //! Incrementally maintained MSC4521 reconciliation state.
 
 use super::{
-    algebraic::{AlgebraicError, ElementHash, RoomAccumulator},
+    algebraic::{AccumulatedElement, AlgebraicError, RoomAccumulator},
     gf64,
 };
 use alloc::{string::String, vec::Vec};
@@ -138,11 +138,8 @@ impl ResidentKernel {
     /// # Errors
     /// Returns an error if the hash is zero, or if the accumulator rejects the
     /// update due to its own capacity and count limits.
-    pub fn insert(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
-        if hash.h64 == 0 {
-            // Defensive guard: normal construction should never yield a zero short id.
-            return Err(AlgebraicError::ZeroShortIdentifier);
-        }
+    pub fn insert(&mut self, hash: impl AccumulatedElement) -> Result<(), AlgebraicError> {
+        hash.validate()?;
         self.accumulator.insert(hash)?;
         toggle_stratum(&mut self.strata, strata_identifier(hash));
         Ok(())
@@ -153,22 +150,19 @@ impl ResidentKernel {
     /// # Errors
     /// Returns an error if the hash is zero, or if the accumulator rejects the
     /// update because the population is already empty.
-    pub fn remove(&mut self, hash: ElementHash) -> Result<(), AlgebraicError> {
-        if hash.h64 == 0 {
-            // Defensive guard: normal construction should never yield a zero short id.
-            return Err(AlgebraicError::ZeroShortIdentifier);
-        }
+    pub fn remove(&mut self, hash: impl AccumulatedElement) -> Result<(), AlgebraicError> {
+        hash.validate()?;
         self.accumulator.remove(hash)?;
         toggle_stratum(&mut self.strata, strata_identifier(hash));
         Ok(())
     }
 }
 
-const fn strata_identifier(hash: ElementHash) -> u64 {
+fn strata_identifier(hash: impl AccumulatedElement) -> u64 {
     // PinSketch requires nonzero identifiers. This makes the sole alias in
     // the strata estimator (Q3=0 and Q3=1); a resulting estimate miss is
     // recovered by the independent h64 bucket tree.
-    let q3 = hash.q3;
+    let q3 = hash.strata_key();
     if q3 == 0 {
         1
     } else {
@@ -255,6 +249,7 @@ pub fn decode_strata<S: AsRef<str>>(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::algebraic::ElementHash;
 
     #[test]
     fn strata_wire_round_trips_and_rejects_malformed() {
@@ -299,6 +294,45 @@ mod tests {
 
         resident.remove(event).unwrap();
         assert_eq!(resident, ResidentKernel::new());
+    }
+
+    #[test]
+    fn full_digest_elements_feed_residual_and_strata_windows() {
+        use crate::algebraic::FixedWindowElementHash;
+
+        let mut digest = [0_u8; 32];
+        digest[8..16].copy_from_slice(&0x100_u64.to_be_bytes());
+        digest[16..].copy_from_slice(&0xfeed_u128.to_be_bytes());
+        // Zero placement window is legal.
+        let event = FixedWindowElementHash::from_digest32(digest);
+        let mut resident = ResidentKernel::new();
+        resident.insert(event).unwrap();
+        assert_eq!(resident.accumulator().digest(), 0xfeed);
+        assert_eq!(resident.strata()[8][0], 0x100);
+        resident.remove(event).unwrap();
+        assert_eq!(resident, ResidentKernel::new());
+    }
+
+    #[test]
+    fn only_the_all_zero_digest_is_rejected() {
+        use crate::algebraic::FixedWindowElementHash;
+
+        let mut resident = ResidentKernel::new();
+        assert_eq!(
+            resident.insert(FixedWindowElementHash::from_digest32([0; 32])),
+            Err(AlgebraicError::ZeroSketchElement)
+        );
+        assert_eq!(
+            resident.remove(FixedWindowElementHash::from_digest32([0; 32])),
+            Err(AlgebraicError::ZeroSketchElement)
+        );
+        // A zero strata window (digest[8..16]) is legal and aliases to 1.
+        let mut digest = [0xAA_u8; 32];
+        digest[8..16].fill(0);
+        resident
+            .insert(FixedWindowElementHash::from_digest32(digest))
+            .unwrap();
+        assert_eq!(resident.accumulator().known_event_count(), 1);
     }
 
     #[test]

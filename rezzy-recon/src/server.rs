@@ -16,8 +16,8 @@ use crate::EventId;
 use super::{
     algebraic::SyndromeSketch,
     triage::{BucketRequest, NodeSummary},
-    AlgebraicError, ElementHash, EventIdFormat, FixedWindowElementHash, RoomAccumulator,
-    RoomEventIdKind, H64_TRIE_WIDTH,
+    AccumulatedElement, AlgebraicError, ElementHash, EventIdFormat, FixedWindowElementHash,
+    RoomAccumulator, RoomEventIdKind, H64_TRIE_WIDTH,
 };
 use crate::gf256::Gf256Sketch;
 
@@ -254,6 +254,19 @@ pub trait ForwardGraph<Id: EventId> {
             |s| ElementHash::from_matrix_event_id(s, format),
         )
     }
+
+    /// Returns the full-digest element for a given event ID, using the same
+    /// string and format resolution as [`Self::event_hash`].
+    ///
+    /// # Errors
+    /// Returns an error if the event ID format is invalid or hashing fails.
+    fn fixed_window_hash(&self, id: &Id) -> Result<FixedWindowElementHash, AlgebraicError> {
+        let format = self.event_format(id);
+        self.event_id_str(id).map_or_else(
+            || FixedWindowElementHash::from_matrix_event_id(&id.to_string(), format),
+            |s| FixedWindowElementHash::from_matrix_event_id(s, format),
+        )
+    }
 }
 
 /// Computes the MSC0501 room digest over a negotiated frame.
@@ -271,6 +284,32 @@ pub fn compute_frame_digest<Id: EventId, G: ForwardGraph<Id>>(
     kind: RoomEventIdKind,
     graph: &G,
     frame_anchors: &[Id],
+) -> Result<RoomAccumulator, AlgebraicError> {
+    fold_frame(kind, graph, frame_anchors, |id| graph.event_hash(id))
+}
+
+/// [`compute_frame_digest`] over full-digest elements: the same traversal,
+/// accumulating each event's fixed-window residual.
+///
+/// # Errors
+/// Same as [`compute_frame_digest`]; additionally rejects an all-zero digest.
+pub fn compute_fixed_window_frame_digest<Id: EventId, G: ForwardGraph<Id>>(
+    kind: RoomEventIdKind,
+    graph: &G,
+    frame_anchors: &[Id],
+) -> Result<RoomAccumulator, AlgebraicError> {
+    fold_frame(kind, graph, frame_anchors, |id| {
+        let hash = graph.fixed_window_hash(id)?;
+        hash.validate()?;
+        Ok(hash)
+    })
+}
+
+fn fold_frame<Id: EventId, G: ForwardGraph<Id>, E: AccumulatedElement>(
+    kind: RoomEventIdKind,
+    graph: &G,
+    frame_anchors: &[Id],
+    mut hash_of: impl FnMut(&Id) -> Result<E, AlgebraicError>,
 ) -> Result<RoomAccumulator, AlgebraicError> {
     kind.require_event_ids_frame()?;
     let mut accumulator = RoomAccumulator::new();
@@ -290,8 +329,7 @@ pub fn compute_frame_digest<Id: EventId, G: ForwardGraph<Id>>(
         for child in graph.children(&current) {
             // Unconditionally mark visited to avoid re-traversing unknown forks
             if visited.insert(child.clone()) && graph.is_known(child) {
-                let hash = graph.event_hash(child)?;
-                accumulator.insert(hash)?;
+                accumulator.insert(hash_of(child)?)?;
                 queue.push_back(child.clone());
             }
         }
@@ -776,6 +814,17 @@ mod tests {
         fn event_hash(&self, id: &MockId) -> Result<ElementHash, AlgebraicError> {
             Ok(ElementHash::from_opaque_bytes(id.0.as_bytes()))
         }
+
+        fn fixed_window_hash(&self, id: &MockId) -> Result<FixedWindowElementHash, AlgebraicError> {
+            Ok(mock_fixed_hash(&id.0))
+        }
+    }
+
+    fn mock_fixed_hash(id: &str) -> FixedWindowElementHash {
+        let seed = id
+            .bytes()
+            .fold(7_u64, |acc, b| acc.wrapping_mul(131) ^ u64::from(b));
+        FixedWindowElementHash::from_digest32(crate::test_util::digest32(seed))
     }
 
     fn id(s: &str) -> MockId {
@@ -917,6 +966,34 @@ mod tests {
 
         assert_eq!(digest.digest(), expected.digest());
         assert_eq!(digest.known_event_count(), 1);
+    }
+
+    #[test]
+    fn fixed_window_frame_digest_uses_full_digest_residuals() {
+        let mut graph = MockGraph::new();
+        graph.add_edge("$genesis", "$anchor");
+        graph.add_edge("$anchor", "$child1");
+        graph.add_edge("$anchor", "$child2");
+        graph.add_edge("$child1", "$grandchild");
+        graph.add_edge("$child2", "$grandchild");
+
+        let digest = compute_fixed_window_frame_digest(
+            RoomEventIdKind::ReferenceHash,
+            &graph,
+            &[id("$anchor")],
+        )
+        .unwrap();
+
+        let mut expected = RoomAccumulator::new();
+        for name in ["$child1", "$child2", "$grandchild"] {
+            expected.insert(mock_fixed_hash(name)).unwrap();
+        }
+        assert_eq!(digest, expected);
+        assert_eq!(digest.known_event_count(), 3);
+        // The legacy fold over the same frame is a different digest.
+        let legacy =
+            compute_frame_digest(RoomEventIdKind::ReferenceHash, &graph, &[id("$anchor")]).unwrap();
+        assert_ne!(legacy.digest(), digest.digest());
     }
 
     #[test]
