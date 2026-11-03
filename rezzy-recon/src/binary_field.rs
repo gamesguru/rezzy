@@ -134,6 +134,126 @@ impl BinaryField for u64 {
 mod tests {
     use super::BinaryField;
 
+    /// GF(2^256) reduction polynomial `x^256 + x^10 + x^5 + x^2 + 1`.
+    /// Keep this test with the experimental field profile so its modulus
+    /// cannot silently change after the little-endian byte mapping is pinned.
+    const GF256_LOW_EXPONENTS: [usize; 4] = [10, 5, 2, 0];
+
+    /// GF(2)[x] polynomial as a 512-bit little-endian bitset.
+    type Poly = [u64; 8];
+
+    fn bit(poly: &Poly, index: usize) -> bool {
+        poly.get(index / 64)
+            .is_some_and(|word| word >> (index % 64) & 1 == 1)
+    }
+
+    fn degree(poly: &Poly) -> Option<usize> {
+        (0..512).rev().find(|&i| bit(poly, i))
+    }
+
+    fn xor_shifted(target: &mut Poly, source: &Poly, shift: usize) -> Option<()> {
+        let source_bits = 512_usize.checked_sub(shift)?;
+        for i in (0..source_bits).filter(|&i| bit(source, i)) {
+            let target_bit = i.checked_add(shift)?;
+            *target.get_mut(target_bit / 64)? ^= 1 << (target_bit % 64);
+        }
+        Some(())
+    }
+
+    fn reduce(mut value: Poly, modulus: &Poly) -> Poly {
+        let modulus_degree = degree(modulus).expect("non-zero modulus");
+        while let Some(value_degree) = degree(&value) {
+            if value_degree < modulus_degree {
+                break;
+            }
+            xor_shifted(
+                &mut value,
+                modulus,
+                value_degree
+                    .checked_sub(modulus_degree)
+                    .expect("long division only shifts high terms down"),
+            )
+            .expect("shifted polynomial fits in the bitset");
+        }
+        value
+    }
+
+    fn mul_mod(a: &Poly, b: &Poly, modulus: &Poly) -> Poly {
+        let mut product = [0_u64; 8];
+        for i in (0..256).filter(|&i| bit(b, i)) {
+            xor_shifted(&mut product, a, i).expect("256-bit product fits in 512 bits");
+        }
+        reduce(product, modulus)
+    }
+
+    fn gcd(mut a: Poly, mut b: Poly) -> Poly {
+        while degree(&b).is_some() {
+            let remainder = reduce(a, &b);
+            a = b;
+            b = remainder;
+        }
+        a
+    }
+
+    /// Rabin's test for degree 256 (whose only prime divisor is 2):
+    /// `f` is irreducible iff `x^(2^256) = x mod f` and
+    /// `gcd(x^(2^128) + x, f) = 1`.
+    #[test]
+    fn gf256_reduction_polynomial_is_irreducible() {
+        let mut modulus = [0_u64; 8];
+        modulus[4] |= 1; // x^256
+        for exponent in GF256_LOW_EXPONENTS {
+            modulus[exponent / 64] |= 1 << (exponent % 64);
+        }
+        let mut x = [0_u64; 8];
+        x[0] = 2;
+
+        let mut power = x; // x^(2^0)
+        let mut midpoint = [0_u64; 8];
+        for round in 1..=256 {
+            power = mul_mod(&power, &power, &modulus);
+            if round == 128 {
+                midpoint = power;
+            }
+        }
+        assert_eq!(power, x, "x^(2^256) != x mod f");
+
+        let mut difference = midpoint;
+        difference[0] ^= x[0];
+        let mut one = [0_u64; 8];
+        one[0] = 1;
+        assert_eq!(
+            gcd(modulus, difference),
+            one,
+            "f shares a factor of degree dividing 128"
+        );
+    }
+
+    /// Sanity-checks the test's own arithmetic on a known reducible
+    /// polynomial, so a vacuous pass is impossible.
+    #[test]
+    fn rabin_check_rejects_a_reducible_polynomial() {
+        // x^256 + 1 = (x + 1)^256 over GF(2).
+        let mut modulus = [0_u64; 8];
+        modulus[4] |= 1;
+        modulus[0] |= 1;
+        let mut x = [0_u64; 8];
+        x[0] = 2;
+        let mut power = x;
+        let mut midpoint = [0_u64; 8];
+        for round in 1..=256 {
+            power = mul_mod(&power, &power, &modulus);
+            if round == 128 {
+                midpoint = power;
+            }
+        }
+        let mut difference = midpoint;
+        difference[0] ^= x[0];
+        let mut one = [0_u64; 8];
+        one[0] = 1;
+        assert!(power != x || gcd(modulus, difference) != one);
+    }
+
     #[test]
     fn gf64_inverse_round_trips() {
         assert_eq!(0_u64.inv(), None);

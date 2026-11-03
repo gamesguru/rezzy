@@ -20,6 +20,7 @@ pub mod algebraic;
 pub(crate) mod binary_field;
 pub mod bitmap;
 pub mod client;
+pub mod gf256;
 pub mod gf64;
 pub mod gf64_simd;
 mod pinsketch;

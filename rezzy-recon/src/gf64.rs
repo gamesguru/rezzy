@@ -24,6 +24,80 @@ pub fn mul_bitwise(mut left: u64, mut right: u64) -> u64 {
     product
 }
 
+/// Returns the unreduced carry-less product of two 64-bit polynomials.
+/// GF(2^256)'s four-limb Karatsuba multiplication uses this primitive before
+/// applying its own degree-256 reduction polynomial.
+#[must_use]
+#[allow(unsafe_code)] // the cached target-feature function is called after feature dispatch
+pub(crate) fn clmul_raw(left: u64, right: u64) -> [u64; 2] {
+    #[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        // SAFETY: dispatch checks PCLMUL support before selecting the target-feature function.
+        unsafe { accelerated_clmul_raw()(left, right) }
+    }
+    #[cfg(not(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64"))))]
+    {
+        clmul_raw_bitwise(left, right)
+    }
+}
+
+fn clmul_raw_bitwise(left: u64, right: u64) -> [u64; 2] {
+    let mut product = 0_u128;
+    for shift in 0..64 {
+        let mask = 0_u128.wrapping_sub(u128::from(right >> shift & 1));
+        product ^= (u128::from(left) << shift) & mask;
+    }
+    let bytes = product.to_le_bytes();
+    [
+        u64::from_le_bytes(bytes[..8].try_into().expect("u128 has a low 64-bit half")),
+        u64::from_le_bytes(bytes[8..].try_into().expect("u128 has a high 64-bit half")),
+    ]
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+fn accelerated_clmul_raw() -> unsafe fn(u64, u64) -> [u64; 2] {
+    use std::sync::OnceLock;
+
+    static IMPLEMENTATION: OnceLock<unsafe fn(u64, u64) -> [u64; 2]> = OnceLock::new();
+    *IMPLEMENTATION.get_or_init(|| {
+        if std::is_x86_feature_detected!("pclmulqdq") {
+            clmul_raw_pclmul
+        } else {
+            clmul_raw_portable
+        }
+    })
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+#[allow(unsafe_code)]
+unsafe fn clmul_raw_portable(left: u64, right: u64) -> [u64; 2] {
+    clmul_raw_bitwise(left, right)
+}
+
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+#[target_feature(enable = "pclmulqdq")]
+#[allow(unsafe_code)]
+unsafe fn clmul_raw_pclmul(left: u64, right: u64) -> [u64; 2] {
+    #[cfg(target_arch = "x86")]
+    use core::arch::x86::{
+        _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_set_epi64x, _mm_srli_si128,
+    };
+    #[cfg(target_arch = "x86_64")]
+    use core::arch::x86_64::{
+        _mm_clmulepi64_si128, _mm_cvtsi128_si64, _mm_set_epi64x, _mm_srli_si128,
+    };
+
+    let left = _mm_set_epi64x(0, i64::from_ne_bytes(left.to_ne_bytes()));
+    let right = _mm_set_epi64x(0, i64::from_ne_bytes(right.to_ne_bytes()));
+    let product = _mm_clmulepi64_si128(left, right, 0x00);
+    let low = _mm_cvtsi128_si64(product);
+    let high = _mm_cvtsi128_si64(_mm_srli_si128::<8>(product));
+    [
+        u64::from_ne_bytes(low.to_ne_bytes()),
+        u64::from_ne_bytes(high.to_ne_bytes()),
+    ]
+}
+
 /// Multiplies two elements of the MSC4521 64-bit binary field.
 ///
 /// Uses the portable fallback unless a target-specific accelerated implementation is enabled.

@@ -16,6 +16,7 @@ type Polynomial<F> = Vec<F>;
 const FIELD_BITS: usize = 64;
 const MIXED_FACTOR_TRIALS: usize = 8;
 const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+const MAX_FACTOR_WORK_GF256: usize = 300_000_000;
 // KNOWN GAP, still open: this covers observed *balanced* recursive
 // splitting, not a proven worst-case recursion bound.
 //
@@ -54,6 +55,16 @@ impl WorkModel {
         bits: FIELD_BITS,
         mixed_trials: MIXED_FACTOR_TRIALS,
         max_factor_work: MAX_FACTOR_WORK,
+    };
+
+    /// GF(2^256) work ceiling. Degree-256 release measurements used
+    /// 232,591,912 units for consecutive roots and 36,127,278 for
+    /// pseudorandom roots. The ceiling leaves headroom over those samples but
+    /// is not a worst-case factorization bound; exhaustion fails safely.
+    pub(crate) const GF256: Self = Self {
+        bits: 256,
+        mixed_trials: MIXED_FACTOR_TRIALS,
+        max_factor_work: MAX_FACTOR_WORK_GF256,
     };
 
     pub(crate) const fn max_factor_work(self) -> usize {
@@ -169,10 +180,10 @@ pub(crate) fn decode_with_budget(
 
 /// Finds the roots of an already-prepared locator and finalizes them, or
 /// returns the empty set when `prepared` is `None`.
-fn decode_roots(
-    prepared: Option<(Polynomial<u64>, usize)>,
-    find: impl FnOnce(Polynomial<u64>, &mut Vec<u64>) -> Result<(), AlgebraicError>,
-) -> Result<Vec<u64>, AlgebraicError> {
+fn decode_roots<F: BinaryField + Ord>(
+    prepared: Option<(Polynomial<F>, usize)>,
+    find: impl FnOnce(Polynomial<F>, &mut Vec<F>) -> Result<(), AlgebraicError>,
+) -> Result<Vec<F>, AlgebraicError> {
     let Some((locator, expected)) = prepared else {
         return Ok(Vec::new());
     };
@@ -185,10 +196,10 @@ fn decode_roots(
 /// its roots can be found. Returns `None` when the residual decodes to the
 /// empty set (`locator.len() == 1`), matching the early-return in [`decode`]
 /// and [`decode_with_budget`].
-fn prepare_locator(
-    odd_syndromes: &[u64],
+fn prepare_locator<F: BinaryField>(
+    odd_syndromes: &[F],
     max_elements: usize,
-) -> Result<Option<(Polynomial<u64>, usize)>, AlgebraicError> {
+) -> Result<Option<(Polynomial<F>, usize)>, AlgebraicError> {
     let all = reconstruct_syndromes(odd_syndromes);
     let mut locator = berlekamp_massey(&all, max_elements).ok_or(AlgebraicError::DecodeFailure)?;
     if locator.len() == 1 {
@@ -203,12 +214,30 @@ fn prepare_locator(
 }
 
 /// Validates the root count and distinctness, then returns them sorted.
-fn finalize_roots(mut roots: Vec<u64>, expected: usize) -> Result<Vec<u64>, AlgebraicError> {
-    if roots.len() != expected || roots.contains(&0) {
+fn finalize_roots<F: BinaryField + Ord>(
+    mut roots: Vec<F>,
+    expected: usize,
+) -> Result<Vec<F>, AlgebraicError> {
+    if roots.len() != expected || roots.contains(&F::ZERO) {
         return Err(AlgebraicError::DecodeFailure);
     }
     roots.sort_unstable();
     Ok(roots)
+}
+
+/// Field-generic decode entry point used by the concrete wider field profile.
+pub(crate) fn decode_with_model<F: BinaryField + Ord>(
+    odd_syndromes: &[F],
+    max_elements: usize,
+    model: WorkModel,
+    cached_solver: Option<&QuadraticSolver<F>>,
+) -> Result<Vec<F>, AlgebraicError> {
+    let mut work = model.max_factor_work();
+    let roots = decode_roots(
+        prepare_locator(odd_syndromes, max_elements)?,
+        |locator, roots| find_roots_with_solver(locator, roots, &mut work, model, cached_solver),
+    )?;
+    require_reencode(roots, odd_syndromes)
 }
 
 fn reconstruct_syndromes<F: BinaryField>(odd: &[F]) -> Vec<F> {
@@ -475,7 +504,7 @@ const fn next_factor_parameter(mut state: u64) -> u64 {
     state ^ (state << 17)
 }
 
-struct QuadraticSolver<F> {
+pub(crate) struct QuadraticSolver<F> {
     words: usize,
     /// Pivot column of each reduced row; rows `pivots.len()..BITS` reduce to
     /// zero coefficients, so their transformed rhs must be zero.
@@ -487,7 +516,7 @@ struct QuadraticSolver<F> {
 }
 
 impl<F: BinaryField> QuadraticSolver<F> {
-    fn new() -> Option<Self> {
+    pub(crate) fn new() -> Option<Self> {
         // Reduce the GF(2)-linear map z -> z^2 + z once. `transform` records
         // the row operations, so each later solve only applies the reduced
         // matrix to a target vector.
@@ -803,6 +832,7 @@ fn find_roots_with_solver<F: BinaryField>(
 mod tests {
     use super::*;
     use crate::algebraic::gf64_mul;
+    use crate::gf256::Gf256;
 
     /// Test-only GF(2^8) with the AES reduction polynomial
     /// `x^8 + x^4 + x^3 + x + 1`. Small enough to brute-force roots.
@@ -1051,6 +1081,53 @@ mod tests {
         );
     }
 
+    /// Timing probe for whole root-finding calls: owned (built per call) vs
+    /// cached quadratic solver, by locator degree. Run with
+    /// `cargo test -p rezzy-recon --release --lib root_finding_solver_timing -- --ignored --nocapture`.
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "timing probe"]
+    fn root_finding_solver_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let cached = cached_gf64_quadratic_solver().expect("cached GF(2^64) solver");
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for degree in [2_usize, 3, 4, 8, 32, 64] {
+            let roots = unique_random_elements(&mut state, degree);
+            let mut locator = vec![1_u64];
+            for &root in &roots {
+                let mut next = vec![0_u64; locator.len() + 1];
+                for (i, &c) in locator.iter().enumerate() {
+                    next[i + 1] ^= c;
+                    next[i] ^= gf64_mul(root, c);
+                }
+                locator = next;
+            }
+            let rounds = if degree >= 32 { 8 } else { 128 };
+            let time = |solver: Option<&QuadraticSolver<u64>>| {
+                let start = Instant::now();
+                for _ in 0..rounds {
+                    let mut found = Vec::new();
+                    let mut work = usize::MAX;
+                    find_roots_with_solver(
+                        locator.clone(),
+                        &mut found,
+                        &mut work,
+                        WorkModel::GF64,
+                        solver,
+                    )
+                    .expect("roots");
+                    black_box(found);
+                }
+                start.elapsed().as_micros() / rounds
+            };
+            let owned_us = time(None);
+            let cached_us = time(Some(cached));
+            std::println!("degree {degree}: owned {owned_us} us, cached {cached_us} us per call");
+        }
+    }
+
     /// Builds the odd `s1, s3, ...` syndromes for a set of field elements.
     fn odd_syndromes(elements: &[u64]) -> Vec<u64> {
         let mut odd = vec![0; elements.len()];
@@ -1060,6 +1137,19 @@ mod tests {
             for syndrome in &mut odd {
                 *syndrome ^= power;
                 power = gf64_mul(power, squared);
+            }
+        }
+        odd
+    }
+
+    fn odd_syndromes_field<F: BinaryField>(elements: &[F]) -> Vec<F> {
+        let mut odd = vec![F::ZERO; elements.len()];
+        for &value in elements {
+            let squared = value.square();
+            let mut power = value;
+            for syndrome in &mut odd {
+                *syndrome = syndrome.add(power);
+                power = power.mul(squared);
             }
         }
         odd
@@ -1092,6 +1182,109 @@ mod tests {
             let odd = odd_syndromes(&expected);
             assert_eq!(decode(&odd, expected.len()), Ok(expected));
         }
+    }
+
+    #[test]
+    fn gf256_field_decodes_a_small_set_end_to_end() {
+        let expected = [1_u64, 2, 3].map(Gf256::from_u64);
+        let odd = odd_syndromes_field(&expected);
+        assert_eq!(
+            Gf256::from_u64(2).mul(Gf256::from_u64(3)),
+            Gf256::from_u64(6)
+        );
+        assert_eq!(
+            require_reencode(expected.to_vec(), &odd),
+            Ok(expected.to_vec())
+        );
+        assert_eq!(Gf256::decode(&odd, expected.len()), Ok(expected.to_vec()));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "timing and work-model calibration probe"]
+    fn gf256_root_finding_work_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let cached_solver = Some(crate::gf256::cached_quadratic_solver());
+        for degree in [2_usize, 3, 4, 8, 16, 32, 64, 128, 256] {
+            let expected: Vec<Gf256> = (1..=degree)
+                .map(|value| Gf256::from_u64(u64::try_from(value).expect("small root index")))
+                .collect();
+            let odd = odd_syndromes_field(&expected);
+            let rounds = if degree <= 4 { 3 } else { 1 };
+            for (label, solver) in [("per-call", None), ("cached", cached_solver)] {
+                let mut total_elapsed = core::time::Duration::ZERO;
+                let mut observed_work = 0_usize;
+                for _ in 0..rounds {
+                    let (locator, _) = prepare_locator(&odd, degree)
+                        .expect("locator preparation")
+                        .expect("non-empty set has a locator");
+                    let mut roots = Vec::new();
+                    let mut remaining_work = 1_000_000_000_usize;
+                    let started = Instant::now();
+                    find_roots_with_solver(
+                        locator,
+                        &mut roots,
+                        &mut remaining_work,
+                        WorkModel::GF256,
+                        solver,
+                    )
+                    .expect("roots within the one-billion-unit measurement allowance");
+                    total_elapsed = total_elapsed.saturating_add(started.elapsed());
+                    observed_work = 1_000_000_000_usize
+                        .checked_sub(remaining_work)
+                        .expect("root finding only consumes work");
+                    assert_eq!(finalize_roots(roots, degree).unwrap(), expected);
+                    black_box(observed_work);
+                }
+                std::println!(
+                    "GF(2^256) root degree {degree} {label}: {:?}/call, {observed_work} work units",
+                    total_elapsed / rounds
+                );
+            }
+        }
+
+        let mut state = 0x6a09_e667_f3bc_c909_u64;
+        let mut random_roots = Vec::with_capacity(256);
+        while random_roots.len() < 256 {
+            let candidate = Gf256::from_limbs(core::array::from_fn(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            }));
+            if candidate != Gf256::ZERO && !random_roots.contains(&candidate) {
+                random_roots.push(candidate);
+            }
+        }
+        random_roots.sort_unstable();
+        let odd = odd_syndromes_field(&random_roots);
+        let (locator, _) = prepare_locator(&odd, random_roots.len())
+            .expect("random locator preparation")
+            .expect("random non-empty set has a locator");
+        let mut roots = Vec::new();
+        let mut remaining_work = 1_000_000_000_usize;
+        let started = Instant::now();
+        find_roots_with_solver(
+            locator,
+            &mut roots,
+            &mut remaining_work,
+            WorkModel::GF256,
+            cached_solver,
+        )
+        .expect("random roots within the one-billion-unit measurement allowance");
+        let elapsed = started.elapsed();
+        let observed_work = 1_000_000_000_usize
+            .checked_sub(remaining_work)
+            .expect("root finding only consumes work");
+        assert_eq!(
+            finalize_roots(roots, random_roots.len()).unwrap(),
+            random_roots
+        );
+        std::println!(
+            "GF(2^256) random root degree 256 cached: {elapsed:?}, {observed_work} work units"
+        );
     }
 
     #[test]
