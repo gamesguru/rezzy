@@ -17,6 +17,16 @@ const FIELD_BITS: usize = 64;
 const MIXED_FACTOR_TRIALS: usize = 8;
 const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 const MAX_FACTOR_WORK_GF256: usize = 300_000_000;
+/// Cost-model worst case for GF(2^256) recursion: the sum of
+/// `single_call_work_ceiling(d)` for `d = 2..=256`. A chain of `(1, d-1)`
+/// splits maximizes this model; the DP test below proves that for the model.
+/// Constructing an input that reaches it is still open, and the 300M budget
+/// is deliberately a practical policy ceiling rather than this bound.
+#[cfg(test)]
+const MAX_FACTOR_WORK_GF256_WORST_CASE: usize = 5_148_287_480;
+#[cfg(test)]
+#[allow(clippy::assertions_on_constants)]
+const _: () = assert!(MAX_FACTOR_WORK_GF256 < MAX_FACTOR_WORK_GF256_WORST_CASE);
 // KNOWN GAP, still open: this covers observed *balanced* recursive
 // splitting, not a proven worst-case recursion bound.
 //
@@ -1485,6 +1495,35 @@ mod tests {
             .map(|d| single_call_work_ceiling(d).expect("does not overflow"))
             .sum();
         assert_eq!(total_degenerate_work, 916_609_400);
+    }
+
+    #[test]
+    fn gf256_work_model_worst_case_matches_degenerate_chain() {
+        let mut worst = vec![0_usize; 257];
+        for degree in 2_usize..=256 {
+            let split = (1..degree)
+                .map(|left| {
+                    let right = degree.checked_sub(left).expect("left is below degree");
+                    worst[left]
+                        .checked_add(worst[right])
+                        .expect("split subtree cost fits usize")
+                })
+                .max()
+                .expect("degree two has one split");
+            worst[degree] = WorkModel::GF256
+                .single_call_work_ceiling(degree)
+                .and_then(|cost| cost.checked_add(split))
+                .expect("worst-case cost fits usize");
+        }
+        let chain: usize = (2..=256)
+            .map(|degree| {
+                WorkModel::GF256
+                    .single_call_work_ceiling(degree)
+                    .expect("does not overflow")
+            })
+            .sum();
+        assert_eq!(worst[256], chain);
+        assert_eq!(worst[256], MAX_FACTOR_WORK_GF256_WORST_CASE);
     }
 
     #[test]
