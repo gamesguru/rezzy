@@ -111,6 +111,10 @@ impl WorkModel {
         self.bits.checked_add(self.mixed_trials)
     }
 
+    /// (Conservative: the table-based construction now does about half these
+    /// multiplications, but work units are charged from this model so the
+    /// ceilings and budgets stay unchanged.)
+    ///
     /// One-time cost of `build_frobenius_basis` for a degree-`degree`
     /// polynomial: `BITS - 1` squaring+reduce rounds, each `O(degree^2)`.
     const fn frobenius_basis_cost(self, degree: usize) -> Option<usize> {
@@ -505,6 +509,86 @@ fn trace_mod<F: BinaryField>(modulus: &[F], parameter: F) -> Option<Polynomial<F
 /// unavoidable `O(degree^2)` GCD/division per trial. See
 /// `frobenius_basis_cost` and `factor_trial_cost_with_basis`.
 fn build_frobenius_basis<F: BinaryField>(modulus: &[F]) -> Option<Vec<Polynomial<F>>> {
+    let degree = modulus.len().checked_sub(1)?;
+    if modulus.last() != Some(&F::ONE) {
+        return None;
+    }
+    if degree < 2 {
+        return build_frobenius_basis_by_division(modulus);
+    }
+    let low = &modulus[..degree];
+
+    // Squaring `s = sum s_j X^j` gives `sum s_j^2 X^(2j)`. Terms with
+    // `2j < degree` need no reduction; only `X^(2j) mod f` for the upper half
+    // `j >= degree/2` is needed, and that table is built once per node and
+    // reused by every one of the `BITS - 1` squarings. Each squaring then costs
+    // about `degree^2 / 2` multiplications instead of the `degree^2` of a
+    // schoolbook division of the degree-`2*degree - 2` square.
+    let first_high = degree.checked_add(1)? / 2;
+    let mut power = low.to_vec(); // X^degree mod f (f is monic; char 2)
+    if first_high.checked_mul(2)? > degree {
+        mul_x_mod(&mut power, low)?;
+    }
+    let mut table = Vec::with_capacity(degree.checked_sub(first_high)?);
+    for index in first_high..degree {
+        table.push(power.clone());
+        if index.checked_add(1)? < degree {
+            mul_x_mod(&mut power, low)?;
+            mul_x_mod(&mut power, low)?;
+        }
+    }
+
+    let mut current = vec![F::ZERO; degree];
+    *current.get_mut(1)? = F::ONE; // X (degree >= 2)
+    let mut basis = Vec::with_capacity(F::BITS);
+    basis.push(trimmed(&current));
+    for _ in 1..F::BITS {
+        let mut next = vec![F::ZERO; degree];
+        for (index, coefficient) in current.iter().copied().enumerate() {
+            if coefficient == F::ZERO {
+                continue;
+            }
+            let square = coefficient.square();
+            if index.checked_mul(2)? < degree {
+                let slot = next.get_mut(index.checked_mul(2)?)?;
+                *slot = slot.add(square);
+            } else {
+                F::mac(
+                    square,
+                    table.get(index.checked_sub(first_high)?)?,
+                    &mut next,
+                );
+            }
+        }
+        basis.push(trimmed(&next));
+        current = next;
+    }
+    Some(basis)
+}
+
+/// `value * X mod f` for a monic `f` whose coefficients below the leading
+/// term are `low`; `value` has exactly `low.len()` coefficients.
+fn mul_x_mod<F: BinaryField>(value: &mut [F], low: &[F]) -> Option<()> {
+    let carry = *value.last()?;
+    let len = value.len();
+    value.copy_within(0..len.checked_sub(1)?, 1);
+    *value.first_mut()? = F::ZERO;
+    if carry != F::ZERO {
+        F::mac(carry, low, value);
+    }
+    Some(())
+}
+
+fn trimmed<F: BinaryField>(value: &[F]) -> Polynomial<F> {
+    let mut poly = value.to_vec();
+    trim(&mut poly);
+    poly
+}
+
+/// Schoolbook basis construction: repeated square-then-divide. Used for the
+/// degenerate degrees the table method does not cover, and as the test
+/// reference for it.
+fn build_frobenius_basis_by_division<F: BinaryField>(modulus: &[F]) -> Option<Vec<Polynomial<F>>> {
     let mut basis = Vec::with_capacity(F::BITS);
     let mut current = vec![F::ZERO, F::ONE]; // X
     poly_mod(modulus, &mut current)?;
@@ -1347,6 +1431,55 @@ mod tests {
         std::println!(
             "GF(2^256) random root degree 256 cached: {elapsed:?}, {observed_work} work units"
         );
+    }
+
+    /// The table-based basis must equal the schoolbook square-then-divide
+    /// basis for every degree parity, in every field.
+    #[test]
+    fn frobenius_basis_matches_division_reference() {
+        fn random_monic<F: BinaryField>(
+            degree: usize,
+            state: &mut u64,
+            make: impl Fn(u64) -> F,
+        ) -> Vec<F> {
+            let mut poly: Vec<F> = (0..degree)
+                .map(|_| {
+                    *state ^= *state << 13;
+                    *state ^= *state >> 7;
+                    *state ^= *state << 17;
+                    make(*state)
+                })
+                .collect();
+            poly.push(F::ONE);
+            poly
+        }
+        let mut state = 0x1234_5678_9abc_def1_u64;
+        for degree in 2..=9 {
+            let modulus = random_monic(degree, &mut state, |v| Gf8((v & 0xff) as u8));
+            assert_eq!(
+                build_frobenius_basis(&modulus).unwrap(),
+                build_frobenius_basis_by_division(&modulus).unwrap(),
+                "gf8 degree {degree}"
+            );
+        }
+        for degree in [2_usize, 3, 4, 7, 16, 17] {
+            let modulus = random_monic(degree, &mut state, |v| v);
+            assert_eq!(
+                build_frobenius_basis(&modulus).unwrap(),
+                build_frobenius_basis_by_division(&modulus).unwrap(),
+                "gf64 degree {degree}"
+            );
+        }
+        for degree in [2_usize, 3, 4, 5, 8, 15, 32] {
+            let modulus = random_monic(degree, &mut state, Gf256::from_u64);
+            assert_eq!(
+                build_frobenius_basis(&modulus).unwrap(),
+                build_frobenius_basis_by_division(&modulus).unwrap(),
+                "gf256 degree {degree}"
+            );
+        }
+        // Non-monic moduli are rejected, as `poly_mod` does.
+        assert!(build_frobenius_basis(&[1_u64, 2, 3]).is_none());
     }
 
     #[test]
