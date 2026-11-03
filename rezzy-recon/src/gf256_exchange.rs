@@ -254,22 +254,23 @@ mod tests {
         .unwrap()
     }
 
-    /// Local {0..400}, remote {150..550}: 150 local-only, 150 remote-only.
-    /// Far above one bucket's capacity, so recovery requires splitting.
-    #[test]
-    fn splits_buckets_and_recovers_every_full_digest() {
-        let local = population(0..400);
-        let remote = population(150..550);
-        let local_set: Vec<[u8; 32]> = (0..400).map(digest).collect();
+    /// Runs a full exchange between two populations and returns
+    /// `(local_only, remote_only, rounds, saw_split)`.
+    fn run_exchange(
+        local: &FixedWindowPopulation,
+        remote: &FixedWindowPopulation,
+        local_set: &[[u8; 32]],
+        root_capacity: usize,
+    ) -> (Vec<[u8; 32]>, Vec<[u8; 32]>, usize, bool) {
         let decoder = Gf256Decoder::build().unwrap();
         let mut exchange = Gf256BucketExchange::default();
-        let mut action = exchange.start(32);
-        let mut rounds = 0;
+        let mut action = exchange.start(root_capacity);
+        let mut rounds = 0_usize;
         let mut saw_split = false;
-        let (local_only, remote_only) = loop {
+        loop {
             match action {
                 Gf256Action::Request(requests) => {
-                    rounds += 1;
+                    rounds = rounds.saturating_add(1);
                     saw_split |= requests.iter().any(|r| r.depth > 0);
                     let remote_nodes = remote.bucket_nodes(&requests).unwrap();
                     let payload: Vec<u8> = remote_nodes
@@ -298,17 +299,57 @@ mod tests {
                 Gf256Action::Complete {
                     local_only,
                     remote_only,
-                } => break (local_only, remote_only),
+                } => return (local_only, remote_only, rounds, saw_split),
                 Gf256Action::Fallback => panic!("fell back"),
             }
-        };
-        assert!(saw_split && rounds >= 2, "rounds={rounds}");
-        let mut expect_local: Vec<_> = (0..150).map(digest).collect();
-        let mut expect_remote: Vec<_> = (400..550).map(digest).collect();
+        }
+    }
+
+    /// Local {0..total}, remote {only..total+only}: `only` differences each
+    /// way. More than 32 in total forces a split (a failed root first retries
+    /// at the capacity ceiling of 32, which cannot hold them).
+    fn assert_exchange_recovers(total: u64, only: u64, root_capacity: usize) -> (usize, bool) {
+        let local = population(0..total);
+        let remote = population(only..total.saturating_add(only));
+        let local_set: Vec<[u8; 32]> = (0..total).map(digest).collect();
+        let (local_only, remote_only, rounds, saw_split) =
+            run_exchange(&local, &remote, &local_set, root_capacity);
+        let mut expect_local: Vec<_> = (0..only).map(digest).collect();
+        let mut expect_remote: Vec<_> = (total..total.saturating_add(only)).map(digest).collect();
         expect_local.sort_unstable();
         expect_remote.sort_unstable();
         assert_eq!(local_only, expect_local);
         assert_eq!(remote_only, expect_remote);
+        (rounds, saw_split)
+    }
+
+    /// Capacity retry recovers 40 local-only and 40 remote-only digests.
+    #[test]
+    fn recovers_every_full_digest_after_capacity_retry() {
+        let (rounds, _) = assert_exchange_recovers(100, 40, 8);
+        assert!(rounds >= 2, "rounds={rounds}");
+    }
+
+    /// Starting at maximum capacity forces the 40/40 case to split.
+    #[test]
+    fn splits_buckets_and_recovers_every_full_digest() {
+        let (rounds, saw_split) =
+            assert_exchange_recovers(100, 40, crate::triage::MAX_BUCKET_SKETCH_CAPACITY);
+        assert!(
+            saw_split && rounds >= 2,
+            "saw_split={saw_split}, rounds={rounds}"
+        );
+    }
+
+    /// The original 150/150 case: slow unoptimized, so run it in release.
+    #[test]
+    #[ignore = "stress: run with `cargo test --release -- --ignored`"]
+    fn stress_splits_and_recovers_150_each_way() {
+        let (rounds, saw_split) = assert_exchange_recovers(400, 150, 32);
+        assert!(
+            saw_split && rounds >= 2,
+            "saw_split={saw_split}, rounds={rounds}"
+        );
     }
 
     #[test]
