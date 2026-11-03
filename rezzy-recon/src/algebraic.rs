@@ -141,6 +141,67 @@ pub struct ElementHash {
     pub q3: u64,
 }
 
+/// Full SHA-256 digest with the fixed windows used by the GF(2^256) profile.
+///
+/// This is separate from [`ElementHash`] because changing its historical
+/// first-nonzero `h64` placement rule would silently change the MSC4521
+/// profile. The fixed windows are: digest bytes `0..8` for bucket placement,
+/// `8..16` for strata, `16..32` for the residual, and all 32 bytes for the
+/// GF(2^256) sketch element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FixedWindowElementHash {
+    digest: [u8; 32],
+}
+
+impl FixedWindowElementHash {
+    /// Stores a full digest using the fixed-window profile mapping.
+    #[must_use]
+    pub const fn from_digest32(digest: [u8; 32]) -> Self {
+        Self { digest }
+    }
+
+    /// Returns the original digest bytes.
+    #[must_use]
+    pub const fn digest(self) -> [u8; 32] {
+        self.digest
+    }
+
+    /// Returns digest bytes `0..8` as the bucket key (big-endian).
+    #[must_use]
+    pub fn bucket_key(self) -> u64 {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&self.digest[..8]);
+        u64::from_be_bytes(bytes)
+    }
+
+    /// Returns digest bytes `8..16` as the strata key (big-endian).
+    #[must_use]
+    pub fn strata_key(self) -> u64 {
+        let mut bytes = [0; 8];
+        bytes.copy_from_slice(&self.digest[8..16]);
+        u64::from_be_bytes(bytes)
+    }
+
+    /// Returns digest bytes `16..32` as the residual (big-endian).
+    #[must_use]
+    pub fn residual(self) -> u128 {
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&self.digest[16..]);
+        u128::from_be_bytes(bytes)
+    }
+
+    /// Returns all digest bytes as the GF(2^256) polynomial-basis element.
+    pub fn sketch_element(self) -> crate::gf256::Gf256 {
+        let mut limbs = [0_u64; 4];
+        for (limb, chunk) in limbs.iter_mut().zip(self.digest.chunks_exact(8)) {
+            let mut bytes = [0_u8; 8];
+            bytes.copy_from_slice(chunk);
+            *limb = u64::from_le_bytes(bytes);
+        }
+        crate::gf256::Gf256::from_limbs(limbs)
+    }
+}
+
 impl ElementHash {
     // Placement is predictable because the event digest is fixed at authoring
     // time. Reconciliation bounds the consequences locally: small populations
@@ -796,6 +857,25 @@ mod tests {
         assert_eq!(hash.h64, 7);
         assert_eq!(hash.q3, 7);
         assert_eq!(hash.h128, 9);
+    }
+
+    #[test]
+    fn fixed_window_hash_uses_disjoint_digest_ranges() {
+        let mut digest = [0_u8; 32];
+        for (index, byte) in digest.iter_mut().enumerate() {
+            *byte = u8::try_from(index).unwrap();
+        }
+        let hash = FixedWindowElementHash::from_digest32(digest);
+        assert_eq!(hash.digest(), digest);
+        assert_eq!(hash.bucket_key(), 0x0001_0203_0405_0607);
+        assert_eq!(hash.strata_key(), 0x0809_0a0b_0c0d_0e0f);
+        assert_eq!(hash.residual(), 0x1011_1213_1415_1617_1819_1a1b_1c1d_1e1f);
+        assert_eq!(hash.sketch_element().to_le_bytes(), digest);
+
+        // Fixed placement preserves zero instead of scanning later chunks.
+        let zero_prefix = FixedWindowElementHash::from_digest32([0; 32]);
+        assert_eq!(zero_prefix.bucket_key(), 0);
+        assert_eq!(zero_prefix.sketch_element(), crate::gf256::Gf256::ZERO);
     }
 
     fn hash(seed: u8) -> ElementHash {
