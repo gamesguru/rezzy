@@ -16,6 +16,10 @@ type Polynomial<F> = Vec<F>;
 const FIELD_BITS: usize = 64;
 const MIXED_FACTOR_TRIALS: usize = 8;
 const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+/// Seed for the dense multiplier applied to mixed trial parameters when the
+/// reduction polynomial is sparse (see `WorkModel::mixed_squarings`).
+const DENSE_PARAMETER_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
+
 const MAX_FACTOR_WORK_GF256: usize = 300_000_000;
 /// Cost-model worst case for GF(2^256) recursion: the sum of
 /// `single_call_work_ceiling(d)` for `d = 2..=256`. A chain of `(1, d-1)`
@@ -57,6 +61,10 @@ const MAX_FACTOR_WORK: usize = 16_000_000;
 pub(crate) struct WorkModel {
     bits: usize,
     mixed_trials: usize,
+    /// Squarings of `DENSE_PARAMETER_SEED` that build the dense constant each
+    /// mixed trial parameter is multiplied by. Needed when the reduction polynomial is sparse: `Tr(a)` is zero
+    /// for every low-degree `a`, so a 64-bit seed never splits small roots.
+    mixed_squarings: usize,
     max_factor_work: usize,
 }
 
@@ -64,13 +72,18 @@ impl WorkModel {
     pub(crate) const GF64: Self = Self {
         bits: FIELD_BITS,
         mixed_trials: MIXED_FACTOR_TRIALS,
+        mixed_squarings: 0,
         max_factor_work: MAX_FACTOR_WORK,
     };
 
-    /// GF(2^256) work ceiling. Degree-256 release measurements used
-    /// 232,591,912 units for consecutive roots and 36,127,278 for
-    /// pseudorandom roots. The ceiling leaves headroom over those samples but
-    /// is not a worst-case factorization bound; exhaustion fails safely.
+    /// GF(2^256) work ceiling. Degree-256 release measurements use
+    /// 35,390,836 units for consecutive roots and 36,138,455 for
+    /// pseudorandom roots. (Before the dense trial parameters below, the
+    /// consecutive case took 232,591,912: the sparse reduction polynomial
+    /// makes `Tr(a)` zero for every low-degree `a`, so small roots burned
+    /// about 260 failed trials.) The ceiling leaves wide headroom over those
+    /// samples but is not a worst-case factorization bound, and has not been
+    /// re-derived; exhaustion fails safely.
     ///
     /// # Expected `no_std` Software Multiplication Cost
     /// On `no_std` platforms (or targets lacking hardware PCLMULQDQ / AVX-512),
@@ -85,6 +98,8 @@ impl WorkModel {
     pub(crate) const GF256: Self = Self {
         bits: 256,
         mixed_trials: MIXED_FACTOR_TRIALS,
+        // A 64-bit seed reaches full width after three squarings (64 -> 512).
+        mixed_squarings: 3,
         max_factor_work: MAX_FACTOR_WORK_GF256,
     };
 
@@ -823,7 +838,19 @@ fn find_roots_with_solver<F: BinaryField>(
                     .ok_or(AlgebraicError::DecodeFailure)?;
                 F::bit(basis_bit).ok_or(AlgebraicError::DecodeFailure)?
             } else {
-                F::from_u64(mixed_parameter)
+                let parameter = F::from_u64(mixed_parameter);
+                if model.mixed_squarings == 0 {
+                    parameter
+                } else {
+                    // Multiply by a fixed dense constant. Squaring alone is not
+                    // enough: `Tr(a^8 * 1) = Tr(a)` is still zero, so roots
+                    // that differ by 1 could never be split by a low-degree seed.
+                    let mut dense = F::from_u64(DENSE_PARAMETER_SEED);
+                    for _ in 0..model.mixed_squarings {
+                        dense = dense.square();
+                    }
+                    parameter.mul(dense)
+                }
             };
             let cost = model
                 .factor_trial_cost_with_basis(degree)
@@ -951,6 +978,7 @@ mod tests {
         WorkModel {
             bits: 8,
             mixed_trials: MIXED_FACTOR_TRIALS,
+            mixed_squarings: 0,
             max_factor_work: 1_000_000,
         }
     }
