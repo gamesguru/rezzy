@@ -198,15 +198,8 @@ where
     let mut verified = Vec::with_capacity(successful_buckets.len());
     let mut rejected = Vec::new();
     for success in successful_buckets {
-        let slot = requests
-            .iter()
-            .position(|r| r.depth == success.depth && r.prefix == success.prefix)
-            .ok_or(AlgebraicError::InvalidBucketIndex)?;
-        let (Some(request), Some(&l), Some(&r)) =
-            (requests.get(slot), local.get(slot), remote.get(slot))
-        else {
-            return Err(AlgebraicError::InvalidBucketIndex);
-        };
+        let (request, l, r) =
+            bucket_context(requests, local, remote, (success.depth, success.prefix))?;
         match verify_decode(request, l, r, &success.roots, &mut local_candidates) {
             Ok(classified) => {
                 verified.push(classified);
@@ -234,6 +227,24 @@ where
 /// Result of [`verify_batch`]: the batch to feed the exchange, the nodes that
 /// passed phase 1, and the nodes rejected by it with their decoded roots.
 pub type VerifiedBatch = (BucketDecodeBatch, Vec<Classified>, Vec<(u8, u64, Vec<u64>)>);
+
+fn bucket_context<'a>(
+    requests: &'a [BucketRequest],
+    local: &[NodeSummary],
+    remote: &[NodeSummary],
+    node: (u8, u64),
+) -> Result<(&'a BucketRequest, NodeSummary, NodeSummary), AlgebraicError> {
+    let slot = requests
+        .iter()
+        .position(|request| (request.depth, request.prefix) == node)
+        .ok_or(AlgebraicError::InvalidBucketIndex)?;
+    let (Some(request), Some(&local), Some(&remote)) =
+        (requests.get(slot), local.get(slot), remote.get(slot))
+    else {
+        return Err(AlgebraicError::InvalidBucketIndex);
+    };
+    Ok((request, local, remote))
+}
 
 /// One GF(2^256) node whose decoded digests passed exact verification.
 ///
@@ -360,15 +371,8 @@ where
     let mut admitted: Vec<Gf256BucketDecodeSuccess> = Vec::with_capacity(successful_buckets.len());
     let mut verified = Vec::with_capacity(successful_buckets.len());
     for success in successful_buckets {
-        let slot = requests
-            .iter()
-            .position(|r| r.depth == success.depth && r.prefix == success.prefix)
-            .ok_or(AlgebraicError::InvalidBucketIndex)?;
-        let (Some(request), Some(&l), Some(&r)) =
-            (requests.get(slot), local.get(slot), remote.get(slot))
-        else {
-            return Err(AlgebraicError::InvalidBucketIndex);
-        };
+        let (request, l, r) =
+            bucket_context(requests, local, remote, (success.depth, success.prefix))?;
         match verify_gf256_decode(request, l, r, &success.digests, &mut is_local) {
             Ok(node) => {
                 verified.push(node);

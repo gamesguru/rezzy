@@ -53,6 +53,47 @@ pub fn recommended_bucket_decode_budget(
             .ok_or(AlgebraicError::InvalidSketchCapacity)
     })
 }
+
+fn take_bucket_bytes<'a>(
+    encoded: &'a [u8],
+    offset: &mut usize,
+    capacity: usize,
+    bytes_per_element: usize,
+) -> Result<&'a [u8], AlgebraicError> {
+    let byte_len = capacity
+        .checked_mul(bytes_per_element)
+        .ok_or(AlgebraicError::InvalidSketchLength)?;
+    let end = offset
+        .checked_add(byte_len)
+        .ok_or(AlgebraicError::InvalidSketchLength)?;
+    let bytes = encoded
+        .get(*offset..end)
+        .ok_or(AlgebraicError::InvalidSketchLength)?;
+    *offset = end;
+    Ok(bytes)
+}
+
+fn account_bucket_work(
+    budget: &mut usize,
+    allowance: usize,
+    remaining: usize,
+) -> Result<(), AlgebraicError> {
+    // The decoder should only subtract from its initial allowance. Check that
+    // invariant in debug builds, but retain checked arithmetic in release:
+    // these paths process untrusted sketches, and a panic is worse than a
+    // decode-accounting error.
+    debug_assert!(
+        remaining <= allowance,
+        "decoder violated budget bounds: remaining={remaining} > allowance={allowance}"
+    );
+    let spent = allowance
+        .checked_sub(remaining)
+        .ok_or(AlgebraicError::BudgetExhausted)?;
+    *budget = budget
+        .checked_sub(spent)
+        .ok_or(AlgebraicError::BudgetExhausted)?;
+    Ok(())
+}
 /// Recommended default work budget for [`estimate_strata`], sized to
 /// cover a full strata-estimator pass: [`STRATA_COUNT`] strata each at
 /// the worst-case per-stratum work ceiling for [`STRATUM_CAPACITY`].
@@ -447,17 +488,7 @@ pub fn decode_bucket_sketches(
     let mut successful_buckets = Vec::new();
     let mut failed_buckets = Vec::new();
     for request in requests {
-        let byte_len = request
-            .capacity
-            .checked_mul(8)
-            .ok_or(AlgebraicError::InvalidSketchLength)?;
-        let end = offset
-            .checked_add(byte_len)
-            .ok_or(AlgebraicError::InvalidSketchLength)?;
-        let bytes = encoded
-            .get(offset..end)
-            .ok_or(AlgebraicError::InvalidSketchLength)?;
-        offset = end;
+        let bytes = take_bucket_bytes(encoded, &mut offset, request.capacity, 8)?;
 
         let coordinates = bytes
             .chunks_exact(8)
@@ -485,28 +516,7 @@ pub fn decode_bucket_sketches(
         } else {
             sketch.decode_elements_with_shared_budget(request.capacity, &mut remaining)
         };
-        // `remaining` only ever decreases from `allowance` (budgeted
-        // decoders only subtract) and `allowance <= budget` by
-        // construction above, so both `checked_sub`s below are provably
-        // non-underflowing. `debug_assert!` turns a violation of that
-        // invariant into a loud dev-time failure instead of a silent
-        // `BudgetExhausted` that would read as a routine protocol
-        // fallback -- but the production path still degrades to an
-        // error rather than panicking: this function processes
-        // untrusted wire input, and a release-mode `assert!` reachable
-        // from that input would trade a decode-accounting bug for a
-        // remotely triggerable crash loop, which is a worse failure
-        // mode than the one it replaces.
-        debug_assert!(
-            remaining <= allowance,
-            "decoder violated budget bounds: remaining={remaining} > allowance={allowance}"
-        );
-        let spent = allowance
-            .checked_sub(remaining)
-            .ok_or(AlgebraicError::BudgetExhausted)?;
-        budget = budget
-            .checked_sub(spent)
-            .ok_or(AlgebraicError::BudgetExhausted)?;
+        account_bucket_work(&mut budget, allowance, remaining)?;
         match result {
             Ok(roots) => successful_buckets.push(BucketDecodeSuccess {
                 depth: request.depth,
@@ -594,32 +604,13 @@ pub fn decode_gf256_bucket_sketches(
     let mut offset = 0_usize;
     let mut batch = Gf256BucketDecodeBatch::default();
     for request in requests {
-        let byte_len = request
-            .capacity
-            .checked_mul(32)
-            .ok_or(AlgebraicError::InvalidSketchLength)?;
-        let end = offset
-            .checked_add(byte_len)
-            .ok_or(AlgebraicError::InvalidSketchLength)?;
-        let bytes = encoded
-            .get(offset..end)
-            .ok_or(AlgebraicError::InvalidSketchLength)?;
-        offset = end;
+        let bytes = take_bucket_bytes(encoded, &mut offset, request.capacity, 32)?;
 
         let sketch = Gf256Sketch::from_bytes(request.capacity, bytes)?;
         let allowance = budget.min(ceiling);
         let mut remaining = allowance;
         let result = sketch.decode_elements_with_budget(request.capacity, decoder, &mut remaining);
-        debug_assert!(
-            remaining <= allowance,
-            "decoder violated budget bounds: remaining={remaining} > allowance={allowance}"
-        );
-        let spent = allowance
-            .checked_sub(remaining)
-            .ok_or(AlgebraicError::BudgetExhausted)?;
-        budget = budget
-            .checked_sub(spent)
-            .ok_or(AlgebraicError::BudgetExhausted)?;
+        account_bucket_work(&mut budget, allowance, remaining)?;
         match result {
             Ok(elements) => batch.successful_buckets.push(Gf256BucketDecodeSuccess {
                 depth: request.depth,
