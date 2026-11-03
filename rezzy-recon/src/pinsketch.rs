@@ -476,19 +476,19 @@ const fn next_factor_parameter(mut state: u64) -> u64 {
 }
 
 struct QuadraticSolver<F> {
-    rows: Vec<QuadraticRow>,
-    transforms: Vec<Vec<u64>>,
+    words: usize,
+    /// Pivot column of each reduced row; rows `pivots.len()..BITS` reduce to
+    /// zero coefficients, so their transformed rhs must be zero.
     pivots: Vec<usize>,
+    /// Row operations recorded during elimination, `BITS` rows of `words`
+    /// words each, so applying them to a target is `BITS * words` AND+parity.
+    transforms: Vec<u64>,
     _field: core::marker::PhantomData<F>,
-}
-
-struct QuadraticRow {
-    coefficients: Vec<u64>,
 }
 
 impl<F: BinaryField> QuadraticSolver<F> {
     fn new() -> Option<Self> {
-        // Reduce the GF(2)-linear map z -> z^2 + z once. `transforms` records
+        // Reduce the GF(2)-linear map z -> z^2 + z once. `transform` records
         // the row operations, so each later solve only applies the reduced
         // matrix to a target vector.
         #[derive(Clone)]
@@ -546,52 +546,46 @@ impl<F: BinaryField> QuadraticSolver<F> {
             pivots.push(column);
             rank = rank.checked_add(1)?;
         }
-        let transforms = rows.iter().map(|row| row.transform.clone()).collect();
+        let mut transforms = Vec::with_capacity(bits.saturating_mul(words));
+        for row in &rows {
+            transforms.extend_from_slice(&row.transform);
+        }
         Some(Self {
-            rows: rows
-                .into_iter()
-                .map(|row| QuadraticRow {
-                    coefficients: row.coefficients,
-                })
-                .collect(),
-            transforms,
+            words,
             pivots,
+            transforms,
             _field: core::marker::PhantomData,
         })
     }
 
     fn solve(&self, target: F) -> Option<F> {
-        let bits = F::BITS;
-        let mut rhs = Vec::with_capacity(bits);
-        for transform in &self.transforms {
+        let bytes = target.to_le_bytes();
+        let bytes = bytes.as_ref();
+        // Little-endian word `index` of the target, zero-padded past the end.
+        let target_word = |index: usize| -> u64 {
+            let mut word = [0_u8; 8];
+            let start = index.saturating_mul(8);
+            if let Some(chunk) = bytes.get(start..) {
+                let len = chunk.len().min(8);
+                word[..len].copy_from_slice(&chunk[..len]);
+            }
+            u64::from_le_bytes(word)
+        };
+        let mut solution = F::ZERO;
+        for (row, transform) in self.transforms.chunks_exact(self.words).enumerate() {
             let parity = transform
                 .iter()
                 .enumerate()
-                .fold(0_u32, |parity, (word, mask)| {
-                    let mut target_word = 0_u64;
-                    for bit in 0..64 {
-                        let index = word.saturating_mul(64).saturating_add(bit);
-                        if index < bits && target.test_bit(index) {
-                            target_word |= 1_u64 << bit;
-                        }
-                    }
-                    parity ^ ((mask & target_word).count_ones() & 1)
+                .fold(0_u32, |parity, (index, mask)| {
+                    parity ^ ((mask & target_word(index)).count_ones() & 1)
                 });
-            rhs.push(parity != 0);
-        }
-        if self
-            .rows
-            .iter()
-            .enumerate()
-            .any(|(row, data)| data.coefficients.iter().all(|&word| word == 0) && rhs[row])
-        {
-            return None;
-        }
-        let mut solution = F::ZERO;
-        for (row, &column) in self.pivots.iter().enumerate() {
-            if rhs[row] {
-                solution = solution.add(F::bit(column)?);
+            if parity == 0 {
+                continue;
             }
+            // A set rhs bit on a pivot row selects that column; on a reduced
+            // zero row it is an inconsistent equation.
+            let column = *self.pivots.get(row)?;
+            solution = solution.add(F::bit(column)?);
         }
         (solution.square().add(solution) == target).then_some(solution)
     }
@@ -600,6 +594,21 @@ impl<F: BinaryField> QuadraticSolver<F> {
 #[cfg(test)]
 fn solve_quadratic_form<F: BinaryField>(target: F) -> Option<F> {
     QuadraticSolver::<F>::new()?.solve(target)
+}
+
+/// The GF(2^64) solved form is field-wide, not call-specific. Cache it under
+/// `std` so a single degree-2 leaf does not pay the build cost that only
+/// amortizes across several leaves. The `no_std` build falls back to building
+/// one solver per root-finding call.
+#[cfg(feature = "std")]
+fn cached_gf64_quadratic_solver() -> Option<&'static QuadraticSolver<u64>> {
+    static SOLVER: std::sync::OnceLock<Option<QuadraticSolver<u64>>> = std::sync::OnceLock::new();
+    SOLVER.get_or_init(QuadraticSolver::new).as_ref()
+}
+
+#[cfg(not(feature = "std"))]
+fn cached_gf64_quadratic_solver() -> Option<&'static QuadraticSolver<u64>> {
+    None
 }
 
 fn find_roots(poly: Polynomial<u64>, roots: &mut Vec<u64>) -> Result<(), AlgebraicError> {
@@ -662,23 +671,40 @@ fn find_roots_with_budget(
     roots: &mut Vec<u64>,
     work: &mut usize,
 ) -> Result<(), AlgebraicError> {
-    find_roots_with_model(poly, roots, work, WorkModel::GF64)
+    find_roots_with_solver(
+        poly,
+        roots,
+        work,
+        WorkModel::GF64,
+        cached_gf64_quadratic_solver(),
+    )
 }
 
 /// Field-generic root finder. The field width comes from `model`; the
 /// deterministic trial parameters are the historical u64 xorshift seeds for
 /// the mixed prefix, then `F::bit` for the Frobenius rounds, so the GF(2^64)
 /// sequence is unchanged.
+#[cfg(test)]
 fn find_roots_with_model<F: BinaryField>(
     poly: Polynomial<F>,
     roots: &mut Vec<F>,
     work: &mut usize,
     model: WorkModel,
 ) -> Result<(), AlgebraicError> {
+    find_roots_with_solver(poly, roots, work, model, None)
+}
+
+fn find_roots_with_solver<F: BinaryField>(
+    poly: Polynomial<F>,
+    roots: &mut Vec<F>,
+    work: &mut usize,
+    model: WorkModel,
+    cached_solver: Option<&QuadraticSolver<F>>,
+) -> Result<(), AlgebraicError> {
     let mut pending = vec![poly];
     let mut workspace = GcdWorkspace::new();
     let mut trace = Vec::new();
-    let mut quadratic_solver: Option<QuadraticSolver<F>> = None;
+    let mut owned_solver: Option<QuadraticSolver<F>> = None;
     while let Some(poly) = pending.pop() {
         let degree = poly
             .len()
@@ -698,13 +724,17 @@ fn find_roots_with_model<F: BinaryField>(
             }
             let inverse = linear.inv().ok_or(AlgebraicError::DecodeFailure)?;
             let normalized = poly[0].mul(inverse.mul(inverse));
-            if quadratic_solver.is_none() {
-                quadratic_solver =
-                    Some(QuadraticSolver::new().ok_or(AlgebraicError::DecodeFailure)?);
-            }
-            let root = quadratic_solver
-                .as_ref()
-                .and_then(|solver| solver.solve(normalized))
+            let solver = if let Some(solver) = cached_solver {
+                solver
+            } else {
+                if owned_solver.is_none() {
+                    owned_solver =
+                        Some(QuadraticSolver::new().ok_or(AlgebraicError::DecodeFailure)?);
+                }
+                owned_solver.as_ref().ok_or(AlgebraicError::DecodeFailure)?
+            };
+            let root = solver
+                .solve(normalized)
                 .ok_or(AlgebraicError::DecodeFailure)?
                 .mul(linear);
             roots.push(root);
@@ -910,6 +940,115 @@ mod tests {
             found.sort_unstable_by_key(|root| root.0);
             assert_eq!(found, expected);
         }
+    }
+
+    /// Field trace `Tr(x) = sum_{i=0}^{63} x^(2^i)` in GF(2^64). The sum is
+    /// zero exactly when `z^2 + z = x` has a solution.
+    fn gf64_trace(target: u64) -> u64 {
+        let mut trace = 0_u64;
+        let mut power = target;
+        for _ in 0..u64::BITS {
+            trace ^= power;
+            power = gf64_mul(power, power);
+        }
+        trace
+    }
+
+    #[test]
+    fn gf64_quadratic_solver_matches_trace() {
+        let mut state = 0x1357_9bdf_2468_ace0_u64;
+        let mut targets = vec![
+            0_u64,
+            1,
+            2,
+            u64::MAX,
+            0x8000_0000_0000_0000,
+            0xdead_beef_cafe_babe,
+        ];
+        for _ in 0..1_024 {
+            state = next_factor_parameter(state);
+            targets.push(state);
+        }
+
+        let solver = QuadraticSolver::<u64>::new().expect("GF(2^64) solver");
+        let mut solvable = 0_usize;
+        let mut unsolvable = 0_usize;
+        for target in targets {
+            let trace = gf64_trace(target);
+            assert!(trace == 0 || trace == 1, "trace left GF(2): {target:#x}");
+            let solved = solver.solve(target);
+            assert_eq!(solved, solve_quadratic_form(target));
+            if let Some(root) = solved {
+                solvable = solvable.saturating_add(1);
+                assert_eq!(trace, 0, "solvable target {target:#x} has trace 1");
+                assert_eq!(gf64_mul(root, root) ^ root, target);
+            } else {
+                unsolvable = unsolvable.saturating_add(1);
+                assert_eq!(trace, 1, "unsolvable target {target:#x} has trace 0");
+            }
+        }
+        assert!(solvable > 0, "benchmark did not cover solvable targets");
+        assert!(unsolvable > 0, "benchmark did not cover unsolvable targets");
+    }
+
+    /// Timing probe, not a pass/fail test. Run with
+    /// `cargo test -p rezzy-recon --release --lib quadratic_solver_timing -- --ignored --nocapture`.
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "timing probe"]
+    fn quadratic_solver_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let targets: Vec<u64> = (0..2_048)
+            .map(|_| {
+                state = next_factor_parameter(state);
+                state
+            })
+            .collect();
+
+        let build_start = Instant::now();
+        let solver = QuadraticSolver::<u64>::new().expect("GF(2^64) solver");
+        let build_time = build_start.elapsed();
+
+        for &target in &targets {
+            black_box(solver.solve(target));
+        }
+        let rounds: usize = 64;
+        let start = Instant::now();
+        for _ in 0..rounds {
+            for &target in &targets {
+                black_box(solver.solve(target));
+            }
+        }
+        let reuse_time = start.elapsed();
+
+        let cached = cached_gf64_quadratic_solver().expect("cached GF(2^64) solver");
+        let start = Instant::now();
+        for _ in 0..rounds {
+            for &target in &targets {
+                black_box(cached.solve(target));
+            }
+        }
+        let cached_time = start.elapsed();
+
+        let start = Instant::now();
+        for _ in 0..rounds {
+            for &target in &targets {
+                black_box(solve_quadratic_form(target));
+            }
+        }
+        let rebuild_time = start.elapsed();
+
+        let calls = rounds.checked_mul(targets.len()).expect("small benchmark");
+        let reuse_ns = reuse_time.as_nanos() / u128::try_from(calls).expect("non-zero");
+        let cached_ns = cached_time.as_nanos() / u128::try_from(calls).expect("non-zero");
+        let rebuild_ns = rebuild_time.as_nanos() / u128::try_from(calls).expect("non-zero");
+        std::println!(
+            "build {build_time:?}; per-call: local reuse {reuse_ns} ns, \
+             cached {cached_ns} ns, rebuilt {rebuild_ns} ns over {calls} calls"
+        );
     }
 
     /// Builds the odd `s1, s3, ...` syndromes for a set of field elements.
