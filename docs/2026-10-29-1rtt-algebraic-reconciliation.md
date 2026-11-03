@@ -380,8 +380,8 @@ ratio table above as a lower bound.
 The GF(2^256) implementation uses nine carry-less base multiplies via Karatsuba,
 followed by reduction. Its dedicated square spreads bits before reduction. In
 the current benchmark run these took about 22 ns and 16 ns per operation;
-earlier probes measured 45 ns and 39 ns before the reduce/square rewrite, and
-29 ns and 18 ns after it. Timings vary with host and harness.
+earlier probes measured 45 ns and 39 ns before the reduce/square rewrite, and 29
+ns and 18 ns after it. Timings vary with host and harness.
 
 | Constant                 | Today      | Option A                                              |
 | :----------------------- | :--------- | :---------------------------------------------------- |
@@ -427,3 +427,49 @@ B/elem):
    `benches/bench-results.csv` remains GF(2^64)-only.
 5. DX sketch: O(N) fingerprint filter; does not recover 256-bit IDs.
    Experimental comparison in `filter_spillover` only, not `triage`.
+
+### 8.6 `algebraic_v2_gf256` profile
+
+**Status:** proposed and immutable once advertised. It is not a rename of
+`algebraic_v1`, and it must not be changed in place; any semantic change needs a
+new profile ID.
+
+**Identity and negotiation.** The profile ID is `algebraic_v2_gf256`. It appears
+in negotiation and in every sketch header. The header carries the profile ID and
+capacity; an unknown ID is rejected, never decoded as v1 or best-effort. Bind the
+selected ID into the authenticated session transcript to prevent downgrade. One
+session uses one profile. Different peers may use different profiles; split a
+multi-room exchange if the rooms require different profiles. v1 remains the
+default for ordinary event sync. v2 is offered for ID-only reconciliation. A
+caller that requires v2 fails or uses the non-algebraic path when the peer lacks
+it; there is no silent downgrade.
+
+**Element mapping.** Use `Gf256::from_le_bytes(digest[0..32])` exactly, with no
+transformation. Every 32-byte string maps bijectively to a field element; the raw
+mapping is what makes a decoded element convert back to the event ID. Reject the
+all-zero 32-byte digest at insertion and at element toggle. Do not alias zero to
+one. A zero placement prefix (`digest[0..8]`) is legal; zero syndromes are legal.
+
+**Windows.** `digest[0..8]` is the big-endian bucket key. `digest[8..16]` is the
+strata key, with the existing `0 -> 1` estimator alias; strata stay GF(2^64).
+`digest[16..32]` is `h128` and feeds the unchanged `NodeSummary`. `q3` becomes a
+derived value once `ElementHash` stores the digest.
+
+**Wire.** A bucket sketch payload is `32 * C` bytes: 1024 B at C = 32 and 8192 B
+at C = 256, before header and base64url expansion. The header is versioned and
+self-describing enough to reject a profile or capacity mismatch.
+
+**Budget and hybrid policy.** v2 is not the default. Use it for small-difference
+ID-only buckets where collision-free recovery is worth the wire and CPU. Keep the
+existing prefix bisection, cap the per-bucket degree, and split rather than
+allowing an attacker to force a degree-256 decode. GF(2^256) work units remain a
+practical per-attempt ceiling, not a proven worst case.
+
+**Security and performance.** v2 removes locator collisions but does not weaken
+or re-derive the SHA-256 residual identity bound: ~2^128 birthday and ~2^256
+targeted. It also does not by itself re-derive the sketch-gated accumulator
+forgery bound or `MAX_BATCH_FACTOR_WORK`. Measured cost on the reference host is
+22–29 ns per multiply, 16–18 ns per square, and 0.9–2.8 s for degree-256 decode;
+degree-32 v2 decode is not yet measured. IBLT/Erlay-style structures are the
+performance comparison, not the correctness baseline, and should be benchmarked
+in `filter_spillover` before any main-path change.
