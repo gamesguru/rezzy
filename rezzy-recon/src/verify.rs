@@ -192,7 +192,12 @@ where
         successful_buckets,
         failed_buckets,
     } = batch;
-    let (admitted, failed_buckets, verified, rejected) = verify_batch_outcomes(
+    let BatchVerificationResult {
+        admitted,
+        failed: failed_buckets,
+        verified,
+        rejected,
+    } = verify_batch_outcomes(
         successful_buckets,
         failed_buckets,
         requests,
@@ -243,6 +248,13 @@ impl DecodeOutcome for Gf256BucketDecodeSuccess {
     }
 }
 
+struct BatchVerificationResult<S, V, R> {
+    admitted: Vec<S>,
+    failed: Vec<(u8, u64)>,
+    verified: Vec<V>,
+    rejected: Vec<R>,
+}
+
 fn verify_batch_outcomes<S, V, R>(
     successful: Vec<S>,
     mut failed: Vec<(u8, u64)>,
@@ -251,7 +263,7 @@ fn verify_batch_outcomes<S, V, R>(
     remote: &[NodeSummary],
     mut verify: impl FnMut(&BucketRequest, NodeSummary, NodeSummary, &S) -> Result<V, AlgebraicError>,
     mut rejected: impl FnMut(&S) -> Option<R>,
-) -> Result<(Vec<S>, Vec<(u8, u64)>, Vec<V>, Vec<R>), AlgebraicError>
+) -> Result<BatchVerificationResult<S, V, R>, AlgebraicError>
 where
     S: DecodeOutcome,
 {
@@ -286,7 +298,12 @@ where
             Err(error) => return Err(error),
         }
     }
-    Ok((admitted, failed, verified, rejected_outcomes))
+    Ok(BatchVerificationResult {
+        admitted,
+        failed,
+        verified,
+        rejected: rejected_outcomes,
+    })
 }
 
 /// One GF(2^256) node whose decoded digests passed exact verification.
@@ -408,7 +425,12 @@ where
         successful_buckets,
         failed_buckets,
     } = batch;
-    let (admitted, failed_buckets, verified, _) = verify_batch_outcomes(
+    let BatchVerificationResult {
+        admitted,
+        failed: failed_buckets,
+        verified,
+        ..
+    } = verify_batch_outcomes(
         successful_buckets,
         failed_buckets,
         requests,
