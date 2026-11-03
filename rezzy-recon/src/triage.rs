@@ -1274,4 +1274,37 @@ mod tests {
         let unordered = [BucketRequest::new(1, 1, 4), BucketRequest::new(1, 0, 4)];
         assert!(decode_gf256_bucket_sketches(&[0; 256], &unordered, budget, &decoder).is_err());
     }
+
+    #[test]
+    fn gf256_batch_empty_batch_and_oversized_capacity() {
+        let decoder = Gf256Decoder::build().unwrap();
+        let empty = decode_gf256_bucket_sketches(&[], &[], 0, &decoder).unwrap();
+        assert!(empty.successful_buckets.is_empty() && empty.failed_buckets.is_empty());
+        let big = BucketRequest::new(0, 0, MAX_BUCKET_SKETCH_CAPACITY + 1);
+        assert_eq!(
+            decode_gf256_bucket_sketches(&vec![0; 33 * 32], &[big], usize::MAX, &decoder),
+            Err(AlgebraicError::InvalidSketchCapacity)
+        );
+    }
+
+    #[test]
+    fn gf256_batch_total_work_over_budget_aborts_later_bucket() {
+        let decoder = Gf256Decoder::build().unwrap();
+        let (mut encoded, _) = gf256_payload(8, &[1, 2, 3, 4, 5, 6, 7, 8]);
+        let (second, _) = gf256_payload(8, &[20, 21, 22, 23, 24, 25, 26, 27]);
+        encoded.extend_from_slice(&second);
+        let requests = [BucketRequest::new(1, 0, 8), BucketRequest::new(1, 1, 8)];
+        // Enough for the first bucket, not for both.
+        let mut probe = Gf256Decoder::per_sketch_work_ceiling();
+        let sketch = Gf256Sketch::from_bytes(8, &encoded[..256]).unwrap();
+        sketch
+            .decode_elements_with_budget(8, &decoder, &mut probe)
+            .unwrap();
+        let one = Gf256Decoder::per_sketch_work_ceiling() - probe;
+        assert_eq!(
+            decode_gf256_bucket_sketches(&encoded, &requests, one + one / 2, &decoder),
+            Err(AlgebraicError::BudgetExhausted)
+        );
+        assert!(decode_gf256_bucket_sketches(&encoded, &requests, one * 2 + 1, &decoder).is_ok());
+    }
 }

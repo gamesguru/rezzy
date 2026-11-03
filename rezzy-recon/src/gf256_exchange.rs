@@ -92,9 +92,21 @@ impl Gf256BucketExchange {
     /// advances. `requests`, `local` and `remote` are index-aligned with the
     /// round that produced `batch`; `is_local` is exact local membership.
     ///
+    /// The batch must hold exactly one outcome (success or failure) per
+    /// request; a missing, duplicate or unrequested node is rejected so the
+    /// exchange can never complete with part of the key space unaccounted for.
+    ///
+    /// Failed nodes first retry at a larger capacity and then split. That is
+    /// correct for the failures that actually occur: an over-capacity bucket
+    /// is indistinguishable from a bad decode at this layer, and there are no
+    /// hash collisions that capacity cannot fix. A node that fails verification
+    /// after decoding is not a capacity problem, but it is vanishingly rare
+    /// (the decoder re-encodes its roots), so the extra round is not worth a
+    /// separate signal.
+    ///
     /// # Errors
-    /// Returns an error if the inputs are misaligned or name a node that was
-    /// never requested.
+    /// Returns an error if the inputs are misaligned or the batch does not
+    /// cover exactly the requested nodes.
     pub fn advance_verified<F>(
         &mut self,
         batch: Gf256BucketDecodeBatch,
@@ -106,6 +118,9 @@ impl Gf256BucketExchange {
     where
         F: FnMut(&[u8; 32]) -> bool,
     {
+        if !bucket_batch_covers_requests(&batch, requests) {
+            return Err(AlgebraicError::InvalidBucketIndex);
+        }
         let (batch, verified) = verify_gf256_batch(batch, requests, local, remote, is_local)?;
         for node in verified {
             self.local_only.extend_from_slice(node.local_only());
@@ -157,6 +172,24 @@ impl Gf256BucketExchange {
         self.rounds_emitted = self.rounds_emitted.saturating_add(1);
         Gf256Action::Request(round)
     }
+}
+
+/// Whether `batch` holds exactly one outcome for every request and nothing
+/// else.
+fn bucket_batch_covers_requests(
+    batch: &Gf256BucketDecodeBatch,
+    requests: &[BucketRequest],
+) -> bool {
+    let mut outcomes: Vec<(u8, u64)> = batch
+        .successful_buckets
+        .iter()
+        .map(|bucket| (bucket.depth, bucket.prefix))
+        .chain(batch.failed_buckets.iter().copied())
+        .collect();
+    outcomes.sort_unstable();
+    let mut expected: Vec<(u8, u64)> = requests.iter().map(|r| (r.depth, r.prefix)).collect();
+    expected.sort_unstable();
+    outcomes == expected
 }
 
 /// Maximum split fan-out per retry, in bits (matches the GF(2^64) planner).
@@ -327,5 +360,59 @@ mod tests {
         assert!(subtract_gf256_payload(&local, &[0; 63], &requests).is_err());
         assert!(subtract_gf256_payload(&local, &[0; 65], &requests).is_err());
         assert!(subtract_gf256_payload(&local, &[0; 64], &requests).is_ok());
+    }
+
+    #[test]
+    fn incomplete_duplicate_or_extra_outcomes_are_rejected() {
+        use crate::triage::Gf256BucketDecodeSuccess;
+        let requests = [BucketRequest::new(1, 0, 4), BucketRequest::new(1, 1, 4)];
+        let ok = |depth, prefix| Gf256BucketDecodeSuccess {
+            depth,
+            prefix,
+            digests: Vec::new(),
+        };
+        let summaries = [NodeSummary {
+            count: 0,
+            digest: 0,
+        }; 2];
+        let run = |batch: Gf256BucketDecodeBatch| {
+            Gf256BucketExchange::default().advance_verified(
+                batch,
+                &requests,
+                &summaries,
+                &summaries,
+                |_| true,
+            )
+        };
+        // Complete: accepted.
+        let full = Gf256BucketDecodeBatch {
+            successful_buckets: alloc::vec![ok(1, 0), ok(1, 1)],
+            failed_buckets: Vec::new(),
+        };
+        assert!(matches!(run(full), Ok(Gf256Action::Complete { .. })));
+        // Missing node.
+        let missing = Gf256BucketDecodeBatch {
+            successful_buckets: alloc::vec![ok(1, 0)],
+            failed_buckets: Vec::new(),
+        };
+        assert_eq!(run(missing), Err(AlgebraicError::InvalidBucketIndex));
+        // Duplicate node.
+        let duplicate = Gf256BucketDecodeBatch {
+            successful_buckets: alloc::vec![ok(1, 0), ok(1, 0)],
+            failed_buckets: Vec::new(),
+        };
+        assert_eq!(run(duplicate), Err(AlgebraicError::InvalidBucketIndex));
+        // Both a success and a failure for one node.
+        let both = Gf256BucketDecodeBatch {
+            successful_buckets: alloc::vec![ok(1, 0), ok(1, 1)],
+            failed_buckets: alloc::vec![(1, 1)],
+        };
+        assert_eq!(run(both), Err(AlgebraicError::InvalidBucketIndex));
+        // Unrequested node.
+        let extra = Gf256BucketDecodeBatch {
+            successful_buckets: alloc::vec![ok(1, 0), ok(1, 1), ok(2, 0)],
+            failed_buckets: Vec::new(),
+        };
+        assert_eq!(run(extra), Err(AlgebraicError::InvalidBucketIndex));
     }
 }
