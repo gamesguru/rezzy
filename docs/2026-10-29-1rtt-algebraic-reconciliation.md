@@ -349,12 +349,16 @@ returns `BudgetExhausted` and falls back to the non-algebraic path.
 | ID-only sync latency            | 2 RTT                                                                                                                        | 1 RTT (one fewer RTT; not necessarily a 50% wall-clock drop)                           |
 | Event replication latency       | 2 RTT if ID and body are batched in phase 2; otherwise 3 RTT (sketch, IDs, bodies)                                           | 2 RTT (sketch, bodies); body fetch remains                                             |
 | Post-decode verification        | O(d·C) re-encode, O(d) count/residual, local classification (O(d log N) or amortized O(d)), plus candidate/ambiguity lookups | Same, minus the candidate map and ambiguity branches. Not O(1)                         |
-| Per-op field multiply           | ~1 base clmul + reduction                                                                                                    | 9 base clmuls via Karatsuba + reduction; ~22-29 ns/op in release probes (host-specific) |
-| Per-op field square             | No dedicated wide-field operation                                                                                            | Bit spreading + reduction; ~16-18 ns/op in release probes (host-specific)               |
 | Root finding work units         | 16,000,000 ceiling                                                                                                           | 300,000,000 practical ceiling; measured 232.6M consecutive, 36.1M random at d=256      |
 | Full decode wall clock          | —                                                                                                                            | ~2.8 s consecutive, ~0.9 s random at d=256 (release host)                              |
 | Wire per bucket sketch (C = 32) | 256 B                                                                                                                        | 1024 B                                                                                 |
 | Resident strata                 | 2048 B, F = 64                                                                                                               | unchanged                                                                              |
+
+The GF(2^256) implementation uses nine carry-less base multiplies via
+Karatsuba, followed by reduction. Its dedicated square spreads bits before
+reduction. In the current benchmark run these took about 21 ns and 16 ns per
+operation, respectively; earlier isolated probes measured 45 ns and 39 ns.
+These timings vary with host and harness.
 
 | Constant                 | Today      | Option A                                                              |
 | :----------------------- | :--------- | :-------------------------------------------------------------------- |

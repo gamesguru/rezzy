@@ -52,11 +52,11 @@ pub use algebraic::{
     RoomAccumulator, RoomEventIdKind, SyndromeSketch, MAX_LOCAL_SKETCH_DECODE_CAPACITY,
     MAX_OVERFLOW_SKETCH_CAPACITY, MAX_SKETCH_CAPACITY,
 };
-pub use gf256::{Gf256, Gf256Decoder};
 pub use client::{
     should_narrow, BucketExchange, ClientAction, ReconciliationClient, RemoteDigest,
     MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
 };
+pub use gf256::{Gf256, Gf256Decoder};
 pub use resident::{
     decode_strata, encode_strata, ResidentKernel, RESIDENT_FORMAT_VERSION, RESIDENT_SERIALIZED_LEN,
     STRATA_COUNT, STRATUM_CAPACITY,
