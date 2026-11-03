@@ -23,6 +23,16 @@ pub(crate) trait BinaryField: Copy + Eq {
     fn add(self, other: Self) -> Self;
     fn mul(self, other: Self) -> Self;
 
+    /// `target[i] += term * source[i]` for every coefficient. The default is
+    /// a scalar loop; a field may override it with a wider multiply-accumulate
+    /// backend. `source` and `target` must have the same length.
+    fn mac(term: Self, source: &[Self], target: &mut [Self]) {
+        debug_assert_eq!(source.len(), target.len());
+        for (coefficient, slot) in source.iter().zip(target.iter_mut()) {
+            *slot = slot.add(term.mul(*coefficient));
+        }
+    }
+
     /// `self^(2^BITS - 2)` via a fixed schedule; `None` for zero.
     fn inv(self) -> Option<Self> {
         if self == Self::ZERO {
@@ -53,6 +63,11 @@ impl BinaryField for u64 {
     #[inline]
     fn mul(self, other: Self) -> Self {
         crate::gf64::mul(self, other)
+    }
+
+    #[inline]
+    fn mac(term: Self, source: &[Self], target: &mut [Self]) {
+        crate::gf64_simd::poly_mac(term, source, target);
     }
 }
 

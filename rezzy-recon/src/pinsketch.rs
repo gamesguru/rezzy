@@ -8,11 +8,10 @@
 use alloc::{vec, vec::Vec};
 
 use crate::binary_field::BinaryField;
-use crate::gf64_simd::Gf64Evaluator;
 
 use super::algebraic::{gf64_mul, AlgebraicError};
 
-type Polynomial = Vec<u64>;
+type Polynomial<F> = Vec<F>;
 
 const FIELD_BITS: usize = 64;
 const MIXED_FACTOR_TRIALS: usize = 8;
@@ -96,8 +95,8 @@ pub(crate) fn decode_with_budget(
 /// Finds the roots of an already-prepared locator and finalizes them, or
 /// returns the empty set when `prepared` is `None`.
 fn decode_roots(
-    prepared: Option<(Polynomial, usize)>,
-    find: impl FnOnce(Polynomial, &mut Vec<u64>) -> Result<(), AlgebraicError>,
+    prepared: Option<(Polynomial<u64>, usize)>,
+    find: impl FnOnce(Polynomial<u64>, &mut Vec<u64>) -> Result<(), AlgebraicError>,
 ) -> Result<Vec<u64>, AlgebraicError> {
     let Some((locator, expected)) = prepared else {
         return Ok(Vec::new());
@@ -114,7 +113,7 @@ fn decode_roots(
 fn prepare_locator(
     odd_syndromes: &[u64],
     max_elements: usize,
-) -> Result<Option<(Polynomial, usize)>, AlgebraicError> {
+) -> Result<Option<(Polynomial<u64>, usize)>, AlgebraicError> {
     let all = reconstruct_syndromes(odd_syndromes);
     let mut locator = berlekamp_massey(&all, max_elements).ok_or(AlgebraicError::DecodeFailure)?;
     if locator.len() == 1 {
@@ -196,130 +195,66 @@ fn gf64_inv(value: u64) -> Option<u64> {
     BinaryField::inv(value)
 }
 
-fn trim(poly: &mut Polynomial) {
-    while poly.last() == Some(&0) {
+fn trim<F: BinaryField>(poly: &mut Polynomial<F>) {
+    while poly.last() == Some(&F::ZERO) {
         poly.pop();
     }
 }
 
-fn make_monic(poly: &mut Polynomial) -> Option<()> {
+fn make_monic<F: BinaryField>(poly: &mut Polynomial<F>) -> Option<()> {
     let leading = *poly.last()?;
-    if leading == 1 {
+    if leading == F::ONE {
         return Some(());
     }
-    let inverse = gf64_inv(leading)?;
+    let inverse = leading.inv()?;
     for coefficient in poly {
-        *coefficient = gf64_mul(*coefficient, inverse);
+        *coefficient = (*coefficient).mul(inverse);
     }
     Some(())
 }
 
-fn poly_mod(modulus: &[u64], value: &mut Polynomial) -> Option<()> {
+fn poly_mod<F: BinaryField>(modulus: &[F], value: &mut Polynomial<F>) -> Option<()> {
     let modulus_degree = modulus.len().checked_sub(1)?;
-    if modulus.last() != Some(&1) {
+    if modulus.last() != Some(&F::ONE) {
         return None;
     }
-    // Dispatch on the evaluator backend once, outside the reduction loop,
-    // and let each arm monomorphize its own copy of the loop via the
-    // generic `poly_mod_reduce`, instead of matching on the backend once
-    // per row inside a single shared loop. The match cost was already
-    // trivial (branch-predicted, hoisted out of the loop in the prior
-    // pass), but this removes it from the loop body entirely so the
-    // compiler can optimize each backend's reduction independently.
-    match crate::gf64_simd::get_evaluator() {
-        #[cfg(all(target_arch = "x86_64", has_avx512_support))]
-        crate::gf64_simd::EvaluatorBackend::Avx512 => {
-            poly_mod_reduce::<crate::gf64_simd::Avx512Evaluator>(modulus_degree, modulus, value)?;
-        }
-        #[cfg(target_arch = "x86_64")]
-        crate::gf64_simd::EvaluatorBackend::Sse => {
-            poly_mod_reduce::<crate::gf64_simd::SseEvaluator>(modulus_degree, modulus, value)?;
-        }
-        crate::gf64_simd::EvaluatorBackend::Scalar => {
-            poly_mod_reduce::<crate::gf64_simd::ScalarEvaluator>(modulus_degree, modulus, value)?;
+    while value.len() >= modulus.len() {
+        let term = value.pop()?;
+        if term != F::ZERO {
+            let offset = value.len().checked_sub(modulus_degree)?;
+            let target = &mut value[offset..offset.checked_add(modulus_degree)?];
+            let source = &modulus[..modulus_degree];
+            F::mac(term, source, target);
         }
     }
     trim(value);
     Some(())
 }
 
-fn poly_mod_reduce<E: Gf64Evaluator>(
-    modulus_degree: usize,
-    modulus: &[u64],
-    value: &mut Polynomial,
-) -> Option<()> {
-    while value.len() >= modulus.len() {
-        let term = value.pop()?;
-        if term != 0 {
-            let offset = value.len().checked_sub(modulus_degree)?;
-            let target = &mut value[offset..offset.checked_add(modulus_degree)?];
-            let source = &modulus[..modulus_degree];
-            E::poly_mac(term, source, target);
-        }
-    }
-    Some(())
-}
-
-fn poly_div(mut dividend: Polynomial, divisor: &[u64]) -> Option<Polynomial> {
-    if divisor.last() != Some(&1) || dividend.len() < divisor.len() {
+fn poly_div<F: BinaryField>(mut dividend: Polynomial<F>, divisor: &[F]) -> Option<Polynomial<F>> {
+    if divisor.last() != Some(&F::ONE) || dividend.len() < divisor.len() {
         return None;
     }
-    let mut quotient = vec![0; dividend.len().checked_sub(divisor.len())?.checked_add(1)?];
+    let mut quotient = vec![F::ZERO; dividend.len().checked_sub(divisor.len())?.checked_add(1)?];
     let divisor_degree = divisor.len().checked_sub(1)?;
-    // See `poly_mod` for why the backend dispatch happens once here rather
-    // than once per reduction row inside a shared loop.
-    match crate::gf64_simd::get_evaluator() {
-        #[cfg(all(target_arch = "x86_64", has_avx512_support))]
-        crate::gf64_simd::EvaluatorBackend::Avx512 => {
-            poly_div_reduce::<crate::gf64_simd::Avx512Evaluator>(
-                divisor_degree,
-                divisor,
-                &mut dividend,
-                &mut quotient,
-            )?;
-        }
-        #[cfg(target_arch = "x86_64")]
-        crate::gf64_simd::EvaluatorBackend::Sse => {
-            poly_div_reduce::<crate::gf64_simd::SseEvaluator>(
-                divisor_degree,
-                divisor,
-                &mut dividend,
-                &mut quotient,
-            )?;
-        }
-        crate::gf64_simd::EvaluatorBackend::Scalar => {
-            poly_div_reduce::<crate::gf64_simd::ScalarEvaluator>(
-                divisor_degree,
-                divisor,
-                &mut dividend,
-                &mut quotient,
-            )?;
+    while dividend.len() >= divisor.len() {
+        let term = dividend.pop()?;
+        let position = dividend.len().checked_sub(divisor_degree)?;
+        quotient[position] = term;
+        if term != F::ZERO {
+            let target = &mut dividend[position..position.checked_add(divisor_degree)?];
+            let source = &divisor[..divisor_degree];
+            F::mac(term, source, target);
         }
     }
     trim(&mut quotient);
     Some(quotient)
 }
 
-fn poly_div_reduce<E: Gf64Evaluator>(
-    divisor_degree: usize,
-    divisor: &[u64],
-    dividend: &mut Polynomial,
-    quotient: &mut Polynomial,
-) -> Option<()> {
-    while dividend.len() >= divisor.len() {
-        let term = dividend.pop()?;
-        let position = dividend.len().checked_sub(divisor_degree)?;
-        quotient[position] = term;
-        if term != 0 {
-            let target = &mut dividend[position..position.checked_add(divisor_degree)?];
-            let source = &divisor[..divisor_degree];
-            E::poly_mac(term, source, target);
-        }
-    }
-    Some(())
-}
-
-fn poly_gcd(mut left: Polynomial, mut right: Polynomial) -> Option<Polynomial> {
+fn poly_gcd<F: BinaryField>(
+    mut left: Polynomial<F>,
+    mut right: Polynomial<F>,
+) -> Option<Polynomial<F>> {
     if left.len() < right.len() {
         core::mem::swap(&mut left, &mut right);
     }
@@ -332,15 +267,15 @@ fn poly_gcd(mut left: Polynomial, mut right: Polynomial) -> Option<Polynomial> {
     Some(left)
 }
 
-fn poly_square(poly: &mut Polynomial) -> Option<()> {
+fn poly_square<F: BinaryField>(poly: &mut Polynomial<F>) -> Option<()> {
     if poly.is_empty() {
         return Some(());
     }
     let new_len = poly.len().checked_mul(2)?.checked_sub(1)?;
     let old = core::mem::take(poly);
-    poly.resize(new_len, 0);
+    poly.resize(new_len, F::ZERO);
     for (target, coefficient) in (0..new_len).step_by(2).zip(old) {
-        poly[target] = gf64_mul(coefficient, coefficient);
+        poly[target] = coefficient.mul(coefficient);
     }
     Some(())
 }
@@ -354,7 +289,7 @@ fn poly_square(poly: &mut Polynomial) -> Option<()> {
 /// pair's doc comments). Kept as a test-only cross-check that the
 /// precomputed path computes the same trace.
 #[cfg(test)]
-fn trace_mod(modulus: &[u64], parameter: u64) -> Option<Polynomial> {
+fn trace_mod(modulus: &[u64], parameter: u64) -> Option<Polynomial<u64>> {
     let mut trace = vec![0, parameter];
     for _ in 0..TRACE_SQUARES {
         poly_square(&mut trace)?;
@@ -381,7 +316,7 @@ fn trace_mod(modulus: &[u64], parameter: u64) -> Option<Polynomial> {
 /// `O(FIELD_BITS * degree)` for the linear combination, leaving only the
 /// unavoidable `O(degree^2)` GCD/division per trial. See
 /// `frobenius_basis_cost` and `factor_trial_cost_with_basis`.
-fn build_frobenius_basis(modulus: &[u64]) -> Option<Vec<Polynomial>> {
+fn build_frobenius_basis(modulus: &[u64]) -> Option<Vec<Polynomial<u64>>> {
     let mut basis = Vec::with_capacity(FIELD_BITS);
     let mut current = vec![0, 1]; // X
     poly_mod(modulus, &mut current)?;
@@ -396,7 +331,7 @@ fn build_frobenius_basis(modulus: &[u64]) -> Option<Vec<Polynomial>> {
 
 /// Computes `Tr(parameter * X) mod modulus` from a basis built by
 /// `build_frobenius_basis` for the same `modulus`.
-fn trace_from_basis(basis: &[Polynomial], parameter: u64) -> Polynomial {
+fn trace_from_basis(basis: &[Polynomial<u64>], parameter: u64) -> Polynomial<u64> {
     let width = basis.iter().map(Vec::len).max().unwrap_or(0);
     let mut trace = vec![0_u64; width];
     let mut power = parameter;
@@ -475,7 +410,7 @@ fn solve_quadratic_form(target: u64) -> Option<u64> {
     (gf64_mul(solution, solution) ^ solution == target).then_some(solution)
 }
 
-fn find_roots(poly: Polynomial, roots: &mut Vec<u64>) -> Result<(), AlgebraicError> {
+fn find_roots(poly: Polynomial<u64>, roots: &mut Vec<u64>) -> Result<(), AlgebraicError> {
     let mut work = MAX_FACTOR_WORK;
     find_roots_with_budget(poly, roots, &mut work)
 }
@@ -557,7 +492,7 @@ pub(crate) const fn single_call_work_ceiling(degree: usize) -> Option<usize> {
 }
 
 fn find_roots_with_budget(
-    poly: Polynomial,
+    poly: Polynomial<u64>,
     roots: &mut Vec<u64>,
     work: &mut usize,
 ) -> Result<(), AlgebraicError> {
@@ -763,7 +698,7 @@ mod tests {
         assert_eq!(poly_div(vec![2, 3, 1], &[1, 1]), Some(vec![2, 1]));
         assert_eq!(poly_div(vec![0, 1, 1], &[1, 1]), Some(vec![0, 1]));
 
-        let mut empty = Vec::new();
+        let mut empty: Vec<u64> = Vec::new();
         poly_square(&mut empty).unwrap();
         assert_eq!(empty, [] as [u64; 0]);
     }

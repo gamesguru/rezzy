@@ -283,6 +283,18 @@ pub fn get_evaluator() -> EvaluatorBackend {
     EvaluatorBackend::Scalar
 }
 
+/// Dispatches a polynomial multiply-accumulate to the best available
+/// evaluator backend.
+pub(crate) fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
+    match get_evaluator() {
+        #[cfg(all(target_arch = "x86_64", has_avx512_support))]
+        EvaluatorBackend::Avx512 => Avx512Evaluator::poly_mac(term, source, target),
+        #[cfg(target_arch = "x86_64")]
+        EvaluatorBackend::Sse => SseEvaluator::poly_mac(term, source, target),
+        EvaluatorBackend::Scalar => ScalarEvaluator::poly_mac(term, source, target),
+    }
+}
+
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 fn get_evaluator_internal() -> EvaluatorBackend {
     let (has_avx512, has_pclmul) = get_evaluator_features();
