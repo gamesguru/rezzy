@@ -252,7 +252,7 @@ impl Gf256Sketch {
         bytes
     }
 
-    /// Parses a coordinate payload with the capacity supplied by its header.
+    /// Parses a coordinate payload for a sketch of the given `capacity`.
     ///
     /// # Errors
     /// Returns an error for zero/excessive capacity or a non-exact payload size.
