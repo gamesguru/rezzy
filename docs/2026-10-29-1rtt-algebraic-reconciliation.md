@@ -22,12 +22,15 @@ information that a 64-bit sketch does not carry. To eliminate this second fetch,
 those bits—or a correlated algebraic equivalent—must be transmitted in the
 initial response. This requires roughly **$4\times$ the sketch bytes**
 ($C \times 32$ bytes instead of $C \times 8$ bytes for capacity $C$), matching
-the information-theoretic lower bound for 1-RTT reconstruction.
+the leading $C \times 256$-bit term in the information-theoretic lower bound for
+recovering up to $C$ arbitrary 256-bit elements. The exact bound has lower-order
+terms, including uncertainty in the element count.
 
 Two viable architectures exist for 1-RTT reconstruction:
 
-1. **Option A (Full 256-bit element in $\mathrm{GF}(2^{256})$):** Strictly
-   eliminates collision buckets and phase-2 fetches. However, it incurs a
+1. **Option A (Full 256-bit element in $\mathrm{GF}(2^{256})$):** Eliminates
+   truncation-induced locator collisions and phase-2 ID lookup for distinct
+   digests. SHA-256 identity collisions remain possible. It incurs a
    $5\text{–}13\times$ increase in root-finding work units plus a multi-limb
    field multiplication penalty.
 2. **Option B2 (128-bit locator + 128-bit correlated payload in
@@ -430,46 +433,99 @@ B/elem):
 
 ### 8.6 `algebraic_v2_gf256` profile
 
-**Status:** proposed and immutable once advertised. It is not a rename of
-`algebraic_v1`, and it must not be changed in place; any semantic change needs a
-new profile ID.
+**Name and status.** The wire identifier is `algebraic_v2_gf256`, and the Rust
+variant is `Profile::AlgebraicV2Gf256`. The profile is separate from
+`algebraic_v1`, not a revision silently interpreted as v1. Its definition is
+immutable once advertised; any semantic change requires a new profile ID. A
+future standardization effort may choose a namespaced ID, but must assign it as
+a distinct identifier rather than renaming this one in place.
 
-**Identity and negotiation.** The profile ID is `algebraic_v2_gf256`. It appears
-in negotiation and in every sketch header. The header carries the profile ID and
-capacity; an unknown ID is rejected, never decoded as v1 or best-effort. Bind the
-selected ID into the authenticated session transcript to prevent downgrade. One
-session uses one profile. Different peers may use different profiles; split a
-multi-room exchange if the rooms require different profiles. v1 remains the
-default for ordinary event sync. v2 is offered for ID-only reconciliation. A
-caller that requires v2 fails or uses the non-algebraic path when the peer lacks
-it; there is no silent downgrade.
+**Negotiation and pinning.** Peers advertise supported profile IDs, then the
+initiator selects one profile before building sketches. v1 remains the default
+for ordinary event replication; v2 is offered for ID-only reconciliation.
+Callers may allow v2 without preferring it, prefer it when common, or require it
+and fail closed to the non-algebraic path if the peer lacks it. Falling back to
+v1 is permitted only when the caller accepts v1's collision-recovery semantics.
+Never silently downgrade after a decode failure. Put the selected profile ID in
+the signed request body on every exchange request; Matrix X-Matrix
+authentication covers the request method, URI, and body. The response must echo
+the selected ID, and the client must authenticate the TLS server and check that
+echo before accepting the payload. Pin one profile for the entire reconciliation
+session: no per-bucket or per-round switching. Unknown or mismatched IDs abort
+or use an explicitly selected fallback; they are never best-effort decoded.
 
-**Element mapping.** Use `Gf256::from_le_bytes(digest[0..32])` exactly, with no
-transformation. Every 32-byte string maps bijectively to a field element; the raw
-mapping is what makes a decoded element convert back to the event ID. Reject the
-all-zero 32-byte digest at insertion and at element toggle. Do not alias zero to
-one. A zero placement prefix (`digest[0..8]`) is legal; zero syndromes are legal.
+Pin one profile for the entire reconciliation exchange: no per-bucket or
+per-round switching. Different peers may use different profiles for the same
+room because each peer session negotiates independently. An aggregate multi-room
+sketch must use one profile throughout; split it if room policies select
+different profiles. If prefix splitting is needed, all child buckets remain on
+the selected profile.
 
-**Windows.** `digest[0..8]` is the big-endian bucket key. `digest[8..16]` is the
-strata key, with the existing `0 -> 1` estimator alias; strata stay GF(2^64).
-`digest[16..32]` is `h128` and feeds the unchanged `NodeSummary`. `q3` becomes a
-derived value once `ElementHash` stores the digest.
+**1. Element mapping.** For room-version 3 and later, use the raw 32-byte
+base64-decoded event-ID digest: `Gf256::from_le_bytes(digest[0..32])`, with no
+transformation. The digest is split into four consecutive 8-byte chunks, each
+interpreted as a little-endian limb; the least-significant limb is therefore
+`u64::from_le_bytes(digest[0..8])`. This is a bijection from 32-byte digests to
+field elements, so a decoded element maps back to the original digest bytes and
+event ID. The profile removes truncation-induced locator collisions for distinct
+digests; identity still inherits SHA-256's collision bound. PinSketch's set
+universe is the nonzero field elements
+([construction over GF(2^m)\*](https://courses.csail.mit.edu/6.857/2009/handouts/DodisReyzinSmith-FuzzyExtractors.pdf)),
+so the all-zero digest is a valid field element but an invalid set element;
+reject it at insertion and element toggle. Do not alias it to one. Zero
+syndromes remain valid.
 
-**Wire.** A bucket sketch payload is `32 * C` bytes: 1024 B at C = 32 and 8192 B
-at C = 256, before header and base64url expansion. The header is versioned and
-self-describing enough to reject a profile or capacity mismatch.
+**2. Zero placement prefix.** The placement key is
+`u64::from_be_bytes(digest[0..8])`, matching the existing big-endian prefix
+ordering. Zero is legal as a placement prefix. This is independent of the full
+field element's nonzero requirement and byte interpretation.
 
-**Budget and hybrid policy.** v2 is not the default. Use it for small-difference
-ID-only buckets where collision-free recovery is worth the wire and CPU. Keep the
-existing prefix bisection, cap the per-bucket degree, and split rather than
-allowing an attacker to force a degree-256 decode. GF(2^256) work units remain a
-practical per-attempt ceiling, not a proven worst case.
+**3. Strata key.** Keep strata in GF(2^64), keyed by the big-endian value
+`u64::from_be_bytes(digest[8..16])` and the existing `0 -> 1` estimator alias.
+It affects only estimation; the tree remains the recovery path. `q3` can be
+derived from the stored full digest.
 
-**Security and performance.** v2 removes locator collisions but does not weaken
-or re-derive the SHA-256 residual identity bound: ~2^128 birthday and ~2^256
-targeted. It also does not by itself re-derive the sketch-gated accumulator
-forgery bound or `MAX_BATCH_FACTOR_WORK`. Measured cost on the reference host is
-22–29 ns per multiply, 16–18 ns per square, and 0.9–2.8 s for degree-256 decode;
-degree-32 v2 decode is not yet measured. IBLT/Erlay-style structures are the
-performance comparison, not the correctness baseline, and should be benchmarked
-in `filter_spillover` before any main-path change.
+**4. Residual.** `h128` is `u128::from_be_bytes(digest[16..32])`, and
+`NodeSummary` remains its existing 16-byte digest plus count. These big-endian
+window interpretations are independent of the little-endian four-limb field
+interpretation of the complete digest.
+
+**5. Versioned header.** Include the profile ID, header version, and sketch
+capacity. The profile ID pins the field polynomial, element mapping, byte order,
+and syndrome format; capacity is checked against payload length. Every request
+must carry the selected ID in its X-Matrix-signed body, and the response must
+echo it over the authenticated TLS connection. A mismatched or unknown profile
+is rejected. Matrix federation authenticates requests with X-Matrix signatures
+and authenticates responses with the TLS server certificate
+([Server-Server API authentication](https://spec.matrix.org/latest/server-server-api/#authentication)).
+
+**6. Payload size.** The binary bucket payload is `32 * C` bytes: 1024 B at
+`C = 32` and 8192 B at `C = 256`. Base64url expands these to about 1.4 KB and 11
+KB, respectively, before the header and surrounding protocol envelope. Use
+`C = 32` for normal buckets and `C = 256` only for overflow under explicit local
+resource policy. Prefer prefix splitting when possible, enforce the per-attempt
+work ceiling, and rate-limit costly overflow attempts. Do not raise
+`MAX_BATCH_FACTOR_WORK` from its old extrapolation without measured GF(2^256)
+re-derivation.
+
+**Performance and alternatives.** `algebraic_v2_gf256` is not the fastest
+profile; it is the full-digest profile. Current measurements are about 22–29 ns
+per multiply, 16–18 ns per square, and 0.9–2.8 s for degree-256 decode, with
+substantial host and workload variation. PinSketch decoding is quadratic in the
+difference size, so keep ordinary buckets small and treat overflow as a bounded
+expensive path. A GF(2^128) correlated-payload design may be cheaper, but is not
+yet implemented or benchmarked; do not claim a performance win without measuring
+it. IBLT/Erlay schemes are separate short-ID or probabilistic trade-offs, not
+equivalent full-ID profiles. Erlay uses per-link salted short transaction IDs
+and bisection/fallback handling; it does not recover full IDs from its initial
+short-ID sketch ([Erlay paper](https://nt4tn.net/papers/ccs19-erlay.pdf)).
+
+**Implementation status.** `rezzy-recon::profile` now defines the profile
+identifiers, `allow`/`prefer`/`require` selection, a session-pinned profile
+value, and a versioned header that validates profile, capacity, and exact
+payload length. These are protocol primitives only. The transport's capability
+exchange, signed request field, TLS-authenticated response echo, and
+profile-aware bucket construction/extraction are still pending; until those are
+wired, production reconciliation continues to use the existing v1 path. The
+header magic and encoding are an implementation proposal and must be checked
+against the eventual transport envelope before this profile is published.
