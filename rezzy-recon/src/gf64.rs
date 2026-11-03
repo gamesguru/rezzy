@@ -78,6 +78,15 @@ unsafe fn clmul_raw_portable(left: u64, right: u64) -> [u64; 2] {
 #[target_feature(enable = "pclmulqdq")]
 #[allow(unsafe_code)]
 unsafe fn clmul_raw_pclmul(left: u64, right: u64) -> [u64; 2] {
+    // SAFETY: this wrapper has the same target-feature requirement as the helper.
+    unsafe { clmul_pclmul_words(left, right) }
+}
+
+/// Computes the unreduced 128-bit carry-less product with PCLMULQDQ.
+#[cfg(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64")))]
+#[target_feature(enable = "pclmulqdq")]
+#[allow(unsafe_code)]
+unsafe fn clmul_pclmul_words(left: u64, right: u64) -> [u64; 2] {
     #[cfg(target_arch = "x86")]
     use core::arch::x86::{_mm_clmulepi64_si128, _mm_set_epi64x, _mm_storeu_si128};
     #[cfg(target_arch = "x86_64")]
@@ -150,16 +159,8 @@ unsafe fn mul_portable(left: u64, right: u64) -> u64 {
 #[target_feature(enable = "pclmulqdq")]
 #[allow(unsafe_code)]
 unsafe fn mul_pclmul(left: u64, right: u64) -> u64 {
-    #[cfg(target_arch = "x86")]
-    use core::arch::x86::{_mm_clmulepi64_si128, _mm_set_epi64x, _mm_storeu_si128};
-    #[cfg(target_arch = "x86_64")]
-    use core::arch::x86_64::{_mm_clmulepi64_si128, _mm_set_epi64x, _mm_storeu_si128};
-
-    let left = _mm_set_epi64x(0, i64::from_ne_bytes(left.to_ne_bytes()));
-    let right = _mm_set_epi64x(0, i64::from_ne_bytes(right.to_ne_bytes()));
-    let low = _mm_clmulepi64_si128(left, right, 0x00);
-    let mut low_word = [0_u64; 2];
-    _mm_storeu_si128(low_word.as_mut_ptr().cast(), low);
+    // SAFETY: this wrapper has the same target-feature requirement as the helper.
+    let low_word = unsafe { clmul_pclmul_words(left, right) };
     let high = low_word[1];
     // Since x^64 = x^4 + x^3 + x + 1, fold the high half directly into the
     // low half. Only four overflow bits remain and need a final reduction.
