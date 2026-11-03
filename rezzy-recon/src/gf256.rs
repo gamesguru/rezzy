@@ -221,46 +221,33 @@ fn clmul128(a: [u64; 2], b: [u64; 2]) -> [u64; 4] {
     ]
 }
 
-fn xor_shifted_into_320(target: &mut [u64; 5], source: &[u64; 4], shift: usize) -> Option<()> {
-    let word_offset = shift / 64;
-    let bit_offset = shift % 64;
-    let shift_amount = u32::try_from(bit_offset).ok()?;
-    for (index, limb) in source.iter().copied().enumerate() {
-        let target_index = index.checked_add(word_offset)?;
-        *target.get_mut(target_index)? ^= limb.wrapping_shl(shift_amount);
-        if bit_offset != 0 {
-            let spill_index = target_index.checked_add(1)?;
-            *target.get_mut(spill_index)? ^= limb >> (64_usize.checked_sub(bit_offset)?);
-        }
-    }
-    Some(())
-}
-
 fn reduce(product: Wide) -> [u64; 4] {
-    // Fold the high half with x^256 = 1 + x^2 + x^5 + x^10. The shifted
-    // terms spill at most ten bits above degree 255; fold that tail once more,
-    // which stays below degree 20.
-    let high = [product.0[4], product.0[5], product.0[6], product.0[7]];
-    let mut folded = [0_u64; 5];
-    for shift in [0, 2, 5, 10] {
-        xor_shifted_into_320(&mut folded, &high, shift)
-            .expect("a four-limb value shifted by at most ten fits in 320 bits");
+    // Fold the high half with x^256 = 1 + x^2 + x^5 + x^10. A shift by `k`
+    // spills the top `k` bits of the last high limb above degree 255; those
+    // collect in `spill` (below degree 10) and fold once more into limb 0.
+    let [l0, l1, l2, l3, h0, h1, h2, h3] = product.0;
+    let mut r = [l0 ^ h0, l1 ^ h1, l2 ^ h2, l3 ^ h3];
+    let mut spill = 0_u64;
+    for (left, right) in [(2_u32, 62_u32), (5, 59), (10, 54)] {
+        r[0] ^= h0 << left;
+        r[1] ^= (h1 << left) | (h0 >> right);
+        r[2] ^= (h2 << left) | (h1 >> right);
+        r[3] ^= (h3 << left) | (h2 >> right);
+        spill ^= h3 >> right;
     }
-    let tail = folded[4];
-    let tail_reduced = tail ^ tail.wrapping_shl(2) ^ tail.wrapping_shl(5) ^ tail.wrapping_shl(10);
-    [
-        product.0[0] ^ folded[0] ^ tail_reduced,
-        product.0[1] ^ folded[1],
-        product.0[2] ^ folded[2],
-        product.0[3] ^ folded[3],
-    ]
+    r[0] ^= spill ^ (spill << 2) ^ (spill << 5) ^ (spill << 10);
+    r
 }
 
-const fn spread_u16(mut value: u32) -> u32 {
-    value = (value | value.wrapping_shl(8)) & 0x00ff_00ff;
-    value = (value | value.wrapping_shl(4)) & 0x0f0f_0f0f;
-    value = (value | value.wrapping_shl(2)) & 0x3333_3333;
-    (value | value.wrapping_shl(1)) & 0x5555_5555
+/// Interleaves the low 32 bits of `value` with zeros: bit `i` moves to bit
+/// `2i`. The caller guarantees `value < 2^32`.
+const fn spread_u32(value: u64) -> u64 {
+    let mut v = value;
+    v = (v | (v << 16)) & 0x0000_ffff_0000_ffff;
+    v = (v | (v << 8)) & 0x00ff_00ff_00ff_00ff;
+    v = (v | (v << 4)) & 0x0f0f_0f0f_0f0f_0f0f;
+    v = (v | (v << 2)) & 0x3333_3333_3333_3333;
+    (v | (v << 1)) & 0x5555_5555_5555_5555
 }
 
 impl BinaryField for Gf256 {
@@ -284,29 +271,18 @@ impl BinaryField for Gf256 {
     }
 
     fn square(self) -> Self {
-        let mut wide = Wide([0; 8]);
-        for (limb_index, limb) in self.0.into_iter().enumerate() {
-            let mut spread = 0_u128;
-            for (chunk_index, chunk) in limb.to_le_bytes().chunks_exact(2).enumerate() {
-                let value = u16::from_le_bytes(chunk.try_into().expect("two-byte chunk"));
-                let shift = chunk_index
-                    .checked_mul(32)
-                    .expect("four chunks fit in 128 bits");
-                spread |= u128::from(spread_u16(u32::from(value))) << shift;
-            }
-            let product_word = limb_index
-                .checked_mul(2)
-                .expect("square output has two limbs per input limb");
-            let bytes = spread.to_le_bytes();
-            let low = u64::from_le_bytes(bytes[..8].try_into().expect("low 64-bit half"));
-            let high = u64::from_le_bytes(bytes[8..].try_into().expect("high 64-bit half"));
-            wide.0[product_word] = low;
-            let high_word = product_word
-                .checked_add(1)
-                .expect("square output has two limbs per input limb");
-            wide.0[high_word] = high;
-        }
-        Self(reduce(wide))
+        // Squaring is GF(2)-linear: bit `i` of the input lands on bit `2i`.
+        let [a0, a1, a2, a3] = self.0;
+        Self(reduce(Wide([
+            spread_u32(a0 & 0xffff_ffff),
+            spread_u32(a0 >> 32),
+            spread_u32(a1 & 0xffff_ffff),
+            spread_u32(a1 >> 32),
+            spread_u32(a2 & 0xffff_ffff),
+            spread_u32(a2 >> 32),
+            spread_u32(a3 & 0xffff_ffff),
+            spread_u32(a3 >> 32),
+        ])))
     }
 
     fn bit(index: usize) -> Option<Self> {
