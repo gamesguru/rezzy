@@ -54,26 +54,38 @@ pub fn recommended_bucket_decode_budget(
     })
 }
 
-fn take_bucket_bytes<'a>(
-    encoded: &'a [u8],
-    offset: &mut usize,
-    capacity: usize,
-    bytes_per_element: usize,
-) -> Result<&'a [u8], AlgebraicError> {
-    let byte_len = capacity
-        .checked_mul(bytes_per_element)
-        .ok_or(AlgebraicError::InvalidSketchLength)?;
-    let end = offset
-        .checked_add(byte_len)
-        .ok_or(AlgebraicError::InvalidSketchLength)?;
-    let bytes = encoded
-        .get(*offset..end)
-        .ok_or(AlgebraicError::InvalidSketchLength)?;
-    *offset = end;
-    Ok(bytes)
+struct PayloadCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
 }
 
-fn account_bucket_work(
+impl<'a> PayloadCursor<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, capacity: usize, width: usize) -> Result<&'a [u8], AlgebraicError> {
+        let byte_len = capacity
+            .checked_mul(width)
+            .ok_or(AlgebraicError::InvalidSketchLength)?;
+        let end = self
+            .offset
+            .checked_add(byte_len)
+            .ok_or(AlgebraicError::InvalidSketchLength)?;
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(AlgebraicError::InvalidSketchLength)?;
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    const fn is_finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+}
+
+fn charge_shared_budget(
     budget: &mut usize,
     allowance: usize,
     remaining: usize,
@@ -484,11 +496,11 @@ pub fn decode_bucket_sketches(
 ) -> Result<BucketDecodeBatch, AlgebraicError> {
     validate_adaptive_bucket_requests(requests)?;
 
-    let mut offset = 0_usize;
+    let mut payload = PayloadCursor::new(encoded);
     let mut successful_buckets = Vec::new();
     let mut failed_buckets = Vec::new();
     for request in requests {
-        let bytes = take_bucket_bytes(encoded, &mut offset, request.capacity, 8)?;
+        let bytes = payload.take(request.capacity, 8)?;
 
         let coordinates = bytes
             .chunks_exact(8)
@@ -516,7 +528,7 @@ pub fn decode_bucket_sketches(
         } else {
             sketch.decode_elements_with_shared_budget(request.capacity, &mut remaining)
         };
-        account_bucket_work(&mut budget, allowance, remaining)?;
+        charge_shared_budget(&mut budget, allowance, remaining)?;
         match result {
             Ok(roots) => successful_buckets.push(BucketDecodeSuccess {
                 depth: request.depth,
@@ -532,7 +544,7 @@ pub fn decode_bucket_sketches(
             Err(error) => return Err(error),
         }
     }
-    if offset != encoded.len() {
+    if !payload.is_finished() {
         return Err(AlgebraicError::InvalidSketchLength);
     }
     Ok(BucketDecodeBatch {
@@ -601,16 +613,16 @@ pub fn decode_gf256_bucket_sketches(
     }
 
     let ceiling = Gf256Decoder::per_sketch_work_ceiling();
-    let mut offset = 0_usize;
+    let mut payload = PayloadCursor::new(encoded);
     let mut batch = Gf256BucketDecodeBatch::default();
     for request in requests {
-        let bytes = take_bucket_bytes(encoded, &mut offset, request.capacity, 32)?;
+        let bytes = payload.take(request.capacity, 32)?;
 
         let sketch = Gf256Sketch::from_bytes(request.capacity, bytes)?;
         let allowance = budget.min(ceiling);
         let mut remaining = allowance;
         let result = sketch.decode_elements_with_budget(request.capacity, decoder, &mut remaining);
-        account_bucket_work(&mut budget, allowance, remaining)?;
+        charge_shared_budget(&mut budget, allowance, remaining)?;
         match result {
             Ok(elements) => batch.successful_buckets.push(Gf256BucketDecodeSuccess {
                 depth: request.depth,
@@ -626,7 +638,7 @@ pub fn decode_gf256_bucket_sketches(
             Err(error) => return Err(error),
         }
     }
-    debug_assert_eq!(offset, encoded.len());
+    debug_assert!(payload.is_finished());
     Ok(batch)
 }
 

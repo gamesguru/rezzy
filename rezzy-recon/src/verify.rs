@@ -26,7 +26,8 @@ use alloc::vec::Vec;
 use super::client::ReconciliationClient;
 use super::server::H64Index;
 use super::triage::{
-    BucketDecodeBatch, BucketRequest, Gf256BucketDecodeBatch, Gf256BucketDecodeSuccess, NodeSummary,
+    BucketDecodeBatch, BucketDecodeSuccess, BucketRequest, Gf256BucketDecodeBatch,
+    Gf256BucketDecodeSuccess, NodeSummary,
 };
 use super::{AlgebraicError, ElementHash, FixedWindowElementHash};
 
@@ -187,33 +188,31 @@ pub fn verify_batch<F>(
 where
     F: FnMut(u64) -> Vec<u128>,
 {
-    if requests.len() != local.len() || requests.len() != remote.len() {
-        return Err(AlgebraicError::InvalidSketchLength);
-    }
     let BucketDecodeBatch {
         successful_buckets,
-        mut failed_buckets,
+        failed_buckets,
     } = batch;
-    let mut admitted = Vec::with_capacity(successful_buckets.len());
-    let mut verified = Vec::with_capacity(successful_buckets.len());
-    let mut rejected = Vec::new();
-    for success in successful_buckets {
-        let (request, l, r) =
-            bucket_context(requests, local, remote, (success.depth, success.prefix))?;
-        match verify_decode(request, l, r, &success.roots, &mut local_candidates) {
-            Ok(classified) => {
-                verified.push(classified);
-                admitted.push(success);
-            }
-            Err(AlgebraicError::DecodeFailure) => {
-                failed_buckets.push((success.depth, success.prefix));
-                let mut roots = success.roots;
-                roots.sort_unstable();
-                rejected.push((success.depth, success.prefix, roots));
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    let (admitted, failed_buckets, verified, rejected) = verify_batch_outcomes(
+        successful_buckets,
+        failed_buckets,
+        requests,
+        local,
+        remote,
+        |request, local, remote, success| {
+            verify_decode(
+                request,
+                local,
+                remote,
+                &success.roots,
+                &mut local_candidates,
+            )
+        },
+        |success| {
+            let mut roots = success.roots.clone();
+            roots.sort_unstable();
+            Some((success.depth, success.prefix, roots))
+        },
+    )?;
     Ok((
         BucketDecodeBatch {
             successful_buckets: admitted,
@@ -228,22 +227,66 @@ where
 /// passed phase 1, and the nodes rejected by it with their decoded roots.
 pub type VerifiedBatch = (BucketDecodeBatch, Vec<Classified>, Vec<(u8, u64, Vec<u64>)>);
 
-fn bucket_context<'a>(
-    requests: &'a [BucketRequest],
+trait DecodeOutcome {
+    fn node(&self) -> (u8, u64);
+}
+
+impl DecodeOutcome for BucketDecodeSuccess {
+    fn node(&self) -> (u8, u64) {
+        (self.depth, self.prefix)
+    }
+}
+
+impl DecodeOutcome for Gf256BucketDecodeSuccess {
+    fn node(&self) -> (u8, u64) {
+        (self.depth, self.prefix)
+    }
+}
+
+fn verify_batch_outcomes<S, V, R>(
+    successful: Vec<S>,
+    mut failed: Vec<(u8, u64)>,
+    requests: &[BucketRequest],
     local: &[NodeSummary],
     remote: &[NodeSummary],
-    node: (u8, u64),
-) -> Result<(&'a BucketRequest, NodeSummary, NodeSummary), AlgebraicError> {
-    let slot = requests
-        .iter()
-        .position(|request| (request.depth, request.prefix) == node)
-        .ok_or(AlgebraicError::InvalidBucketIndex)?;
-    let (Some(request), Some(&local), Some(&remote)) =
-        (requests.get(slot), local.get(slot), remote.get(slot))
-    else {
-        return Err(AlgebraicError::InvalidBucketIndex);
-    };
-    Ok((request, local, remote))
+    mut verify: impl FnMut(&BucketRequest, NodeSummary, NodeSummary, &S) -> Result<V, AlgebraicError>,
+    mut rejected: impl FnMut(&S) -> Option<R>,
+) -> Result<(Vec<S>, Vec<(u8, u64)>, Vec<V>, Vec<R>), AlgebraicError>
+where
+    S: DecodeOutcome,
+{
+    if requests.len() != local.len() || requests.len() != remote.len() {
+        return Err(AlgebraicError::InvalidSketchLength);
+    }
+    let mut admitted = Vec::with_capacity(successful.len());
+    let mut verified = Vec::with_capacity(successful.len());
+    let mut rejected_outcomes = Vec::new();
+    for outcome in successful {
+        let node = outcome.node();
+        let slot = requests
+            .iter()
+            .position(|request| (request.depth, request.prefix) == node)
+            .ok_or(AlgebraicError::InvalidBucketIndex)?;
+        let (Some(request), Some(&local), Some(&remote)) =
+            (requests.get(slot), local.get(slot), remote.get(slot))
+        else {
+            return Err(AlgebraicError::InvalidBucketIndex);
+        };
+        match verify(request, local, remote, &outcome) {
+            Ok(value) => {
+                verified.push(value);
+                admitted.push(outcome);
+            }
+            Err(AlgebraicError::DecodeFailure) => {
+                failed.push(node);
+                if let Some(value) = rejected(&outcome) {
+                    rejected_outcomes.push(value);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((admitted, failed, verified, rejected_outcomes))
 }
 
 /// One GF(2^256) node whose decoded digests passed exact verification.
@@ -361,29 +404,21 @@ pub fn verify_gf256_batch<F>(
 where
     F: FnMut(&[u8; 32]) -> bool,
 {
-    if requests.len() != local.len() || requests.len() != remote.len() {
-        return Err(AlgebraicError::InvalidSketchLength);
-    }
     let Gf256BucketDecodeBatch {
         successful_buckets,
-        mut failed_buckets,
+        failed_buckets,
     } = batch;
-    let mut admitted: Vec<Gf256BucketDecodeSuccess> = Vec::with_capacity(successful_buckets.len());
-    let mut verified = Vec::with_capacity(successful_buckets.len());
-    for success in successful_buckets {
-        let (request, l, r) =
-            bucket_context(requests, local, remote, (success.depth, success.prefix))?;
-        match verify_gf256_decode(request, l, r, &success.digests, &mut is_local) {
-            Ok(node) => {
-                verified.push(node);
-                admitted.push(success);
-            }
-            Err(AlgebraicError::DecodeFailure) => {
-                failed_buckets.push((success.depth, success.prefix));
-            }
-            Err(error) => return Err(error),
-        }
-    }
+    let (admitted, failed_buckets, verified, _) = verify_batch_outcomes(
+        successful_buckets,
+        failed_buckets,
+        requests,
+        local,
+        remote,
+        |request, local, remote, success| {
+            verify_gf256_decode(request, local, remote, &success.digests, &mut is_local)
+        },
+        |_| None::<()>,
+    )?;
     Ok((
         Gf256BucketDecodeBatch {
             successful_buckets: admitted,
