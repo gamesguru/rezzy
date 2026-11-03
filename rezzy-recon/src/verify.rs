@@ -25,8 +25,10 @@ use alloc::vec::Vec;
 
 use super::client::ReconciliationClient;
 use super::server::H64Index;
-use super::triage::{BucketDecodeBatch, BucketRequest, NodeSummary};
-use super::{AlgebraicError, ElementHash};
+use super::triage::{
+    BucketDecodeBatch, BucketRequest, Gf256BucketDecodeBatch, Gf256BucketDecodeSuccess, NodeSummary,
+};
+use super::{AlgebraicError, ElementHash, FixedWindowElementHash};
 
 /// One node's decoded roots, classified by local `h64` presence.
 ///
@@ -232,6 +234,160 @@ where
 /// Result of [`verify_batch`]: the batch to feed the exchange, the nodes that
 /// passed phase 1, and the nodes rejected by it with their decoded roots.
 pub type VerifiedBatch = (BucketDecodeBatch, Vec<Classified>, Vec<(u8, u64, Vec<u64>)>);
+
+/// One GF(2^256) node whose decoded digests passed exact verification.
+///
+/// Unlike [`Classified`] there is no follow-up phase: the digests are the
+/// elements themselves, so membership and the full residual are checked at
+/// decode time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gf256Verified {
+    depth: u8,
+    prefix: u64,
+    local_only: Vec<[u8; 32]>,
+    remote_only: Vec<[u8; 32]>,
+}
+
+impl Gf256Verified {
+    /// The node's `(depth, prefix)`.
+    #[must_use]
+    pub const fn node(&self) -> (u8, u64) {
+        (self.depth, self.prefix)
+    }
+
+    /// Digests present locally and absent remotely.
+    #[must_use]
+    pub fn local_only(&self) -> &[[u8; 32]] {
+        &self.local_only
+    }
+
+    /// Digests absent locally; the peer must supply the matching event IDs.
+    #[must_use]
+    pub fn remote_only(&self) -> &[[u8; 32]] {
+        &self.remote_only
+    }
+}
+
+/// Exact verification of one node's decoded GF(2^256) digests.
+///
+/// `is_local(digest)` is exact membership in the local population. Checks:
+/// no all-zero or repeated digest, every digest's placement key lies in the
+/// node, `count_A - count_B = |L| - |M|`, and the node residual
+/// `D_A xor D_B` equals the XOR of the residual windows of every digest.
+///
+/// # Errors
+/// [`AlgebraicError::DecodeFailure`] on any failed check.
+pub fn verify_gf256_decode<F>(
+    request: &BucketRequest,
+    local: NodeSummary,
+    remote: NodeSummary,
+    digests: &[[u8; 32]],
+    mut is_local: F,
+) -> Result<Gf256Verified, AlgebraicError>
+where
+    F: FnMut(&[u8; 32]) -> bool,
+{
+    let mut distinct = digests.to_vec();
+    distinct.sort_unstable();
+    if distinct.windows(2).any(|pair| pair[0] == pair[1]) || distinct.contains(&[0; 32]) {
+        return Err(AlgebraicError::DecodeFailure);
+    }
+    let bounds = H64Index::bounds_unchecked(request);
+    let mut local_only = Vec::new();
+    let mut remote_only = Vec::new();
+    let mut residual = 0_u128;
+    for digest in digests {
+        let element = FixedWindowElementHash::from_digest32(*digest);
+        if !bounds.contains(&u128::from(element.bucket_key())) {
+            return Err(AlgebraicError::DecodeFailure);
+        }
+        residual ^= element.residual();
+        if is_local(digest) {
+            local_only.push(*digest);
+        } else {
+            remote_only.push(*digest);
+        }
+    }
+    local_only.sort_unstable();
+    remote_only.sort_unstable();
+
+    let lhs = i128::from(local.count).checked_sub(i128::from(remote.count));
+    let rhs = i128::try_from(local_only.len())
+        .ok()
+        .zip(i128::try_from(remote_only.len()).ok())
+        .and_then(|(l, m)| l.checked_sub(m));
+    let (Some(lhs), Some(rhs)) = (lhs, rhs) else {
+        return Err(AlgebraicError::DecodeFailure);
+    };
+    if lhs != rhs || residual != local.digest ^ remote.digest {
+        return Err(AlgebraicError::DecodeFailure);
+    }
+    Ok(Gf256Verified {
+        depth: request.depth,
+        prefix: request.prefix,
+        local_only,
+        remote_only,
+    })
+}
+
+/// Exact verification over one decoded GF(2^256) round.
+///
+/// `requests`, `local` and `remote` are index-aligned. A node that fails
+/// verification moves to `failed_buckets` so the exchange can split or retry
+/// it while its siblings are admitted.
+///
+/// # Errors
+/// [`AlgebraicError::InvalidSketchLength`] if the slices are not aligned, and
+/// [`AlgebraicError::InvalidBucketIndex`] if a decoded node was never
+/// requested.
+pub fn verify_gf256_batch<F>(
+    batch: Gf256BucketDecodeBatch,
+    requests: &[BucketRequest],
+    local: &[NodeSummary],
+    remote: &[NodeSummary],
+    mut is_local: F,
+) -> Result<(Gf256BucketDecodeBatch, Vec<Gf256Verified>), AlgebraicError>
+where
+    F: FnMut(&[u8; 32]) -> bool,
+{
+    if requests.len() != local.len() || requests.len() != remote.len() {
+        return Err(AlgebraicError::InvalidSketchLength);
+    }
+    let Gf256BucketDecodeBatch {
+        successful_buckets,
+        mut failed_buckets,
+    } = batch;
+    let mut admitted: Vec<Gf256BucketDecodeSuccess> = Vec::with_capacity(successful_buckets.len());
+    let mut verified = Vec::with_capacity(successful_buckets.len());
+    for success in successful_buckets {
+        let slot = requests
+            .iter()
+            .position(|r| r.depth == success.depth && r.prefix == success.prefix)
+            .ok_or(AlgebraicError::InvalidBucketIndex)?;
+        let (Some(request), Some(&l), Some(&r)) =
+            (requests.get(slot), local.get(slot), remote.get(slot))
+        else {
+            return Err(AlgebraicError::InvalidBucketIndex);
+        };
+        match verify_gf256_decode(request, l, r, &success.digests, &mut is_local) {
+            Ok(node) => {
+                verified.push(node);
+                admitted.push(success);
+            }
+            Err(AlgebraicError::DecodeFailure) => {
+                failed_buckets.push((success.depth, success.prefix));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((
+        Gf256BucketDecodeBatch {
+            successful_buckets: admitted,
+            failed_buckets,
+        },
+        verified,
+    ))
+}
 
 /// Phase 2 for one node: check the identifiers the peer returned for `M`.
 ///
@@ -609,6 +765,131 @@ mod tests {
         assert_eq!(
             NodeSummary::from_bytes(&[0; 23]),
             Err(AlgebraicError::InvalidSketchLength)
+        );
+    }
+
+    fn gf_digest(seed: u64) -> [u8; 32] {
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut out = [0_u8; 32];
+        for chunk in out.chunks_exact_mut(8) {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            chunk.copy_from_slice(&x.to_le_bytes());
+        }
+        out
+    }
+
+    fn gf_population(seeds: &[u64]) -> crate::FixedWindowPopulation {
+        crate::FixedWindowPopulation::new(
+            seeds
+                .iter()
+                .map(|s| FixedWindowElementHash::from_digest32(gf_digest(*s)))
+                .collect(),
+        )
+        .unwrap()
+    }
+
+    /// Local {1..=6}, remote {4..=9}: L = {1,2,3}, M = {7,8,9}.
+    fn gf_fixture() -> (BucketRequest, NodeSummary, NodeSummary, Vec<[u8; 32]>) {
+        let request = BucketRequest::new(0, 0, 8);
+        let local = gf_population(&[1, 2, 3, 4, 5, 6]);
+        let remote = gf_population(&[4, 5, 6, 7, 8, 9]);
+        let (local_sketch, local_summary) = local.bucket_nodes(&[request]).unwrap().remove(0);
+        let (remote_sketch, remote_summary) = remote.bucket_nodes(&[request]).unwrap().remove(0);
+        let decoder = crate::Gf256Decoder::build().unwrap();
+        let digests = crate::Gf256Sketch::extract_symmetric_difference(
+            &local_sketch,
+            &remote_sketch,
+            8,
+            &decoder,
+        )
+        .unwrap();
+        (request, local_summary, remote_summary, digests)
+    }
+
+    fn in_local(digest: &[u8; 32]) -> bool {
+        (1..=6).any(|seed| gf_digest(seed) == *digest)
+    }
+
+    #[test]
+    fn gf256_verify_classifies_and_checks_full_residual() {
+        let (request, local, remote, digests) = gf_fixture();
+        let node = verify_gf256_decode(&request, local, remote, &digests, in_local).unwrap();
+        assert_eq!(node.node(), (0, 0));
+        assert_eq!(node.local_only().len(), 3);
+        assert_eq!(node.remote_only().len(), 3);
+        assert!(node.remote_only().iter().all(|d| !in_local(d)));
+    }
+
+    #[test]
+    fn gf256_verify_rejects_tampering() {
+        let (request, local, remote, digests) = gf_fixture();
+        // Wrong residual.
+        let bad = NodeSummary {
+            digest: remote.digest ^ 1,
+            ..remote
+        };
+        assert_eq!(
+            verify_gf256_decode(&request, local, bad, &digests, in_local),
+            Err(AlgebraicError::DecodeFailure)
+        );
+        // Wrong count.
+        let bad = NodeSummary {
+            count: remote.count + 1,
+            ..remote
+        };
+        assert_eq!(
+            verify_gf256_decode(&request, local, bad, &digests, in_local),
+            Err(AlgebraicError::DecodeFailure)
+        );
+        // Missing, repeated, and zero digests.
+        assert!(verify_gf256_decode(&request, local, remote, &digests[1..], in_local).is_err());
+        let mut repeated = digests.clone();
+        repeated.push(digests[0]);
+        assert!(verify_gf256_decode(&request, local, remote, &repeated, in_local).is_err());
+        let mut zero = digests.clone();
+        zero.push([0; 32]);
+        assert!(verify_gf256_decode(&request, local, remote, &zero, in_local).is_err());
+        // Digest outside the node.
+        let narrow = BucketRequest::new(1, 0, 8);
+        assert!(verify_gf256_decode(&narrow, local, remote, &digests, in_local).is_err());
+    }
+
+    #[test]
+    fn gf256_verify_batch_moves_failed_nodes() {
+        let (request, local, remote, digests) = gf_fixture();
+        let good = Gf256BucketDecodeSuccess {
+            depth: 0,
+            prefix: 0,
+            digests,
+        };
+        let batch = Gf256BucketDecodeBatch {
+            successful_buckets: vec![good.clone()],
+            failed_buckets: vec![],
+        };
+        let (out, verified) =
+            verify_gf256_batch(batch, &[request], &[local], &[remote], in_local).unwrap();
+        assert_eq!(out.successful_buckets, vec![good.clone()]);
+        assert_eq!(verified.len(), 1);
+
+        let bad = NodeSummary {
+            digest: remote.digest ^ 1,
+            ..remote
+        };
+        let batch = Gf256BucketDecodeBatch {
+            successful_buckets: vec![good],
+            failed_buckets: vec![],
+        };
+        let (out, verified) =
+            verify_gf256_batch(batch, &[request], &[local], &[bad], in_local).unwrap();
+        assert!(out.successful_buckets.is_empty() && verified.is_empty());
+        assert_eq!(out.failed_buckets, vec![(0, 0)]);
+
+        let batch = Gf256BucketDecodeBatch::default();
+        assert_eq!(
+            verify_gf256_batch(batch, &[request], &[], &[remote], in_local).unwrap_err(),
+            AlgebraicError::InvalidSketchLength
         );
     }
 }

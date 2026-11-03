@@ -582,6 +582,14 @@ pub fn decode_gf256_bucket_sketches(
 ) -> Result<Gf256BucketDecodeBatch, AlgebraicError> {
     validate_adaptive_bucket_requests(requests)?;
 
+    let expected_len = requests.iter().try_fold(0_usize, |total, request| {
+        let byte_len = request.capacity.checked_mul(32)?;
+        total.checked_add(byte_len)
+    });
+    if expected_len != Some(encoded.len()) {
+        return Err(AlgebraicError::InvalidSketchLength);
+    }
+
     let ceiling = Gf256Decoder::per_sketch_work_ceiling();
     let mut offset = 0_usize;
     let mut batch = Gf256BucketDecodeBatch::default();
@@ -627,9 +635,7 @@ pub fn decode_gf256_bucket_sketches(
             Err(error) => return Err(error),
         }
     }
-    if offset != encoded.len() {
-        return Err(AlgebraicError::InvalidSketchLength);
-    }
+    debug_assert_eq!(offset, encoded.len());
     Ok(batch)
 }
 

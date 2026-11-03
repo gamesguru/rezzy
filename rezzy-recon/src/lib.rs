@@ -73,7 +73,10 @@ pub use triage::{
     NodeSummary, StrataEstimate, MAX_BATCH_FACTOR_WORK, MAX_BUCKETED_SKETCH_CAPACITY,
     MAX_OVERFLOW_BUCKET_CAPACITY, MAX_STRATA_FACTOR_WORK, NODE_SUMMARY_LEN,
 };
-pub use verify::{verify_batch, verify_decode, verify_follow_up, Classified};
+pub use verify::{
+    verify_batch, verify_decode, verify_follow_up, verify_gf256_batch, verify_gf256_decode,
+    Classified, Gf256Verified,
+};
 
 #[allow(clippy::assertions_on_constants)]
 const _: () = assert!(MAX_SKETCH_CAPACITY == 32);
