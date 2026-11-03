@@ -475,79 +475,131 @@ const fn next_factor_parameter(mut state: u64) -> u64 {
     state ^ (state << 17)
 }
 
-fn solve_quadratic_form<F: BinaryField>(target: F) -> Option<F> {
-    // Solve the GF(2)-linear map z -> z^2 + z using a BITS x BITS matrix.
-    // Rows are bitsets of columns, one u64 word per 64 columns.
-    #[derive(Clone)]
-    struct Row {
-        coefficients: Vec<u64>,
-        rhs: bool,
-    }
+struct QuadraticSolver<F> {
+    rows: Vec<QuadraticRow>,
+    transforms: Vec<Vec<u64>>,
+    pivots: Vec<usize>,
+    _field: core::marker::PhantomData<F>,
+}
 
-    let bits = F::BITS;
-    let words = bits.div_ceil(64);
-    let mut rows = vec![
-        Row {
-            coefficients: vec![0; words],
-            rhs: false,
-        };
-        bits
-    ];
-    for column in 0..bits {
-        let basis = F::bit(column)?;
-        let image = basis.square().add(basis);
-        for (row, equation) in rows.iter_mut().enumerate() {
-            if image.test_bit(row) {
-                equation.coefficients[column / 64] |= 1_u64 << (column % 64);
-            }
-        }
-    }
-    for (row, equation) in rows.iter_mut().enumerate() {
-        if target.test_bit(row) {
-            equation.rhs = true;
-        }
-    }
+struct QuadraticRow {
+    coefficients: Vec<u64>,
+}
 
-    let mut rank = 0;
-    for column in 0..bits {
-        let word = column / 64;
-        let mask = 1_u64 << (column % 64);
-        let Some(pivot) = (rank..bits).find(|&row| rows[row].coefficients[word] & mask != 0) else {
-            continue;
-        };
-        rows.swap(rank, pivot);
-        let pivot_row = rows[rank].clone();
-        for (row, equation) in rows.iter_mut().enumerate() {
-            if row != rank && equation.coefficients[word] & mask != 0 {
-                for (coefficient, pivot_coefficient) in equation
-                    .coefficients
-                    .iter_mut()
-                    .zip(&pivot_row.coefficients)
-                {
-                    *coefficient ^= *pivot_coefficient;
+impl<F: BinaryField> QuadraticSolver<F> {
+    fn new() -> Option<Self> {
+        // Reduce the GF(2)-linear map z -> z^2 + z once. `transforms` records
+        // the row operations, so each later solve only applies the reduced
+        // matrix to a target vector.
+        #[derive(Clone)]
+        struct WorkRow {
+            coefficients: Vec<u64>,
+            transform: Vec<u64>,
+        }
+        let bits = F::BITS;
+        let words = bits.div_ceil(64);
+        let mut rows = Vec::with_capacity(bits);
+        for row in 0..bits {
+            let mut transform = vec![0; words];
+            transform[row / 64] |= 1_u64 << (row % 64);
+            rows.push(WorkRow {
+                coefficients: vec![0; words],
+                transform,
+            });
+        }
+        for column in 0..bits {
+            let basis = F::bit(column)?;
+            let image = basis.square().add(basis);
+            for (row, equation) in rows.iter_mut().enumerate() {
+                if image.test_bit(row) {
+                    equation.coefficients[column / 64] |= 1_u64 << (column % 64);
                 }
-                equation.rhs ^= pivot_row.rhs;
             }
         }
-        rank = rank.checked_add(1)?;
-    }
-    if rows
-        .iter()
-        .any(|row| row.coefficients.iter().all(|&word| word == 0) && row.rhs)
-    {
-        return None;
-    }
-    let mut solution = F::ZERO;
-    for row in rows.iter().take(rank) {
-        let word = row.coefficients.iter().position(|&word| word != 0)?;
-        let column = word
-            .checked_mul(64)?
-            .checked_add(row.coefficients[word].trailing_zeros() as usize)?;
-        if row.rhs {
-            solution = solution.add(F::bit(column)?);
+        let mut rank = 0;
+        let mut pivots = Vec::with_capacity(bits);
+        for column in 0..bits {
+            let word = column / 64;
+            let mask = 1_u64 << (column % 64);
+            let Some(pivot) = (rank..bits).find(|&row| rows[row].coefficients[word] & mask != 0)
+            else {
+                continue;
+            };
+            rows.swap(rank, pivot);
+            let pivot_row = rows[rank].clone();
+            for (row, equation) in rows.iter_mut().enumerate() {
+                if row != rank && equation.coefficients[word] & mask != 0 {
+                    for (coefficient, pivot_coefficient) in equation
+                        .coefficients
+                        .iter_mut()
+                        .zip(&pivot_row.coefficients)
+                    {
+                        *coefficient ^= *pivot_coefficient;
+                    }
+                    for (coefficient, pivot_coefficient) in
+                        equation.transform.iter_mut().zip(&pivot_row.transform)
+                    {
+                        *coefficient ^= *pivot_coefficient;
+                    }
+                }
+            }
+            pivots.push(column);
+            rank = rank.checked_add(1)?;
         }
+        let transforms = rows.iter().map(|row| row.transform.clone()).collect();
+        Some(Self {
+            rows: rows
+                .into_iter()
+                .map(|row| QuadraticRow {
+                    coefficients: row.coefficients,
+                })
+                .collect(),
+            transforms,
+            pivots,
+            _field: core::marker::PhantomData,
+        })
     }
-    (solution.square().add(solution) == target).then_some(solution)
+
+    fn solve(&self, target: F) -> Option<F> {
+        let bits = F::BITS;
+        let mut rhs = Vec::with_capacity(bits);
+        for transform in &self.transforms {
+            let parity = transform
+                .iter()
+                .enumerate()
+                .fold(0_u32, |parity, (word, mask)| {
+                    let mut target_word = 0_u64;
+                    for bit in 0..64 {
+                        let index = word.saturating_mul(64).saturating_add(bit);
+                        if index < bits && target.test_bit(index) {
+                            target_word |= 1_u64 << bit;
+                        }
+                    }
+                    parity ^ ((mask & target_word).count_ones() & 1)
+                });
+            rhs.push(parity != 0);
+        }
+        if self
+            .rows
+            .iter()
+            .enumerate()
+            .any(|(row, data)| data.coefficients.iter().all(|&word| word == 0) && rhs[row])
+        {
+            return None;
+        }
+        let mut solution = F::ZERO;
+        for (row, &column) in self.pivots.iter().enumerate() {
+            if rhs[row] {
+                solution = solution.add(F::bit(column)?);
+            }
+        }
+        (solution.square().add(solution) == target).then_some(solution)
+    }
+}
+
+#[cfg(test)]
+fn solve_quadratic_form<F: BinaryField>(target: F) -> Option<F> {
+    QuadraticSolver::<F>::new()?.solve(target)
 }
 
 fn find_roots(poly: Polynomial<u64>, roots: &mut Vec<u64>) -> Result<(), AlgebraicError> {
@@ -626,6 +678,7 @@ fn find_roots_with_model<F: BinaryField>(
     let mut pending = vec![poly];
     let mut workspace = GcdWorkspace::new();
     let mut trace = Vec::new();
+    let mut quadratic_solver: Option<QuadraticSolver<F>> = None;
     while let Some(poly) = pending.pop() {
         let degree = poly
             .len()
@@ -645,7 +698,13 @@ fn find_roots_with_model<F: BinaryField>(
             }
             let inverse = linear.inv().ok_or(AlgebraicError::DecodeFailure)?;
             let normalized = poly[0].mul(inverse.mul(inverse));
-            let root = solve_quadratic_form(normalized)
+            if quadratic_solver.is_none() {
+                quadratic_solver =
+                    Some(QuadraticSolver::new().ok_or(AlgebraicError::DecodeFailure)?);
+            }
+            let root = quadratic_solver
+                .as_ref()
+                .and_then(|solver| solver.solve(normalized))
                 .ok_or(AlgebraicError::DecodeFailure)?
                 .mul(linear);
             roots.push(root);
