@@ -138,6 +138,12 @@ const BENCHMARKS: &[BenchmarkEntry] = &[
     // --- math (Algebraic Structures & Set Reconciliation) ---
     BenchmarkEntry {
         domain: "math",
+        name: "gf256",
+        description: "GF(2^256) arithmetic, syndrome construction, and decoding",
+        run_fn: math::gf256::run,
+    },
+    BenchmarkEntry {
+        domain: "math",
         name: "lthash",
         description: "MSC4500 LtHash incremental state hash vs non-homomorphic baselines",
         run_fn: math::lthash::run,

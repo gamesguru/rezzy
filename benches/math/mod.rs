@@ -4,6 +4,7 @@ pub mod adaptive_sketch;
 pub mod expansion_backends;
 pub mod filter_spillover;
 pub mod filters;
+pub mod gf256;
 pub mod invertible_filter;
 pub mod lthash;
 pub mod lthash_backends;
