@@ -3567,6 +3567,11 @@ fn test_redaction_preserved_keys_matrix() {
         redaction_preserved_keys("m.room.join_rules", "1"),
         RedactionRule::Keys(&["join_rule"])
     );
+    // Room version 8 adopts the v6 redaction rules, which preserve `allow`.
+    assert_eq!(
+        redaction_preserved_keys("m.room.join_rules", "8"),
+        RedactionRule::Keys(&["join_rule", "allow"])
+    );
 
     // Room versions 2-8: distinct `"N" => N` arms in the version-mapping match.
     // All are pre-v9 / pre-v11, so create keeps `creator` and member keeps only

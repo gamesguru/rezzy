@@ -185,6 +185,29 @@ fn test_redact_json_preserves_dotted_nested_key() {
     assert_eq!(redacted["content"]["membership"], "invite");
 }
 
+/// Room version 8's join-rules redaction preserves `allow`, and the reference
+/// hash is computed from that same redacted content.
+#[test]
+fn test_v8_join_rules_allow_survives_redaction_and_hashing() {
+    let pdu = json!({
+        "type": "m.room.join_rules",
+        "sender": "@alice:example.com",
+        "state_key": "",
+        "origin_server_ts": 1000,
+        "content": {
+            "join_rule": "restricted",
+            "allow": [{ "type": "m.room_membership", "room_id": "!room:example.com" }],
+            "extra": "discard me"
+        }
+    });
+
+    let redacted = redact_json(&pdu, "8");
+    assert_eq!(redacted["content"]["join_rule"], "restricted");
+    assert_eq!(redacted["content"]["allow"], pdu["content"]["allow"]);
+    assert!(redacted["content"].get("extra").is_none());
+    assert_eq!(reference_hash(&pdu, "8"), reference_hash(&redacted, "8"));
+}
+
 /// Coverage: `split_redaction_content`'s complement of
 /// `redaction_preserved_keys(All, ..)`. `m.room.create` preserves all of
 /// `content` in v11+, so `redactable_content` must be empty and

@@ -631,7 +631,7 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> Redacti
             }
         }
         crate::basespec::event_types::M_ROOM_JOIN_RULES => {
-            if ver_num >= 9 {
+            if ver_num >= 8 {
                 RedactionRule::Keys(&["join_rule", "allow"])
             } else {
                 RedactionRule::Keys(&["join_rule"])
