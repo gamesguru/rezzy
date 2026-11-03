@@ -967,7 +967,7 @@ impl BucketExchange {
 /// Finds the request a failed bucket was submitted under, then retries or
 /// splits it. Shared by [`BucketExchange::advance`] and
 /// [`ReconciliationClient::transition_bucket_batch`].
-fn retry_failed_bucket(
+pub(crate) fn retry_failed_bucket(
     previous_requests: &[BucketRequest],
     depth: u8,
     prefix: u64,
