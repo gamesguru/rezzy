@@ -100,7 +100,11 @@ diagonal $i = j$. The pairing information is discarded at encode time.
 To preserve pairing algebraically, the payload must be coupled to the locator
 **at encode time** via cross-moments:
 $$S_k^{(0)} = \sum_{x \in \mathcal{S}} q_{0, x}^k \quad (\text{odd } k)$$
-$$S_k^{(m)} = \sum_{x \in \mathcal{S}} q_{m, x} \cdot q_{0, x}^k \quad (m \in \{1, 2, 3\}, \; k = 0 \dots C-1)$$
+
+$$
+S_k^{(m)} = \sum_{x \in \mathcal{S}} q_{m, x} \cdot q_{0, x}^k
+\quad (m \in \{1, 2, 3\}, \; k = 0 \dots C-1)
+$$
 
 ### The Threat Model: Cancellation vs. Recovery
 
