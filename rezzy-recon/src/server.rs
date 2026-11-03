@@ -16,8 +16,10 @@ use crate::EventId;
 use super::{
     algebraic::SyndromeSketch,
     triage::{BucketRequest, NodeSummary},
-    AlgebraicError, ElementHash, EventIdFormat, RoomAccumulator, RoomEventIdKind, H64_TRIE_WIDTH,
+    AlgebraicError, ElementHash, EventIdFormat, FixedWindowElementHash, RoomAccumulator,
+    RoomEventIdKind, H64_TRIE_WIDTH,
 };
+use crate::gf256::Gf256Sketch;
 
 /// Read-only helper over a pre-sorted `h64` index.
 ///
@@ -332,6 +334,136 @@ pub fn build_bucket_sketches(
     Ok(sketches)
 }
 
+/// In-memory population retaining the full digest required by
+/// `algebraic_v2_gf256`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FixedWindowPopulation {
+    bucket_keys: Vec<u64>,
+    elements: Vec<FixedWindowElementHash>,
+}
+
+impl FixedWindowPopulation {
+    /// Sorts full digests by their fixed big-endian placement key.
+    ///
+    /// # Errors
+    /// Returns `ZeroSketchElement` if a digest is all zero, which is outside
+    /// the `PinSketch` element universe for this profile.
+    pub fn new(elements: Vec<FixedWindowElementHash>) -> Result<Self, AlgebraicError> {
+        if elements
+            .iter()
+            .any(|element| element.sketch_element() == crate::gf256::Gf256::ZERO)
+        {
+            return Err(AlgebraicError::ZeroSketchElement);
+        }
+        let mut elements = elements;
+        elements.sort_unstable_by_key(|element| element.bucket_key());
+        let bucket_keys = elements
+            .iter()
+            .map(|element| element.bucket_key())
+            .collect();
+        Ok(Self {
+            bucket_keys,
+            elements,
+        })
+    }
+
+    /// Number of retained full digests.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.elements.len()
+    }
+
+    /// Whether this population is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
+
+    fn bucket_range(&self, request: &BucketRequest) -> core::ops::Range<usize> {
+        H64Index::new(&self.bucket_keys).bucket_range_unchecked(request)
+    }
+
+    /// Builds one GF(2^256) sketch for each validated bucket request.
+    ///
+    /// # Errors
+    /// Returns an error for malformed requests, invalid capacities, or a
+    /// sketch element outside the nonzero field-element universe.
+    pub fn bucket_sketches(
+        &self,
+        requests: &[BucketRequest],
+    ) -> Result<Vec<Gf256Sketch>, AlgebraicError> {
+        build_gf256_bucket_sketches(self, requests)
+    }
+
+    /// Builds full-field sketches with the existing per-node count/residual.
+    ///
+    /// # Errors
+    /// Returns an error for malformed requests, invalid capacities, or a
+    /// sketch element outside the nonzero field-element universe.
+    pub fn bucket_nodes(
+        &self,
+        requests: &[BucketRequest],
+    ) -> Result<Vec<(Gf256Sketch, NodeSummary)>, AlgebraicError> {
+        build_gf256_bucket_nodes(self, requests)
+    }
+}
+
+/// Builds GF(2^256) full-digest sketches for localized bucket requests.
+///
+/// The population must be indexed by `FixedWindowPopulation`; this cannot be
+/// derived from `SortedPopulation`, which has already discarded digest bytes.
+///
+/// # Errors
+/// Returns an error when requests are invalid or a capacity is unsupported.
+pub fn build_gf256_bucket_sketches(
+    population: &FixedWindowPopulation,
+    requests: &[BucketRequest],
+) -> Result<Vec<Gf256Sketch>, AlgebraicError> {
+    crate::triage::validate_adaptive_bucket_requests(requests)?;
+    let mut sketches = Vec::with_capacity(requests.len());
+    for request in requests {
+        let mut sketch = Gf256Sketch::new(request.capacity)?;
+        for element in &population.elements[population.bucket_range(request)] {
+            sketch.toggle(element.sketch_element())?;
+        }
+        sketches.push(sketch);
+    }
+    Ok(sketches)
+}
+
+/// Builds GF(2^256) full-digest sketches and matching existing node summaries.
+///
+/// # Errors
+/// Returns an error when requests are invalid or a capacity is unsupported.
+pub fn build_gf256_bucket_nodes(
+    population: &FixedWindowPopulation,
+    requests: &[BucketRequest],
+) -> Result<Vec<(Gf256Sketch, NodeSummary)>, AlgebraicError> {
+    crate::triage::validate_adaptive_bucket_requests(requests)?;
+    let mut nodes = Vec::with_capacity(requests.len());
+    for request in requests {
+        let range = population.bucket_range(request);
+        let mut sketch = Gf256Sketch::new(request.capacity)?;
+        let mut summary_count = 0_u64;
+        let mut summary_digest = 0_u128;
+        for element in &population.elements[range] {
+            sketch.toggle(element.sketch_element())?;
+            summary_count = summary_count
+                .checked_add(1)
+                .ok_or(AlgebraicError::CountOverflow)?;
+            summary_digest ^= element.residual();
+        }
+        nodes.push((
+            sketch,
+            NodeSummary {
+                count: summary_count,
+                digest: summary_digest,
+            },
+        ));
+    }
+    Ok(nodes)
+}
+
 /// A population sorted by `(h64, h128)`, with the two columns kept aligned.
 ///
 /// Building it from [`ElementHash`]es sorts once, so a node's elements are a
@@ -557,6 +689,40 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
     use core::fmt;
+
+    #[test]
+    fn fixed_window_bucket_builder_uses_big_endian_prefixes_and_full_elements() {
+        let mut in_bucket = [0_u8; 32];
+        in_bucket[..8].copy_from_slice(&0x1200_0000_0000_1234_u64.to_be_bytes());
+        in_bucket[8..16].copy_from_slice(&7_u64.to_be_bytes());
+        in_bucket[31] = 1;
+        let mut other_bucket = [0_u8; 32];
+        other_bucket[..8].copy_from_slice(&0x9200_0000_0000_1234_u64.to_be_bytes());
+        other_bucket[31] = 2;
+        let population = FixedWindowPopulation::new(vec![
+            FixedWindowElementHash::from_digest32(other_bucket),
+            FixedWindowElementHash::from_digest32(in_bucket),
+        ])
+        .unwrap();
+        let request = BucketRequest::new(8, 0x12, 4);
+        let built = population.bucket_nodes(&[request]).unwrap();
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].0.capacity(), 4);
+        assert_eq!(built[0].1.count, 1);
+        assert_eq!(built[0].1.digest, 1);
+        assert_eq!(
+            built[0].0.coordinates()[0],
+            FixedWindowElementHash::from_digest32(in_bucket).sketch_element()
+        );
+    }
+
+    #[test]
+    fn fixed_window_population_rejects_zero_digest() {
+        assert_eq!(
+            FixedWindowPopulation::new(vec![FixedWindowElementHash::from_digest32([0; 32])]),
+            Err(AlgebraicError::ZeroSketchElement)
+        );
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
     struct MockId(String);

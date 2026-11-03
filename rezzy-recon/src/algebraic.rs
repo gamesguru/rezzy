@@ -78,6 +78,8 @@ pub enum AlgebraicError {
     BudgetExhausted,
     /// An event hashed to the reserved zero short identifier.
     ZeroShortIdentifier,
+    /// The all-zero 256-bit digest is outside the `PinSketch` element universe.
+    ZeroSketchElement,
     /// A bucket depth or prefix is out of range.
     InvalidBucketIndex,
     /// The event count overflowed.
@@ -158,6 +160,28 @@ impl FixedWindowElementHash {
     #[must_use]
     pub const fn from_digest32(digest: [u8; 32]) -> Self {
         Self { digest }
+    }
+
+    /// Derives the fixed-window element from a Matrix event ID.
+    ///
+    /// # Errors
+    /// Returns an error when the ID is invalid or does not contain a 32-byte
+    /// reference hash.
+    pub fn from_matrix_event_id(
+        event_id: &str,
+        format: EventIdFormat,
+    ) -> Result<Self, AlgebraicError> {
+        ElementHash::matrix_event_digest32(event_id, format).map(Self::from_digest32)
+    }
+
+    /// Derives the fixed-window element from a Matrix event ID when the room
+    /// version's base64 alphabet is not known at the call site.
+    ///
+    /// # Errors
+    /// Returns an error when the ID is invalid under both supported alphabets.
+    pub fn from_matrix_event_id_any(event_id: &str) -> Result<Self, AlgebraicError> {
+        Self::from_matrix_event_id(event_id, EventIdFormat::V4Plus)
+            .or_else(|_| Self::from_matrix_event_id(event_id, EventIdFormat::V3))
     }
 
     /// Returns the original digest bytes.

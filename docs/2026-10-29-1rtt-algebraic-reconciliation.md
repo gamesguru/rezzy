@@ -523,9 +523,10 @@ short-ID sketch ([Erlay paper](https://nt4tn.net/papers/ccs19-erlay.pdf)).
 **Implementation status.** `rezzy-recon::profile` now defines the profile
 identifiers, `allow`/`prefer`/`require` selection, a session-pinned profile
 value, and a versioned header that validates profile, capacity, and exact
-payload length. These are protocol primitives only. The transport's capability
-exchange, signed request field, TLS-authenticated response echo, and
-profile-aware bucket construction/extraction are still pending; until those are
-wired, production reconciliation continues to use the existing v1 path. The
-header magic and encoding are an implementation proposal and must be checked
-against the eventual transport envelope before this profile is published.
+payload length. `FixedWindowPopulation` and `Gf256Sketch` can build bucket
+sketches and extract a full-digest symmetric difference. The existing MSC0501
+client state machine and network adapter still use v1; transport capability
+exchange, the signed request field, the TLS-authenticated response echo, and
+end-to-end profile selection remain to be wired. The header magic and encoding
+are an implementation proposal and must be checked against the eventual
+transport envelope before this profile is published.

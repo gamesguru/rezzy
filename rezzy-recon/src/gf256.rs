@@ -16,7 +16,7 @@
 
 use crate::binary_field::BinaryField;
 use crate::pinsketch::QuadraticSolver;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 
 /// Element of GF(2^256) in the fixed four-limb polynomial basis.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
@@ -96,6 +96,178 @@ impl Gf256 {
 /// to reuse the quadratic solver, including in `no_std` environments.
 pub struct Gf256Decoder {
     quadratic_solver: QuadraticSolver<Gf256>,
+}
+
+/// A `PinSketch` over full 256-bit digest elements.
+///
+/// The element set is GF(2^256) without zero. Coordinates are serialized as
+/// consecutive little-endian 32-byte field elements.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Gf256Sketch {
+    coordinates: Vec<Gf256>,
+}
+
+impl Gf256Sketch {
+    /// Creates an empty sketch of the requested capacity.
+    ///
+    /// # Errors
+    /// Returns `InvalidSketchCapacity` for zero or a capacity above 256.
+    pub fn new(capacity: usize) -> Result<Self, crate::algebraic::AlgebraicError> {
+        if capacity == 0 || capacity > crate::MAX_OVERFLOW_SKETCH_CAPACITY {
+            return Err(crate::algebraic::AlgebraicError::InvalidSketchCapacity);
+        }
+        Ok(Self {
+            coordinates: vec![Gf256::ZERO; capacity],
+        })
+    }
+
+    /// Number of odd-power syndrome coordinates in this sketch.
+    #[must_use]
+    pub const fn capacity(&self) -> usize {
+        self.coordinates.len()
+    }
+
+    /// Odd-power syndrome coordinates.
+    pub fn coordinates(&self) -> &[Gf256] {
+        &self.coordinates
+    }
+
+    /// Inserts or removes one nonzero field element.
+    ///
+    /// # Errors
+    /// Returns `ZeroSketchElement` for the reserved all-zero digest element.
+    pub fn toggle(&mut self, value: Gf256) -> Result<(), crate::algebraic::AlgebraicError> {
+        if value == Gf256::ZERO {
+            return Err(crate::algebraic::AlgebraicError::ZeroSketchElement);
+        }
+        let square = value.square();
+        let mut odd_power = value;
+        for coordinate in &mut self.coordinates {
+            *coordinate = BinaryField::add(*coordinate, odd_power);
+            odd_power = BinaryField::mul(odd_power, square);
+        }
+        Ok(())
+    }
+
+    /// XORs a same-capacity sketch into this one.
+    ///
+    /// # Errors
+    /// Returns `InvalidSketchLength` when capacities differ.
+    pub fn xor(&mut self, other: &Self) -> Result<(), crate::algebraic::AlgebraicError> {
+        if self.capacity() != other.capacity() {
+            return Err(crate::algebraic::AlgebraicError::InvalidSketchLength);
+        }
+        for (left, right) in self.coordinates.iter_mut().zip(&other.coordinates) {
+            *left = BinaryField::add(*left, *right);
+        }
+        Ok(())
+    }
+
+    /// Returns the symmetric-difference sketch of two equal-capacity sets.
+    ///
+    /// # Errors
+    /// Returns `InvalidSketchLength` when capacities differ.
+    pub fn subtract(&self, other: &Self) -> Result<Self, crate::algebraic::AlgebraicError> {
+        let mut residual = self.clone();
+        residual.xor(other)?;
+        Ok(residual)
+    }
+
+    /// Decodes the set difference represented by this sketch and re-encodes
+    /// every coordinate to verify the result.
+    ///
+    /// # Errors
+    /// Returns the decoder's error when the difference exceeds the requested
+    /// bound, is malformed, or exceeds its work budget.
+    pub fn decode_elements(
+        &self,
+        max_elements: usize,
+        decoder: &Gf256Decoder,
+    ) -> Result<Vec<Gf256>, crate::algebraic::AlgebraicError> {
+        if max_elements == 0 || max_elements > self.capacity() {
+            return Err(crate::algebraic::AlgebraicError::InvalidSketchCapacity);
+        }
+        if self.coordinates.iter().all(|value| *value == Gf256::ZERO) {
+            return Ok(Vec::new());
+        }
+        let roots = decoder.decode(&self.coordinates[..max_elements], max_elements)?;
+        if roots.len() > self.capacity() || roots.contains(&Gf256::ZERO) {
+            return Err(crate::algebraic::AlgebraicError::DecodeFailure);
+        }
+        let mut check = Self::new(self.capacity())?;
+        for root in roots.iter().copied() {
+            check.toggle(root)?;
+        }
+        if check == *self {
+            Ok(roots)
+        } else {
+            Err(crate::algebraic::AlgebraicError::DecodeFailure)
+        }
+    }
+
+    /// Decodes the digest bytes represented by this sketch.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::decode_elements`].
+    pub fn decode_digests(
+        &self,
+        max_elements: usize,
+        decoder: &Gf256Decoder,
+    ) -> Result<Vec<[u8; 32]>, crate::algebraic::AlgebraicError> {
+        self.decode_elements(max_elements, decoder)
+            .map(|elements| elements.into_iter().map(Gf256::to_le_bytes).collect())
+    }
+
+    /// Extracts the exact symmetric difference between two same-capacity
+    /// sketches as their original 32-byte digest values.
+    ///
+    /// Membership in the local set can then distinguish remote-only from
+    /// local-only elements.
+    ///
+    /// # Errors
+    /// Returns an error for unequal capacities or an undecodable residual.
+    pub fn extract_symmetric_difference(
+        local: &Self,
+        remote: &Self,
+        max_elements: usize,
+        decoder: &Gf256Decoder,
+    ) -> Result<Vec<[u8; 32]>, crate::algebraic::AlgebraicError> {
+        local
+            .subtract(remote)?
+            .decode_digests(max_elements, decoder)
+    }
+
+    /// Serializes the coordinate payload as little-endian 32-byte elements.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.capacity().saturating_mul(32));
+        for coordinate in &self.coordinates {
+            bytes.extend_from_slice(&coordinate.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// Parses a coordinate payload with the capacity supplied by its header.
+    ///
+    /// # Errors
+    /// Returns an error for zero/excessive capacity or a non-exact payload size.
+    pub fn from_bytes(
+        capacity: usize,
+        bytes: &[u8],
+    ) -> Result<Self, crate::algebraic::AlgebraicError> {
+        let mut sketch = Self::new(capacity)?;
+        let expected = capacity
+            .checked_mul(32)
+            .ok_or(crate::algebraic::AlgebraicError::InvalidSketchLength)?;
+        if bytes.len() != expected {
+            return Err(crate::algebraic::AlgebraicError::InvalidSketchLength);
+        }
+        for (coordinate, chunk) in sketch.coordinates.iter_mut().zip(bytes.chunks_exact(32)) {
+            *coordinate = Gf256::from_le_bytes(chunk)
+                .ok_or(crate::algebraic::AlgebraicError::InvalidSketchLength)?;
+        }
+        Ok(sketch)
+    }
 }
 
 impl Gf256Decoder {
@@ -320,7 +492,7 @@ impl BinaryField for Gf256 {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::{Gf256, Gf256Decoder, Wide};
+    use super::{Gf256, Gf256Decoder, Gf256Sketch, Wide};
     use crate::binary_field::BinaryField;
     use alloc::{vec, vec::Vec};
 
@@ -417,6 +589,44 @@ mod tests {
         ];
         assert_eq!(decoder.decode(&odd, expected.len()), Ok(expected.clone()));
         assert_eq!(decoder.decode(&odd, expected.len()), Ok(expected));
+    }
+
+    #[test]
+    fn full_digest_sketch_round_trips_and_extracts_symmetric_difference() {
+        let decoder = Gf256Decoder::build().expect("the fixed quadratic map is solvable");
+        let mut local = Gf256Sketch::new(4).unwrap();
+        let mut remote = Gf256Sketch::new(4).unwrap();
+        let one = Gf256::from_limbs([1, 0, 0, 0]);
+        let two = Gf256::from_limbs([2, 0, 0, 0]);
+        let three = Gf256::from_limbs([3, 0, 0, 0]);
+        local.toggle(one).unwrap();
+        local.toggle(two).unwrap();
+        remote.toggle(two).unwrap();
+        remote.toggle(three).unwrap();
+
+        let payload = remote.to_bytes();
+        let remote = Gf256Sketch::from_bytes(4, &payload).unwrap();
+        let mut expected = vec![one.to_le_bytes(), three.to_le_bytes()];
+        expected.sort_unstable();
+        let mut extracted =
+            Gf256Sketch::extract_symmetric_difference(&local, &remote, 4, &decoder).unwrap();
+        extracted.sort_unstable();
+        assert_eq!(extracted, expected);
+        assert_eq!(payload.len(), 4 * 32);
+        assert_eq!(Gf256Sketch::from_bytes(4, &payload).unwrap(), remote);
+    }
+
+    #[test]
+    fn full_digest_sketch_rejects_zero_element_and_wrong_payload_size() {
+        let mut sketch = Gf256Sketch::new(1).unwrap();
+        assert_eq!(
+            sketch.toggle(Gf256::ZERO),
+            Err(crate::algebraic::AlgebraicError::ZeroSketchElement)
+        );
+        assert_eq!(
+            Gf256Sketch::from_bytes(1, &[0; 31]),
+            Err(crate::algebraic::AlgebraicError::InvalidSketchLength)
+        );
     }
 
     #[test]
