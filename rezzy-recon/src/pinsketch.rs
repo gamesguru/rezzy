@@ -17,11 +17,6 @@ const FIELD_BITS: usize = 64;
 const MIXED_FACTOR_TRIALS: usize = 8;
 const FACTOR_TRIALS: usize = MIXED_FACTOR_TRIALS + FIELD_BITS;
 const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
-// Only the test-only reference `trace_mod` still uses this directly; the
-// production path (`build_frobenius_basis`) derives the same round count
-// from `FIELD_BITS - 1`.
-#[cfg(test)]
-const TRACE_SQUARES: usize = 63;
 // KNOWN GAP, still open: this covers observed *balanced* recursive
 // splitting, not a proven worst-case recursion bound.
 //
@@ -289,12 +284,12 @@ fn poly_square<F: BinaryField>(poly: &mut Polynomial<F>) -> Option<()> {
 /// pair's doc comments). Kept as a test-only cross-check that the
 /// precomputed path computes the same trace.
 #[cfg(test)]
-fn trace_mod(modulus: &[u64], parameter: u64) -> Option<Polynomial<u64>> {
-    let mut trace = vec![0, parameter];
-    for _ in 0..TRACE_SQUARES {
+fn trace_mod<F: BinaryField>(modulus: &[F], parameter: F) -> Option<Polynomial<F>> {
+    let mut trace = vec![F::ZERO, parameter];
+    for _ in 1..F::BITS {
         poly_square(&mut trace)?;
         if trace.len() < 2 {
-            trace.resize(2, 0);
+            trace.resize(2, F::ZERO);
         }
         trace[1] = parameter;
         poly_mod(modulus, &mut trace)?;
@@ -303,7 +298,7 @@ fn trace_mod(modulus: &[u64], parameter: u64) -> Option<Polynomial<u64>> {
 }
 
 /// One-time-per-polynomial precomputation consumed by `trace_from_basis`:
-/// the images `X^(2^0), X^(2^1), ..., X^(2^63) mod modulus`.
+/// the images `X^(2^0), X^(2^1), ..., X^(2^(BITS-1)) mod modulus`.
 ///
 /// Squaring is GF(2)-linear in characteristic 2 (`(a+b)^2 = a^2+b^2`), so
 /// `(parameter*X)^(2^i) = parameter^(2^i) * X^(2^i)` -- the trace
@@ -316,12 +311,12 @@ fn trace_mod(modulus: &[u64], parameter: u64) -> Option<Polynomial<u64>> {
 /// `O(FIELD_BITS * degree)` for the linear combination, leaving only the
 /// unavoidable `O(degree^2)` GCD/division per trial. See
 /// `frobenius_basis_cost` and `factor_trial_cost_with_basis`.
-fn build_frobenius_basis(modulus: &[u64]) -> Option<Vec<Polynomial<u64>>> {
-    let mut basis = Vec::with_capacity(FIELD_BITS);
-    let mut current = vec![0, 1]; // X
+fn build_frobenius_basis<F: BinaryField>(modulus: &[F]) -> Option<Vec<Polynomial<F>>> {
+    let mut basis = Vec::with_capacity(F::BITS);
+    let mut current = vec![F::ZERO, F::ONE]; // X
     poly_mod(modulus, &mut current)?;
     basis.push(current.clone());
-    for _ in 1..FIELD_BITS {
+    for _ in 1..F::BITS {
         poly_square(&mut current)?;
         poly_mod(modulus, &mut current)?;
         basis.push(current.clone());
@@ -331,17 +326,17 @@ fn build_frobenius_basis(modulus: &[u64]) -> Option<Vec<Polynomial<u64>>> {
 
 /// Computes `Tr(parameter * X) mod modulus` from a basis built by
 /// `build_frobenius_basis` for the same `modulus`.
-fn trace_from_basis(basis: &[Polynomial<u64>], parameter: u64) -> Polynomial<u64> {
+fn trace_from_basis<F: BinaryField>(basis: &[Polynomial<F>], parameter: F) -> Polynomial<F> {
     let width = basis.iter().map(Vec::len).max().unwrap_or(0);
-    let mut trace = vec![0_u64; width];
+    let mut trace = vec![F::ZERO; width];
     let mut power = parameter;
     for basis_term in basis {
-        if power != 0 {
+        if power != F::ZERO {
             for (coefficient, term) in trace.iter_mut().zip(basis_term.iter()) {
-                *coefficient ^= gf64_mul(power, *term);
+                *coefficient = coefficient.add(power.mul(*term));
             }
         }
-        power = gf64_mul(power, power);
+        power = power.mul(power);
     }
     trim(&mut trace);
     trace
