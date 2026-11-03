@@ -17,11 +17,48 @@
 pub(crate) trait BinaryField: Copy + Eq {
     /// Extension degree `m` of GF(2^m).
     const BITS: usize;
+    /// Serialized width in bytes, little-endian.
+    const BYTES: usize = Self::BITS.div_ceil(8);
+    /// Type returned by [`BinaryField::to_le_bytes`].
+    type Bytes: AsRef<[u8]>;
     const ZERO: Self;
     const ONE: Self;
 
     fn add(self, other: Self) -> Self;
     fn mul(self, other: Self) -> Self;
+
+    /// `self * self`. Override when a field has a cheaper dedicated squaring.
+    #[inline]
+    fn square(self) -> Self {
+        self.mul(self)
+    }
+
+    /// Field element with only bit `index` set, or `None` when `index` is
+    /// outside `0..BITS`. These are the GF(2) basis vectors used by the
+    /// quadratic solver and the Frobenius trial parameters.
+    fn bit(index: usize) -> Option<Self>;
+
+    /// Embeds `value` in the low 64 bits. Profiles are at least 64 bits, so
+    /// this is lossless for the deterministic trial seed.
+    fn from_u64(value: u64) -> Self {
+        debug_assert!(Self::BYTES >= 8, "from_u64 needs a 64-bit-wide field");
+        <Self as BinaryField>::from_le_bytes(&value.to_le_bytes())
+            .expect("an eight-byte prefix always fits")
+    }
+
+    /// Reads bit `index` of the little-endian representation.
+    fn test_bit(self, index: usize) -> bool {
+        let bytes = self.to_le_bytes();
+        let bytes = bytes.as_ref();
+        bytes
+            .get(index / 8)
+            .is_some_and(|byte| byte & (1 << (index % 8)) != 0)
+    }
+
+    fn to_le_bytes(self) -> Self::Bytes;
+
+    /// Parses exactly [`Self::BYTES`] bytes; `None` on any other length.
+    fn from_le_bytes(bytes: &[u8]) -> Option<Self>;
 
     /// `target[i] += term * source[i]` for every coefficient. The default is
     /// a scalar loop; a field may override it with a wider multiply-accumulate
@@ -52,6 +89,8 @@ pub(crate) trait BinaryField: Copy + Eq {
 /// GF(2^64) in the MSC4521 representation.
 impl BinaryField for u64 {
     const BITS: usize = 64;
+    const BYTES: usize = 8;
+    type Bytes = [u8; 8];
     const ZERO: Self = 0;
     const ONE: Self = 1;
 
@@ -63,6 +102,25 @@ impl BinaryField for u64 {
     #[inline]
     fn mul(self, other: Self) -> Self {
         crate::gf64::mul(self, other)
+    }
+
+    #[inline]
+    fn bit(index: usize) -> Option<Self> {
+        (index < <Self as BinaryField>::BITS).then(|| 1_u64 << index)
+    }
+
+    #[inline]
+    fn to_le_bytes(self) -> Self::Bytes {
+        self.to_le_bytes()
+    }
+
+    #[inline]
+    fn from_le_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::BYTES {
+            return None;
+        }
+        let bytes: [u8; 8] = bytes.try_into().ok()?;
+        Some(Self::from_le_bytes(bytes))
     }
 
     #[inline]

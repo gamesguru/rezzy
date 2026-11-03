@@ -9,13 +9,12 @@ use alloc::{vec, vec::Vec};
 
 use crate::binary_field::BinaryField;
 
-use super::algebraic::{gf64_mul, AlgebraicError};
+use super::algebraic::AlgebraicError;
 
 type Polynomial<F> = Vec<F>;
 
 const FIELD_BITS: usize = 64;
 const MIXED_FACTOR_TRIALS: usize = 8;
-const FACTOR_TRIALS: usize = MIXED_FACTOR_TRIALS + FIELD_BITS;
 const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 // KNOWN GAP, still open: this covers observed *balanced* recursive
 // splitting, not a proven worst-case recursion bound.
@@ -40,6 +39,87 @@ const FACTOR_PARAMETER_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 // practical inputs, while the absolute worst-case bound remains an open gap.
 const MAX_FACTOR_WORK: usize = 16_000_000;
 
+/// Work-cost model for one field width. The formulas are the existing
+/// GF(2^64) model generalized from `FIELD_BITS` to `bits`; the GF(2^64)
+/// instance reproduces the historical constants exactly.
+#[derive(Clone, Copy)]
+pub(crate) struct WorkModel {
+    bits: usize,
+    mixed_trials: usize,
+    max_factor_work: usize,
+}
+
+impl WorkModel {
+    pub(crate) const GF64: Self = Self {
+        bits: FIELD_BITS,
+        mixed_trials: MIXED_FACTOR_TRIALS,
+        max_factor_work: MAX_FACTOR_WORK,
+    };
+
+    pub(crate) const fn max_factor_work(self) -> usize {
+        self.max_factor_work
+    }
+
+    const fn factor_trials(self) -> Option<usize> {
+        self.bits.checked_add(self.mixed_trials)
+    }
+
+    /// One-time cost of `build_frobenius_basis` for a degree-`degree`
+    /// polynomial: `BITS - 1` squaring+reduce rounds, each `O(degree^2)`.
+    const fn frobenius_basis_cost(self, degree: usize) -> Option<usize> {
+        let Some(squared) = degree.checked_mul(degree) else {
+            return None;
+        };
+        let Some(rounds) = self.bits.checked_sub(1) else {
+            return None;
+        };
+        squared.checked_mul(rounds)
+    }
+
+    /// Per-trial cost once the node's Frobenius basis is already built:
+    /// `O(BITS * degree)` for the trace linear combination, plus
+    /// `O(degree^2)` for `poly_gcd`.
+    const fn factor_trial_cost_with_basis(self, degree: usize) -> Option<usize> {
+        let Some(trace_cost) = self.bits.checked_mul(degree) else {
+            return None;
+        };
+        let Some(gcd_cost) = degree.checked_mul(degree) else {
+            return None;
+        };
+        trace_cost.checked_add(gcd_cost)
+    }
+
+    /// Cost of `poly_div` on a successful split: `O(degree^2)`.
+    const fn split_cost(degree: usize) -> Option<usize> {
+        degree.checked_mul(degree)
+    }
+
+    /// Upper bound on one `find_roots_with_budget` call for a locator of
+    /// degree `degree`: the basis build plus a full trial ladder at that
+    /// degree, plus one split.
+    const fn single_call_work_ceiling(self, degree: usize) -> Option<usize> {
+        let Some(basis) = self.frobenius_basis_cost(degree) else {
+            return None;
+        };
+        let Some(per_trial) = self.factor_trial_cost_with_basis(degree) else {
+            return None;
+        };
+        let Some(trials) = self.factor_trials() else {
+            return None;
+        };
+        let Some(ladder) = per_trial.checked_mul(trials) else {
+            return None;
+        };
+        let Some(split) = Self::split_cost(degree) else {
+            return None;
+        };
+        let Some(subtotal) = basis.checked_add(ladder) else {
+            return None;
+        };
+        subtotal.checked_add(split)
+    }
+}
+
 pub(crate) fn decode(
     odd_syndromes: &[u64],
     max_elements: usize,
@@ -59,7 +139,7 @@ fn require_reencode<F: BinaryField>(
 ) -> Result<Vec<F>, AlgebraicError> {
     let mut check = vec![F::ZERO; odd_syndromes.len()];
     for &root in &roots {
-        let squared = root.mul(root);
+        let squared = root.square();
         let mut odd_power = root;
         for coordinate in &mut check {
             *coordinate = coordinate.add(odd_power);
@@ -186,6 +266,7 @@ fn berlekamp_massey<F: BinaryField>(syndromes: &[F], max_degree: usize) -> Optio
     (current.last().copied().unwrap_or(F::ZERO) != F::ZERO).then_some(current)
 }
 
+#[cfg(test)]
 fn gf64_inv(value: u64) -> Option<u64> {
     BinaryField::inv(value)
 }
@@ -246,6 +327,7 @@ fn poly_div<F: BinaryField>(mut dividend: Polynomial<F>, divisor: &[F]) -> Optio
     Some(quotient)
 }
 
+#[cfg(test)]
 fn poly_gcd<F: BinaryField>(
     mut left: Polynomial<F>,
     mut right: Polynomial<F>,
@@ -262,6 +344,39 @@ fn poly_gcd<F: BinaryField>(
     Some(left)
 }
 
+/// Reusable buffers for the trial loop's gcd. Returns only the degree (as a
+/// slice); the caller clones the factor only on the trial that splits.
+struct GcdWorkspace<F> {
+    left: Polynomial<F>,
+    right: Polynomial<F>,
+}
+
+impl<F: BinaryField> GcdWorkspace<F> {
+    const fn new() -> Self {
+        Self {
+            left: Vec::new(),
+            right: Vec::new(),
+        }
+    }
+
+    fn gcd(&mut self, dividend: &[F], divisor: &[F]) -> Option<&[F]> {
+        self.left.clear();
+        self.left.extend_from_slice(dividend);
+        self.right.clear();
+        self.right.extend_from_slice(divisor);
+        if self.left.len() < self.right.len() {
+            core::mem::swap(&mut self.left, &mut self.right);
+        }
+        while !self.right.is_empty() {
+            make_monic(&mut self.right)?;
+            poly_mod(&self.right, &mut self.left)?;
+            core::mem::swap(&mut self.left, &mut self.right);
+        }
+        make_monic(&mut self.left)?;
+        Some(&self.left)
+    }
+}
+
 fn poly_square<F: BinaryField>(poly: &mut Polynomial<F>) -> Option<()> {
     if poly.is_empty() {
         return Some(());
@@ -270,7 +385,7 @@ fn poly_square<F: BinaryField>(poly: &mut Polynomial<F>) -> Option<()> {
     let old = core::mem::take(poly);
     poly.resize(new_len, F::ZERO);
     for (target, coefficient) in (0..new_len).step_by(2).zip(old) {
-        poly[target] = coefficient.mul(coefficient);
+        poly[target] = coefficient.square();
     }
     Some(())
 }
@@ -326,9 +441,22 @@ fn build_frobenius_basis<F: BinaryField>(modulus: &[F]) -> Option<Vec<Polynomial
 
 /// Computes `Tr(parameter * X) mod modulus` from a basis built by
 /// `build_frobenius_basis` for the same `modulus`.
+#[cfg(test)]
 fn trace_from_basis<F: BinaryField>(basis: &[Polynomial<F>], parameter: F) -> Polynomial<F> {
+    let mut trace = Vec::new();
+    trace_from_basis_into(basis, parameter, &mut trace);
+    trace
+}
+
+/// [`trace_from_basis`] into a reusable buffer.
+fn trace_from_basis_into<F: BinaryField>(
+    basis: &[Polynomial<F>],
+    parameter: F,
+    trace: &mut Polynomial<F>,
+) {
     let width = basis.iter().map(Vec::len).max().unwrap_or(0);
-    let mut trace = vec![F::ZERO; width];
+    trace.clear();
+    trace.resize(width, F::ZERO);
     let mut power = parameter;
     for basis_term in basis {
         if power != F::ZERO {
@@ -336,10 +464,9 @@ fn trace_from_basis<F: BinaryField>(basis: &[Polynomial<F>], parameter: F) -> Po
                 *coefficient = coefficient.add(power.mul(*term));
             }
         }
-        power = power.mul(power);
+        power = power.square();
     }
-    trim(&mut trace);
-    trace
+    trim(trace);
 }
 
 const fn next_factor_parameter(mut state: u64) -> u64 {
@@ -348,65 +475,83 @@ const fn next_factor_parameter(mut state: u64) -> u64 {
     state ^ (state << 17)
 }
 
-fn solve_quadratic_form(target: u64) -> Option<u64> {
-    // Solve the GF(2)-linear map z -> z^2 + z using a reduced 64x65 matrix.
-    #[derive(Clone, Copy)]
+fn solve_quadratic_form<F: BinaryField>(target: F) -> Option<F> {
+    // Solve the GF(2)-linear map z -> z^2 + z using a BITS x BITS matrix.
+    // Rows are bitsets of columns, one u64 word per 64 columns.
+    #[derive(Clone)]
     struct Row {
-        coefficients: u64,
+        coefficients: Vec<u64>,
         rhs: bool,
     }
 
-    let mut rows = [Row {
-        coefficients: 0,
-        rhs: false,
-    }; 64];
-    for column in 0..64 {
-        let basis = 1_u64 << column;
-        let image = gf64_mul(basis, basis) ^ basis;
+    let bits = F::BITS;
+    let words = bits.div_ceil(64);
+    let mut rows = vec![
+        Row {
+            coefficients: vec![0; words],
+            rhs: false,
+        };
+        bits
+    ];
+    for column in 0..bits {
+        let basis = F::bit(column)?;
+        let image = basis.square().add(basis);
         for (row, equation) in rows.iter_mut().enumerate() {
-            if image & (1_u64 << row) != 0 {
-                equation.coefficients |= 1_u64 << column;
+            if image.test_bit(row) {
+                equation.coefficients[column / 64] |= 1_u64 << (column % 64);
             }
         }
     }
     for (row, equation) in rows.iter_mut().enumerate() {
-        if target & (1_u64 << row) != 0 {
+        if target.test_bit(row) {
             equation.rhs = true;
         }
     }
 
     let mut rank = 0;
-    for column in 0..64 {
-        let pivot = (rank..64).find(|row| rows[*row].coefficients & (1_u64 << column) != 0);
-        let Some(pivot) = pivot else { continue };
+    for column in 0..bits {
+        let word = column / 64;
+        let mask = 1_u64 << (column % 64);
+        let Some(pivot) = (rank..bits).find(|&row| rows[row].coefficients[word] & mask != 0) else {
+            continue;
+        };
         rows.swap(rank, pivot);
-        let pivot_row = rows[rank];
+        let pivot_row = rows[rank].clone();
         for (row, equation) in rows.iter_mut().enumerate() {
-            if row != rank && equation.coefficients & (1_u64 << column) != 0 {
-                equation.coefficients ^= pivot_row.coefficients;
+            if row != rank && equation.coefficients[word] & mask != 0 {
+                for (coefficient, pivot_coefficient) in equation
+                    .coefficients
+                    .iter_mut()
+                    .zip(&pivot_row.coefficients)
+                {
+                    *coefficient ^= *pivot_coefficient;
+                }
                 equation.rhs ^= pivot_row.rhs;
             }
         }
         rank = rank.checked_add(1)?;
     }
-    if rows.iter().any(|row| row.coefficients == 0 && row.rhs) {
+    if rows
+        .iter()
+        .any(|row| row.coefficients.iter().all(|&word| word == 0) && row.rhs)
+    {
         return None;
     }
-    let mut solution = 0_u64;
+    let mut solution = F::ZERO;
     for row in rows.iter().take(rank) {
-        if row.coefficients == 0 {
-            return None;
-        }
-        let pivot = row.coefficients.trailing_zeros();
+        let word = row.coefficients.iter().position(|&word| word != 0)?;
+        let column = word
+            .checked_mul(64)?
+            .checked_add(row.coefficients[word].trailing_zeros() as usize)?;
         if row.rhs {
-            solution |= 1_u64 << pivot;
+            solution = solution.add(F::bit(column)?);
         }
     }
-    (gf64_mul(solution, solution) ^ solution == target).then_some(solution)
+    (solution.square().add(solution) == target).then_some(solution)
 }
 
 fn find_roots(poly: Polynomial<u64>, roots: &mut Vec<u64>) -> Result<(), AlgebraicError> {
-    let mut work = MAX_FACTOR_WORK;
+    let mut work = WorkModel::GF64.max_factor_work();
     find_roots_with_budget(poly, roots, &mut work)
 }
 
@@ -414,14 +559,9 @@ fn find_roots(poly: Polynomial<u64>, roots: &mut Vec<u64>) -> Result<(), Algebra
 /// polynomial: `FIELD_BITS - 1` squaring+reduce rounds, each `O(degree^2)`
 /// -- the same per-round cost the naive `trace_mod` paid per trial, now
 /// paid once per recursion node instead.
+#[cfg(test)]
 const fn frobenius_basis_cost(degree: usize) -> Option<usize> {
-    let Some(squared) = degree.checked_mul(degree) else {
-        return None;
-    };
-    let Some(rounds) = FIELD_BITS.checked_sub(1) else {
-        return None;
-    };
-    squared.checked_mul(rounds)
+    WorkModel::GF64.frobenius_basis_cost(degree)
 }
 
 /// Per-trial cost once the node's Frobenius basis is already built:
@@ -435,20 +575,16 @@ const fn frobenius_basis_cost(degree: usize) -> Option<usize> {
 /// trial for work that never happened -- an average split takes ~3.7
 /// trials, so that wasted roughly 2.7x this term's cost of budget per
 /// node.)
+#[cfg(test)]
 const fn factor_trial_cost_with_basis(degree: usize) -> Option<usize> {
-    let Some(trace_cost) = FIELD_BITS.checked_mul(degree) else {
-        return None;
-    };
-    let Some(gcd_cost) = degree.checked_mul(degree) else {
-        return None;
-    };
-    trace_cost.checked_add(gcd_cost)
+    WorkModel::GF64.factor_trial_cost_with_basis(degree)
 }
 
 /// Cost of `poly_div` on a successful split: `O(degree^2)`. Charged once,
 /// only on the trial that actually splits -- see `factor_trial_cost_with_basis`.
+#[cfg(test)]
 const fn split_cost(degree: usize) -> Option<usize> {
-    degree.checked_mul(degree)
+    WorkModel::split_cost(degree)
 }
 
 /// Upper bound on the work one `find_roots_with_budget` call can need for a
@@ -466,24 +602,7 @@ const fn split_cost(degree: usize) -> Option<usize> {
 /// simply hit `BudgetExhausted` for its own allotment -- which is the
 /// intended outcome here, not a bug in this bound.
 pub(crate) const fn single_call_work_ceiling(degree: usize) -> Option<usize> {
-    let Some(basis) = frobenius_basis_cost(degree) else {
-        return None;
-    };
-    let Some(per_trial) = factor_trial_cost_with_basis(degree) else {
-        return None;
-    };
-    let Some(ladder) = per_trial.checked_mul(FACTOR_TRIALS) else {
-        return None;
-    };
-    // `split_cost` is charged at most once per node -- on the one trial
-    // (if any) that actually splits -- not per trial in the ladder.
-    let Some(split) = split_cost(degree) else {
-        return None;
-    };
-    let Some(subtotal) = basis.checked_add(ladder) else {
-        return None;
-    };
-    subtotal.checked_add(split)
+    WorkModel::GF64.single_call_work_ceiling(degree)
 }
 
 fn find_roots_with_budget(
@@ -491,7 +610,22 @@ fn find_roots_with_budget(
     roots: &mut Vec<u64>,
     work: &mut usize,
 ) -> Result<(), AlgebraicError> {
+    find_roots_with_model(poly, roots, work, WorkModel::GF64)
+}
+
+/// Field-generic root finder. The field width comes from `model`; the
+/// deterministic trial parameters are the historical u64 xorshift seeds for
+/// the mixed prefix, then `F::bit` for the Frobenius rounds, so the GF(2^64)
+/// sequence is unchanged.
+fn find_roots_with_model<F: BinaryField>(
+    poly: Polynomial<F>,
+    roots: &mut Vec<F>,
+    work: &mut usize,
+    model: WorkModel,
+) -> Result<(), AlgebraicError> {
     let mut pending = vec![poly];
+    let mut workspace = GcdWorkspace::new();
+    let mut trace = Vec::new();
     while let Some(poly) = pending.pop() {
         let degree = poly
             .len()
@@ -506,51 +640,57 @@ fn find_roots_with_budget(
         }
         if degree == 2 {
             let linear = poly[1];
-            if linear == 0 {
+            if linear == F::ZERO {
                 return Err(AlgebraicError::DecodeFailure);
             }
-            let inverse = gf64_inv(linear).ok_or(AlgebraicError::DecodeFailure)?;
-            let normalized = gf64_mul(poly[0], gf64_mul(inverse, inverse));
-            let root = gf64_mul(
-                solve_quadratic_form(normalized).ok_or(AlgebraicError::DecodeFailure)?,
-                linear,
-            );
+            let inverse = linear.inv().ok_or(AlgebraicError::DecodeFailure)?;
+            let normalized = poly[0].mul(inverse.mul(inverse));
+            let root = solve_quadratic_form(normalized)
+                .ok_or(AlgebraicError::DecodeFailure)?
+                .mul(linear);
             roots.push(root);
-            roots.push(root ^ linear);
+            roots.push(root.add(linear));
             continue;
         }
 
-        let basis_cost = frobenius_basis_cost(degree).ok_or(AlgebraicError::DecodeFailure)?;
+        let basis_cost = model
+            .frobenius_basis_cost(degree)
+            .ok_or(AlgebraicError::DecodeFailure)?;
         *work = work
             .checked_sub(basis_cost)
             .ok_or(AlgebraicError::BudgetExhausted)?;
         let basis = build_frobenius_basis(&poly).ok_or(AlgebraicError::DecodeFailure)?;
 
+        let trials = model.factor_trials().ok_or(AlgebraicError::DecodeFailure)?;
         let mut split = None;
-        let mut parameter = FACTOR_PARAMETER_SEED;
-        for trial in 0..FACTOR_TRIALS {
-            if trial >= MIXED_FACTOR_TRIALS {
+        let mut mixed_parameter = FACTOR_PARAMETER_SEED;
+        for trial in 0..trials {
+            let parameter = if trial >= model.mixed_trials {
                 let basis_bit = trial
-                    .checked_sub(MIXED_FACTOR_TRIALS)
+                    .checked_sub(model.mixed_trials)
                     .ok_or(AlgebraicError::DecodeFailure)?;
-                let basis_bit =
-                    u32::try_from(basis_bit).map_err(|_| AlgebraicError::DecodeFailure)?;
-                parameter = 1_u64
-                    .checked_shl(basis_bit)
-                    .ok_or(AlgebraicError::DecodeFailure)?;
-            }
-            let cost = factor_trial_cost_with_basis(degree).ok_or(AlgebraicError::DecodeFailure)?;
+                F::bit(basis_bit).ok_or(AlgebraicError::DecodeFailure)?
+            } else {
+                F::from_u64(mixed_parameter)
+            };
+            let cost = model
+                .factor_trial_cost_with_basis(degree)
+                .ok_or(AlgebraicError::DecodeFailure)?;
             *work = work
                 .checked_sub(cost)
                 .ok_or(AlgebraicError::BudgetExhausted)?;
-            let trace = trace_from_basis(&basis, parameter);
-            let factor = poly_gcd(poly.clone(), trace).ok_or(AlgebraicError::DecodeFailure)?;
+            trace_from_basis_into(&basis, parameter, &mut trace);
+            let factor = workspace
+                .gcd(&poly, &trace)
+                .ok_or(AlgebraicError::DecodeFailure)?;
             if factor.len() > 1 && factor.len() < poly.len() {
+                let factor = factor.to_vec();
                 // poly_div only runs on this, the one trial that actually
                 // splits -- charged separately from the per-trial cost
                 // above so trials that don't split aren't overcharged for
                 // division work they never performed.
-                let div_cost = split_cost(degree).ok_or(AlgebraicError::DecodeFailure)?;
+                let div_cost =
+                    WorkModel::split_cost(degree).ok_or(AlgebraicError::DecodeFailure)?;
                 *work = work
                     .checked_sub(div_cost)
                     .ok_or(AlgebraicError::BudgetExhausted)?;
@@ -558,8 +698,8 @@ fn find_roots_with_budget(
                 split = Some((factor, quotient));
                 break;
             }
-            if trial < MIXED_FACTOR_TRIALS {
-                parameter = next_factor_parameter(parameter);
+            if trial < model.mixed_trials {
+                mixed_parameter = next_factor_parameter(mixed_parameter);
             }
         }
         let (factor, quotient) = split.ok_or(AlgebraicError::DecodeFailure)?;
@@ -573,6 +713,145 @@ fn find_roots_with_budget(
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+    use crate::algebraic::gf64_mul;
+
+    /// Test-only GF(2^8) with the AES reduction polynomial
+    /// `x^8 + x^4 + x^3 + x + 1`. Small enough to brute-force roots.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct Gf8(u8);
+
+    impl BinaryField for Gf8 {
+        const BITS: usize = 8;
+        const BYTES: usize = 1;
+        type Bytes = [u8; 1];
+        const ZERO: Self = Self(0);
+        const ONE: Self = Self(1);
+
+        fn add(self, other: Self) -> Self {
+            Self(self.0 ^ other.0)
+        }
+
+        fn mul(self, other: Self) -> Self {
+            let mut a = self.0;
+            let mut b = other.0;
+            let mut product = 0_u8;
+            for _ in 0..8 {
+                if b & 1 != 0 {
+                    product ^= a;
+                }
+                let high = a & 0x80;
+                a <<= 1;
+                if high != 0 {
+                    a ^= 0x1b; // low byte of x^8 + x^4 + x^3 + x + 1
+                }
+                b >>= 1;
+            }
+            Self(product)
+        }
+
+        fn bit(index: usize) -> Option<Self> {
+            (index < <Self as BinaryField>::BITS).then(|| Self(1_u8 << index))
+        }
+
+        fn from_u64(value: u64) -> Self {
+            Self(u8::try_from(value & 0xff).expect("masked to eight bits"))
+        }
+
+        fn to_le_bytes(self) -> Self::Bytes {
+            [self.0]
+        }
+
+        fn from_le_bytes(bytes: &[u8]) -> Option<Self> {
+            (bytes.len() == 1).then(|| Self(bytes[0]))
+        }
+    }
+
+    fn gf8_poly_from_roots(roots: &[Gf8]) -> Vec<Gf8> {
+        let mut poly = vec![Gf8::ONE];
+        for &root in roots {
+            let len = poly.len().checked_add(1).expect("small test polynomial");
+            let mut next = vec![Gf8::ZERO; len];
+            for (index, coefficient) in poly.iter().enumerate() {
+                let next_index = index.checked_add(1).expect("small test polynomial");
+                next[index] = next[index].add(coefficient.mul(root));
+                next[next_index] = next[next_index].add(*coefficient);
+            }
+            poly = next;
+        }
+        poly
+    }
+
+    fn gf8_eval(poly: &[Gf8], point: Gf8) -> Gf8 {
+        poly.iter().rev().fold(Gf8::ZERO, |acc, &coefficient| {
+            acc.mul(point).add(coefficient)
+        })
+    }
+
+    fn gf8_brute_force_roots(poly: &[Gf8]) -> Vec<Gf8> {
+        (0..=u8::MAX)
+            .map(Gf8)
+            .filter(|&point| gf8_eval(poly, point) == Gf8::ZERO)
+            .collect()
+    }
+
+    fn gf8_work_model() -> WorkModel {
+        WorkModel {
+            bits: 8,
+            mixed_trials: MIXED_FACTOR_TRIALS,
+            max_factor_work: 1_000_000,
+        }
+    }
+
+    #[test]
+    fn gf8_inverse_round_trips() {
+        for value in 1..=u8::MAX {
+            let value = Gf8(value);
+            let inverse = value.inv().expect("non-zero");
+            assert_eq!(value.mul(inverse), Gf8::ONE);
+        }
+    }
+
+    #[test]
+    fn gf8_quadratic_solver_matches_trace() {
+        for target in 0..=u8::MAX {
+            let target = Gf8(target);
+            let mut trace = Gf8::ZERO;
+            let mut power = target;
+            for _ in 0..8 {
+                trace = trace.add(power);
+                power = power.square();
+            }
+            match solve_quadratic_form(target) {
+                Some(solution) => {
+                    assert_eq!(trace, Gf8::ZERO, "solvable target {target:?} has trace 1");
+                    assert_eq!(solution.square().add(solution), target);
+                }
+                None => assert_eq!(trace, Gf8::ONE, "unsolvable target {target:?} has trace 0"),
+            }
+        }
+    }
+
+    #[test]
+    fn gf8_root_finding_matches_brute_force() {
+        let cases: &[&[Gf8]] = &[
+            &[],
+            &[Gf8(1)],
+            &[Gf8(3), Gf8(5)],
+            &[Gf8(1), Gf8(2), Gf8(3)],
+            &[Gf8(1), Gf8(0x53), Gf8(0xa7), Gf8(0xff)],
+        ];
+        for roots in cases {
+            let poly = gf8_poly_from_roots(roots);
+            let mut expected = gf8_brute_force_roots(&poly);
+            let mut work = gf8_work_model().max_factor_work();
+            let mut found = Vec::new();
+            find_roots_with_model(poly, &mut found, &mut work, gf8_work_model())
+                .expect("GF(2^8) roots");
+            expected.sort_unstable_by_key(|root| root.0);
+            found.sort_unstable_by_key(|root| root.0);
+            assert_eq!(found, expected);
+        }
+    }
 
     /// Builds the odd `s1, s3, ...` syndromes for a set of field elements.
     fn odd_syndromes(elements: &[u64]) -> Vec<u64> {
