@@ -53,13 +53,13 @@ pseudorandom roots. Other adversarial factor shapes may exhaust the ceiling.
 
 The runnable release benchmark on the current host measured about 21 ns for
 multiplication and 16 ns for square; cached decode took 2.59 s for 256
-consecutive roots and 0.86 s for 256 pseudorandom roots. Earlier isolated
-probes measured 45 ns and 39 ns for multiply and square, showing that these
-microbenchmarks are host- and harness-sensitive. `Gf256::square` is a
-dedicated bit-spreading implementation followed by polynomial reduction; it
-does not fall back to multiplication. The full wide-field reconciliation
-profile is not yet wired into the existing MSC4521 `ElementHash` and
-bucket-exchange path.
+consecutive roots and 0.86 s for 256 pseudorandom roots. Earlier isolated probes
+measured 45 ns and 39 ns for multiply and square, then 29 ns and 18 ns after the
+reduce/square rewrite, showing that these microbenchmarks are host- and
+harness-sensitive. `Gf256::square` is a dedicated
+bit-spreading implementation followed by polynomial reduction; it does not fall
+back to multiplication. The full wide-field reconciliation profile is not yet
+wired into the existing MSC4521 `ElementHash` and bucket-exchange path.
 
 ---
 
@@ -181,7 +181,9 @@ The entire 32-byte digest is treated as an element of $\mathrm{GF}(2^{256})$.
 
 This ratio applies _before_ accounting for multi-limb multiplication overhead (4
 limbs vs. native 64-bit PCLMULQDQ / AVX-512). `MAX_BATCH_FACTOR_WORK` would
-increase from $\sim 36.7\text{M}$ to $\sim 345\text{M}$.
+increase from $\sim 36.7\text{M}$ to $\sim 345\text{M}$. The d = 256 entry is a
+model estimate: the measured consecutive case is 232.6M units, about 4.5x
+higher, so this table is a lower bound, not a budget calibration.
 
 ### Option B: Correlated Payload Moments (Interleaved Reed-Solomon)
 
@@ -328,44 +330,64 @@ reconciliation still requires the new profile's zero-element and wire rules.
 ### 8.3 Pinned GF(2^256) field profile
 
 The committed wide-field decoder pins the polynomial basis
-`x^256 + x^10 + x^5 + x^2 + 1`. Elements are four little-endian `u64`
-limbs, bit `i` is the coefficient of `x^i`, and the byte mapping is
-little-endian. The reduction polynomial is justified by Rabin's
-irreducibility test in the `binary_field` test module, next to a
-reducible-polynomial negative control.
+`x^256 + x^10 + x^5 + x^2 + 1`. Elements are four little-endian `u64` limbs, bit
+`i` is the coefficient of `x^i`, and the byte mapping is little-endian. The
+reduction polynomial is justified by Rabin's irreducibility test in the
+`binary_field` test module, next to a reducible-polynomial negative control.
 
-`MAX_FACTOR_WORK_GF256` is 300,000,000 work units. Release measurements
-for degree-256 inputs were 232,591,912 units for consecutive roots and
-36,127,278 for pseudorandom roots. This is a practical ceiling, not a
-proven worst case: the work model's full binary recursion bound is
-5,148,287,480 units (a chain of `(1, d-1)` splits maximizes the model),
-and constructing an input that reaches it is still open. Exhaustion
-returns `BudgetExhausted` and falls back to the non-algebraic path.
+`MAX_FACTOR_WORK_GF256` is 300,000,000 work units. Release measurements for
+degree-256 inputs were 232,591,912 units for consecutive roots and 36,127,278
+for pseudorandom roots. This is a practical ceiling, not a proven worst case:
+the work model's full binary recursion bound is 5,148,287,480 units (a chain of
+`(1, d-1)` splits maximizes the model), and constructing an input that reaches
+it is still open. Exhaustion returns `BudgetExhausted` and falls back to the
+non-algebraic path.
+
+At the calibration throughput of roughly 49M work units per second, the 232.6M
+consecutive case is about 4.8 s and the 36.1M random case about 0.7 s. The 300M
+ceiling therefore permits on the order of 6 s of decode CPU per attempt, and the
+5.15B model worst case would be about 105 s. That is a DoS surface: keep the
+ceiling per attempt and never scale it to the random-input measurement.
+
+The 6.4x consecutive-versus-random gap at F = 256 is not explained, and the
+F = 64 decoder does not show it. Do not extrapolate budgets from random roots
+until the gap is understood; the present ceiling is anchored on the structured
+case.
+
+The earlier analytical estimate for d = 256 was 51,380,224 units. The measured
+consecutive case is 232.6M, about 4.5x higher, so the model underestimates the
+number of splitting rounds, not only the per-multiply cost. Treat the analytical
+ratio table above as a lower bound.
 
 ### 8.4 Cost, latency and memory
 
-| Metric                          | Before                                                                                                                       | After                                                                                  |
-| :------------------------------ | :--------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------- |
-| ID-only sync latency            | 2 RTT                                                                                                                        | 1 RTT (one fewer RTT; not necessarily a 50% wall-clock drop)                           |
-| Event replication latency       | 2 RTT if ID and body are batched in phase 2; otherwise 3 RTT (sketch, IDs, bodies)                                           | 2 RTT (sketch, bodies); body fetch remains                                             |
-| Post-decode verification        | O(d·C) re-encode, O(d) count/residual, local classification (O(d log N) or amortized O(d)), plus candidate/ambiguity lookups | Same, minus the candidate map and ambiguity branches. Not O(1)                         |
-| Root finding work units         | 16,000,000 ceiling                                                                                                           | 300,000,000 practical ceiling; measured 232.6M consecutive, 36.1M random at d=256      |
-| Full decode wall clock          | —                                                                                                                            | ~2.8 s consecutive, ~0.9 s random at d=256 (release host)                              |
-| Wire per bucket sketch (C = 32) | 256 B                                                                                                                        | 1024 B                                                                                 |
-| Resident strata                 | 2048 B, F = 64                                                                                                               | unchanged                                                                              |
+| Metric                          | Before                                                                                                                       | After                                                                             |
+| :------------------------------ | :--------------------------------------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------- |
+| ID-only sync latency            | 2 RTT                                                                                                                        | 1 RTT (one fewer RTT; not necessarily a 50% wall-clock drop)                      |
+| Event replication latency       | 2 RTT if ID and body are batched in phase 2; otherwise 3 RTT (sketch, IDs, bodies)                                           | 2 RTT (sketch, bodies); body fetch remains                                        |
+| Post-decode verification        | O(d·C) re-encode, O(d) count/residual, local classification (O(d log N) or amortized O(d)), plus candidate/ambiguity lookups | Same, minus the candidate map and ambiguity branches. Not O(1)                    |
+| Root finding work units         | 16,000,000 ceiling                                                                                                           | 300,000,000 practical ceiling; measured 232.6M consecutive, 36.1M random at d=256 |
+| Full decode wall clock          | —                                                                                                                            | ~2.8 s consecutive, ~0.9 s random at d=256 (release host)                         |
+| Wire per bucket sketch (C = 32) | 256 B                                                                                                                        | 1024 B                                                                            |
+| Resident strata                 | 2048 B, F = 64                                                                                                               | unchanged                                                                         |
 
-The GF(2^256) implementation uses nine carry-less base multiplies via
-Karatsuba, followed by reduction. Its dedicated square spreads bits before
-reduction. In the current benchmark run these took about 21 ns and 16 ns per
-operation, respectively; earlier isolated probes measured 45 ns and 39 ns.
-These timings vary with host and harness.
+The GF(2^256) implementation uses nine carry-less base multiplies via Karatsuba,
+followed by reduction. Its dedicated square spreads bits before reduction. In
+the current benchmark run these took about 21 ns and 16 ns per operation,
+respectively; earlier isolated probes measured 45 ns and 39 ns, then 29 ns and
+18 ns after the reduce/square rewrite. These timings vary with host and harness.
 
-| Constant                 | Today      | Option A                                                              |
-| :----------------------- | :--------- | :-------------------------------------------------------------------- |
-| `MAX_FACTOR_WORK`        | 16,000,000 | 16,000,000 (GF(2^64) strata)                                          |
-| `MAX_FACTOR_WORK_GF256`  | n/a        | 300,000,000 practical; 5,148,287,480 model worst-case                 |
-| `MAX_BATCH_FACTOR_WORK`  | 36,700,160 | ~344,981,504 (128 x ceiling(32, F=256))                               |
-| `MAX_STRATA_FACTOR_WORK` | 1,458,176  | 1,458,176 (F=64, d=8)                                                 |
+| Constant                 | Today      | Option A                                              |
+| :----------------------- | :--------- | :---------------------------------------------------- |
+| `MAX_FACTOR_WORK`        | 16,000,000 | 16,000,000 (GF(2^64) strata)                          |
+| `MAX_FACTOR_WORK_GF256`  | n/a        | 300,000,000 practical; 5,148,287,480 model worst-case |
+| `MAX_BATCH_FACTOR_WORK`  | 36,700,160 | ~344,981,504 provisional; not re-derived for F=256    |
+| `MAX_STRATA_FACTOR_WORK` | 1,458,176  | 1,458,176 (F=64, d=8)                                 |
+
+`MAX_BATCH_FACTOR_WORK` is still the old F = 256 extrapolation and needs a
+measured re-derivation. The sketch-gated accumulator forgery bound has also not
+been re-derived for the wide-field profile; the table in §8.2 records it as
+open. Neither figure should be treated as a settled budget.
 
 Population memory (today `SortedPopulation` = `Vec<u64>` + `Vec<u128>` = 24
 B/elem):
@@ -394,8 +416,8 @@ B/elem):
    digest representation is implemented; use in the versioned reconciliation
    path remains pending.
 4. **Benchmarks:** a runnable suite entry covers GF(2^256) multiply, square,
-   full-ID set sketch construction, and cached decode at several degrees. Full-ID
-   extraction/exchange is pending production wiring. `benches/bench-results.csv`
-   remains GF(2^64)-only.
+   full-ID set sketch construction, and cached decode at several degrees.
+   Full-ID extraction/exchange is pending production wiring.
+   `benches/bench-results.csv` remains GF(2^64)-only.
 5. DX sketch: O(N) fingerprint filter; does not recover 256-bit IDs.
    Experimental comparison in `filter_spillover` only, not `triage`.
