@@ -8,7 +8,7 @@
 //! The representation is four little-endian `u64` limbs, with bit `i`
 //! representing the coefficient of `x^i`. Reduction uses the irreducible
 //! polynomial `x^256 + x^10 + x^5 + x^2 + 1`, verified by Rabin's test in
-//! [`crate::binary_field::tests`]. The little-endian limb/byte mapping is
+//! the `binary_field` test module. The little-endian limb/byte mapping is
 //! fixed by this profile. The current decoder ceiling is 300 million work
 //! units, based on release measurements of degree-256 consecutive roots
 //! (232.6M units) and pseudorandom roots (36.1M units). It is a practical
