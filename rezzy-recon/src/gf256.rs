@@ -40,7 +40,7 @@ impl Gf256 {
         self.0
     }
 
-    /// Parses exactly 32 little-endian bytes.
+    /// Parses exactly 32 little-endian bytes, returning `None` for any other length.
     #[must_use]
     pub fn from_le_bytes(bytes: &[u8]) -> Option<Self> {
         <Self as BinaryField>::from_le_bytes(bytes)
@@ -63,7 +63,9 @@ impl Gf256 {
         <Self as BinaryField>::inv(self)
     }
 
-    /// Decodes odd-power syndromes using the current GF(2^256) work ceiling.
+    /// Decodes odd-power syndromes (`s1`, `s3`, ...) into sorted, nonzero elements.
+    /// `max_elements` limits the degree of the recovered locator polynomial.
+    /// Uses the current GF(2^256) work ceiling.
     /// The ceiling is based on measured consecutive and pseudorandom degree-256
     /// inputs; adversarial factorization shapes can still exhaust it.
     /// In `no_std`, this convenience method rebuilds the quadratic solver;
@@ -279,7 +281,9 @@ impl Gf256Decoder {
         })
     }
 
-    /// Decodes odd-power syndromes with this decoder's cached quadratic solver.
+    /// Decodes odd-power syndromes (`s1`, `s3`, ...) into sorted, nonzero elements.
+    /// `max_elements` limits the degree of the recovered locator polynomial.
+    /// Uses this decoder's cached quadratic solver.
     ///
     /// # Errors
     /// Returns `DecodeFailure` for invalid or inconsistent syndromes and
