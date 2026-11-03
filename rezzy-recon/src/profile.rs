@@ -421,9 +421,7 @@ mod tests {
             Err(ProfileError::InvalidHeader)
         );
 
-        let mut zero_capacity = SketchHeader::new(Profile::AlgebraicV1, 8)
-            .unwrap()
-            .encode();
+        let mut zero_capacity = SketchHeader::new(Profile::AlgebraicV1, 8).unwrap().encode();
         zero_capacity[6..8].copy_from_slice(&0_u16.to_be_bytes());
         assert_eq!(
             SketchHeader::decode(&zero_capacity),
