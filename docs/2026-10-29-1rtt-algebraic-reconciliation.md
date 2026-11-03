@@ -51,12 +51,15 @@ work-unit ceiling is a practical limit, not a proven worst-case bound. Release
 probes observed 232.6M units for 256 consecutive roots and 36.1M for 256
 pseudorandom roots. Other adversarial factor shapes may exhaust the ceiling.
 
-GF(2^256) multiply and square probes measured about 45 ns/op and 39 ns/op,
-respectively, on the measured machine. `Gf256::square` is a dedicated
-bit-spreading implementation followed by polynomial reduction; it does not
-fall back to multiplication. These timings are machine-specific. The full
-wide-field reconciliation profile is not yet wired into the existing
-MSC4521 `ElementHash` and bucket-exchange path.
+The runnable release benchmark on the current host measured about 21 ns for
+multiplication and 16 ns for square; cached decode took 2.59 s for 256
+consecutive roots and 0.86 s for 256 pseudorandom roots. Earlier isolated
+probes measured 45 ns and 39 ns for multiply and square, showing that these
+microbenchmarks are host- and harness-sensitive. `Gf256::square` is a
+dedicated bit-spreading implementation followed by polynomial reduction; it
+does not fall back to multiplication. The full wide-field reconciliation
+profile is not yet wired into the existing MSC4521 `ElementHash` and
+bucket-exchange path.
 
 ---
 
@@ -306,8 +309,9 @@ element). Drop the `h64 == 0` guard from `ResidentKernel::insert`; bucket
 placement may use a zero prefix. Keep the zero-element rejection in
 `SyndromeSketch::toggle`, but apply it to the full 32-byte digest. The current
 first-non-zero scan makes `h64 | q3 | h128` disjoint only probabilistically;
-fixed windows make it strict. The `q3` field may be dropped once `ElementHash`
-stores the digest.
+fixed windows make it strict. `FixedWindowElementHash` now represents this
+mapping explicitly, separately from legacy `ElementHash`; using it in
+reconciliation still requires the new profile's zero-element and wire rules.
 
 ### 8.2 Collision and security surfaces
 
@@ -345,8 +349,10 @@ returns `BudgetExhausted` and falls back to the non-algebraic path.
 | ID-only sync latency            | 2 RTT                                                                                                                        | 1 RTT (one fewer RTT; not necessarily a 50% wall-clock drop)                           |
 | Event replication latency       | 2 RTT if ID and body are batched in phase 2; otherwise 3 RTT (sketch, IDs, bodies)                                           | 2 RTT (sketch, bodies); body fetch remains                                             |
 | Post-decode verification        | O(d·C) re-encode, O(d) count/residual, local classification (O(d log N) or amortized O(d)), plus candidate/ambiguity lookups | Same, minus the candidate map and ambiguity branches. Not O(1)                         |
-| Per-op field multiply           | ~1 base clmul + reduction                                                                                                    | ~9-16 base clmuls + reduction; measured ~29 ns multiply, ~18 ns square (release host)  |
+| Per-op field multiply           | ~1 base clmul + reduction                                                                                                    | 9 base clmuls via Karatsuba + reduction; ~22-29 ns/op in release probes (host-specific) |
+| Per-op field square             | No dedicated wide-field operation                                                                                            | Bit spreading + reduction; ~16-18 ns/op in release probes (host-specific)               |
 | Root finding work units         | 16,000,000 ceiling                                                                                                           | 300,000,000 practical ceiling; measured 232.6M consecutive, 36.1M random at d=256      |
+| Full decode wall clock          | —                                                                                                                            | ~2.8 s consecutive, ~0.9 s random at d=256 (release host)                              |
 | Wire per bucket sketch (C = 32) | 256 B                                                                                                                        | 1024 B                                                                                 |
 | Resident strata                 | 2048 B, F = 64                                                                                                               | unchanged                                                                              |
 
@@ -372,16 +378,20 @@ B/elem):
    functions: `FACTOR_TRIALS`, `TRACE_SQUARES`, `frobenius_basis_cost`,
    `factor_trial_cost_with_basis`, `solve_quadratic_form` and the hardcoded
    `MAX_FACTOR_WORK` all depend on `FIELD_BITS`. Use F = 256 for bucket sketches
-   and F = 64 for strata; do not set one global `FIELD_BITS = 256`. **Done** for
-   the field trait, work model and per-field ceilings; the full-ID sketch wiring
-   is still pending.
+   and F = 64 for strata; do not set one global `FIELD_BITS = 256`. **Decoder
+   genericization and the GF(2^256) field profile are implemented.** The
+   production full-ID sketch, bucket extraction and verification wiring remain
+   pending.
 2. Keep prefix bisection, capacity overflow, budgets, residual/count checks and
    the prefix-grinding policy. Delete `SortedPopulation::candidates`, ambiguity
    branches in `verify_decode`, collision-repeat tracking and phase-2
    `verify_follow_up` (fold its checks into local verification).
-3. Strata key stays `digest[8..16]`; never derive it from `h128`.
-4. Benches: add GF(2^256) multiply, full-ID toggle/decode/extraction/exchange,
-   and separate GF(2^64) strata benches. The 5-13x figure is analytical until
-   then. `benches/bench-results.csv` is GF(2^64)-only (last run 2026-10-13).
+3. Strata key stays `digest[8..16]`; never derive it from `h128`. Fixed-window
+   digest representation is implemented; use in the versioned reconciliation
+   path remains pending.
+4. **Benchmarks:** a runnable suite entry covers GF(2^256) multiply, square,
+   full-ID set sketch construction, and cached decode at several degrees. Full-ID
+   extraction/exchange is pending production wiring. `benches/bench-results.csv`
+   remains GF(2^64)-only.
 5. DX sketch: O(N) fingerprint filter; does not recover 256-bit IDs.
    Experimental comparison in `filter_spillover` only, not `triage`.
