@@ -431,37 +431,17 @@ B/elem):
 5. DX sketch: O(N) fingerprint filter; does not recover 256-bit IDs.
    Experimental comparison in `filter_spillover` only, not `triage`.
 
-### 8.6 `algebraic_gf256` profile
+### 8.6 `algebraic_gf256`
 
-**Name and status.** The wire identifier is `algebraic_gf256`, and the
-Rust variant is `Profile::AlgebraicGf256`. The profile is separate from
-`algebraic_v1`, not a revision of `algebraic_v1`. Its definition is immutable
-once advertised; any semantic change requires a new profile ID. A future
-standardization effort may choose a namespaced ID, but must assign it as a
-distinct identifier rather than renaming this one in place.
+`algebraic_gf256` is the sole bucket-sketch algorithm for the new full-digest
+reconciliation path. It replaces the GF(2^64) bucket sketch. There is no
+algorithm negotiation or fallback between sketch formats. This format has not
+been released, so its name has no version suffix. Use `algebraic_gf256` as a
+wire identifier if the transport needs an explicit format discriminator.
 
-**Negotiation and pinning.** Peers advertise supported profile IDs, then the
-initiator selects one profile before building sketches. `algebraic_v1` remains
-the default for ordinary event replication; `algebraic_gf256` is
-offered for ID-only reconciliation. Callers may allow
-`algebraic_gf256` without preferring it, prefer it when common, or
-require it and fail closed to the non-algebraic path if the peer lacks it.
-Falling back to `algebraic_v1` is permitted only when the caller accepts its
-collision-recovery semantics.
-Never silently downgrade after a decode failure. Put the selected profile ID in
-the signed request body on every exchange request; Matrix X-Matrix
-authentication covers the request method, URI, and body. The response must echo
-the selected ID, and the client must authenticate the TLS server and check that
-echo before accepting the payload. Pin one profile for the entire reconciliation
-session: no per-bucket or per-round switching. Unknown or mismatched IDs abort
-or use an explicitly selected fallback; they are never best-effort decoded.
-
-Pin one profile for the entire reconciliation exchange: no per-bucket or
-per-round switching. Different peers may use different profiles for the same
-room because each peer session negotiates independently. An aggregate multi-room
-sketch must use one profile throughout; split it if room policies select
-different profiles. If prefix splitting is needed, all child buckets remain on
-the selected profile.
+The field polynomial, element mapping, byte order, and syndrome encoding below
+define this format. A future incompatible format may receive another name if
+and when one exists.
 
 **1. Element mapping.** For room-version 3 and later, use the raw 32-byte
 base64-decoded event-ID digest: `Gf256::from_le_bytes(digest[0..32])`, with no
@@ -492,13 +472,12 @@ derived from the stored full digest.
 window interpretations are independent of the little-endian four-limb field
 interpretation of the complete digest.
 
-**5. Versioned header.** Include the profile ID, header version, and sketch
-capacity. The profile ID pins the field polynomial, element mapping, byte order,
-and syndrome format; capacity is checked against payload length. Every request
-must carry the selected ID in its X-Matrix-signed body, and the response must
-echo it over the authenticated TLS connection. A mismatched or unknown profile
-is rejected. Matrix federation authenticates requests with X-Matrix signatures
-and authenticates responses with the TLS server certificate
+**5. Wire framing.** Carry the algorithm identifier and capacity in the
+authenticated request body when the transport needs to distinguish this format
+from legacy sketches. Require the payload length to be exactly `32 * C`. This
+framing identifies one format; it does not negotiate alternatives. Matrix
+federation authenticates requests with X-Matrix signatures and responses with
+the TLS server certificate
 ([Server-Server API authentication](https://spec.matrix.org/latest/server-server-api/#authentication)).
 
 **6. Payload size.** The binary bucket payload is `32 * C` bytes: 1024 B at
@@ -510,9 +489,9 @@ work ceiling, and rate-limit costly overflow attempts. Do not raise
 `MAX_BATCH_FACTOR_WORK` from its old extrapolation without measured GF(2^256)
 re-derivation.
 
-**Performance and alternatives.** `algebraic_gf256` is not the fastest
-profile; it is the full-digest profile. Current measurements are about 22–29 ns
-per multiply, 16–18 ns per square, and 0.9–2.8 s for degree-256 decode, with
+**Performance and alternatives.** `algebraic_gf256` is not the fastest profile;
+it is the full-digest profile. Current measurements are about 22–29 ns per
+multiply, 16–18 ns per square, and 0.9–2.8 s for degree-256 decode, with
 substantial host and workload variation. PinSketch decoding is quadratic in the
 difference size, so keep ordinary buckets small and treat overflow as a bounded
 expensive path. A GF(2^128) correlated-payload design may be cheaper, but is not
@@ -522,13 +501,11 @@ equivalent full-ID profiles. Erlay uses per-link salted short transaction IDs
 and bisection/fallback handling; it does not recover full IDs from its initial
 short-ID sketch ([Erlay paper](https://nt4tn.net/papers/ccs19-erlay.pdf)).
 
-**Implementation status.** `rezzy-recon::profile` now defines the profile
-identifiers, `allow`/`prefer`/`require` selection, a session-pinned profile
-value, and a versioned header that validates profile, capacity, and exact
-payload length. `FixedWindowPopulation` and `Gf256Sketch` can build bucket
-sketches and extract a full-digest symmetric difference. The existing MSC0501
-client state machine and network adapter still use v1; transport capability
-exchange, the signed request field, the TLS-authenticated response echo, and
-end-to-end profile selection remain to be wired. The header magic and encoding
-are an implementation proposal and must be checked against the eventual
-transport envelope before this profile is published.
+**Implementation status.** `FixedWindowPopulation` and `Gf256Sketch` can build
+bucket sketches and extract a full-digest symmetric difference. The existing
+MSC0501 client state machine and network adapter still use the GF(2^64) bucket
+path; replacing it with the GF(2^256) path and wiring the payload into the
+transport remain pending. No profile negotiation is needed while only
+`algebraic_gf256` is supported. Keep a small format header only if the
+transport needs to reject legacy payloads explicitly; place it with wire
+framing, not in profile negotiation machinery.
