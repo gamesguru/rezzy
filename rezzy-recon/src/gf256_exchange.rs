@@ -83,9 +83,35 @@ impl Gf256BucketExchange {
     /// `capacity` coordinates.
     #[must_use]
     pub fn start(&mut self, capacity: usize) -> Gf256Action {
-        self.pending.clear();
+        self.reset();
         self.pending.push_back(BucketRequest::new(0, 0, capacity));
         self.drain_round()
+    }
+
+    /// Starts an exchange from a client-planned set of disjoint buckets.
+    ///
+    /// This connects summary-based client selection to the full-digest
+    /// exchange. The caller should pass the requests from
+    /// [`crate::Gf256ClientAction::BucketSketches`].
+    ///
+    /// # Errors
+    /// Returns an error if the initial request set is malformed or exceeds
+    /// the protocol's aggregate capacity.
+    pub fn start_with_requests(
+        &mut self,
+        requests: Vec<BucketRequest>,
+    ) -> Result<Gf256Action, AlgebraicError> {
+        validate_adaptive_bucket_requests(&requests)?;
+        self.reset();
+        self.pending.extend(requests);
+        Ok(self.drain_round())
+    }
+
+    fn reset(&mut self) {
+        self.pending.clear();
+        self.rounds_emitted = 0;
+        self.local_only.clear();
+        self.remote_only.clear();
     }
 
     /// Verifies a decoded round against both sides' node summaries and
@@ -127,7 +153,25 @@ impl Gf256BucketExchange {
             self.remote_only.extend_from_slice(node.remote_only());
         }
         for (depth, prefix) in batch.failed_buckets {
-            match retry_failed_bucket(requests, depth, prefix, 0, false, MAX_ROUND_JUMP) {
+            let Some(index) = requests
+                .iter()
+                .position(|request| request.depth == depth && request.prefix == prefix)
+            else {
+                return Err(AlgebraicError::InvalidBucketIndex);
+            };
+            // The absolute count difference is a lower bound on the
+            // symmetric-difference cardinality. Use it to size a retry; when
+            // it already exceeds the per-bucket ceiling, split immediately.
+            let count_delta = local[index].count.abs_diff(remote[index].count);
+            let force_split = count_delta > crate::triage::MAX_BUCKET_SKETCH_CAPACITY as u64;
+            match retry_failed_bucket(
+                requests,
+                depth,
+                prefix,
+                count_delta,
+                force_split,
+                MAX_ROUND_JUMP,
+            ) {
                 Ok(children) => self.pending.extend(children),
                 Err(_) => return Ok(Gf256Action::Fallback),
             }
@@ -239,9 +283,7 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::*;
-    use crate::{
-        decode_gf256_bucket_sketches, FixedWindowElementHash, FixedWindowPopulation, Gf256Decoder,
-    };
+    use crate::{FixedWindowElementHash, FixedWindowPopulation, Gf256Decoder};
 
     use crate::test_util::digest32 as digest;
 
@@ -262,9 +304,19 @@ mod tests {
         local_set: &[[u8; 32]],
         root_capacity: usize,
     ) -> (Vec<[u8; 32]>, Vec<[u8; 32]>, usize, bool) {
-        let decoder = Gf256Decoder::build().unwrap();
         let mut exchange = Gf256BucketExchange::default();
-        let mut action = exchange.start(root_capacity);
+        let action = exchange.start(root_capacity);
+        run_exchange_from_action(local, remote, local_set, exchange, action)
+    }
+
+    fn run_exchange_from_action(
+        local: &FixedWindowPopulation,
+        remote: &FixedWindowPopulation,
+        local_set: &[[u8; 32]],
+        mut exchange: Gf256BucketExchange,
+        mut action: Gf256Action,
+    ) -> (Vec<[u8; 32]>, Vec<[u8; 32]>, usize, bool) {
+        let decoder = Gf256Decoder::build().unwrap();
         let mut rounds = 0_usize;
         let mut saw_split = false;
         loop {
@@ -283,9 +335,15 @@ mod tests {
                     let local_summaries: Vec<_> = local_nodes.iter().map(|n| n.1).collect();
                     let diff =
                         subtract_gf256_payload(&local_sketches, &payload, &requests).unwrap();
-                    let batch =
-                        decode_gf256_bucket_sketches(&diff, &requests, 3_000_000_000, &decoder)
-                            .unwrap();
+                    let batch = crate::decode_gf256_bucket_sketches_with_summaries(
+                        &diff,
+                        &requests,
+                        &local_summaries,
+                        &remote_summaries,
+                        3_000_000_000,
+                        &decoder,
+                    )
+                    .unwrap();
                     action = exchange
                         .advance_verified(
                             batch,
@@ -341,6 +399,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn strata_underestimate_still_splits_and_recovers_full_digest_difference() {
+        use crate::{Gf256ClientAction, ReconciliationClient, RemoteDigest, ResidentKernel};
+
+        let local = population(0..40);
+        let remote = population(20..60);
+        let local_set: Vec<[u8; 32]> = (0..40).map(digest).collect();
+        let mut local_state = ResidentKernel::new();
+        let mut remote_state = ResidentKernel::new();
+        for seed in 0..40 {
+            local_state
+                .insert(FixedWindowElementHash::from_digest32(digest(seed)))
+                .unwrap();
+        }
+        for seed in 20..60 {
+            remote_state
+                .insert(FixedWindowElementHash::from_digest32(digest(seed)))
+                .unwrap();
+        }
+        let remote_summary = RemoteDigest {
+            digest: remote_state.accumulator().digest(),
+            known_event_count: remote_state.accumulator().known_event_count(),
+            // Deliberately under-estimate: the actual sets differ by 40
+            // elements, but the strata hint says zero.
+            strata: *local_state.strata(),
+            frame_matches: true,
+            has_unknown_extremity: false,
+        };
+        let Gf256ClientAction::BucketSketches { requests } =
+            ReconciliationClient::default().select_gf256_action(&local_state, remote_summary, 0)
+        else {
+            panic!("different summaries should select a bucket exchange");
+        };
+        assert!(requests
+            .iter()
+            .all(|request| request.capacity == crate::triage::MAX_BUCKET_SKETCH_CAPACITY));
+        assert_eq!(requests, alloc::vec![BucketRequest::new(0, 0, 32)]);
+        let mut exchange = Gf256BucketExchange::default();
+        let first = exchange.start_with_requests(requests).unwrap();
+        let (local_only, remote_only, rounds, _) =
+            run_exchange_from_action(&local, &remote, &local_set, exchange, first);
+        assert!(rounds >= 1);
+        let mut expected_local: Vec<_> = (0..20).map(digest).collect();
+        let mut expected_remote: Vec<_> = (40..60).map(digest).collect();
+        expected_local.sort_unstable();
+        expected_remote.sort_unstable();
+        assert_eq!(local_only, expected_local);
+        assert_eq!(remote_only, expected_remote);
+    }
+
+    #[test]
+    fn strata_overestimate_stays_bounded_and_recovers_full_digest_difference() {
+        use crate::{Gf256ClientAction, ReconciliationClient, RemoteDigest, ResidentKernel};
+
+        let local = population(0..20);
+        let remote = population(1..21);
+        let local_set: Vec<[u8; 32]> = (0..20).map(digest).collect();
+        let mut local_state = ResidentKernel::new();
+        let mut remote_state = ResidentKernel::new();
+        let mut inflated_strata = ResidentKernel::new();
+        for seed in 0..20 {
+            local_state
+                .insert(FixedWindowElementHash::from_digest32(digest(seed)))
+                .unwrap();
+        }
+        for seed in 1..21 {
+            remote_state
+                .insert(FixedWindowElementHash::from_digest32(digest(seed)))
+                .unwrap();
+        }
+        for seed in 1..=256 {
+            inflated_strata
+                .insert(FixedWindowElementHash::from_digest32(digest(seed + 10_000)))
+                .unwrap();
+        }
+        let remote_summary = RemoteDigest {
+            digest: remote_state.accumulator().digest(),
+            known_event_count: remote_state.accumulator().known_event_count(),
+            strata: *inflated_strata.strata(),
+            frame_matches: true,
+            has_unknown_extremity: false,
+        };
+        let Gf256ClientAction::BucketSketches { requests } = ReconciliationClient::default()
+            .allow_unlimited_delta()
+            .select_gf256_action(&local_state, remote_summary, 0)
+        else {
+            panic!("over-estimated strata should remain a bounded bucket plan");
+        };
+        assert!(requests.len() > 1);
+        assert!(requests
+            .iter()
+            .all(|request| request.capacity == crate::triage::MAX_BUCKET_SKETCH_CAPACITY));
+        assert_eq!(
+            requests.len(),
+            1_usize << requests[0].depth,
+            "requests must cover the entire key space at one depth"
+        );
+        let mut exchange = Gf256BucketExchange::default();
+        let first = exchange.start_with_requests(requests).unwrap();
+        let (local_only, remote_only, _, _) =
+            run_exchange_from_action(&local, &remote, &local_set, exchange, first);
+        assert_eq!(local_only, alloc::vec![digest(0)]);
+        assert_eq!(remote_only, alloc::vec![digest(20)]);
+    }
+
     /// The original 150/150 case: slow unoptimized, so run it in release.
     #[test]
     #[ignore = "stress: run with `cargo test --release -- --ignored`"]
@@ -365,7 +528,10 @@ mod tests {
         let sketches: Vec<_> = nodes.iter().map(|n| n.0.clone()).collect();
         let summaries: Vec<_> = nodes.iter().map(|n| n.1).collect();
         let diff = subtract_gf256_payload(&sketches, &payload, &requests).unwrap();
-        let batch = decode_gf256_bucket_sketches(&diff, &requests, 1_000_000, &decoder).unwrap();
+        let batch = crate::decode_gf256_bucket_sketches_with_summaries(
+            &diff, &requests, &summaries, &summaries, 0, &decoder,
+        )
+        .unwrap();
         let action = exchange
             .advance_verified(batch, &requests, &summaries, &summaries, |_| true)
             .unwrap();
@@ -376,6 +542,46 @@ mod tests {
                 remote_only: Vec::new()
             }
         );
+    }
+
+    #[test]
+    fn initial_planned_requests_are_validated_and_used() {
+        let mut exchange = Gf256BucketExchange::default();
+        let requests = alloc::vec![BucketRequest::new(1, 0, 32), BucketRequest::new(1, 1, 32)];
+        assert_eq!(
+            exchange.start_with_requests(requests.clone()).unwrap(),
+            Gf256Action::Request(requests)
+        );
+        assert_eq!(
+            exchange.start_with_requests(alloc::vec![BucketRequest::new(0, 0, 33)]),
+            Err(AlgebraicError::InvalidSketchCapacity)
+        );
+    }
+
+    #[test]
+    fn count_difference_above_capacity_splits_without_retry() {
+        let request = BucketRequest::new(0, 0, 32);
+        let batch = Gf256BucketDecodeBatch {
+            successful_buckets: Vec::new(),
+            failed_buckets: alloc::vec![(0, 0)],
+        };
+        let local = [NodeSummary {
+            count: 80,
+            digest: 0,
+        }];
+        let remote = [NodeSummary {
+            count: 0,
+            digest: 0,
+        }];
+        let action = Gf256BucketExchange::default()
+            .advance_verified(batch, &[request], &local, &remote, |_| false)
+            .unwrap();
+        let Gf256Action::Request(children) = action else {
+            panic!("count lower bound should lead to child buckets");
+        };
+        assert!(children
+            .iter()
+            .all(|child| { child.depth > request.depth && child.capacity <= 32 }));
     }
 
     #[test]

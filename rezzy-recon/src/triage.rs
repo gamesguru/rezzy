@@ -599,8 +599,41 @@ pub struct Gf256BucketDecodeBatch {
 pub fn decode_gf256_bucket_sketches(
     encoded: &[u8],
     requests: &[BucketRequest],
+    budget: usize,
+    decoder: &Gf256Decoder,
+) -> Result<Gf256BucketDecodeBatch, AlgebraicError> {
+    decode_gf256_bucket_sketches_inner(encoded, requests, budget, decoder, None)
+}
+
+/// Decodes a GF(2^256) batch while skipping buckets whose actual local and
+/// remote node summaries are equal. Skipped buckets produce an empty success
+/// outcome, which is checked against those summaries by the batch verifier.
+/// The strata estimate does not participate in this decision.
+///
+/// # Errors
+/// Returns the same errors as [`decode_gf256_bucket_sketches`], and
+/// [`AlgebraicError::InvalidSketchLength`] if either summary slice is not
+/// aligned with `requests`.
+pub fn decode_gf256_bucket_sketches_with_summaries(
+    encoded: &[u8],
+    requests: &[BucketRequest],
+    local: &[NodeSummary],
+    remote: &[NodeSummary],
+    budget: usize,
+    decoder: &Gf256Decoder,
+) -> Result<Gf256BucketDecodeBatch, AlgebraicError> {
+    if local.len() != requests.len() || remote.len() != requests.len() {
+        return Err(AlgebraicError::InvalidSketchLength);
+    }
+    decode_gf256_bucket_sketches_inner(encoded, requests, budget, decoder, Some((local, remote)))
+}
+
+fn decode_gf256_bucket_sketches_inner(
+    encoded: &[u8],
+    requests: &[BucketRequest],
     mut budget: usize,
     decoder: &Gf256Decoder,
+    summaries: Option<(&[NodeSummary], &[NodeSummary])>,
 ) -> Result<Gf256BucketDecodeBatch, AlgebraicError> {
     validate_adaptive_bucket_requests(requests)?;
 
@@ -615,8 +648,17 @@ pub fn decode_gf256_bucket_sketches(
     let ceiling = Gf256Decoder::per_sketch_work_ceiling();
     let mut payload = PayloadCursor::new(encoded);
     let mut batch = Gf256BucketDecodeBatch::default();
-    for request in requests {
+    for (index, request) in requests.iter().enumerate() {
         let bytes = payload.take(request.capacity, 32)?;
+
+        if summaries.is_some_and(|(local, remote)| local[index] == remote[index]) {
+            batch.successful_buckets.push(Gf256BucketDecodeSuccess {
+                depth: request.depth,
+                prefix: request.prefix,
+                digests: Vec::new(),
+            });
+            continue;
+        }
 
         let sketch = Gf256Sketch::from_bytes(request.capacity, bytes)?;
         let allowance = budget.min(ceiling);
@@ -1232,6 +1274,24 @@ mod tests {
         let batch =
             decode_gf256_bucket_sketches(&encoded, &[BucketRequest::new(0, 0, 4)], 0, &decoder)
                 .unwrap();
+        assert_eq!(batch.successful_buckets.len(), 1);
+        assert!(batch.successful_buckets[0].digests.is_empty());
+    }
+
+    #[test]
+    fn gf256_batch_skips_decode_when_node_summaries_match() {
+        let decoder = Gf256Decoder::build().unwrap();
+        let requests = [BucketRequest::new(0, 0, 4)];
+        let summary = [NodeSummary {
+            count: 10,
+            digest: 0x1234,
+        }];
+        let (encoded, _) = gf256_payload(4, &[1]);
+        let batch = decode_gf256_bucket_sketches_with_summaries(
+            &encoded, &requests, &summary, &summary, 0, &decoder,
+        )
+        .unwrap();
+        assert!(batch.failed_buckets.is_empty());
         assert_eq!(batch.successful_buckets.len(), 1);
         assert!(batch.successful_buckets[0].digests.is_empty());
     }

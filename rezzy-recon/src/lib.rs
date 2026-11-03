@@ -56,8 +56,8 @@ pub use algebraic::{
     MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_OVERFLOW_SKETCH_CAPACITY, MAX_SKETCH_CAPACITY,
 };
 pub use client::{
-    should_narrow, BucketExchange, ClientAction, ReconciliationClient, RemoteDigest,
-    MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
+    should_narrow, BucketExchange, ClientAction, Gf256ClientAction, ReconciliationClient,
+    RemoteDigest, MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
 };
 pub use gf256::{Gf256, Gf256Decoder, Gf256Sketch};
 pub use gf256_exchange::{subtract_gf256_payload, Gf256Action, Gf256BucketExchange};
@@ -72,11 +72,12 @@ pub use server::{
     SortedPopulation,
 };
 pub use triage::{
-    bucket_prefix, decode_bucket_sketches, decode_gf256_bucket_sketches, estimate_strata,
-    recommended_bucket_decode_budget, validate_overflow_bucket_requests, BucketDecodeBatch,
-    BucketDecodeSuccess, BucketRequest, Gf256BucketDecodeBatch, Gf256BucketDecodeSuccess,
-    NodeSummary, StrataEstimate, MAX_BATCH_FACTOR_WORK, MAX_BUCKETED_SKETCH_CAPACITY,
-    MAX_OVERFLOW_BUCKET_CAPACITY, MAX_STRATA_FACTOR_WORK, NODE_SUMMARY_LEN,
+    bucket_prefix, decode_bucket_sketches, decode_gf256_bucket_sketches,
+    decode_gf256_bucket_sketches_with_summaries, estimate_strata, recommended_bucket_decode_budget,
+    validate_overflow_bucket_requests, BucketDecodeBatch, BucketDecodeSuccess, BucketRequest,
+    Gf256BucketDecodeBatch, Gf256BucketDecodeSuccess, NodeSummary, StrataEstimate,
+    MAX_BATCH_FACTOR_WORK, MAX_BUCKETED_SKETCH_CAPACITY, MAX_OVERFLOW_BUCKET_CAPACITY,
+    MAX_STRATA_FACTOR_WORK, NODE_SUMMARY_LEN,
 };
 pub use verify::{
     verify_batch, verify_decode, verify_follow_up, verify_gf256_batch, verify_gf256_decode,
