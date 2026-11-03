@@ -21,7 +21,7 @@ pub enum Profile {
     /// MSC4521's legacy GF(2^64) short-ID sketch.
     AlgebraicV1,
     /// Full-digest GF(2^256) sketch with fixed digest windows.
-    AlgebraicGf256FixedV1,
+    AlgebraicGf256V1,
 }
 
 impl Profile {
@@ -30,14 +30,14 @@ impl Profile {
     pub const fn wire_id(self) -> &'static str {
         match self {
             Self::AlgebraicV1 => "algebraic_v1",
-            Self::AlgebraicGf256FixedV1 => "algebraic_gf256_fixed_v1",
+            Self::AlgebraicGf256V1 => "algebraic_gf256_v1",
         }
     }
 
     const fn wire_id_len(self) -> u8 {
         match self {
             Self::AlgebraicV1 => 12,
-            Self::AlgebraicGf256FixedV1 => 24,
+            Self::AlgebraicGf256V1 => 18,
         }
     }
 
@@ -46,8 +46,8 @@ impl Profile {
     pub fn from_wire_id(id: &[u8]) -> Option<Self> {
         if id == Self::AlgebraicV1.wire_id().as_bytes() {
             Some(Self::AlgebraicV1)
-        } else if id == Self::AlgebraicGf256FixedV1.wire_id().as_bytes() {
-            Some(Self::AlgebraicGf256FixedV1)
+        } else if id == Self::AlgebraicGf256V1.wire_id().as_bytes() {
+            Some(Self::AlgebraicGf256V1)
         } else {
             None
         }
@@ -72,7 +72,7 @@ impl Profile {
         }
         let bytes_per_coordinate = match self {
             Self::AlgebraicV1 => 8,
-            Self::AlgebraicGf256FixedV1 => 32,
+            Self::AlgebraicGf256V1 => 32,
         };
         capacity
             .checked_mul(bytes_per_coordinate)
@@ -136,15 +136,15 @@ impl PinnedProfile {
             ProfilePolicy::Allow => {
                 if supports(Profile::AlgebraicV1) {
                     Some(Profile::AlgebraicV1)
-                } else if supports(Profile::AlgebraicGf256FixedV1) {
-                    Some(Profile::AlgebraicGf256FixedV1)
+                } else if supports(Profile::AlgebraicGf256V1) {
+                    Some(Profile::AlgebraicGf256V1)
                 } else {
                     None
                 }
             }
             ProfilePolicy::Prefer => {
-                if supports(Profile::AlgebraicGf256FixedV1) {
-                    Some(Profile::AlgebraicGf256FixedV1)
+                if supports(Profile::AlgebraicGf256V1) {
+                    Some(Profile::AlgebraicGf256V1)
                 } else if supports(Profile::AlgebraicV1) {
                     Some(Profile::AlgebraicV1)
                 } else {
@@ -152,7 +152,7 @@ impl PinnedProfile {
                 }
             }
             ProfilePolicy::Require => {
-                supports(Profile::AlgebraicGf256FixedV1).then_some(Profile::AlgebraicGf256FixedV1)
+                supports(Profile::AlgebraicGf256V1).then_some(Profile::AlgebraicGf256V1)
             }
         };
         selected.map(Self).ok_or(ProfileError::NoCommonProfile)
@@ -301,18 +301,18 @@ impl SketchHeader {
 mod tests {
     use super::*;
 
-    const PROFILES: [Profile; 2] = [Profile::AlgebraicV1, Profile::AlgebraicGf256FixedV1];
+    const PROFILES: [Profile; 2] = [Profile::AlgebraicV1, Profile::AlgebraicGf256V1];
 
     #[test]
     fn policy_selects_profile_independent_of_advertisement_order() {
-        let reversed = [Profile::AlgebraicGf256FixedV1, Profile::AlgebraicV1];
+        let reversed = [Profile::AlgebraicGf256V1, Profile::AlgebraicV1];
         assert_eq!(
             PinnedProfile::negotiate(&PROFILES, &reversed, ProfilePolicy::Allow).unwrap(),
             PinnedProfile(Profile::AlgebraicV1)
         );
         assert_eq!(
             PinnedProfile::negotiate(&PROFILES, &reversed, ProfilePolicy::Prefer).unwrap(),
-            PinnedProfile(Profile::AlgebraicGf256FixedV1)
+            PinnedProfile(Profile::AlgebraicGf256V1)
         );
         assert_eq!(
             PinnedProfile::negotiate(&PROFILES, &[Profile::AlgebraicV1], ProfilePolicy::Require),
@@ -321,12 +321,12 @@ mod tests {
         assert_eq!(
             PinnedProfile::negotiate(
                 &PROFILES,
-                &[Profile::AlgebraicGf256FixedV1],
+                &[Profile::AlgebraicGf256V1],
                 ProfilePolicy::Require
             )
             .unwrap()
             .profile(),
-            Profile::AlgebraicGf256FixedV1
+            Profile::AlgebraicGf256V1
         );
     }
 
@@ -337,13 +337,13 @@ mod tests {
             Profile::AlgebraicV1.wire_id().len()
         );
         assert_eq!(
-            usize::from(Profile::AlgebraicGf256FixedV1.wire_id_len()),
-            Profile::AlgebraicGf256FixedV1.wire_id().len()
+            usize::from(Profile::AlgebraicGf256V1.wire_id_len()),
+            Profile::AlgebraicGf256V1.wire_id().len()
         );
-        let header = SketchHeader::new(Profile::AlgebraicGf256FixedV1, 32).unwrap();
+        let header = SketchHeader::new(Profile::AlgebraicGf256V1, 32).unwrap();
         assert_eq!(SketchHeader::decode(&header.encode()), Ok(header));
-        assert_eq!(Profile::AlgebraicGf256FixedV1.payload_len(32), Ok(1024));
-        assert_eq!(Profile::AlgebraicGf256FixedV1.payload_len(256), Ok(8192));
+        assert_eq!(Profile::AlgebraicGf256V1.payload_len(32), Ok(1024));
+        assert_eq!(Profile::AlgebraicGf256V1.payload_len(256), Ok(8192));
         assert_eq!(header.validate_payload(&[0; 1024]), Ok(()));
         assert_eq!(
             header.validate_payload(&[0; 1023]),
@@ -387,12 +387,12 @@ mod tests {
             );
         }
         assert_eq!(Profile::AlgebraicV1.payload_len(8), Ok(64));
-        assert_eq!(Profile::AlgebraicGf256FixedV1.payload_len(8), Ok(256));
+        assert_eq!(Profile::AlgebraicGf256V1.payload_len(8), Ok(256));
     }
 
     #[test]
     fn malformed_headers_and_payload_lengths_are_rejected() {
-        let good = SketchHeader::new(Profile::AlgebraicGf256FixedV1, 32)
+        let good = SketchHeader::new(Profile::AlgebraicGf256V1, 32)
             .unwrap()
             .encode();
 
@@ -429,7 +429,7 @@ mod tests {
             Err(ProfileError::InvalidCapacity)
         );
 
-        let header = SketchHeader::new(Profile::AlgebraicGf256FixedV1, 16).unwrap();
+        let header = SketchHeader::new(Profile::AlgebraicGf256V1, 16).unwrap();
         assert_eq!(
             header.validate_payload(&[0; 1024]),
             Err(ProfileError::PayloadLengthMismatch)
@@ -438,12 +438,12 @@ mod tests {
 
     #[test]
     fn allow_selects_gf256_only_when_v1_is_unavailable() {
-        let only_gf256 = [Profile::AlgebraicGf256FixedV1];
+        let only_gf256 = [Profile::AlgebraicGf256V1];
         assert_eq!(
             PinnedProfile::negotiate(&only_gf256, &only_gf256, ProfilePolicy::Allow)
                 .unwrap()
                 .profile(),
-            Profile::AlgebraicGf256FixedV1
+            Profile::AlgebraicGf256V1
         );
         assert_eq!(
             PinnedProfile::negotiate(&PROFILES, &PROFILES, ProfilePolicy::Allow)
