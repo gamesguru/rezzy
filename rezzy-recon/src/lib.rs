@@ -24,7 +24,6 @@ pub mod gf256;
 pub mod gf64;
 pub mod gf64_simd;
 mod pinsketch;
-pub mod profile;
 pub mod resident;
 pub mod server;
 pub mod triage;
@@ -58,7 +57,6 @@ pub use client::{
     MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
 };
 pub use gf256::{Gf256, Gf256Decoder, Gf256Sketch};
-pub use profile::{PinnedProfile, Profile, ProfileError, ProfilePolicy, SketchHeader};
 pub use resident::{
     decode_strata, encode_strata, ResidentKernel, RESIDENT_FORMAT_VERSION, RESIDENT_SERIALIZED_LEN,
     STRATA_COUNT, STRATUM_CAPACITY,

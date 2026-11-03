@@ -18,6 +18,9 @@ use crate::binary_field::BinaryField;
 use crate::pinsketch::QuadraticSolver;
 use alloc::{vec, vec::Vec};
 
+/// Identifier of the full-digest GF(2^256) bucket-sketch algorithm.
+pub const PROFILE_ID: &str = "algebraic_gf256";
+
 /// Element of GF(2^256) in the fixed four-limb polynomial basis.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 #[must_use]
