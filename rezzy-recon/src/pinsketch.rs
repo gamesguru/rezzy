@@ -223,7 +223,7 @@ fn prepare_locator<F: BinaryField>(
     Ok(Some((locator, expected)))
 }
 
-/// Validates the root count and distinctness, then returns them sorted.
+/// Rejects an incorrect root count or zero roots, then returns the roots sorted.
 fn finalize_roots<F: BinaryField + Ord>(
     mut roots: Vec<F>,
     expected: usize,
