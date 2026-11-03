@@ -27,6 +27,8 @@ pub mod gf64_simd;
 mod pinsketch;
 pub mod resident;
 pub mod server;
+#[cfg(test)]
+mod test_util;
 pub mod triage;
 pub mod verify;
 

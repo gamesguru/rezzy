@@ -524,9 +524,12 @@ pub fn check_auth<E: EventLike>(
 
 /// Check whether `event` is authorized given the room state at its `prev_events`,
 /// validating `auth_events` rules (2.1–2.4) against an optional
-/// [`EventProvider`] when the event reaches those checks. Create events and
-/// matching-domain `m.room.aliases` events in room versions 1–5 return earlier;
-/// state resolution version V2.2 skips these `auth_events` checks.
+/// [`EventProvider`] when the event reaches those checks. Create events return
+/// before the `auth_events` checks. Matching-domain `m.room.aliases` events in
+/// room versions 1–5 run those checks first when an [`EventProvider`] is
+/// supplied and `version` is not V2.2, then return before the generic
+/// sender-membership and power-level rules. V2.2 skips the `auth_events`
+/// checks.
 ///
 /// # Errors
 ///
