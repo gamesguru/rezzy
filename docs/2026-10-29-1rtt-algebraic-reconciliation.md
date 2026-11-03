@@ -51,15 +51,15 @@ work-unit ceiling is a practical limit, not a proven worst-case bound. Release
 probes observed 232.6M units for 256 consecutive roots and 36.1M for 256
 pseudorandom roots. Other adversarial factor shapes may exhaust the ceiling.
 
-The runnable release benchmark on the current host measured about 21 ns for
-multiplication and 16 ns for square; cached decode took 2.59 s for 256
-consecutive roots and 0.86 s for 256 pseudorandom roots. Earlier isolated probes
+The runnable release benchmark on the current host measured about 22 ns for
+multiplication and 16 ns for square; cached decode took 2.76 s for 256
+consecutive roots and 0.90 s for 256 pseudorandom roots. Earlier isolated probes
 measured 45 ns and 39 ns for multiply and square, then 29 ns and 18 ns after the
 reduce/square rewrite, showing that these microbenchmarks are host- and
-harness-sensitive. `Gf256::square` is a dedicated
-bit-spreading implementation followed by polynomial reduction; it does not fall
-back to multiplication. The full wide-field reconciliation profile is not yet
-wired into the existing MSC4521 `ElementHash` and bucket-exchange path.
+harness-sensitive. `Gf256::square` is a dedicated bit-spreading implementation
+followed by polynomial reduction; it does not fall back to multiplication. The
+full wide-field reconciliation profile is not yet wired into the existing
+MSC4521 `ElementHash` and bucket-exchange path.
 
 ---
 
@@ -343,16 +343,22 @@ the work model's full binary recursion bound is 5,148,287,480 units (a chain of
 it is still open. Exhaustion returns `BudgetExhausted` and falls back to the
 non-algebraic path.
 
-At the calibration throughput of roughly 49M work units per second, the 232.6M
-consecutive case is about 4.8 s and the 36.1M random case about 0.7 s. The 300M
-ceiling therefore permits on the order of 6 s of decode CPU per attempt, and the
-5.15B model worst case would be about 105 s. That is a DoS surface: keep the
-ceiling per attempt and never scale it to the random-input measurement.
+Before the reduce/square optimization, the 232.6M consecutive case took about
+4.78 s and the 36.1M random case about 1.54 s. Those imply different observed
+rates (about 49M and 23M work units/s), so one throughput number cannot predict
+all decode times. After the optimization, the reported degree-256 times are
+about 2.76 s consecutive and 0.90 s random; these are host-specific. Linear
+scaling of those optimized runs puts a 300M-unit decode near 3.6–7.5 CPU seconds
+and the 5.15B model bound near 61–128 seconds, depending on which workload rate
+is used. These are rough risk estimates, not runtime guarantees: work units are
+an accounting model, not a uniform measure of CPU time. The ceiling is a DoS
+surface, so keep it per attempt and never calibrate it from random roots alone.
 
-The 6.4x consecutive-versus-random gap at F = 256 is not explained, and the
-F = 64 decoder does not show it. Do not extrapolate budgets from random roots
-until the gap is understood; the present ceiling is anchored on the structured
-case.
+The 6.4x consecutive-versus-random gap in work units at F = 256 is not
+explained. No comparable gap has been observed in the tested F = 64 workloads,
+but that comparison is not a general result over all root sets. Do not
+extrapolate budgets from random roots until the gap is understood; the present
+ceiling is anchored on the higher-work structured case.
 
 The earlier analytical estimate for d = 256 was 51,380,224 units. The measured
 consecutive case is 232.6M, about 4.5x higher, so the model underestimates the
@@ -373,9 +379,9 @@ ratio table above as a lower bound.
 
 The GF(2^256) implementation uses nine carry-less base multiplies via Karatsuba,
 followed by reduction. Its dedicated square spreads bits before reduction. In
-the current benchmark run these took about 21 ns and 16 ns per operation,
-respectively; earlier isolated probes measured 45 ns and 39 ns, then 29 ns and
-18 ns after the reduce/square rewrite. These timings vary with host and harness.
+the current benchmark run these took about 22 ns and 16 ns per operation;
+earlier probes measured 45 ns and 39 ns before the reduce/square rewrite, and
+29 ns and 18 ns after it. Timings vary with host and harness.
 
 | Constant                 | Today      | Option A                                              |
 | :----------------------- | :--------- | :---------------------------------------------------- |
