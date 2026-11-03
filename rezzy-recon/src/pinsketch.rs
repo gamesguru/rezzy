@@ -601,6 +601,44 @@ fn build_frobenius_basis_by_division<F: BinaryField>(modulus: &[F]) -> Option<Ve
     Some(basis)
 }
 
+/// Roots of a degree-2 locator `c + b X + X^2` (`b != 0`) via the linear
+/// quadratic solver.
+fn solve_quadratic_locator<F: BinaryField>(
+    poly: &[F],
+    solver: &QuadraticSolver<F>,
+    roots: &mut Vec<F>,
+) -> Result<(), AlgebraicError> {
+    let linear = poly[1];
+    if linear == F::ZERO {
+        return Err(AlgebraicError::DecodeFailure);
+    }
+    let inverse = linear.inv().ok_or(AlgebraicError::DecodeFailure)?;
+    let normalized = poly[0].mul(inverse.mul(inverse));
+    let root = solver
+        .solve(normalized)
+        .ok_or(AlgebraicError::DecodeFailure)?
+        .mul(linear);
+    roots.push(root);
+    roots.push(root.add(linear));
+    Ok(())
+}
+
+/// Whether `modulus` (monic, degree >= 2) divides `X^(2^BITS) - X`, i.e. has
+/// `degree` distinct roots in the field. `basis` is
+/// `build_frobenius_basis(modulus)`, so its last element is `X^(2^(BITS-1))`;
+/// one more squaring-and-reduce gives `X^(2^BITS) mod modulus`, which must be
+/// `X`.
+fn splits_completely<F: BinaryField>(basis: &[Polynomial<F>], modulus: &[F]) -> bool {
+    let Some(last) = basis.last() else {
+        return false;
+    };
+    let mut power = last.clone();
+    if poly_square(&mut power).is_none() || poly_mod(modulus, &mut power).is_none() {
+        return false;
+    }
+    power == [F::ZERO, F::ONE]
+}
+
 /// Computes `Tr(parameter * X) mod modulus` from a basis built by
 /// `build_frobenius_basis` for the same `modulus`.
 #[cfg(test)]
@@ -864,6 +902,7 @@ fn find_roots_with_solver<F: BinaryField>(
     cached_solver: Option<&QuadraticSolver<F>>,
 ) -> Result<(), AlgebraicError> {
     let mut pending = vec![poly];
+    let mut is_root_locator = true;
     let mut workspace = GcdWorkspace::new();
     let mut trace = Vec::new();
     let mut owned_solver: Option<QuadraticSolver<F>> = None;
@@ -880,12 +919,6 @@ fn find_roots_with_solver<F: BinaryField>(
             continue;
         }
         if degree == 2 {
-            let linear = poly[1];
-            if linear == F::ZERO {
-                return Err(AlgebraicError::DecodeFailure);
-            }
-            let inverse = linear.inv().ok_or(AlgebraicError::DecodeFailure)?;
-            let normalized = poly[0].mul(inverse.mul(inverse));
             let solver = if let Some(solver) = cached_solver {
                 solver
             } else {
@@ -895,12 +928,7 @@ fn find_roots_with_solver<F: BinaryField>(
                 }
                 owned_solver.as_ref().ok_or(AlgebraicError::DecodeFailure)?
             };
-            let root = solver
-                .solve(normalized)
-                .ok_or(AlgebraicError::DecodeFailure)?
-                .mul(linear);
-            roots.push(root);
-            roots.push(root.add(linear));
+            solve_quadratic_locator(&poly, solver, roots)?;
             continue;
         }
 
@@ -911,6 +939,17 @@ fn find_roots_with_solver<F: BinaryField>(
             .checked_sub(basis_cost)
             .ok_or(AlgebraicError::BudgetExhausted)?;
         let basis = build_frobenius_basis(&poly).ok_or(AlgebraicError::DecodeFailure)?;
+        if is_root_locator {
+            // A locator that splits into distinct linear factors divides
+            // `X^(2^BITS) - X`. Children of a splitting polynomial split too,
+            // so this is checked once, on the original locator. Rejecting here
+            // skips the whole futile trial ladder for over-capacity or
+            // corrupt sketches, bounding their cost to one basis build.
+            if !splits_completely(&basis, &poly) {
+                return Err(AlgebraicError::DecodeFailure);
+            }
+            is_root_locator = false;
+        }
 
         let trials = model.factor_trials().ok_or(AlgebraicError::DecodeFailure)?;
         let mut split = None;
@@ -1480,6 +1519,54 @@ mod tests {
         }
         // Non-monic moduli are rejected, as `poly_mod` does.
         assert!(build_frobenius_basis(&[1_u64, 2, 3]).is_none());
+    }
+
+    /// A locator splits completely exactly when it divides `X^(2^BITS) - X`.
+    #[test]
+    fn splits_completely_accepts_products_of_roots_and_rejects_others() {
+        let roots: Vec<Gf256> = [3_u64, 9, 27, 81, 243].map(Gf256::from_u64).to_vec();
+        let mut product = vec![Gf256::ONE];
+        for root in &roots {
+            let mut next = vec![Gf256::ZERO; product.len() + 1];
+            for (i, c) in product.iter().enumerate() {
+                next[i + 1] = next[i + 1].add(*c);
+                next[i] = next[i].add(c.mul(*root));
+            }
+            product = next;
+        }
+        let basis = build_frobenius_basis(&product).unwrap();
+        assert!(splits_completely(&basis, &product));
+        // Perturbing one coefficient almost surely breaks complete splitting.
+        let mut broken = product;
+        broken[1] = broken[1].add(Gf256::from_u64(5));
+        let basis = build_frobenius_basis(&broken).unwrap();
+        assert!(!splits_completely(&basis, &broken));
+    }
+
+    /// An over-capacity sketch yields a locator that cannot split. It must be
+    /// rejected after one basis build, not by burning the trial ladder.
+    #[test]
+    fn over_capacity_garbage_locator_fails_without_exhausting_work() {
+        let expected: Vec<Gf256> = (1..=40_u64).map(Gf256::from_u64).collect();
+        let odd = odd_syndromes_field(&expected);
+        // Decode as though only 16 odd syndromes (capacity 16) were sent.
+        let result = prepare_locator(&odd[..16], 16);
+        let Ok(Some((locator, _))) = result else {
+            return; // BM already rejected it: also fine.
+        };
+        let mut roots = Vec::new();
+        let mut work = WorkModel::GF256.max_factor_work();
+        let started = work;
+        let outcome = find_roots_with_solver(
+            locator,
+            &mut roots,
+            &mut work,
+            WorkModel::GF256,
+            Some(crate::gf256::cached_quadratic_solver()),
+        );
+        assert_eq!(outcome, Err(AlgebraicError::DecodeFailure));
+        // Only the single basis build was charged, never the 288-trial ladder.
+        assert!(started - work < started / 10, "spent {}", started - work);
     }
 
     #[test]
