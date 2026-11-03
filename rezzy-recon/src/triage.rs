@@ -8,7 +8,10 @@
 use alloc::vec::Vec;
 
 use super::client::MAX_BUCKETS_PER_ROUND;
-use super::{pinsketch, AlgebraicError, SyndromeSketch, MAX_DEPTH, STRATA_COUNT, STRATUM_CAPACITY};
+use super::{
+    pinsketch, AlgebraicError, Gf256, Gf256Decoder, Gf256Sketch, SyndromeSketch, MAX_DEPTH,
+    STRATA_COUNT, STRATUM_CAPACITY,
+};
 
 /// Maximum sum of capacities in one bucketed sketch request.
 pub const MAX_BUCKETED_SKETCH_CAPACITY: usize = 4_096;
@@ -526,6 +529,108 @@ pub fn decode_bucket_sketches(
         successful_buckets,
         failed_buckets,
     })
+}
+
+/// One successfully decoded GF(2^256) bucket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gf256BucketDecodeSuccess {
+    /// Prefix depth of the bucket, in bits.
+    pub depth: u8,
+    /// The bucket's prefix.
+    pub prefix: u64,
+    /// Full 32-byte digests of the symmetric difference, sorted by field
+    /// element order.
+    pub digests: Vec<[u8; 32]>,
+}
+
+/// Result of [`decode_gf256_bucket_sketches`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Gf256BucketDecodeBatch {
+    /// Buckets that decoded.
+    pub successful_buckets: Vec<Gf256BucketDecodeSuccess>,
+    /// Each entry is `(depth, prefix)`.
+    pub failed_buckets: Vec<(u8, u64)>,
+}
+
+/// Parses and decodes concatenated GF(2^256) residual bucket sketches under
+/// one shared work budget.
+///
+/// Each request occupies `32 * capacity` bytes, in canonical range order, with
+/// no length prefix. Each bucket is allowed at most the per-sketch GF(2^256)
+/// ceiling (the same allowance a stand-alone decode gets) and at most what is
+/// left of `budget`, so one ground sketch cannot starve later buckets and
+/// outcomes do not depend on request order beyond the shared pool.
+///
+/// A bucket that fails to decode, or that exhausts its full per-sketch
+/// ceiling, is reported in `failed_buckets`. A bucket that runs out of the
+/// *shared* pool before reaching its own ceiling aborts the batch with
+/// [`AlgebraicError::BudgetExhausted`]. Structural errors also abort.
+///
+/// `budget` has no default: the GF(2^256) batch budget has not been
+/// re-derived (see `MAX_BATCH_FACTOR_WORK`, which is GF(2^64)-sized), so the
+/// caller must choose one explicitly.
+///
+/// # Errors
+/// Returns an error for invalid request ordering or capacity, a payload whose
+/// length is not exactly the sum of the request sizes, a non-canonical field
+/// element, or an exhausted shared budget.
+pub fn decode_gf256_bucket_sketches(
+    encoded: &[u8],
+    requests: &[BucketRequest],
+    mut budget: usize,
+    decoder: &Gf256Decoder,
+) -> Result<Gf256BucketDecodeBatch, AlgebraicError> {
+    validate_adaptive_bucket_requests(requests)?;
+
+    let ceiling = Gf256Decoder::per_sketch_work_ceiling();
+    let mut offset = 0_usize;
+    let mut batch = Gf256BucketDecodeBatch::default();
+    for request in requests {
+        let byte_len = request
+            .capacity
+            .checked_mul(32)
+            .ok_or(AlgebraicError::InvalidSketchLength)?;
+        let end = offset
+            .checked_add(byte_len)
+            .ok_or(AlgebraicError::InvalidSketchLength)?;
+        let bytes = encoded
+            .get(offset..end)
+            .ok_or(AlgebraicError::InvalidSketchLength)?;
+        offset = end;
+
+        let sketch = Gf256Sketch::from_bytes(request.capacity, bytes)?;
+        let allowance = budget.min(ceiling);
+        let mut remaining = allowance;
+        let result = sketch.decode_elements_with_budget(request.capacity, decoder, &mut remaining);
+        debug_assert!(
+            remaining <= allowance,
+            "decoder violated budget bounds: remaining={remaining} > allowance={allowance}"
+        );
+        let spent = allowance
+            .checked_sub(remaining)
+            .ok_or(AlgebraicError::BudgetExhausted)?;
+        budget = budget
+            .checked_sub(spent)
+            .ok_or(AlgebraicError::BudgetExhausted)?;
+        match result {
+            Ok(elements) => batch.successful_buckets.push(Gf256BucketDecodeSuccess {
+                depth: request.depth,
+                prefix: request.prefix,
+                digests: elements.into_iter().map(Gf256::to_le_bytes).collect(),
+            }),
+            Err(AlgebraicError::DecodeFailure) => {
+                batch.failed_buckets.push((request.depth, request.prefix));
+            }
+            Err(AlgebraicError::BudgetExhausted) if allowance == ceiling => {
+                batch.failed_buckets.push((request.depth, request.prefix));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    if offset != encoded.len() {
+        return Err(AlgebraicError::InvalidSketchLength);
+    }
+    Ok(batch)
 }
 
 /// Validates a list of bucket requests to ensure they adhere to limits and form an antichain.
@@ -1058,5 +1163,109 @@ mod tests {
             estimate_strata(&local, &remote, 10),
             Err(AlgebraicError::BudgetExhausted)
         );
+    }
+
+    fn gf256_digest(seed: u64) -> [u8; 32] {
+        let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut out = [0_u8; 32];
+        for chunk in out.chunks_exact_mut(8) {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            chunk.copy_from_slice(&x.to_le_bytes());
+        }
+        out
+    }
+
+    fn gf256_payload(capacity: usize, seeds: &[u64]) -> (Vec<u8>, Vec<[u8; 32]>) {
+        let mut sketch = Gf256Sketch::new(capacity).unwrap();
+        let mut digests: Vec<[u8; 32]> = seeds.iter().map(|s| gf256_digest(*s)).collect();
+        for digest in &digests {
+            sketch
+                .toggle(Gf256::from_le_bytes(digest).unwrap())
+                .unwrap();
+        }
+        digests.sort_by_key(|d| Gf256::from_le_bytes(d).unwrap());
+        (sketch.to_bytes(), digests)
+    }
+
+    #[test]
+    fn gf256_batch_recovers_full_digests_per_bucket() {
+        let decoder = Gf256Decoder::build().unwrap();
+        let (mut encoded, left) = gf256_payload(8, &[1, 2, 3]);
+        let (second, right) = gf256_payload(4, &[10, 11]);
+        encoded.extend_from_slice(&second);
+        let requests = [BucketRequest::new(1, 0, 8), BucketRequest::new(1, 1, 4)];
+        let batch =
+            decode_gf256_bucket_sketches(&encoded, &requests, 100_000_000, &decoder).unwrap();
+        assert!(batch.failed_buckets.is_empty());
+        assert_eq!(batch.successful_buckets.len(), 2);
+        assert_eq!(batch.successful_buckets[0].digests, left);
+        assert_eq!(batch.successful_buckets[1].digests, right);
+        assert_eq!(
+            (
+                batch.successful_buckets[1].depth,
+                batch.successful_buckets[1].prefix
+            ),
+            (1, 1)
+        );
+    }
+
+    #[test]
+    fn gf256_batch_isolates_an_over_capacity_bucket() {
+        let decoder = Gf256Decoder::build().unwrap();
+        let seeds: Vec<u64> = (100..140).collect();
+        let (mut encoded, _) = gf256_payload(4, &seeds);
+        let (second, right) = gf256_payload(4, &[7]);
+        encoded.extend_from_slice(&second);
+        let requests = [BucketRequest::new(1, 0, 4), BucketRequest::new(1, 1, 4)];
+        let batch =
+            decode_gf256_bucket_sketches(&encoded, &requests, 100_000_000, &decoder).unwrap();
+        assert_eq!(batch.failed_buckets, vec![(1, 0)]);
+        assert_eq!(batch.successful_buckets.len(), 1);
+        assert_eq!(batch.successful_buckets[0].digests, right);
+    }
+
+    #[test]
+    fn gf256_batch_empty_sketch_decodes_to_no_digests() {
+        let decoder = Gf256Decoder::build().unwrap();
+        let encoded = Gf256Sketch::new(4).unwrap().to_bytes();
+        let batch =
+            decode_gf256_bucket_sketches(&encoded, &[BucketRequest::new(0, 0, 4)], 0, &decoder)
+                .unwrap();
+        assert_eq!(batch.successful_buckets.len(), 1);
+        assert!(batch.successful_buckets[0].digests.is_empty());
+    }
+
+    #[test]
+    fn gf256_batch_shared_budget_exhaustion_aborts() {
+        let decoder = Gf256Decoder::build().unwrap();
+        let (encoded, _) = gf256_payload(8, &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            decode_gf256_bucket_sketches(&encoded, &[BucketRequest::new(0, 0, 8)], 0, &decoder),
+            Err(AlgebraicError::BudgetExhausted)
+        );
+    }
+
+    #[test]
+    fn gf256_batch_rejects_bad_length_and_requests() {
+        let decoder = Gf256Decoder::build().unwrap();
+        let (encoded, _) = gf256_payload(4, &[1]);
+        let one = [BucketRequest::new(0, 0, 4)];
+        let budget = 100_000_000;
+        assert_eq!(
+            decode_gf256_bucket_sketches(&encoded[..encoded.len() - 1], &one, budget, &decoder),
+            Err(AlgebraicError::InvalidSketchLength)
+        );
+        let mut long = encoded;
+        long.push(0);
+        assert_eq!(
+            decode_gf256_bucket_sketches(&long, &one, budget, &decoder),
+            Err(AlgebraicError::InvalidSketchLength)
+        );
+        let nested = [BucketRequest::new(0, 0, 4), BucketRequest::new(1, 0, 4)];
+        assert!(decode_gf256_bucket_sketches(&[0; 256], &nested, budget, &decoder).is_err());
+        let unordered = [BucketRequest::new(1, 1, 4), BucketRequest::new(1, 0, 4)];
+        assert!(decode_gf256_bucket_sketches(&[0; 256], &unordered, budget, &decoder).is_err());
     }
 }

@@ -254,9 +254,22 @@ pub(crate) fn decode_with_model<F: BinaryField + Ord>(
     cached_solver: Option<&QuadraticSolver<F>>,
 ) -> Result<Vec<F>, AlgebraicError> {
     let mut work = model.max_factor_work();
+    decode_with_model_budget(odd_syndromes, max_elements, model, cached_solver, &mut work)
+}
+
+/// Like [`decode_with_model`], but draws factoring work from `work` and leaves
+/// the unspent remainder in it so a caller can share one budget across many
+/// sketches.
+pub(crate) fn decode_with_model_budget<F: BinaryField + Ord>(
+    odd_syndromes: &[F],
+    max_elements: usize,
+    model: WorkModel,
+    cached_solver: Option<&QuadraticSolver<F>>,
+    work: &mut usize,
+) -> Result<Vec<F>, AlgebraicError> {
     let roots = decode_roots(
         prepare_locator(odd_syndromes, max_elements)?,
-        |locator, roots| find_roots_with_solver(locator, roots, &mut work, model, cached_solver),
+        |locator, roots| find_roots_with_solver(locator, roots, work, model, cached_solver),
     )?;
     require_reencode(roots, odd_syndromes)
 }

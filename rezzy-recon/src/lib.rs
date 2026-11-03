@@ -67,8 +67,9 @@ pub use server::{
     H64Index, Population, ReconciliationContext, SortedPopulation,
 };
 pub use triage::{
-    bucket_prefix, decode_bucket_sketches, estimate_strata, recommended_bucket_decode_budget,
-    validate_overflow_bucket_requests, BucketDecodeBatch, BucketDecodeSuccess, BucketRequest,
+    bucket_prefix, decode_bucket_sketches, decode_gf256_bucket_sketches, estimate_strata,
+    recommended_bucket_decode_budget, validate_overflow_bucket_requests, BucketDecodeBatch,
+    BucketDecodeSuccess, BucketRequest, Gf256BucketDecodeBatch, Gf256BucketDecodeSuccess,
     NodeSummary, StrataEstimate, MAX_BATCH_FACTOR_WORK, MAX_BUCKETED_SKETCH_CAPACITY,
     MAX_OVERFLOW_BUCKET_CAPACITY, MAX_STRATA_FACTOR_WORK, NODE_SUMMARY_LEN,
 };

@@ -189,13 +189,29 @@ impl Gf256Sketch {
         max_elements: usize,
         decoder: &Gf256Decoder,
     ) -> Result<Vec<Gf256>, crate::algebraic::AlgebraicError> {
+        let mut budget = Gf256Decoder::per_sketch_work_ceiling();
+        self.decode_elements_with_budget(max_elements, decoder, &mut budget)
+    }
+
+    /// Like [`Self::decode_elements`], but draws factoring work from `budget`
+    /// and leaves the unspent remainder in it.
+    ///
+    /// # Errors
+    /// Same as [`Self::decode_elements`].
+    pub(crate) fn decode_elements_with_budget(
+        &self,
+        max_elements: usize,
+        decoder: &Gf256Decoder,
+        budget: &mut usize,
+    ) -> Result<Vec<Gf256>, crate::algebraic::AlgebraicError> {
         if max_elements == 0 || max_elements > self.capacity() {
             return Err(crate::algebraic::AlgebraicError::InvalidSketchCapacity);
         }
         if self.coordinates.iter().all(|value| *value == Gf256::ZERO) {
             return Ok(Vec::new());
         }
-        let roots = decoder.decode(&self.coordinates[..max_elements], max_elements)?;
+        let roots =
+            decoder.decode_with_budget(&self.coordinates[..max_elements], max_elements, budget)?;
         if roots.len() > self.capacity() || roots.contains(&Gf256::ZERO) {
             return Err(crate::algebraic::AlgebraicError::DecodeFailure);
         }
@@ -276,6 +292,33 @@ impl Gf256Sketch {
 }
 
 impl Gf256Decoder {
+    /// Per-sketch work ceiling: the budget one sketch gets from a fresh
+    /// [`Self::decode`] call.
+    #[must_use]
+    pub(crate) const fn per_sketch_work_ceiling() -> usize {
+        crate::pinsketch::WorkModel::GF256.max_factor_work()
+    }
+
+    /// Like [`Self::decode`], but draws factoring work from `budget` and
+    /// leaves the unspent remainder in it.
+    ///
+    /// # Errors
+    /// Same as [`Self::decode`]; `BudgetExhausted` means `budget` ran out.
+    pub(crate) fn decode_with_budget(
+        &self,
+        odd_syndromes: &[Gf256],
+        max_elements: usize,
+        budget: &mut usize,
+    ) -> Result<Vec<Gf256>, crate::algebraic::AlgebraicError> {
+        crate::pinsketch::decode_with_model_budget(
+            odd_syndromes,
+            max_elements,
+            crate::pinsketch::WorkModel::GF256,
+            Some(&self.quadratic_solver),
+            budget,
+        )
+    }
+
     /// Builds the quadratic solver once for reuse by future decodes.
     #[must_use]
     pub fn build() -> Option<Self> {
