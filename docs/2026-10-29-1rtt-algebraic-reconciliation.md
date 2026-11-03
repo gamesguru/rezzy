@@ -41,6 +41,23 @@ not achieve 1-RTT event replication**, because full event JSON payloads
 ($1\text{–}3\text{ KiB}$) must still be fetched in a subsequent request. The
 two-phase model remains optimal for event stores.
 
+### Implementation status (2026-11-03)
+
+The repository now contains a concrete GF(2^256) polynomial-basis field and a
+generic PinSketch decoder. Its fixed reduction polynomial is
+`x^256 + x^10 + x^5 + x^2 + 1`; Rabin irreducibility and a reducible-polynomial
+sanity check live in `rezzy-recon/src/binary_field.rs`. The decoder's 300M
+work-unit ceiling is a practical limit, not a proven worst-case bound. Release
+probes observed 232.6M units for 256 consecutive roots and 36.1M for 256
+pseudorandom roots. Other adversarial factor shapes may exhaust the ceiling.
+
+GF(2^256) multiply and square probes measured about 45 ns/op and 39 ns/op,
+respectively, on the measured machine. `Gf256::square` is a dedicated
+bit-spreading implementation followed by polynomial reduction; it does not
+fall back to multiplication. These timings are machine-specific. The full
+wide-field reconciliation profile is not yet wired into the existing
+MSC4521 `ElementHash` and bucket-exchange path.
+
 ---
 
 ## 1. Why "Ordered" or "Adjacent" Lists Do Not Fix Pairing
@@ -304,23 +321,41 @@ stores the digest.
 | Prefix grinding (placement DoS)                 | ~2^depth to target a prefix; no-amplification policy                                            | Unchanged targeting cost. Wider decode raises defender cost per poisoned element, so the policy may need retuning                                                                                                                              |
 | LtHash anchoring                                | not wired into recon                                                                            | ~2^97 parameter-dependent estimate, not a theorem; needs an authenticated out-of-band anchor. Orthogonal to the locator width                                                                                                                  |
 
-### 8.3 Cost, latency and memory
+### 8.3 Pinned GF(2^256) field profile
 
-| Metric                          | Before                                                                                                                       | After                                                                        |
-| :------------------------------ | :--------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------- |
-| ID-only sync latency            | 2 RTT                                                                                                                        | 1 RTT (one fewer RTT; not necessarily a 50% wall-clock drop)                 |
-| Event replication latency       | 2 RTT if ID and body are batched in phase 2; otherwise 3 RTT (sketch, IDs, bodies)                                           | 2 RTT (sketch, bodies); body fetch remains                                   |
-| Post-decode verification        | O(d·C) re-encode, O(d) count/residual, local classification (O(d log N) or amortized O(d)), plus candidate/ambiguity lookups | Same, minus the candidate map and ambiguity branches. Not O(1)               |
-| Per-op field multiply           | ~1 base clmul + reduction                                                                                                    | ~9-16 base clmuls + reduction. Unmeasured; expect roughly 4-16x per field op |
-| Root finding work units         | F = 64                                                                                                                       | F = 256: ~12.6x at d=8, 9.4x at d=32, 5.1x at d=256. Unmeasured wall-clock   |
-| Wire per bucket sketch (C = 32) | 256 B                                                                                                                        | 1024 B                                                                       |
-| Resident strata                 | 2048 B, F = 64                                                                                                               | unchanged                                                                    |
+The committed wide-field decoder pins the polynomial basis
+`x^256 + x^10 + x^5 + x^2 + 1`. Elements are four little-endian `u64`
+limbs, bit `i` is the coefficient of `x^i`, and the byte mapping is
+little-endian. The reduction polynomial is justified by Rabin's
+irreducibility test in the `binary_field` test module, next to a
+reducible-polynomial negative control.
 
-| Constant                 | Today      | Option A                                |
-| :----------------------- | :--------- | :-------------------------------------- |
-| `MAX_FACTOR_WORK`        | 16,000,000 | >= 51,380,224 (d=256, F=256)            |
-| `MAX_BATCH_FACTOR_WORK`  | 36,700,160 | ~344,981,504 (128 x ceiling(32, F=256)) |
-| `MAX_STRATA_FACTOR_WORK` | 1,458,176  | 1,458,176 (F=64, d=8)                   |
+`MAX_FACTOR_WORK_GF256` is 300,000,000 work units. Release measurements
+for degree-256 inputs were 232,591,912 units for consecutive roots and
+36,127,278 for pseudorandom roots. This is a practical ceiling, not a
+proven worst case: the work model's full binary recursion bound is
+5,148,287,480 units (a chain of `(1, d-1)` splits maximizes the model),
+and constructing an input that reaches it is still open. Exhaustion
+returns `BudgetExhausted` and falls back to the non-algebraic path.
+
+### 8.4 Cost, latency and memory
+
+| Metric                          | Before                                                                                                                       | After                                                                                  |
+| :------------------------------ | :--------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------- |
+| ID-only sync latency            | 2 RTT                                                                                                                        | 1 RTT (one fewer RTT; not necessarily a 50% wall-clock drop)                           |
+| Event replication latency       | 2 RTT if ID and body are batched in phase 2; otherwise 3 RTT (sketch, IDs, bodies)                                           | 2 RTT (sketch, bodies); body fetch remains                                             |
+| Post-decode verification        | O(d·C) re-encode, O(d) count/residual, local classification (O(d log N) or amortized O(d)), plus candidate/ambiguity lookups | Same, minus the candidate map and ambiguity branches. Not O(1)                         |
+| Per-op field multiply           | ~1 base clmul + reduction                                                                                                    | ~9-16 base clmuls + reduction; measured ~29 ns multiply, ~18 ns square (release host)  |
+| Root finding work units         | 16,000,000 ceiling                                                                                                           | 300,000,000 practical ceiling; measured 232.6M consecutive, 36.1M random at d=256      |
+| Wire per bucket sketch (C = 32) | 256 B                                                                                                                        | 1024 B                                                                                 |
+| Resident strata                 | 2048 B, F = 64                                                                                                               | unchanged                                                                              |
+
+| Constant                 | Today      | Option A                                                              |
+| :----------------------- | :--------- | :-------------------------------------------------------------------- |
+| `MAX_FACTOR_WORK`        | 16,000,000 | 16,000,000 (GF(2^64) strata)                                          |
+| `MAX_FACTOR_WORK_GF256`  | n/a        | 300,000,000 practical; 5,148,287,480 model worst-case                 |
+| `MAX_BATCH_FACTOR_WORK`  | 36,700,160 | ~344,981,504 (128 x ceiling(32, F=256))                               |
+| `MAX_STRATA_FACTOR_WORK` | 1,458,176  | 1,458,176 (F=64, d=8)                                                 |
 
 Population memory (today `SortedPopulation` = `Vec<u64>` + `Vec<u128>` = 24
 B/elem):
@@ -331,13 +366,15 @@ B/elem):
 | Digest + separate 8 B placement key           | 40     | +16   | +160 MB       |
 | Digest + placement + separate residual column | 56     | +32   | +320 MB       |
 
-### 8.4 Implementation checklist
+### 8.5 Implementation checklist
 
 1. Genericize `pinsketch` over a field trait or const generic, not just the cost
    functions: `FACTOR_TRIALS`, `TRACE_SQUARES`, `frobenius_basis_cost`,
    `factor_trial_cost_with_basis`, `solve_quadratic_form` and the hardcoded
    `MAX_FACTOR_WORK` all depend on `FIELD_BITS`. Use F = 256 for bucket sketches
-   and F = 64 for strata; do not set one global `FIELD_BITS = 256`.
+   and F = 64 for strata; do not set one global `FIELD_BITS = 256`. **Done** for
+   the field trait, work model and per-field ceilings; the full-ID sketch wiring
+   is still pending.
 2. Keep prefix bisection, capacity overflow, budgets, residual/count checks and
    the prefix-grinding policy. Delete `SortedPopulation::candidates`, ambiguity
    branches in `verify_decode`, collision-repeat tracking and phase-2
