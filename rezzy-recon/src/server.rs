@@ -335,7 +335,7 @@ pub fn build_bucket_sketches(
 }
 
 /// In-memory population retaining the full digest required by
-/// `algebraic_v2_gf256`.
+/// `algebraic_gf256_fixed_v1`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FixedWindowPopulation {
     bucket_keys: Vec<u64>,

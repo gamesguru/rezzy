@@ -431,21 +431,23 @@ B/elem):
 5. DX sketch: O(N) fingerprint filter; does not recover 256-bit IDs.
    Experimental comparison in `filter_spillover` only, not `triage`.
 
-### 8.6 `algebraic_v2_gf256` profile
+### 8.6 `algebraic_gf256_fixed_v1` profile
 
-**Name and status.** The wire identifier is `algebraic_v2_gf256`, and the Rust
-variant is `Profile::AlgebraicV2Gf256`. The profile is separate from
-`algebraic_v1`, not a revision silently interpreted as v1. Its definition is
-immutable once advertised; any semantic change requires a new profile ID. A
-future standardization effort may choose a namespaced ID, but must assign it as
-a distinct identifier rather than renaming this one in place.
+**Name and status.** The wire identifier is `algebraic_gf256_fixed_v1`, and the
+Rust variant is `Profile::AlgebraicGf256FixedV1`. The profile is separate from
+`algebraic_v1`, not a revision of `algebraic_v1`. Its definition is immutable
+once advertised; any semantic change requires a new profile ID. A future
+standardization effort may choose a namespaced ID, but must assign it as a
+distinct identifier rather than renaming this one in place.
 
 **Negotiation and pinning.** Peers advertise supported profile IDs, then the
-initiator selects one profile before building sketches. v1 remains the default
-for ordinary event replication; v2 is offered for ID-only reconciliation.
-Callers may allow v2 without preferring it, prefer it when common, or require it
-and fail closed to the non-algebraic path if the peer lacks it. Falling back to
-v1 is permitted only when the caller accepts v1's collision-recovery semantics.
+initiator selects one profile before building sketches. `algebraic_v1` remains
+the default for ordinary event replication; `algebraic_gf256_fixed_v1` is
+offered for ID-only reconciliation. Callers may allow
+`algebraic_gf256_fixed_v1` without preferring it, prefer it when common, or
+require it and fail closed to the non-algebraic path if the peer lacks it.
+Falling back to `algebraic_v1` is permitted only when the caller accepts its
+collision-recovery semantics.
 Never silently downgrade after a decode failure. Put the selected profile ID in
 the signed request body on every exchange request; Matrix X-Matrix
 authentication covers the request method, URI, and body. The response must echo
@@ -508,7 +510,7 @@ work ceiling, and rate-limit costly overflow attempts. Do not raise
 `MAX_BATCH_FACTOR_WORK` from its old extrapolation without measured GF(2^256)
 re-derivation.
 
-**Performance and alternatives.** `algebraic_v2_gf256` is not the fastest
+**Performance and alternatives.** `algebraic_gf256_fixed_v1` is not the fastest
 profile; it is the full-digest profile. Current measurements are about 22–29 ns
 per multiply, 16–18 ns per square, and 0.9–2.8 s for degree-256 decode, with
 substantial host and workload variation. PinSketch decoding is quadratic in the
