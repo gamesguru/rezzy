@@ -148,7 +148,7 @@ impl WorkModel {
     /// Upper bound on one `find_roots_with_budget` call for a locator of
     /// degree `degree`: the basis build plus a full trial ladder at that
     /// degree, plus one split.
-    pub(crate) const fn single_call_work_ceiling(self, degree: usize) -> Option<usize> {
+    const fn single_call_work_ceiling(self, degree: usize) -> Option<usize> {
         let Some(basis) = self.frobenius_basis_cost(degree) else {
             return None;
         };
@@ -1548,6 +1548,7 @@ mod tests {
 
     /// A non-splitting locator must be rejected after one basis build, not by
     /// burning the trial ladder.
+    #[cfg(feature = "std")]
     #[test]
     fn non_splitting_locator_fails_without_exhausting_work() {
         // A non-splitting degree-16 locator constructed from arbitrary syndromes.

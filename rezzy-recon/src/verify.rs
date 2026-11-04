@@ -347,7 +347,8 @@ impl Gf256Verified {
 /// `D_A xor D_B` equals the XOR of the residual windows of every digest.
 ///
 /// # Errors
-/// Returns an error if `request` is malformed, or
+/// Returns [`AlgebraicError::InvalidBucketIndex`] or
+/// [`AlgebraicError::InvalidSketchCapacity`] if `request` is malformed, or
 /// [`AlgebraicError::DecodeFailure`] on any failed check.
 pub fn verify_gf256_decode<F>(
     request: &BucketRequest,

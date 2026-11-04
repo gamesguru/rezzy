@@ -10,6 +10,11 @@
 //! each 128-bit AVX-512 lane holds one coefficient's 64-bit limb, so one
 //! vector carry-less multiply computes the same schoolbook product for four
 //! coefficients. Reduction remains scalar per coefficient.
+//!
+//! The vector backend is compiled only when `has_avx512_support` is set
+//! (`std`, `x86_64`, and Rust 1.89 or newer) and is selected at runtime when
+//! the CPU reports `avx512f` and `vpclmulqdq`. Older toolchains and other
+//! targets use the scalar fallback.
 
 #![allow(unsafe_code)]
 
@@ -149,16 +154,39 @@ mod tests {
         Gf256::from_limbs([next(state), next(state), next(state), next(state)])
     }
 
+    fn mac_fixture(seed: u64) -> (Gf256, alloc::vec::Vec<Gf256>, alloc::vec::Vec<Gf256>) {
+        let mut state = seed;
+        let term = element(&mut state);
+        let source = (0..17).map(|_| element(&mut state)).collect();
+        let initial = (0..17).map(|_| element(&mut state)).collect();
+        (term, source, initial)
+    }
+
+    #[test]
+    fn scalar_mac_matches_reference() {
+        let (term, source, initial) = mac_fixture(0x243f_6a88_85a3_08d3_u64);
+        let mut expected = initial.clone();
+        for (coefficient, slot) in source.iter().zip(&mut expected) {
+            *slot = BinaryField::add(*slot, BinaryField::mul(term, *coefficient));
+        }
+        let mut actual = initial;
+        scalar_poly_mac(term, &source, &mut actual);
+        assert_eq!(actual, expected);
+    }
+
+    #[cfg(all(feature = "std", target_arch = "x86_64", has_avx512_support))]
     #[test]
     fn lane_parallel_mac_matches_scalar() {
-        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-        let term = element(&mut state);
-        let source: alloc::vec::Vec<_> = (0..17).map(|_| element(&mut state)).collect();
-        let initial: alloc::vec::Vec<_> = (0..17).map(|_| element(&mut state)).collect();
+        if !std::is_x86_feature_detected!("avx512f") || !std::is_x86_feature_detected!("vpclmulqdq")
+        {
+            return;
+        }
+        let (term, source, initial) = mac_fixture(0x9e37_79b9_7f4a_7c15_u64);
         let mut expected = initial.clone();
         let mut actual = initial;
         scalar_poly_mac(term, &source, &mut expected);
-        poly_mac(term, &source, &mut actual);
+        // SAFETY: the runtime checks above establish both target features.
+        unsafe { poly_mac_avx512(term, &source, &mut actual) };
         assert_eq!(actual, expected);
     }
 }

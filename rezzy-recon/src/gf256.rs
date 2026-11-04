@@ -543,6 +543,9 @@ impl BinaryField for Gf256 {
         Some(Self(limbs))
     }
 
+    /// Dispatches to the lane-parallel backend when it is compiled in and the
+    /// CPU supports AVX-512 VPCLMULQDQ; otherwise uses the scalar fallback.
+    /// Rust 1.88 and non-x86_64/`no_std` builds do not compile the vector path.
     fn mac(term: Self, source: &[Self], target: &mut [Self]) {
         crate::gf256_simd::poly_mac(term, source, target);
     }

@@ -166,7 +166,7 @@ is not injective on the ID space.
 
 ## 3. Architecture Comparison
 
-### Option A: Full 256-bit Elements in $\mathrm{GF}(2^{256})$ (Strict No-Collision-Fallback)
+### Option A: Full 256-bit Elements in $\mathrm{GF}(2^{256})$ (No Locator-Collision Fallback)
 
 The entire 32-byte digest is treated as an element of $\mathrm{GF}(2^{256})$.
 
@@ -177,9 +177,13 @@ The entire 32-byte digest is treated as an element of $\mathrm{GF}(2^{256})$.
   path does not need `verify_follow_up`, `m_roots`, or
   `SortedPopulation::candidates`; those remain in the existing GF(2^64) path.
 - **Zero-Element Invariant:** PinSketch requires non-zero elements ($x \ne 0$).
-  Reject the all-zero 32-byte digest at insertion. Do not alias it to `1` or use
-  an affine offset that leaves one digest unrepresentable. The placement key may
-  be zero; only the full field element must be nonzero.
+  Reject the all-zero 32-byte digest at insertion and route that one reserved
+  identifier through the caller's non-algebraic fallback (for example, direct
+  ID fetch) for exact coverage. Do not alias it to `1` or use an affine offset
+  that leaves another digest unrepresentable. The placement key may be zero;
+  only the full field element must be nonzero. This is a single reserved
+  sentinel, not a locator-collision fallback for other digests, so the scheme
+  is not literally lossless for that one field value.
 - **Compute Cost:** Using the pinned work model
   $\text{ceiling}(d) = (2F+8)d^2 + F(F+8)d$:
 
@@ -233,12 +237,12 @@ If paying $\sim 4\times$ wire is acceptable:
    an explicit fallback path for correctness.
 5. **Zero-Locator Invariant:** Option B2 requires nonzero locator keys
    ($k_i \ne 0$) because root zero is rejected by the algebraic decoder and
-   cannot be evaluated in Forney's formula ($k_i^{-1}$ is undefined). Insertion
-   must reject digests whose 16 locator bytes (`digest[0..16]`) are all zero, or
-   route them to a non-algebraic fallback ladder. This is distinct from Option
-   A, where only the full 32-byte digest cannot be all zero
-   (`digest[0..32] == 0`) and zero prefixes in `digest[0..16]` remain valid
-   field elements.
+   cannot be evaluated in Forney's formula ($k_i^{-1}$ is undefined). If a
+   digest's 16 locator bytes (`digest[0..16]`) are all zero, route that
+   identifier through the non-algebraic fallback; do not silently omit it or
+   alias the locator. This is distinct from Option A, where fallback is needed
+   only for the all-zero 32-byte digest (`digest[0..32] == 0`), while zero
+   prefixes in `digest[0..16]` remain valid field elements.
 
 ---
 
@@ -289,7 +293,7 @@ most one round trip—zero if IDs and bodies are already batched—and never rea
 | Consumer / Workload                             | Recommendation                                    | Rationale                                                                                                                                                                                   |
 | :---------------------------------------------- | :------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Event / DAG Replication** (`rezzy`)           | **Retain Two-Phase MSC4521**                      | Body fetch dominates total time; avoids $4\times$ wire and extraction penalty on sketches.                                                                                                  |
-| **ID-Only Sync (Strict No-Collision-Fallback)** | **Option A ($\mathrm{GF}(2^{256})$)**             | No locator collisions; avoids collision-resolution fetches when decoding completes within budget for $d \le C$. Capacity overflow or budget exhaustion can still require splits / fallback. |
+| **ID-Only Sync (No Locator-Collision Fallback)** | **Option A ($\mathrm{GF}(2^{256})$)**             | No locator collisions; avoids collision-resolution fetches when decoding completes within budget for $d \le C$. Capacity overflow, budget exhaustion, and the reserved all-zero digest can still require fallback. |
 | **ID-Only Sync (Practical)**                    | **Option B2 ($128/128$, $\mathrm{GF}(2^{128})$)** | Reuses `h128` residual as $V_0$; $2^{64}$ adversarial floor; avoids degree-256 root finding.                                                                                                |
 | **GF($2^{64}$)-Only Hardware Constraint**       | **Option B1 ($64/192$, $\mathrm{GF}(2^{64})$)**   | Preserves existing SIMD paths; must document $2^{32}$ adversarial collision fallback.                                                                                                       |
 
@@ -327,8 +331,10 @@ already breaks compatibility; make it explicit).
 | `digest[16..32]` | `h128` residual / `NodeSummary`                             |
 | `digest[0..32]`  | sketch element (full field element)                         |
 
-Reject only the all-zero full digest at insert (no `0 -> 1` aliasing on the full
-element). Drop the `h64 == 0` guard from `ResidentKernel::insert`; bucket
+Insertion returns `ZeroSketchElement` for the all-zero full digest; the caller
+must route it through the non-algebraic fallback for exact coverage (no
+`0 -> 1` aliasing on the full element). Drop the `h64 == 0` guard from
+`ResidentKernel::insert`; bucket
 placement may use a zero prefix. Keep the zero-element rejection in
 `SyndromeSketch::toggle`, but apply it to the full 32-byte digest. The current
 first-non-zero scan makes `h64 | q3 | h128` disjoint only probabilistically;
@@ -443,10 +449,10 @@ B/elem):
 1. Genericize `pinsketch` over a field trait or const generic, not just the cost
    functions: `FACTOR_TRIALS`, `TRACE_SQUARES`, `frobenius_basis_cost`,
    `factor_trial_cost_with_basis`, `solve_quadratic_form` and the hardcoded
-   `MAX_FACTOR_WORK` all depend on `FIELD_BITS`. Use F = 256 for the opt-in
+   `MAX_FACTOR_WORK` all depend on `FIELD_BITS`. Use F = 256 for the default
    full-ID bucket sketches and F = 64 for strata and the existing path; do not
    set one global `FIELD_BITS = 256`. **Decoder genericization, the GF(2^256)
-   field profile and the opt-in sketch, extraction and verification path are
+   field profile and the default sketch, extraction and verification path are
    implemented.** Transport wiring remains pending.
 2. Keep prefix bisection, capacity overflow, budgets, residual/count checks and
    the prefix-grinding policy. The GF(2^256) path does not need
@@ -454,11 +460,12 @@ B/elem):
    `verify_follow_up`, because it recovers full digests; it verifies locally.
    Those pieces stay in place for the existing GF(2^64) path.
 3. Strata key stays `digest[8..16]`; never derive it from `h128`. Fixed-window
-   digest representation is implemented and used by the opt-in GF(2^256) path.
+   digest representation is implemented and used by the default GF(2^256) path.
 4. **Benchmarks:** a runnable suite entry covers GF(2^256) multiply, square,
-   full-ID set sketch construction, and cached decode at several degrees.
-   Full-ID extraction/exchange is pending production wiring.
-   `benches/bench-results.csv` remains GF(2^64)-only.
+   full-ID set sketch construction, cached decode, and room exchanges at several
+   difference sizes. Full-ID extraction/exchange is pending production wiring.
+   `benches/bench-results.csv` remains GF(2^64)-only; GF(2^256) work-budget
+   calibration is not recorded there and remains open (see `docs/tech_debt.md`).
 5. DX sketch: O(N) fingerprint filter; does not recover 256-bit IDs.
    Experimental comparison in `filter_spillover` only, not `triage`.
 

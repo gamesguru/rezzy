@@ -55,27 +55,26 @@ pub fn recommended_bucket_decode_budget(
 }
 
 /// Returns a shared budget for [`decode_gf256_bucket_sketches`] that grants
-/// every request its GF(2^256) per-bucket work ceiling.
+/// every request the decoder's full per-sketch GF(2^256) allowance.
 ///
 /// This is the GF(2^256) counterpart of [`recommended_bucket_decode_budget`].
 /// Using the GF(2^64) helper for a GF(2^256) batch under-budgets it and can
-/// return [`AlgebraicError::BudgetExhausted`] for an ordinary bucket.
+/// return [`AlgebraicError::BudgetExhausted`] for an ordinary bucket. The
+/// GF(2^256) decoder clamps each bucket to
+/// `Gf256Decoder::per_sketch_work_ceiling`, so the shared budget must grant
+/// that full allowance for every request rather than a per-capacity estimate.
 ///
 /// # Errors
-/// Returns an error if requests are invalid or summing their work ceilings
-/// overflows `usize`.
+/// Returns an error if requests are invalid or the total allowance overflows
+/// `usize`.
 pub fn recommended_gf256_bucket_decode_budget(
     requests: &[BucketRequest],
 ) -> Result<usize, AlgebraicError> {
     validate_adaptive_bucket_requests(requests)?;
-    requests.iter().try_fold(0_usize, |total, request| {
-        let ceiling = pinsketch::WorkModel::GF256
-            .single_call_work_ceiling(request.capacity)
-            .ok_or(AlgebraicError::InvalidSketchCapacity)?;
-        total
-            .checked_add(ceiling)
-            .ok_or(AlgebraicError::InvalidSketchCapacity)
-    })
+    requests
+        .len()
+        .checked_mul(Gf256Decoder::per_sketch_work_ceiling())
+        .ok_or(AlgebraicError::InvalidSketchCapacity)
 }
 
 struct PayloadCursor<'a> {
@@ -1434,5 +1433,14 @@ mod tests {
             Err(AlgebraicError::BudgetExhausted)
         );
         assert!(decode_gf256_bucket_sketches(&encoded, &requests, one * 2 + 1, &decoder).is_ok());
+    }
+
+    #[test]
+    fn recommended_gf256_budget_grants_full_per_sketch_allowance() {
+        let requests = [BucketRequest::new(1, 0, 32), BucketRequest::new(1, 1, 32)];
+        assert_eq!(
+            recommended_gf256_bucket_decode_budget(&requests).unwrap(),
+            2 * Gf256Decoder::per_sketch_work_ceiling()
+        );
     }
 }

@@ -14,7 +14,10 @@
 
 use alloc::{collections::VecDeque, vec::Vec};
 
-use crate::client::{retry_failed_bucket, MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS};
+use crate::client::{
+    prune_awaiting, record_split_summaries, retry_failed_bucket, take_complete_split_summaries,
+    MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
+};
 use crate::triage::{
     bucket_range_start, validate_adaptive_bucket_requests, BucketRequest, Gf256BucketDecodeBatch,
     NodeSummary, MAX_BUCKETED_SKETCH_CAPACITY,
@@ -49,6 +52,10 @@ pub struct Gf256BucketExchange {
     max_aggregate_capacity: usize,
     local_only: Vec<[u8; 32]>,
     remote_only: Vec<[u8; 32]>,
+    /// Remote summaries of failed parents awaiting their split children.
+    parents: Vec<(u8, u64, NodeSummary)>,
+    /// Remote summaries of split descendants seen so far.
+    awaiting: Vec<(u8, u64, NodeSummary)>,
 }
 
 impl Default for Gf256BucketExchange {
@@ -78,6 +85,8 @@ impl Gf256BucketExchange {
             max_aggregate_capacity,
             local_only: Vec::new(),
             remote_only: Vec::new(),
+            parents: Vec::new(),
+            awaiting: Vec::new(),
         }
     }
 
@@ -118,6 +127,8 @@ impl Gf256BucketExchange {
         self.rounds_emitted = 0;
         self.local_only.clear();
         self.remote_only.clear();
+        self.parents.clear();
+        self.awaiting.clear();
     }
 
     /// Verifies a decoded round against both sides' node summaries and
@@ -157,6 +168,10 @@ impl Gf256BucketExchange {
         if !bucket_batch_covers_requests(&batch, requests) {
             return Err(AlgebraicError::InvalidBucketIndex);
         }
+        if self.split_summaries_are_inconsistent(requests, remote) {
+            self.last_emitted_round = None;
+            return Ok(Gf256Action::Fallback);
+        }
         let (batch, verified) = verify_gf256_batch(batch, requests, local, remote, is_local)?;
         self.last_emitted_round = None;
         for node in verified {
@@ -171,19 +186,41 @@ impl Gf256BucketExchange {
                 return Err(AlgebraicError::InvalidBucketIndex);
             };
             // The absolute count difference is a lower bound on the
-            // symmetric-difference cardinality. Use it to size a retry; when
-            // it already exceeds the per-bucket ceiling, split immediately.
-            let count_delta = local[index].count.abs_diff(remote[index].count);
+            // symmetric-difference cardinality. When the counts are close, the
+            // sum is used instead: equal counts can still hide a large
+            // symmetric difference (for example, disjoint sets of equal size),
+            // and a one-bit split would then exhaust the round budget.
+            let local_count = local[index].count;
+            let remote_count = remote[index].count;
+            let count_delta = local_count.abs_diff(remote_count);
             let force_split = count_delta > crate::triage::MAX_BUCKET_SKETCH_CAPACITY as u64;
+            let split_estimate = if count_delta <= crate::triage::MAX_BUCKET_SKETCH_CAPACITY as u64
+            {
+                local_count.saturating_add(remote_count)
+            } else {
+                count_delta
+            };
             match retry_failed_bucket(
                 requests,
                 depth,
                 prefix,
-                count_delta,
+                split_estimate,
                 force_split,
-                split_jump(count_delta),
+                split_jump(split_estimate),
             ) {
-                Ok(children) => self.pending.extend(children),
+                Ok(children) => {
+                    if children.iter().any(|child| child.depth > depth)
+                        && !self
+                            .parents
+                            .iter()
+                            .any(|&(parent_depth, parent_prefix, _)| {
+                                (parent_depth, parent_prefix) == (depth, prefix)
+                            })
+                    {
+                        self.parents.push((depth, prefix, remote[index]));
+                    }
+                    self.pending.extend(children);
+                }
                 Err(_) => return Ok(Gf256Action::Fallback),
             }
         }
@@ -191,6 +228,9 @@ impl Gf256BucketExchange {
             .make_contiguous()
             .sort_unstable_by_key(bucket_range_start);
         if self.pending.is_empty() {
+            if !self.parents.is_empty() {
+                return Ok(Gf256Action::Fallback);
+            }
             let mut local_only = core::mem::take(&mut self.local_only);
             let mut remote_only = core::mem::take(&mut self.remote_only);
             local_only.sort_unstable();
@@ -201,6 +241,28 @@ impl Gf256BucketExchange {
             });
         }
         Ok(self.drain_round())
+    }
+
+    /// Returns true when the responder's summaries for a split do not
+    /// reconstruct the parent summary. A split may fan out by several prefix
+    /// bits and its descendants may arrive across rounds, so partial covers
+    /// are retained until complete. Local summaries are trusted; only the
+    /// responder's summaries are checked.
+    fn split_summaries_are_inconsistent(
+        &mut self,
+        requests: &[BucketRequest],
+        remote: &[NodeSummary],
+    ) -> bool {
+        record_split_summaries(&self.parents, &mut self.awaiting, requests, remote);
+        for (_, parent_summary, descendant_summary, count_valid) in
+            take_complete_split_summaries(&mut self.parents, &self.awaiting)
+        {
+            if !count_valid || descendant_summary != parent_summary {
+                return true;
+            }
+        }
+        prune_awaiting(&self.parents, &mut self.awaiting);
+        false
     }
 
     fn drain_round(&mut self) -> Gf256Action {
@@ -278,14 +340,14 @@ fn bucket_batch_covers_requests(
 /// Maximum split fan-out per retry, in bits (matches the GF(2^64) planner).
 const MAX_ROUND_JUMP: u8 = crate::client::MAX_BUCKET_ROUND_DEPTH;
 
-/// Chooses the smallest fan-out that brings the child count difference within
-/// half a bucket's capacity ceiling, leaving room for uneven child
+/// Chooses the smallest fan-out that brings the estimated child difference
+/// within half a bucket's capacity ceiling, leaving room for uneven child
 /// distribution. Splitting by the maximum seven bits for an ordinary
 /// over-capacity bucket creates up to 128 children where a handful are enough,
 /// which can exhaust the round budget before any child is decoded.
-fn split_jump(count_delta: u64) -> u8 {
+fn split_jump(estimated_delta: u64) -> u8 {
     let target_child_delta = (crate::triage::MAX_BUCKET_SKETCH_CAPACITY / 2) as u64;
-    let buckets = count_delta.div_ceil(target_child_delta).max(1);
+    let buckets = estimated_delta.div_ceil(target_child_delta).max(1);
     let bits = if buckets <= 1 {
         0
     } else {
@@ -351,6 +413,32 @@ mod tests {
                 .collect(),
         )
         .unwrap()
+    }
+
+    fn failed_root(
+        local_count: u64,
+        remote_count: u64,
+    ) -> (
+        BucketRequest,
+        Gf256BucketDecodeBatch,
+        [NodeSummary; 1],
+        [NodeSummary; 1],
+    ) {
+        (
+            BucketRequest::new(0, 0, 32),
+            Gf256BucketDecodeBatch {
+                successful_buckets: Vec::new(),
+                failed_buckets: alloc::vec![(0, 0)],
+            },
+            [NodeSummary {
+                count: local_count,
+                digest: 0,
+            }],
+            [NodeSummary {
+                count: remote_count,
+                digest: 0,
+            }],
+        )
     }
 
     /// Runs a full exchange between two populations and returns
@@ -622,19 +710,7 @@ mod tests {
 
     #[test]
     fn count_difference_above_capacity_splits_without_retry() {
-        let request = BucketRequest::new(0, 0, 32);
-        let batch = Gf256BucketDecodeBatch {
-            successful_buckets: Vec::new(),
-            failed_buckets: alloc::vec![(0, 0)],
-        };
-        let local = [NodeSummary {
-            count: 80,
-            digest: 0,
-        }];
-        let remote = [NodeSummary {
-            count: 0,
-            digest: 0,
-        }];
+        let (request, batch, local, remote) = failed_root(80, 0);
         let mut exchange = Gf256BucketExchange::default();
         assert_eq!(
             exchange.start(32),
@@ -651,6 +727,67 @@ mod tests {
         assert!(children
             .iter()
             .all(|child| { child.depth > request.depth && child.capacity <= 32 }));
+    }
+
+    #[test]
+    fn balanced_counts_still_split_wide_enough() {
+        let (request, batch, local, remote) = failed_root(100, 100);
+        let mut exchange = Gf256BucketExchange::default();
+        let _ = exchange.start(32);
+        let action = exchange
+            .advance_verified(batch, &[request], &local, &remote, |_| false)
+            .unwrap();
+        let Gf256Action::Request(children) = action else {
+            panic!("equal counts must still split");
+        };
+        assert_eq!(children.len(), 16);
+        assert_eq!(children[0].depth, 4);
+        assert!(children
+            .iter()
+            .all(|child| child.depth > request.depth && child.capacity <= 32));
+    }
+
+    #[test]
+    fn inconsistent_split_summaries_fall_back() {
+        let (request, failed, local, remote) = failed_root(100, 0);
+        let mut exchange = Gf256BucketExchange::default();
+        assert_eq!(
+            exchange.start(32),
+            Gf256Action::Request(alloc::vec![request])
+        );
+        let Gf256Action::Request(children) = exchange
+            .advance_verified(failed, &[request], &local, &remote, |_| false)
+            .unwrap()
+        else {
+            panic!("parent should split");
+        };
+        let local_children = alloc::vec![NodeSummary::default(); children.len()];
+        let remote_children = alloc::vec![
+            NodeSummary {
+                count: 1,
+                digest: 0,
+            };
+            children.len()
+        ];
+        let batch = Gf256BucketDecodeBatch {
+            successful_buckets: children
+                .iter()
+                .map(|child| crate::triage::Gf256BucketDecodeSuccess {
+                    depth: child.depth,
+                    prefix: child.prefix,
+                    digests: Vec::new(),
+                })
+                .collect(),
+            failed_buckets: Vec::new(),
+        };
+        assert_eq!(
+            exchange
+                .advance_verified(batch, &children, &local_children, &remote_children, |_| {
+                    false
+                },)
+                .unwrap(),
+            Gf256Action::Fallback
+        );
     }
 
     #[test]

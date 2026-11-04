@@ -265,7 +265,7 @@ struct Phase1Failure {
 }
 
 /// Whether `ancestor` is `node` or one of its ancestors.
-fn covers(ancestor: (u8, u64), node: (u8, u64)) -> bool {
+pub(crate) fn covers(ancestor: (u8, u64), node: (u8, u64)) -> bool {
     let Some(shift) = node.0.checked_sub(ancestor.0) else {
         return false;
     };
@@ -273,7 +273,7 @@ fn covers(ancestor: (u8, u64), node: (u8, u64)) -> bool {
 }
 
 /// The half-open interval represented by a bucket prefix at `MAX_DEPTH`.
-fn node_interval(node: (u8, u64)) -> Option<(u128, u128)> {
+pub(crate) fn node_interval(node: (u8, u64)) -> Option<(u128, u128)> {
     let remaining = crate::MAX_DEPTH.checked_sub(node.0)?;
     let remaining = u32::from(remaining);
     let start = u128::from(node.1).checked_shl(remaining)?;
@@ -283,7 +283,7 @@ fn node_interval(node: (u8, u64)) -> Option<(u128, u128)> {
 
 /// Combines a complete, non-overlapping cover of `parent` from descendant
 /// summaries. `None` means some part of the parent has not arrived yet.
-fn summarize_descendant_cover(
+pub(crate) fn summarize_descendant_cover(
     parent: (u8, u64),
     summaries: &[(u8, u64, NodeSummary)],
 ) -> Option<(NodeSummary, bool)> {
@@ -315,6 +315,70 @@ fn summarize_descendant_cover(
         digest ^= summary.digest;
     }
     (cursor == end).then_some((NodeSummary { count, digest }, count_valid))
+}
+
+/// Adds the current round's responder summaries to the descendants awaiting
+/// a parent's split check. A fresh summary supersedes an overlapping earlier
+/// one, since a previously observed descendant may itself have been split.
+pub(crate) fn record_split_summaries(
+    parents: &[(u8, u64, NodeSummary)],
+    awaiting: &mut alloc::vec::Vec<(u8, u64, NodeSummary)>,
+    requests: &[BucketRequest],
+    remote: &[NodeSummary],
+) {
+    for (request, &summary) in requests.iter().zip(remote) {
+        let node = (request.depth, request.prefix);
+        awaiting.retain(|&(depth, prefix, _)| {
+            !covers((depth, prefix), node) && !covers(node, (depth, prefix))
+        });
+        if parents
+            .iter()
+            .any(|&(depth, prefix, _)| depth < node.0 && covers((depth, prefix), node))
+        {
+            awaiting.push((node.0, node.1, summary));
+        }
+    }
+}
+
+/// Removes and returns parents whose descendants now form a complete cover.
+/// The boolean is false when the descendant count sum overflowed.
+#[allow(clippy::type_complexity)]
+pub(crate) fn take_complete_split_summaries(
+    parents: &mut alloc::vec::Vec<(u8, u64, NodeSummary)>,
+    awaiting: &[(u8, u64, NodeSummary)],
+) -> alloc::vec::Vec<((u8, u64), NodeSummary, NodeSummary, bool)> {
+    let candidates: alloc::vec::Vec<(u8, u64)> = parents
+        .iter()
+        .map(|&(depth, prefix, _)| (depth, prefix))
+        .collect();
+    let mut complete = alloc::vec::Vec::new();
+    for parent in candidates {
+        let Some(slot) = parents
+            .iter()
+            .position(|&(depth, prefix, _)| (depth, prefix) == parent)
+        else {
+            continue;
+        };
+        let Some((descendant_summary, count_valid)) = summarize_descendant_cover(parent, awaiting)
+        else {
+            continue;
+        };
+        let parent_summary = parents.remove(slot).2;
+        complete.push((parent, parent_summary, descendant_summary, count_valid));
+    }
+    complete
+}
+
+/// Drops awaited summaries that no longer belong to a parent awaiting a split.
+pub(crate) fn prune_awaiting(
+    parents: &[(u8, u64, NodeSummary)],
+    awaiting: &mut alloc::vec::Vec<(u8, u64, NodeSummary)>,
+) {
+    awaiting.retain(|&(depth, prefix, _)| {
+        parents.iter().any(|&(parent_depth, parent_prefix, _)| {
+            parent_depth < depth && covers((parent_depth, parent_prefix), (depth, prefix))
+        })
+    });
 }
 
 /// Whether `h64` falls inside `node`.
@@ -462,36 +526,10 @@ impl BucketExchange {
         remote: &[NodeSummary],
         batch: &mut BucketDecodeBatch,
     ) {
-        for (request, &summary) in requests.iter().zip(remote) {
-            let node = (request.depth, request.prefix);
-            // A fresh summary supersedes any overlapping earlier summary: a
-            // previously observed descendant may itself have been split.
-            self.awaiting.retain(|&(depth, prefix, _)| {
-                !covers((depth, prefix), node) && !covers(node, (depth, prefix))
-            });
-            let under_parent = self
-                .parents
-                .iter()
-                .any(|&(d, p, _)| d < node.0 && covers((d, p), node));
-            if under_parent {
-                self.awaiting.push((node.0, node.1, summary));
-            }
-        }
-
-        let candidates: alloc::vec::Vec<(u8, u64)> =
-            self.parents.iter().map(|&(d, p, _)| (d, p)).collect();
-        for parent in candidates {
-            // An earlier ladder failure in this loop may have dropped it.
-            let Some(slot) = self.parents.iter().position(|&(d, p, _)| (d, p) == parent) else {
-                continue;
-            };
-            let parent_summary = self.parents[slot].2;
-            let Some((descendant_summary, count_valid)) =
-                summarize_descendant_cover(parent, &self.awaiting)
-            else {
-                continue;
-            };
-            self.parents.remove(slot);
+        record_split_summaries(&self.parents, &mut self.awaiting, requests, remote);
+        for (parent, parent_summary, descendant_summary, count_valid) in
+            take_complete_split_summaries(&mut self.parents, &self.awaiting)
+        {
             if !count_valid || descendant_summary != parent_summary {
                 rezzy_log::warn!(
                     depth = parent.0,
@@ -506,14 +544,7 @@ impl BucketExchange {
                 self.ladder_fail(parent, batch);
             }
         }
-
-        self.awaiting.retain(|&(depth, prefix, _)| {
-            self.parents
-                .iter()
-                .any(|&(parent_depth, parent_prefix, _)| {
-                    parent_depth < depth && covers((parent_depth, parent_prefix), (depth, prefix))
-                })
-        });
+        prune_awaiting(&self.parents, &mut self.awaiting);
     }
 
     /// Whether a phase-1 failure of `node` repeats an earlier one: same
@@ -1254,6 +1285,12 @@ impl ReconciliationClient {
             return Gf256ClientAction::ExtremityDiff;
         }
         let estimate = Self::estimate_delta(local, &remote).unwrap_or(0);
+        if self
+            .gate_threshold
+            .is_some_and(|threshold| estimate > threshold)
+        {
+            return Gf256ClientAction::ExtremityDiff;
+        }
         let headroom = u64::try_from(concurrency_headroom).unwrap_or(u64::MAX);
         let target = provision_capacity(estimate, headroom)
             .unwrap_or(u64::MAX)
@@ -1679,12 +1716,30 @@ mod tests {
             ),
             DefaultClientAction::Gf256(Gf256ClientAction::Synchronized)
         );
+
+        let differing = RemoteDigest {
+            digest: 1,
+            known_event_count: 1,
+            strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
+            frame_matches: true,
+            has_unknown_extremity: false,
+        };
+        let DefaultClientAction::Gf256(Gf256ClientAction::BucketSketches { requests }) =
+            ReconciliationClient::default().select_default_action(
+                &ResidentKernel::new(),
+                differing,
+                0,
+            )
+        else {
+            panic!("differing state should select GF(2^256) bucket sketches");
+        };
+        assert!(!requests.is_empty());
     }
 
     #[test]
     fn gf256_selection_clamps_low_and_high_strata_hints() {
         let client = ReconciliationClient::default()
-            .with_max_aggregate_capacity(128)
+            .with_max_aggregate_capacity(160)
             .with_gate_threshold(None);
         let local = ResidentKernel::new();
         let under_estimate = RemoteDigest {
@@ -1725,6 +1780,12 @@ mod tests {
             frame_matches: true,
             has_unknown_extremity: false,
         };
+        assert_eq!(
+            client
+                .with_gate_threshold(Some(0))
+                .select_gf256_action(&local, over_estimate, 0),
+            Gf256ClientAction::ExtremityDiff
+        );
         let Gf256ClientAction::BucketSketches {
             requests: over_requests,
         } = client.select_gf256_action(&local, over_estimate, 0)
@@ -1734,7 +1795,7 @@ mod tests {
         assert_eq!(
             over_requests.len(),
             4,
-            "the configured four-bucket cap is hit"
+            "five requested buckets are clamped to the largest power of two"
         );
         assert_eq!(over_requests[0].depth, 2);
         assert_eq!(

@@ -10,18 +10,22 @@ spec_audit.md.
 
 ## Performance
 
-### GF(2^256) opt-in path: decode budget, transport and ceiling are unmeasured
+### GF(2^256) full-digest path: decode budget, transport and ceiling are unmeasured
 
 The full-digest path (`select_default_action`, `Gf256BucketExchange`) is the
 default for new callers; the existing GF(2^64) path remains available through
-`select_action`. Open items: there is no recommended production batch budget
-(the e2e test fixture uses 2M `WorkModel::GF256` units, measured at under 1M for
-one 20-each-way scenario); the 300M per-sketch ceiling is practical, not proven;
-and the payload is not wired into any transport or advertised in a capability
-field. Measure typical capacity-32 batches, record units, then propose a
-default. The lane-parallel `gf256_simd` MAC is compiled only where AVX-512
-VPCLMULQDQ support is available; it still needs throughput measurement on that
-hardware.
+`select_action`. Open items: there is no measured production batch budget;
+`recommended_gf256_bucket_decode_budget` grants each request the decoder's full
+per-sketch allowance, but typical capacity-32 cost remains unrecorded (the e2e
+fixture uses 2M `WorkModel::GF256` units, measured at under 1M for one
+20-each-way scenario). The 300M per-sketch ceiling is practical, not proven, and
+the payload is not wired into any transport or advertised in a capability field.
+Measure typical capacity-32 batches, record units, then propose a default. The lane-parallel `gf256_simd` MAC is selected at runtime when the CPU
+supports `avx512f` and `vpclmulqdq`; builds with Rust before 1.89, non-x86_64
+targets, or `no_std` use the scalar path. It still needs throughput measurement
+on AVX-512 hardware. `benches/bench-results.csv` contains no GF(2^256) metrics;
+the work-budget calibration remains unrecorded there, so keep the current
+ceilings until reproducible measurements are added.
 
 ### Dense-index (`id_to_index`/`index_to_id`) pattern reimplemented 5+ times independently
 
