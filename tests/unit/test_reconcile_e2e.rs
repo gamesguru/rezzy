@@ -32,9 +32,9 @@ use rezzy_recon::triage::{
     MAX_BUCKETED_SKETCH_CAPACITY, MAX_BUCKET_SKETCH_CAPACITY, MAX_STRATA_FACTOR_WORK,
 };
 use rezzy_recon::{
-    build_bucket_nodes, build_gf256_bucket_nodes, decode_gf256_bucket_sketches_with_summaries,
-    should_narrow, subtract_gf256_payload, verify_follow_up, BucketRequest, Classified,
-    ElementHash, FixedWindowElementHash, FixedWindowPopulation, Gf256Action, Gf256BucketExchange,
+    build_bucket_nodes, decode_gf256_bucket_sketches_with_summaries, should_narrow,
+    subtract_gf256_payload, verify_follow_up, BucketRequest, Classified, ElementHash,
+    FixedWindowElementHash, FixedWindowPopulation, Gf256Action, Gf256BucketExchange,
     Gf256ClientAction, Gf256Decoder, NodeSummary, SortedPopulation,
 };
 #[path = "../../support/reconciliation.rs"]
@@ -834,15 +834,17 @@ fn run_gf256_exchange(
         match action {
             Gf256Action::Request(requests) => {
                 rounds = rounds.saturating_add(1);
-                let remote_nodes = build_gf256_bucket_nodes(&remote.1, &requests).unwrap();
-                let payload: Vec<u8> = remote_nodes
-                    .iter()
-                    .flat_map(|(sketch, _)| sketch.to_bytes())
-                    .collect();
-                let remote_summaries: Vec<_> = remote_nodes.iter().map(|n| n.1).collect();
-                let local_nodes = build_gf256_bucket_nodes(&local.1, &requests).unwrap();
-                let local_sketches: Vec<_> = local_nodes.iter().map(|n| n.0.clone()).collect();
-                let local_summaries: Vec<_> = local_nodes.iter().map(|n| n.1).collect();
+                let remote_nodes = remote.1.bucket_nodes(&requests).unwrap();
+                let (payload, remote_summaries) = remote_nodes.into_iter().fold(
+                    (Vec::new(), Vec::new()),
+                    |(mut payload, mut summaries), (sketch, summary)| {
+                        payload.extend_from_slice(&sketch.to_bytes());
+                        summaries.push(summary);
+                        (payload, summaries)
+                    },
+                );
+                let (local_sketches, local_summaries): (Vec<_>, Vec<_>) =
+                    local.1.bucket_nodes(&requests).unwrap().into_iter().unzip();
                 let diff = subtract_gf256_payload(&local_sketches, &payload, &requests).unwrap();
                 let batch = decode_gf256_bucket_sketches_with_summaries(
                     &diff,
