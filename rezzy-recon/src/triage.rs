@@ -1443,4 +1443,179 @@ mod tests {
             2 * Gf256Decoder::per_sketch_work_ceiling()
         );
     }
+
+    #[cfg(feature = "std")]
+    fn calibration_next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[cfg(feature = "std")]
+    fn calibration_roots(
+        repetition: usize,
+        bucket: usize,
+        count: usize,
+        random: bool,
+    ) -> Vec<Gf256> {
+        let rep = u64::try_from(repetition).unwrap();
+        let bucket = u64::try_from(bucket).unwrap();
+        let mut state = 0x6a09_e667_f3bc_c909_u64
+            ^ rep.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ bucket.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        let mut roots = Vec::with_capacity(count);
+        while roots.len() < count {
+            let candidate = if random {
+                Gf256::from_limbs(core::array::from_fn(|_| calibration_next(&mut state)))
+            } else {
+                Gf256::from_limbs([
+                    u64::try_from(roots.len()).unwrap().wrapping_add(1),
+                    bucket.wrapping_add(1),
+                    rep.wrapping_add(1),
+                    0,
+                ])
+            };
+            if candidate != Gf256::ZERO && !roots.contains(&candidate) {
+                roots.push(candidate);
+            }
+        }
+        roots.sort_unstable();
+        roots
+    }
+
+    #[cfg(feature = "std")]
+    fn calibration_stats(values: &[usize]) -> Option<(usize, usize, usize, usize)> {
+        if values.is_empty() {
+            return None;
+        }
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        let nearest_rank = |percentile: usize| {
+            let rank = percentile
+                .checked_mul(sorted.len())
+                .expect("calibration percentile multiplication fits usize");
+            sorted[rank.div_ceil(100).saturating_sub(1)]
+        };
+        Some((
+            nearest_rank(50),
+            nearest_rank(95),
+            nearest_rank(99),
+            *sorted.last().unwrap(),
+        ))
+    }
+
+    #[cfg(feature = "std")]
+    fn print_calibration_stats(
+        pattern: &str,
+        scenario: &str,
+        scope: &str,
+        outcome: &str,
+        values: &[usize],
+    ) {
+        if let Some((p50, p95, p99, max)) = calibration_stats(values) {
+            std::println!(
+                "{pattern},{scenario},{scope},{outcome},{},{p50},{p95},{p99},{max}",
+                values.len()
+            );
+        }
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    #[ignore = "release GF256 batch work-unit calibration"]
+    fn gf256_128_bucket_batch_work_calibration() {
+        const REPETITIONS: usize = 100;
+        const BUCKETS: usize = MAX_BUCKETS_PER_ROUND;
+        const CAPACITY: usize = MAX_BUCKET_SKETCH_CAPACITY;
+        let decoder = Gf256Decoder::build().expect("cached GF256 decoder");
+        let per_bucket_allowance = Gf256Decoder::per_sketch_work_ceiling();
+        let batch_allowance = per_bucket_allowance.checked_mul(BUCKETS).unwrap();
+
+        std::println!("pattern,scenario,scope,outcome,samples,p50,p95,p99,max");
+        for (pattern, random) in [("random", true), ("consecutive", false)] {
+            for (scenario, total_differences, stress_bucket) in [
+                ("total_10", 10_usize, false),
+                ("total_100", 100, false),
+                ("total_1000", 1_000, false),
+                ("total_10000", 10_000, false),
+                ("worst_bucket_32", 0, true),
+            ] {
+                let mut bucket_success = Vec::with_capacity(REPETITIONS * BUCKETS);
+                let mut bucket_failure = Vec::new();
+                let mut bucket_all = Vec::with_capacity(REPETITIONS * BUCKETS);
+                let mut batch_success = Vec::with_capacity(REPETITIONS);
+                let mut batch_failure = Vec::with_capacity(REPETITIONS);
+                let mut batch_all = Vec::with_capacity(REPETITIONS);
+                let mut total_successes = 0_usize;
+                let mut total_failures = 0_usize;
+
+                for repetition in 0..REPETITIONS {
+                    let mut counts = vec![0_usize; BUCKETS];
+                    if stress_bucket {
+                        counts[repetition % BUCKETS] = CAPACITY;
+                    } else {
+                        let mut placement_state =
+                            0x243f_6a88_85a3_08d3_u64 ^ u64::try_from(repetition).unwrap();
+                        for _ in 0..total_differences {
+                            let bucket = (calibration_next(&mut placement_state) >> (u64::BITS - 7))
+                                as usize;
+                            counts[bucket] += 1;
+                        }
+                    }
+
+                    let mut remaining_batch = batch_allowance;
+                    let mut this_batch_success = 0_usize;
+                    let mut this_batch_failure = 0_usize;
+                    for (bucket, count) in counts.into_iter().enumerate() {
+                        let expected = calibration_roots(repetition, bucket, count, random);
+                        let mut sketch = Gf256Sketch::new(CAPACITY).unwrap();
+                        for root in &expected {
+                            sketch.toggle(*root).unwrap();
+                        }
+
+                        let allowance = remaining_batch.min(per_bucket_allowance);
+                        let mut remaining_bucket = allowance;
+                        let decoded = decoder.decode_with_budget(
+                            sketch.coordinates(),
+                            CAPACITY,
+                            &mut remaining_bucket,
+                        );
+                        let spent = allowance - remaining_bucket;
+                        remaining_batch = remaining_batch.checked_sub(spent).unwrap();
+                        bucket_all.push(spent);
+
+                        let exact = decoded.is_ok_and(|mut actual| {
+                            actual.sort_unstable();
+                            actual == expected
+                        });
+                        if exact {
+                            total_successes += 1;
+                            this_batch_success += spent;
+                            bucket_success.push(spent);
+                        } else {
+                            total_failures += 1;
+                            this_batch_failure += spent;
+                            bucket_failure.push(spent);
+                        }
+                    }
+                    assert_eq!(
+                        batch_allowance - remaining_batch,
+                        this_batch_success + this_batch_failure
+                    );
+                    batch_success.push(this_batch_success);
+                    batch_failure.push(this_batch_failure);
+                    batch_all.push(this_batch_success + this_batch_failure);
+                }
+
+                std::println!("# {pattern},{scenario},bucket_counts,success={total_successes},failed={total_failures}");
+                print_calibration_stats(pattern, scenario, "bucket", "success", &bucket_success);
+                print_calibration_stats(pattern, scenario, "bucket", "failed", &bucket_failure);
+                print_calibration_stats(pattern, scenario, "bucket", "all", &bucket_all);
+                print_calibration_stats(pattern, scenario, "batch", "success_work", &batch_success);
+                print_calibration_stats(pattern, scenario, "batch", "failed_work", &batch_failure);
+                print_calibration_stats(pattern, scenario, "batch", "total_work", &batch_all);
+            }
+        }
+    }
 }

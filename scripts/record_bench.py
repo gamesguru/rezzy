@@ -11,7 +11,14 @@ from pathlib import Path
 
 from compare_bench import extract
 
-FIELDS = ("timestamp_utc", "revision", "branch", "metric", "milliseconds")
+FIELDS = (
+    "timestamp_utc",
+    "revision",
+    "branch",
+    "metric",
+    "milliseconds",
+    "work_units",
+)
 
 
 def git_value(*args: str) -> str:
@@ -50,6 +57,7 @@ def main() -> int:
                     "branch": branch,
                     "metric": metric,
                     "milliseconds": f"{milliseconds:.9f}",
+                    "work_units": "",
                 }
             )
 
