@@ -32,8 +32,10 @@ use rezzy_recon::triage::{
     MAX_BUCKETED_SKETCH_CAPACITY, MAX_BUCKET_SKETCH_CAPACITY, MAX_STRATA_FACTOR_WORK,
 };
 use rezzy_recon::{
-    build_bucket_nodes, should_narrow, verify_follow_up, BucketRequest, Classified, ElementHash,
-    NodeSummary, SortedPopulation,
+    build_bucket_nodes, build_gf256_bucket_nodes, decode_gf256_bucket_sketches_with_summaries,
+    should_narrow, subtract_gf256_payload, verify_follow_up, BucketRequest, Classified,
+    ElementHash, FixedWindowElementHash, FixedWindowPopulation, Gf256Action, Gf256BucketExchange,
+    Gf256ClientAction, Gf256Decoder, NodeSummary, SortedPopulation,
 };
 #[path = "../../support/reconciliation.rs"]
 mod reconciliation_support;
@@ -772,4 +774,123 @@ fn phase_two_failure_is_narrowed_by_rerunning_the_children() {
         }
     }
     assert!(recovered.iter().all(|&r| !in_lost(r)));
+}
+
+// ---------------------------------------------------------------------------
+// Opt-in GF(2^256) full-digest path, driven only through the public API.
+// The GF(2^64) tests above are the existing/default path and are unchanged.
+// ---------------------------------------------------------------------------
+
+/// Shared decode budget for the GF(2^256) e2e tests, in `WorkModel::GF256`
+/// units. Measured by bisecting the 20-each-way scenario below: the exchange
+/// completes with a budget of about 0.73M units (bisection resolution 1M) and
+/// fails below that. 2M leaves roughly 2.7x headroom. This is a fixture for
+/// one scenario, not a recommended production default.
+const GF256_E2E_BUDGET: usize = 2_000_000;
+
+fn gf256_test_digest(seed: u64) -> [u8; 32] {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut out = [0_u8; 32];
+    for chunk in out.chunks_exact_mut(8) {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        chunk.copy_from_slice(&state.wrapping_mul(0x2545_F491_4F6C_DD1D).to_be_bytes());
+    }
+    out
+}
+
+fn gf256_side(seeds: std::ops::Range<u64>) -> (ResidentKernel, FixedWindowPopulation) {
+    let mut kernel = ResidentKernel::new();
+    let mut elements = Vec::new();
+    for seed in seeds {
+        let element = FixedWindowElementHash::from_digest32(gf256_test_digest(seed));
+        kernel.insert(element).unwrap();
+        elements.push(element);
+    }
+    (kernel, FixedWindowPopulation::new(elements).unwrap())
+}
+
+/// Runs the opt-in exchange and returns `(local_only, remote_only, rounds)`.
+fn run_gf256_exchange(
+    local: &(ResidentKernel, FixedWindowPopulation),
+    local_seeds: std::ops::Range<u64>,
+    remote: &(ResidentKernel, FixedWindowPopulation),
+    budget: usize,
+) -> (Vec<[u8; 32]>, Vec<[u8; 32]>, usize) {
+    let client = ReconciliationClient::default().allow_unlimited_delta();
+    let Gf256ClientAction::BucketSketches { requests } =
+        client.select_gf256_action(&local.0, remote_digest(&remote.0), 0)
+    else {
+        panic!("differing sides must select a bucket exchange");
+    };
+    let local_set: std::collections::HashSet<[u8; 32]> =
+        local_seeds.map(gf256_test_digest).collect();
+    let decoder = Gf256Decoder::build().unwrap();
+    let mut exchange = Gf256BucketExchange::default();
+    let mut action = exchange.start_with_requests(requests).unwrap();
+    let mut rounds = 0_usize;
+    loop {
+        match action {
+            Gf256Action::Request(requests) => {
+                rounds = rounds.saturating_add(1);
+                let remote_nodes = build_gf256_bucket_nodes(&remote.1, &requests).unwrap();
+                let payload: Vec<u8> = remote_nodes
+                    .iter()
+                    .flat_map(|(sketch, _)| sketch.to_bytes())
+                    .collect();
+                let remote_summaries: Vec<_> = remote_nodes.iter().map(|n| n.1).collect();
+                let local_nodes = build_gf256_bucket_nodes(&local.1, &requests).unwrap();
+                let local_sketches: Vec<_> = local_nodes.iter().map(|n| n.0.clone()).collect();
+                let local_summaries: Vec<_> = local_nodes.iter().map(|n| n.1).collect();
+                let diff = subtract_gf256_payload(&local_sketches, &payload, &requests).unwrap();
+                let batch = decode_gf256_bucket_sketches_with_summaries(
+                    &diff,
+                    &requests,
+                    &local_summaries,
+                    &remote_summaries,
+                    budget,
+                    &decoder,
+                )
+                .unwrap();
+                action = exchange
+                    .advance_verified(batch, &requests, &local_summaries, &remote_summaries, |d| {
+                        local_set.contains(d)
+                    })
+                    .unwrap();
+            }
+            Gf256Action::Complete {
+                local_only,
+                remote_only,
+            } => return (local_only, remote_only, rounds),
+            Gf256Action::Fallback => panic!("exchange fell back"),
+        }
+    }
+}
+
+#[test]
+fn gf256_opt_in_exchange_recovers_exact_full_digests() {
+    // 20 differences each way: more than one capacity-32 bucket can hold.
+    let local = gf256_side(0..120);
+    let remote = gf256_side(20..140);
+    let (local_only, remote_only, rounds) =
+        run_gf256_exchange(&local, 0..120, &remote, GF256_E2E_BUDGET);
+    let mut expect_local: Vec<_> = (0..20).map(gf256_test_digest).collect();
+    let mut expect_remote: Vec<_> = (120..140).map(gf256_test_digest).collect();
+    expect_local.sort_unstable();
+    expect_remote.sort_unstable();
+    assert_eq!(local_only, expect_local);
+    assert_eq!(remote_only, expect_remote);
+    assert!(rounds >= 1);
+}
+
+#[test]
+fn gf256_opt_in_identical_sides_synchronize() {
+    let local = gf256_side(0..50);
+    let remote = gf256_side(0..50);
+    let client = ReconciliationClient::default().allow_unlimited_delta();
+    assert_eq!(
+        client.select_gf256_action(&local.0, remote_digest(&remote.0), 0),
+        Gf256ClientAction::Synchronized
+    );
 }
