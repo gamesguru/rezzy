@@ -1,3 +1,7 @@
-# Push destinations are developer-specific. Configure any `pushurl` values in
-# the clone's local `.git/config`; this shared include intentionally defines
-# none, so a push cannot publish to multiple destinations by default.
+# Enable in each clone with:
+#   git config --local include.path ../.gitconfig
+
+[remote "helio"]
+	pushurl = git@nutra.tk:gamesguru/rezzy.git
+	pushurl = git@gitlab.com:gamesguru/rezzy.git
+	pushurl = git@gitlab.com:Wombat-Foundation/rezzy.git

@@ -20,12 +20,13 @@ per-sketch allowance, but typical capacity-32 cost remains unrecorded (the e2e
 fixture uses 2M `WorkModel::GF256` units, measured at under 1M for one
 20-each-way scenario). The 300M per-sketch ceiling is practical, not proven, and
 the payload is not wired into any transport or advertised in a capability field.
-Measure typical capacity-32 batches, record units, then propose a default. The lane-parallel `gf256_simd` MAC is selected at runtime when the CPU
-supports `avx512f` and `vpclmulqdq`; builds with Rust before 1.89, non-x86_64
-targets, or `no_std` use the scalar path. It still needs throughput measurement
-on AVX-512 hardware. `benches/bench-results.csv` contains no GF(2^256) metrics;
-the work-budget calibration remains unrecorded there, so keep the current
-ceilings until reproducible measurements are added.
+Measure typical capacity-32 batches, record units, then propose a default. The
+lane-parallel `gf256_simd` MAC is selected at runtime when the CPU supports
+`avx512f` and `vpclmulqdq`; builds with Rust before 1.89, non-x86_64 targets, or
+`no_std` use the scalar path. It still needs throughput measurement on AVX-512
+hardware. `benches/bench-results.csv` contains no GF(2^256) metrics; the
+work-budget calibration remains unrecorded there, so keep the current ceilings
+until reproducible measurements are added.
 
 ### Dense-index (`id_to_index`/`index_to_id`) pattern reimplemented 5+ times independently
 

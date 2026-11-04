@@ -178,12 +178,12 @@ The entire 32-byte digest is treated as an element of $\mathrm{GF}(2^{256})$.
   `SortedPopulation::candidates`; those remain in the existing GF(2^64) path.
 - **Zero-Element Invariant:** PinSketch requires non-zero elements ($x \ne 0$).
   Reject the all-zero 32-byte digest at insertion and route that one reserved
-  identifier through the caller's non-algebraic fallback (for example, direct
-  ID fetch) for exact coverage. Do not alias it to `1` or use an affine offset
-  that leaves another digest unrepresentable. The placement key may be zero;
-  only the full field element must be nonzero. This is a single reserved
-  sentinel, not a locator-collision fallback for other digests, so the scheme
-  is not literally lossless for that one field value.
+  identifier through the caller's non-algebraic fallback (for example, direct ID
+  fetch) for exact coverage. Do not alias it to `1` or use an affine offset that
+  leaves another digest unrepresentable. The placement key may be zero; only the
+  full field element must be nonzero. This is a single reserved sentinel, not a
+  locator-collision fallback for other digests, so the scheme is not literally
+  lossless for that one field value.
 - **Compute Cost:** Using the pinned work model
   $\text{ceiling}(d) = (2F+8)d^2 + F(F+8)d$:
 
@@ -290,12 +290,12 @@ most one round trip—zero if IDs and bodies are already batched—and never rea
 
 ## 6. Decision Matrix
 
-| Consumer / Workload                             | Recommendation                                    | Rationale                                                                                                                                                                                   |
-| :---------------------------------------------- | :------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Event / DAG Replication** (`rezzy`)           | **Retain Two-Phase MSC4521**                      | Body fetch dominates total time; avoids $4\times$ wire and extraction penalty on sketches.                                                                                                  |
+| Consumer / Workload                              | Recommendation                                    | Rationale                                                                                                                                                                                                          |
+| :----------------------------------------------- | :------------------------------------------------ | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Event / DAG Replication** (`rezzy`)            | **Retain Two-Phase MSC4521**                      | Body fetch dominates total time; avoids $4\times$ wire and extraction penalty on sketches.                                                                                                                         |
 | **ID-Only Sync (No Locator-Collision Fallback)** | **Option A ($\mathrm{GF}(2^{256})$)**             | No locator collisions; avoids collision-resolution fetches when decoding completes within budget for $d \le C$. Capacity overflow, budget exhaustion, and the reserved all-zero digest can still require fallback. |
-| **ID-Only Sync (Practical)**                    | **Option B2 ($128/128$, $\mathrm{GF}(2^{128})$)** | Reuses `h128` residual as $V_0$; $2^{64}$ adversarial floor; avoids degree-256 root finding.                                                                                                |
-| **GF($2^{64}$)-Only Hardware Constraint**       | **Option B1 ($64/192$, $\mathrm{GF}(2^{64})$)**   | Preserves existing SIMD paths; must document $2^{32}$ adversarial collision fallback.                                                                                                       |
+| **ID-Only Sync (Practical)**                     | **Option B2 ($128/128$, $\mathrm{GF}(2^{128})$)** | Reuses `h128` residual as $V_0$; $2^{64}$ adversarial floor; avoids degree-256 root finding.                                                                                                                       |
+| **GF($2^{64}$)-Only Hardware Constraint**        | **Option B1 ($64/192$, $\mathrm{GF}(2^{64})$)**   | Preserves existing SIMD paths; must document $2^{32}$ adversarial collision fallback.                                                                                                                              |
 
 ---
 
@@ -332,15 +332,15 @@ already breaks compatibility; make it explicit).
 | `digest[0..32]`  | sketch element (full field element)                         |
 
 Insertion returns `ZeroSketchElement` for the all-zero full digest; the caller
-must route it through the non-algebraic fallback for exact coverage (no
-`0 -> 1` aliasing on the full element). Drop the `h64 == 0` guard from
-`ResidentKernel::insert`; bucket
-placement may use a zero prefix. Keep the zero-element rejection in
-`SyndromeSketch::toggle`, but apply it to the full 32-byte digest. The current
-first-non-zero scan makes `h64 | q3 | h128` disjoint only probabilistically;
-fixed windows make it strict. `FixedWindowElementHash` now represents this
-mapping explicitly, separately from the existing `ElementHash`; the GF(2^256)
-path uses it, and the existing path keeps `ElementHash`.
+must route it through the non-algebraic fallback for exact coverage (no `0 -> 1`
+aliasing on the full element). Drop the `h64 == 0` guard from
+`ResidentKernel::insert`; bucket placement may use a zero prefix. Keep the
+zero-element rejection in `SyndromeSketch::toggle`, but apply it to the full
+32-byte digest. The current first-non-zero scan makes `h64 | q3 | h128` disjoint
+only probabilistically; fixed windows make it strict. `FixedWindowElementHash`
+now represents this mapping explicitly, separately from the existing
+`ElementHash`; the GF(2^256) path uses it, and the existing path keeps
+`ElementHash`.
 
 ### 8.2 Collision and security surfaces
 
