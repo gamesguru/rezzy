@@ -25,6 +25,37 @@ use crate::triage::{
 use crate::verify::verify_gf256_batch;
 use crate::{AlgebraicError, Gf256Sketch};
 
+/// Why a [`Gf256BucketExchange`] stopped without completing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gf256FallbackReason {
+    /// The configured request/response round limit was reached.
+    RoundLimit,
+    /// A split's child summaries did not reconstruct the parent summary.
+    SplitInconsistent,
+    /// A failed bucket could not be retried or split further.
+    RetryExhausted,
+    /// The pending split children did not form a complete cover of a parent.
+    IncompleteSplit,
+    /// Adding a request's capacity overflowed the round accounting.
+    CapacityOverflow,
+    /// The next round was empty or failed request validation.
+    InvalidRoundPlan,
+}
+
+impl core::fmt::Display for Gf256FallbackReason {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let text = match self {
+            Self::RoundLimit => "round limit",
+            Self::SplitInconsistent => "split summaries inconsistent",
+            Self::RetryExhausted => "bucket cannot be retried or split",
+            Self::IncompleteSplit => "incomplete split cover",
+            Self::CapacityOverflow => "capacity overflow",
+            Self::InvalidRoundPlan => "empty or invalid round plan",
+        };
+        formatter.write_str(text)
+    }
+}
+
 /// The next step of a [`Gf256BucketExchange`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Gf256Action {
@@ -37,8 +68,11 @@ pub enum Gf256Action {
         /// Digests absent locally; the peer must supply the event IDs.
         remote_only: Vec<[u8; 32]>,
     },
-    /// The exchange cannot finish within its limits; use the baseline.
-    Fallback,
+    /// The exchange cannot finish; use the baseline.
+    Fallback {
+        /// The specific limit or inconsistency that stopped the exchange.
+        reason: Gf256FallbackReason,
+    },
 }
 
 /// Bucket exchange planner for the GF(2^256) path.
@@ -170,7 +204,9 @@ impl Gf256BucketExchange {
         }
         if self.split_summaries_are_inconsistent(requests, remote) {
             self.last_emitted_round = None;
-            return Ok(Gf256Action::Fallback);
+            return Ok(Gf256Action::Fallback {
+                reason: Gf256FallbackReason::SplitInconsistent,
+            });
         }
         let (batch, verified) = verify_gf256_batch(batch, requests, local, remote, is_local)?;
         self.last_emitted_round = None;
@@ -221,7 +257,11 @@ impl Gf256BucketExchange {
                     }
                     self.pending.extend(children);
                 }
-                Err(_) => return Ok(Gf256Action::Fallback),
+                Err(_) => {
+                    return Ok(Gf256Action::Fallback {
+                        reason: Gf256FallbackReason::RetryExhausted,
+                    });
+                }
             }
         }
         self.pending
@@ -229,7 +269,9 @@ impl Gf256BucketExchange {
             .sort_unstable_by_key(bucket_range_start);
         if self.pending.is_empty() {
             if !self.parents.is_empty() {
-                return Ok(Gf256Action::Fallback);
+                return Ok(Gf256Action::Fallback {
+                    reason: Gf256FallbackReason::IncompleteSplit,
+                });
             }
             let mut local_only = core::mem::take(&mut self.local_only);
             let mut remote_only = core::mem::take(&mut self.remote_only);
@@ -268,13 +310,17 @@ impl Gf256BucketExchange {
     fn drain_round(&mut self) -> Gf256Action {
         if self.rounds_emitted >= self.max_rounds {
             self.last_emitted_round = None;
-            return Gf256Action::Fallback;
+            return Gf256Action::Fallback {
+                reason: Gf256FallbackReason::RoundLimit,
+            };
         }
         let mut total = 0_usize;
         let mut round = Vec::new();
         while let Some(candidate) = self.pending.front().copied() {
             let Some(next_total) = total.checked_add(candidate.capacity) else {
-                return Gf256Action::Fallback;
+                return Gf256Action::Fallback {
+                    reason: Gf256FallbackReason::CapacityOverflow,
+                };
             };
             if round.len() >= self.max_buckets_per_round || next_total > self.max_aggregate_capacity
             {
@@ -286,7 +332,9 @@ impl Gf256BucketExchange {
         }
         if round.is_empty() || validate_adaptive_bucket_requests(&round).is_err() {
             self.last_emitted_round = None;
-            return Gf256Action::Fallback;
+            return Gf256Action::Fallback {
+                reason: Gf256FallbackReason::InvalidRoundPlan,
+            };
         }
         self.rounds_emitted = self.rounds_emitted.saturating_add(1);
         self.last_emitted_round = Some(round.clone());
@@ -503,7 +551,7 @@ mod tests {
                     local_only,
                     remote_only,
                 } => return (local_only, remote_only, rounds, saw_split),
-                Gf256Action::Fallback => panic!("fell back"),
+                Gf256Action::Fallback { reason } => panic!("fell back: {reason}"),
             }
         }
     }
@@ -786,14 +834,105 @@ mod tests {
                     false
                 },)
                 .unwrap(),
-            Gf256Action::Fallback
+            Gf256Action::Fallback {
+                reason: Gf256FallbackReason::SplitInconsistent
+            }
         );
     }
 
     #[test]
     fn round_budget_exhaustion_falls_back() {
         let mut exchange = Gf256BucketExchange::new(0, 8, 4096);
-        assert_eq!(exchange.start(8), Gf256Action::Fallback);
+        assert_eq!(
+            exchange.start(8),
+            Gf256Action::Fallback {
+                reason: Gf256FallbackReason::RoundLimit
+            }
+        );
+    }
+
+    #[test]
+    fn request_above_aggregate_capacity_is_an_invalid_plan() {
+        let mut exchange = Gf256BucketExchange::new(20, 8, 4);
+        assert_eq!(
+            exchange.start(8),
+            Gf256Action::Fallback {
+                reason: Gf256FallbackReason::InvalidRoundPlan
+            }
+        );
+    }
+
+    #[test]
+    fn depth_limit_falls_back_with_retry_exhausted() {
+        let request = BucketRequest::new(crate::MAX_DEPTH, 0, 32);
+        let mut exchange = Gf256BucketExchange::new(20, 8, 4096);
+        exchange.last_emitted_round = Some(alloc::vec![request]);
+        let batch = Gf256BucketDecodeBatch {
+            successful_buckets: Vec::new(),
+            failed_buckets: alloc::vec![(crate::MAX_DEPTH, 0)],
+        };
+        let summaries = [NodeSummary {
+            count: 1,
+            digest: 0,
+        }];
+        assert_eq!(
+            exchange
+                .advance_verified(batch, &[request], &summaries, &summaries, |_| false)
+                .unwrap(),
+            Gf256Action::Fallback {
+                reason: Gf256FallbackReason::RetryExhausted
+            }
+        );
+    }
+
+    #[test]
+    fn missing_split_children_fall_back_as_incomplete() {
+        let request = BucketRequest::new(0, 0, 32);
+        let mut exchange = Gf256BucketExchange::new(20, 8, 4096);
+        exchange.last_emitted_round = Some(alloc::vec![request]);
+        exchange.parents.push((
+            0,
+            0,
+            NodeSummary {
+                count: 0,
+                digest: 0,
+            },
+        ));
+        let batch = Gf256BucketDecodeBatch {
+            successful_buckets: alloc::vec![crate::triage::Gf256BucketDecodeSuccess {
+                depth: 0,
+                prefix: 0,
+                digests: Vec::new(),
+            }],
+            failed_buckets: Vec::new(),
+        };
+        let summaries = [NodeSummary {
+            count: 0,
+            digest: 0,
+        }];
+        assert_eq!(
+            exchange
+                .advance_verified(batch, &[request], &summaries, &summaries, |_| false)
+                .unwrap(),
+            Gf256Action::Fallback {
+                reason: Gf256FallbackReason::IncompleteSplit
+            }
+        );
+    }
+
+    #[test]
+    fn capacity_sum_overflow_falls_back() {
+        let mut exchange = Gf256BucketExchange::new(20, 8, usize::MAX);
+        exchange
+            .pending
+            .push_back(BucketRequest::new(0, 0, usize::MAX));
+        exchange.pending.push_back(BucketRequest::new(1, 0, 1));
+        assert_eq!(
+            exchange.drain_round(),
+            Gf256Action::Fallback {
+                reason: Gf256FallbackReason::CapacityOverflow
+            }
+        );
     }
 
     #[test]

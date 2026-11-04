@@ -64,7 +64,9 @@ pub use gf256::{Gf256, Gf256Decoder, Gf256Sketch};
 
 /// Profile identifier selected by default for full-digest reconciliation.
 pub const DEFAULT_PROFILE_ID: &str = gf256::PROFILE_ID;
-pub use gf256_exchange::{subtract_gf256_payload, Gf256Action, Gf256BucketExchange};
+pub use gf256_exchange::{
+    subtract_gf256_payload, Gf256Action, Gf256BucketExchange, Gf256FallbackReason,
+};
 pub use resident::{
     decode_strata, encode_strata, ResidentKernel, RESIDENT_FORMAT_VERSION, RESIDENT_SERIALIZED_LEN,
     STRATA_COUNT, STRATUM_CAPACITY,

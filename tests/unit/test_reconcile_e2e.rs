@@ -867,7 +867,7 @@ fn run_gf256_exchange(
                 local_only,
                 remote_only,
             } => return (local_only, remote_only, rounds, initial_buckets),
-            Gf256Action::Fallback => panic!("exchange fell back"),
+            Gf256Action::Fallback { reason } => panic!("exchange fell back: {reason}"),
         }
     }
 }

@@ -7,8 +7,8 @@ use std::{collections::HashSet, hint::black_box, time::Instant};
 use rezzy_recon::{
     decode_gf256_bucket_sketches_with_summaries, gf64_mul, recommended_gf256_bucket_decode_budget,
     subtract_gf256_payload, FixedWindowElementHash, FixedWindowPopulation, Gf256, Gf256Action,
-    Gf256BucketExchange, Gf256ClientAction, Gf256Decoder, ReconciliationClient, RemoteDigest,
-    ResidentKernel,
+    Gf256BucketExchange, Gf256ClientAction, Gf256Decoder, Gf256FallbackReason,
+    ReconciliationClient, RemoteDigest, ResidentKernel,
 };
 use sha2::{Digest, Sha256};
 
@@ -211,14 +211,15 @@ fn build_room_fixture(room_events_per_side: usize, difference_each_way: usize) -
 #[derive(Debug, Clone, Copy)]
 enum RoomExchangeOutcome {
     Complete,
-    Fallback,
+    Fallback(Gf256FallbackReason),
 }
 
 #[derive(Debug, Clone, Copy)]
 struct RoomExchangeResult {
     outcome: RoomExchangeOutcome,
     rounds: usize,
-    bucket_requests: usize,
+    initial_requests: usize,
+    total_requests: usize,
     sketch_payload_bytes: usize,
 }
 
@@ -229,19 +230,20 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
     else {
         panic!("different benchmark rooms must select bucket reconciliation");
     };
+    let initial_requests = requests.len();
     let mut exchange = Gf256BucketExchange::default();
     let mut action = exchange
         .start_with_requests(requests)
         .expect("client requests cover the digest key space");
     let mut rounds = 0_usize;
-    let mut bucket_requests = 0_usize;
+    let mut total_requests = 0_usize;
     let mut sketch_payload_bytes = 0_usize;
 
     loop {
         match action {
             Gf256Action::Request(requests) => {
                 rounds = rounds.saturating_add(1);
-                bucket_requests = bucket_requests.saturating_add(requests.len());
+                total_requests = total_requests.saturating_add(requests.len());
                 let round_capacity = requests.iter().fold(0_usize, |total, request| {
                     total.saturating_add(request.capacity)
                 });
@@ -296,15 +298,17 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
                 return RoomExchangeResult {
                     outcome: RoomExchangeOutcome::Complete,
                     rounds,
-                    bucket_requests,
+                    initial_requests,
+                    total_requests,
                     sketch_payload_bytes,
                 };
             }
-            Gf256Action::Fallback => {
+            Gf256Action::Fallback { reason } => {
                 return RoomExchangeResult {
-                    outcome: RoomExchangeOutcome::Fallback,
+                    outcome: RoomExchangeOutcome::Fallback(reason),
                     rounds,
-                    bucket_requests,
+                    initial_requests,
+                    total_requests,
                     sketch_payload_bytes,
                 };
             }
@@ -323,17 +327,31 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
         outcome = Some(reconcile_room_once(black_box(&fixture), &decoder));
     });
     let result = outcome.expect("one benchmark iteration ran");
+    let peer_raw_bytes = room_events.saturating_mul(32);
+    let sketch_pct = (result.sketch_payload_bytes as f64 / peer_raw_bytes as f64) * 100.0;
+    let outcome_str = match result.outcome {
+        RoomExchangeOutcome::Complete => "Complete,".to_string(),
+        RoomExchangeOutcome::Fallback(reason) => format!("Fallback ({reason}),"),
+    };
     println!(
-        "GF256/{room_events}/diff_each_way_{difference_each_way}: {:.1} ms, {:?}, {} rounds, {} buckets, {} B",
+        "GF256/{:>7}/diff_each_way_{:<5}: {:>6.1} ms, {:<30} {:>2} rounds (1 RTT/ea), {:>3} init / {:>4} total reqs, {:>7} B sketch payload ({:>6.3}% of room_events×32B, est)",
+        room_events,
+        difference_each_way,
         elapsed.as_secs_f64() * 1e3,
-        result.outcome,
+        outcome_str,
         result.rounds,
-        result.bucket_requests,
+        result.initial_requests,
+        result.total_requests,
         result.sketch_payload_bytes,
+        sketch_pct,
     );
 }
 
 fn bench_room_matrix() {
+    println!(
+        "\nGF(2^256) room reconciliation matrix (in-process exchange; network/framing excluded):"
+    );
+    println!("  note: rounds = 1 RTT each; sketch payload excludes 24 B node summaries and transport framing");
     for (room_events, differences) in [
         (100_000_usize, 10_usize),
         (100_000, 100),
