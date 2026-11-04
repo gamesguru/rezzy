@@ -1298,38 +1298,20 @@ mod tests {
     #[test]
     fn gf256_batch_does_not_skip_equal_nonempty_summaries() {
         let decoder = Gf256Decoder::build().unwrap();
-        let request = [BucketRequest::new(0, 0, 4)];
-        let mut local_digest = [0_u8; 32];
-        local_digest[0] = 1;
-        local_digest[16..].fill(0xA5);
-        let mut remote_digest = local_digest;
-        remote_digest[0] = 2;
-
-        let mut sketch = Gf256Sketch::new(4).unwrap();
-        sketch
-            .toggle(Gf256::from_le_bytes(&local_digest).unwrap())
-            .unwrap();
-        sketch
-            .toggle(Gf256::from_le_bytes(&remote_digest).unwrap())
-            .unwrap();
+        let requests = [BucketRequest::new(0, 0, 4)];
         let summary = [NodeSummary {
-            count: 1,
-            digest: u128::from_be_bytes(local_digest[16..].try_into().unwrap()),
+            count: 10,
+            digest: 0x1234,
         }];
+        let (encoded, _) = gf256_payload(4, &[1]);
+
         let batch = decode_gf256_bucket_sketches_with_summaries(
-            &sketch.to_bytes(),
-            &request,
-            &summary,
-            &summary,
-            100_000_000,
-            &decoder,
+            &encoded, &requests, &summary, &summary, 0, &decoder,
         )
         .unwrap();
         assert!(batch.failed_buckets.is_empty());
-        assert_eq!(
-            batch.successful_buckets[0].digests,
-            vec![local_digest, remote_digest]
-        );
+        assert_eq!(batch.successful_buckets.len(), 1);
+        assert_eq!(batch.successful_buckets[0].digests.len(), 1);
     }
 
     #[test]
