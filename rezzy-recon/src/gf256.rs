@@ -443,6 +443,11 @@ fn clmul128(a: [u64; 2], b: [u64; 2]) -> [u64; 4] {
     ]
 }
 
+#[cfg(all(feature = "std", target_arch = "x86_64", has_avx512_support))]
+pub(crate) fn reduce_limbs(limbs: [u64; 8]) -> Gf256 {
+    Gf256(reduce(Wide(limbs)))
+}
+
 fn reduce(product: Wide) -> [u64; 4] {
     // Fold the high half with x^256 = 1 + x^2 + x^5 + x^10. A shift by `k`
     // spills the top `k` bits of the last high limb above degree 255; those
@@ -536,6 +541,10 @@ impl BinaryField for Gf256 {
             *limb = u64::from_le_bytes(chunk.try_into().ok()?);
         }
         Some(Self(limbs))
+    }
+
+    fn mac(term: Self, source: &[Self], target: &mut [Self]) {
+        crate::gf256_simd::poly_mac(term, source, target);
     }
 }
 

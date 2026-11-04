@@ -12,13 +12,16 @@ spec_audit.md.
 
 ### GF(2^256) opt-in path: decode budget, transport and ceiling are unmeasured
 
-The opt-in full-digest path (`select_gf256_action`, `Gf256BucketExchange`)
-coexists with the existing GF(2^64) path, which stays the default. Open items:
-there is no recommended production batch budget (the e2e test fixture uses 2M
-`WorkModel::GF256` units, measured at about 0.73M for one 20-each-way scenario);
-the 300M per-sketch ceiling is practical, not proven; the payload is not wired
-into any transport and needs no discriminator until a transport mixes formats.
-Measure typical capacity-32 batches, record units, then propose a default.
+The full-digest path (`select_default_action`, `Gf256BucketExchange`) is the
+default for new callers; the existing GF(2^64) path remains available through
+`select_action`. Open items: there is no recommended production batch budget
+(the e2e test fixture uses 2M `WorkModel::GF256` units, measured at under 1M for
+one 20-each-way scenario); the 300M per-sketch ceiling is practical, not proven;
+and the payload is not wired into any transport or advertised in a capability
+field. Measure typical capacity-32 batches, record units, then propose a
+default. The lane-parallel `gf256_simd` MAC is compiled only where AVX-512
+VPCLMULQDQ support is available; it still needs throughput measurement on that
+hardware.
 
 ### Dense-index (`id_to_index`/`index_to_id`) pattern reimplemented 5+ times independently
 

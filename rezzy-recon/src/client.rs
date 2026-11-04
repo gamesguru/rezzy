@@ -182,6 +182,18 @@ pub enum Gf256ClientAction {
     },
 }
 
+/// Action selected by [`ReconciliationClient::select_default_action`].
+///
+/// The default is the GF(2^256) full-digest path. The GF(2^64) variant keeps
+/// the existing path available to callers that opt out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefaultClientAction {
+    /// Existing GF(2^64) bucket path.
+    Gf64(ClientAction),
+    /// Default GF(2^256) full-digest path.
+    Gf256(Gf256ClientAction),
+}
+
 /// Population (the larger side's node count) at or below which a known
 /// collision is given up on instead of split further. Each extra level costs
 /// one round, but siblings verify in parallel, so the loss shrinks from the
@@ -1270,6 +1282,23 @@ impl ReconciliationClient {
         Gf256ClientAction::BucketSketches { requests }
     }
 
+    /// Selects the default reconciliation action.
+    ///
+    /// New callers should use this entry point: it selects the GF(2^256)
+    /// full-digest path. `local` must have been populated from
+    /// [`crate::FixedWindowElementHash`] values. [`Self::select_action`]
+    /// remains available for callers that explicitly stay on the existing
+    /// GF(2^64) path.
+    #[must_use]
+    pub fn select_default_action(
+        self,
+        local: &ResidentKernel,
+        remote: RemoteDigest,
+        concurrency_headroom: usize,
+    ) -> DefaultClientAction {
+        DefaultClientAction::Gf256(self.select_gf256_action(local, remote, concurrency_headroom))
+    }
+
     const fn action_for_remote_state(
         local: &ResidentKernel,
         remote: &RemoteDigest,
@@ -1630,6 +1659,25 @@ mod tests {
             Gf256ClientAction::BucketSketches {
                 requests: vec![BucketRequest::new(0, 0, MAX_BUCKET_SKETCH_CAPACITY)],
             }
+        );
+    }
+
+    #[test]
+    fn default_action_selects_gf256() {
+        let remote = RemoteDigest {
+            digest: 0,
+            known_event_count: 0,
+            strata: [[0; STRATUM_CAPACITY]; STRATA_COUNT],
+            frame_matches: true,
+            has_unknown_extremity: false,
+        };
+        assert_eq!(
+            ReconciliationClient::default().select_default_action(
+                &ResidentKernel::new(),
+                remote,
+                0
+            ),
+            DefaultClientAction::Gf256(Gf256ClientAction::Synchronized)
         );
     }
 

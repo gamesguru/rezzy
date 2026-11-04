@@ -22,6 +22,7 @@ pub mod bitmap;
 pub mod client;
 pub mod gf256;
 pub mod gf256_exchange;
+mod gf256_simd;
 pub mod gf64;
 pub mod gf64_simd;
 mod pinsketch;
@@ -56,10 +57,13 @@ pub use algebraic::{
     MAX_LOCAL_SKETCH_DECODE_CAPACITY, MAX_OVERFLOW_SKETCH_CAPACITY, MAX_SKETCH_CAPACITY,
 };
 pub use client::{
-    should_narrow, BucketExchange, ClientAction, Gf256ClientAction, ReconciliationClient,
-    RemoteDigest, MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
+    should_narrow, BucketExchange, ClientAction, DefaultClientAction, Gf256ClientAction,
+    ReconciliationClient, RemoteDigest, MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
 };
 pub use gf256::{Gf256, Gf256Decoder, Gf256Sketch};
+
+/// Profile identifier selected by default for full-digest reconciliation.
+pub const DEFAULT_PROFILE_ID: &str = gf256::PROFILE_ID;
 pub use gf256_exchange::{subtract_gf256_payload, Gf256Action, Gf256BucketExchange};
 pub use resident::{
     decode_strata, encode_strata, ResidentKernel, RESIDENT_FORMAT_VERSION, RESIDENT_SERIALIZED_LEN,

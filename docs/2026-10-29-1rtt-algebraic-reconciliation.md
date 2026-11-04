@@ -63,12 +63,13 @@ harness-sensitive. `Gf256::square` is a dedicated bit-spreading implementation
 followed by polynomial reduction; it does not fall back to multiplication. The
 GF(2^256) client selection (`select_gf256_action`), exchange
 (`Gf256BucketExchange`), server node builders and summary-aware batch decoder
-are implemented and exercised end to end through the public API. They are an
-**opt-in path for ID-only reconciliation that coexists with the existing
-GF(2^64) path**. The existing path (`select_action`, `ElementHash`,
-`SyndromeSketch`, phase-2 verification) is unchanged and remains the default;
-nothing is deleted or renamed. The strata estimator stays GF(2^64) for both.
-What is still missing is transport wiring for the GF(2^256) payload.
+are implemented and exercised end to end through the public API. New callers
+select this path by default through `select_default_action`, which returns the
+GF(2^256) action. The existing path (`select_action`, `ElementHash`,
+`SyndromeSketch`, phase-2 verification) remains available for callers that
+explicitly stay on GF(2^64); nothing is deleted or renamed. The strata estimator
+stays GF(2^64) for both. What is still missing is transport wiring for the
+GF(2^256) payload and advertising it in a wire capability field.
 
 ---
 
@@ -463,12 +464,13 @@ B/elem):
 
 ### 8.6 `algebraic_gf256`
 
-`algebraic_gf256` is the bucket-sketch algorithm for the opt-in full-digest,
-ID-only reconciliation path. It coexists with the existing GF(2^64) bucket
-sketch, which stays the default; the caller chooses a path per exchange. There
-is no algorithm negotiation or fallback between the two. This format has not
-been released, so its name has no version suffix. Use `algebraic_gf256` as a
-wire identifier if the transport needs an explicit format discriminator.
+`algebraic_gf256` is the bucket-sketch algorithm for the full-digest, ID-only
+reconciliation path and is selected by default for new callers through
+`select_default_action`. It coexists with the existing GF(2^64) bucket sketch,
+which callers can still select explicitly. There is no automatic fallback
+between the two. This format has not been released, so its name has no version
+suffix. Use `algebraic_gf256` as the default profile identifier and as a wire
+discriminator if the transport needs one.
 
 The field polynomial, element mapping, byte order, and syndrome encoding below
 define this format. A future incompatible format may receive another name if and
