@@ -25,18 +25,13 @@ impl Xorshift128 {
     }
 
     pub fn next_u64(&mut self) -> u64 {
-        let (x, y) = xorshift128_step(&mut self.state);
+        let mut x = self.state[0];
+        let y = self.state[1];
+        self.state[0] = y;
+        x ^= x << 23;
+        x ^= x >> 17;
+        x ^= y ^ (y >> 26);
+        self.state[1] = x;
         x.wrapping_add(y)
     }
-}
-
-pub(crate) fn xorshift128_step(state: &mut [u64; 2]) -> (u64, u64) {
-    let mut x = state[0];
-    let y = state[1];
-    state[0] = y;
-    x ^= x << 23;
-    x ^= x >> 17;
-    x ^= y ^ (y >> 26);
-    state[1] = x;
-    (x, y)
 }
