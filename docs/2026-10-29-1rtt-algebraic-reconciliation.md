@@ -61,8 +61,14 @@ measured 45 ns and 39 ns for multiply and square, then 29 ns and 18 ns after the
 reduce/square rewrite, showing that these microbenchmarks are host- and
 harness-sensitive. `Gf256::square` is a dedicated bit-spreading implementation
 followed by polynomial reduction; it does not fall back to multiplication. The
-full wide-field reconciliation profile is not yet wired into the existing
-MSC4521 `ElementHash` and bucket-exchange path.
+GF(2^256) client selection (`select_gf256_action`), exchange
+(`Gf256BucketExchange`), server node builders and summary-aware batch decoder
+are implemented and exercised end to end through the public API. They are an
+**opt-in path for ID-only reconciliation that coexists with the existing
+GF(2^64) path**. The existing path (`select_action`, `ElementHash`,
+`SyndromeSketch`, phase-2 verification) is unchanged and remains the default;
+nothing is deleted or renamed. The strata estimator stays GF(2^64) for both.
+What is still missing is transport wiring for the GF(2^256) payload.
 
 ---
 
@@ -326,8 +332,8 @@ placement may use a zero prefix. Keep the zero-element rejection in
 `SyndromeSketch::toggle`, but apply it to the full 32-byte digest. The current
 first-non-zero scan makes `h64 | q3 | h128` disjoint only probabilistically;
 fixed windows make it strict. `FixedWindowElementHash` now represents this
-mapping explicitly, separately from legacy `ElementHash`; using it in
-reconciliation still requires the new profile's zero-element and wire rules.
+mapping explicitly, separately from the existing `ElementHash`; the GF(2^256) path uses it, and
+the existing path keeps `ElementHash`.
 
 ### 8.2 Collision and security surfaces
 
@@ -436,18 +442,18 @@ B/elem):
 1. Genericize `pinsketch` over a field trait or const generic, not just the cost
    functions: `FACTOR_TRIALS`, `TRACE_SQUARES`, `frobenius_basis_cost`,
    `factor_trial_cost_with_basis`, `solve_quadratic_form` and the hardcoded
-   `MAX_FACTOR_WORK` all depend on `FIELD_BITS`. Use F = 256 for bucket sketches
-   and F = 64 for strata; do not set one global `FIELD_BITS = 256`. **Decoder
-   genericization and the GF(2^256) field profile are implemented.** The
-   production full-ID sketch, bucket extraction and verification wiring remain
-   pending.
+   `MAX_FACTOR_WORK` all depend on `FIELD_BITS`. Use F = 256 for the opt-in
+   full-ID bucket sketches and F = 64 for strata and the existing path; do not
+   set one global `FIELD_BITS = 256`. **Decoder genericization, the GF(2^256)
+   field profile and the opt-in sketch, extraction and verification path are
+   implemented.** Transport wiring remains pending.
 2. Keep prefix bisection, capacity overflow, budgets, residual/count checks and
-   the prefix-grinding policy. Delete `SortedPopulation::candidates`, ambiguity
-   branches in `verify_decode`, collision-repeat tracking and phase-2
-   `verify_follow_up` (fold its checks into local verification).
+   the prefix-grinding policy. The GF(2^256) path does not need
+   `SortedPopulation::candidates`, ambiguity branches or phase-2
+   `verify_follow_up`, because it recovers full digests; it verifies locally.
+   Those pieces stay in place for the existing GF(2^64) path.
 3. Strata key stays `digest[8..16]`; never derive it from `h128`. Fixed-window
-   digest representation is implemented; use in the versioned reconciliation
-   path remains pending.
+   digest representation is implemented and used by the opt-in GF(2^256) path.
 4. **Benchmarks:** a runnable suite entry covers GF(2^256) multiply, square,
    full-ID set sketch construction, and cached decode at several degrees.
    Full-ID extraction/exchange is pending production wiring.
@@ -457,9 +463,10 @@ B/elem):
 
 ### 8.6 `algebraic_gf256`
 
-`algebraic_gf256` is the sole bucket-sketch algorithm for the new full-digest
-reconciliation path. It replaces the GF(2^64) bucket sketch. There is no
-algorithm negotiation or fallback between sketch formats. This format has not
+`algebraic_gf256` is the bucket-sketch algorithm for the opt-in full-digest,
+ID-only reconciliation path. It coexists with the existing GF(2^64) bucket
+sketch, which stays the default; the caller chooses a path per exchange. There
+is no algorithm negotiation or fallback between the two. This format has not
 been released, so its name has no version suffix. Use `algebraic_gf256` as a
 wire identifier if the transport needs an explicit format discriminator.
 
@@ -498,7 +505,7 @@ interpretation of the complete digest.
 
 **5. Wire framing.** Carry the algorithm identifier and capacity in the
 authenticated request body when the transport needs to distinguish this format
-from legacy sketches. Require the payload length to be exactly `32 * C`. This
+from existing GF(2^64) sketches. Require the payload length to be exactly `32 * C`. This
 framing identifies one format; it does not negotiate alternatives. Matrix
 federation authenticates requests with X-Matrix signatures and responses with
 the TLS server certificate
@@ -527,9 +534,9 @@ short-ID sketch ([Erlay paper](https://nt4tn.net/papers/ccs19-erlay.pdf)).
 
 **Implementation status.** `FixedWindowPopulation` and `Gf256Sketch` can build
 bucket sketches and extract a full-digest symmetric difference. The existing
-MSC0501 client state machine and network adapter still use the GF(2^64) bucket
-path; replacing it with the GF(2^256) path and wiring the payload into the
-transport remain pending. No profile negotiation is needed while only
+MSC0501 client state machine and network adapter use the GF(2^64) bucket path
+and are unchanged; the GF(2^256) path sits beside them, and wiring its payload
+into the transport remains pending. No profile negotiation is needed while only
 `algebraic_gf256` is supported. Keep a small format header only if the transport
-needs to reject legacy payloads explicitly; place it with wire framing, not in
+needs to reject existing-path payloads explicitly; place it with wire framing, not in
 profile negotiation machinery.
