@@ -15,11 +15,10 @@ spec_audit.md.
 The opt-in full-digest path (`select_gf256_action`, `Gf256BucketExchange`)
 coexists with the existing GF(2^64) path, which stays the default. Open items:
 there is no recommended production batch budget (the e2e test fixture uses 2M
-`WorkModel::GF256` units, measured at about 0.73M for one 20-each-way
-scenario); the 300M per-sketch ceiling is practical, not proven; the payload is
-not wired into any transport and needs no discriminator until a transport mixes
-formats. Measure typical capacity-32 batches, record units, then propose a
-default.
+`WorkModel::GF256` units, measured at about 0.73M for one 20-each-way scenario);
+the 300M per-sketch ceiling is practical, not proven; the payload is not wired
+into any transport and needs no discriminator until a transport mixes formats.
+Measure typical capacity-32 batches, record units, then propose a default.
 
 ### Dense-index (`id_to_index`/`index_to_id`) pattern reimplemented 5+ times independently
 

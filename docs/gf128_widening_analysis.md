@@ -3,8 +3,8 @@
 Status: analysis only. Nothing here is implemented; `rezzy-recon` runs the
 MSC4521 GF(2^64) profile today, and keeps it as the default. A separate opt-in
 GF(2^256) full-digest path for ID-only reconciliation now exists alongside it
-(see `docs/2026-10-29-1rtt-algebraic-reconciliation.md`); the 128-bit
-widening analyzed here is not part of it. This records what widening the reconciliation
+(see `docs/2026-10-29-1rtt-algebraic-reconciliation.md`); the 128-bit widening
+analyzed here is not part of it. This records what widening the reconciliation
 field to 128 bits would cost in time, memory, and disk, and exactly which
 security property it would (and would not) buy.
 

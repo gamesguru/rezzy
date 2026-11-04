@@ -507,8 +507,8 @@ interpretation of the complete digest.
 authenticated request body when the transport needs to distinguish this format
 from existing GF(2^64) sketches. Require the payload length to be exactly
 `32 * C`. This framing identifies one format; it does not negotiate
-alternatives. Matrix federation authenticates requests with X-Matrix
-signatures and responses with the TLS server certificate
+alternatives. Matrix federation authenticates requests with X-Matrix signatures
+and responses with the TLS server certificate
 ([Server-Server API authentication](https://spec.matrix.org/latest/server-server-api/#authentication)).
 
 **6. Payload size.** The binary bucket payload is `32 * C` bytes: 1024 B at
@@ -537,6 +537,6 @@ bucket sketches and extract a full-digest symmetric difference. The existing
 MSC0501 client state machine and network adapter use the GF(2^64) bucket path
 and are unchanged; the GF(2^256) path sits beside them, and wiring its payload
 into the transport remains pending. No profile negotiation is needed while only
-`algebraic_gf256` is supported. Keep a small format header only if the
-transport needs to reject existing-path payloads explicitly; place it with wire
-framing, not in profile negotiation machinery.
+`algebraic_gf256` is supported. Keep a small format header only if the transport
+needs to reject existing-path payloads explicitly; place it with wire framing,
+not in profile negotiation machinery.
