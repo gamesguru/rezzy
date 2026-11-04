@@ -213,12 +213,12 @@ fn mtxdb_auth_difference(store: &Store, forks: &[StateMap]) -> Vec<String> {
         for id in state.values() {
             let short = store
                 .adjacency
-                .short_id(&store.db(), id)
+                .short_id(store.db(), id)
                 .expect("read short id")
                 .expect("state event is recorded");
             let mut closure = store
                 .closure
-                .get_at(&store.db(), short)
+                .get_at(store.db(), short)
                 .expect("read closure")
                 .expect("closure is published");
             closure.insert(short);
@@ -264,7 +264,7 @@ fn mtxdb_auth_difference_merged(store: &Store, forks: &[StateMap]) -> Vec<String
         into.extend(
             store
                 .closure
-                .get_at(&store.db(), short)
+                .get_at(store.db(), short)
                 .expect("read closure")
                 .expect("closure is published")
                 .iter(),
@@ -363,10 +363,7 @@ pub fn run() {
         let store = store_fixture(&fixture, &members.to_string());
         let write_ms = start.elapsed().as_secs_f64() * 1_000.0;
         let start = Instant::now();
-        let report = store
-            .closure
-            .rebuild(&store.db())
-            .expect("rebuild closures");
+        let report = store.closure.rebuild(store.db()).expect("rebuild closures");
         let rebuild_ms = start.elapsed().as_secs_f64() * 1_000.0;
         assert!(report.is_complete(), "fixture closures are complete");
         println!(

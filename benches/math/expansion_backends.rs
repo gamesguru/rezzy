@@ -136,8 +136,8 @@ pub fn hex(bytes: &[u8]) -> String {
 /// beyond `SEED_BYTES` are ignored.
 pub fn unpack_lanes(bytes: &[u8]) -> [u16; SEED_BYTES / 2] {
     let mut out = [0u16; SEED_BYTES / 2];
-    for (lane, pair) in out.iter_mut().zip(bytes.chunks_exact(2)) {
-        *lane = u16::from_le_bytes([pair[0], pair[1]]);
+    for (lane, pair) in out.iter_mut().zip(bytes.as_chunks::<2>().0) {
+        *lane = u16::from_le_bytes(*pair);
     }
     out
 }
@@ -247,8 +247,8 @@ pub mod sha512 {
     /// SHA-512 of an arbitrary-length message.
     pub fn hash(msg: &[u8]) -> [u8; 64] {
         let mut state = H0;
-        let mut chunks = msg.chunks_exact(128);
-        for block in chunks.by_ref() {
+        let (chunks, rem) = msg.as_chunks::<128>();
+        for block in chunks {
             let mut padded = [0u8; 128];
             padded.copy_from_slice(block);
             compress(&mut state, &padded);
@@ -256,7 +256,6 @@ pub mod sha512 {
 
         // One- or two-block padding tail: remainder, 0x80, zeros, 128-bit
         // big-endian bit length.
-        let rem = chunks.remainder();
         let mut tail = [0u8; 256];
         tail[..rem.len()].copy_from_slice(rem);
         tail[rem.len()] = 0x80;
@@ -581,7 +580,9 @@ pub mod aes {
                 let mut out = [unsafe { imp::_mm_setzero_si128() }; 15];
                 for (r, key) in out.iter_mut().enumerate() {
                     let mut bytes = [0u8; 16];
-                    for (word, slot) in rk.0[4 * r..4 * r + 4].iter().zip(bytes.chunks_exact_mut(4))
+                    for (word, slot) in rk.0[4 * r..4 * r + 4]
+                        .iter()
+                        .zip(bytes.as_chunks_mut::<4>().0.iter_mut())
                     {
                         slot.copy_from_slice(&word.to_be_bytes());
                     }
