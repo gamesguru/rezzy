@@ -54,6 +54,30 @@ pub fn recommended_bucket_decode_budget(
     })
 }
 
+/// Returns a shared budget for [`decode_gf256_bucket_sketches`] that grants
+/// every request its GF(2^256) per-bucket work ceiling.
+///
+/// This is the GF(2^256) counterpart of [`recommended_bucket_decode_budget`].
+/// Using the GF(2^64) helper for a GF(2^256) batch under-budgets it and can
+/// return [`AlgebraicError::BudgetExhausted`] for an ordinary bucket.
+///
+/// # Errors
+/// Returns an error if requests are invalid or summing their work ceilings
+/// overflows `usize`.
+pub fn recommended_gf256_bucket_decode_budget(
+    requests: &[BucketRequest],
+) -> Result<usize, AlgebraicError> {
+    validate_adaptive_bucket_requests(requests)?;
+    requests.iter().try_fold(0_usize, |total, request| {
+        let ceiling = pinsketch::WorkModel::GF256
+            .single_call_work_ceiling(request.capacity)
+            .ok_or(AlgebraicError::InvalidSketchCapacity)?;
+        total
+            .checked_add(ceiling)
+            .ok_or(AlgebraicError::InvalidSketchCapacity)
+    })
+}
+
 struct PayloadCursor<'a> {
     bytes: &'a [u8],
     offset: usize,

@@ -181,7 +181,7 @@ impl Gf256BucketExchange {
                 prefix,
                 count_delta,
                 force_split,
-                MAX_ROUND_JUMP,
+                split_jump(count_delta),
             ) {
                 Ok(children) => self.pending.extend(children),
                 Err(_) => return Ok(Gf256Action::Fallback),
@@ -277,6 +277,24 @@ fn bucket_batch_covers_requests(
 
 /// Maximum split fan-out per retry, in bits (matches the GF(2^64) planner).
 const MAX_ROUND_JUMP: u8 = crate::client::MAX_BUCKET_ROUND_DEPTH;
+
+/// Chooses the smallest fan-out that brings the child count difference within
+/// half a bucket's capacity ceiling, leaving room for uneven child
+/// distribution. Splitting by the maximum seven bits for an ordinary
+/// over-capacity bucket creates up to 128 children where a handful are enough,
+/// which can exhaust the round budget before any child is decoded.
+fn split_jump(count_delta: u64) -> u8 {
+    let target_child_delta = (crate::triage::MAX_BUCKET_SKETCH_CAPACITY / 2) as u64;
+    let buckets = count_delta.div_ceil(target_child_delta).max(1);
+    let bits = if buckets <= 1 {
+        0
+    } else {
+        buckets.saturating_sub(1).ilog2().saturating_add(1)
+    };
+    u8::try_from(bits)
+        .unwrap_or(MAX_ROUND_JUMP)
+        .clamp(1, MAX_ROUND_JUMP)
+}
 
 /// Subtracts the local sketches from the responder's concatenated payload and
 /// re-serializes the difference, ready for
@@ -628,6 +646,8 @@ mod tests {
         let Gf256Action::Request(children) = action else {
             panic!("count lower bound should lead to child buckets");
         };
+        assert_eq!(children.len(), 8, "80 differences need only eight children");
+        assert_eq!(children[0].depth, 3);
         assert!(children
             .iter()
             .all(|child| { child.depth > request.depth && child.capacity <= 32 }));

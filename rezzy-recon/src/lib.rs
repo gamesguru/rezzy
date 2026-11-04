@@ -78,10 +78,10 @@ pub use server::{
 pub use triage::{
     bucket_prefix, decode_bucket_sketches, decode_gf256_bucket_sketches,
     decode_gf256_bucket_sketches_with_summaries, estimate_strata, recommended_bucket_decode_budget,
-    validate_overflow_bucket_requests, BucketDecodeBatch, BucketDecodeSuccess, BucketRequest,
-    Gf256BucketDecodeBatch, Gf256BucketDecodeSuccess, NodeSummary, StrataEstimate,
-    MAX_BATCH_FACTOR_WORK, MAX_BUCKETED_SKETCH_CAPACITY, MAX_OVERFLOW_BUCKET_CAPACITY,
-    MAX_STRATA_FACTOR_WORK, NODE_SUMMARY_LEN,
+    recommended_gf256_bucket_decode_budget, validate_overflow_bucket_requests, BucketDecodeBatch,
+    BucketDecodeSuccess, BucketRequest, Gf256BucketDecodeBatch, Gf256BucketDecodeSuccess,
+    NodeSummary, StrataEstimate, MAX_BATCH_FACTOR_WORK, MAX_BUCKETED_SKETCH_CAPACITY,
+    MAX_OVERFLOW_BUCKET_CAPACITY, MAX_STRATA_FACTOR_WORK, NODE_SUMMARY_LEN,
 };
 pub use verify::{
     verify_batch, verify_decode, verify_follow_up, verify_gf256_batch, verify_gf256_decode,

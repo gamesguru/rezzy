@@ -148,7 +148,7 @@ impl WorkModel {
     /// Upper bound on one `find_roots_with_budget` call for a locator of
     /// degree `degree`: the basis build plus a full trial ladder at that
     /// degree, plus one split.
-    const fn single_call_work_ceiling(self, degree: usize) -> Option<usize> {
+    pub(crate) const fn single_call_work_ceiling(self, degree: usize) -> Option<usize> {
         let Some(basis) = self.frobenius_basis_cost(degree) else {
             return None;
         };

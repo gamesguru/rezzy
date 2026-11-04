@@ -104,7 +104,7 @@ impl Stack {
     /// Serializes the lattice little-endian and collapses it to 32 bytes.
     fn collapse(self, lattice: &[u16; LANES]) -> [u8; 32] {
         let mut bytes = [0u8; LANES * 2];
-        for (pair, lane) in bytes.chunks_exact_mut(2).zip(lattice) {
+        for (pair, lane) in bytes.as_chunks_mut::<2>().0.iter_mut().zip(lattice) {
             pair.copy_from_slice(&lane.to_le_bytes());
         }
         match self {

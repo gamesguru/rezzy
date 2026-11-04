@@ -5,7 +5,7 @@
 use std::{collections::HashSet, hint::black_box, time::Instant};
 
 use rezzy_recon::{
-    decode_gf256_bucket_sketches_with_summaries, gf64_mul, recommended_bucket_decode_budget,
+    decode_gf256_bucket_sketches_with_summaries, gf64_mul, recommended_gf256_bucket_decode_budget,
     subtract_gf256_payload, FixedWindowElementHash, FixedWindowPopulation, Gf256, Gf256Action,
     Gf256BucketExchange, Gf256ClientAction, Gf256Decoder, ReconciliationClient, RemoteDigest,
     ResidentKernel,
@@ -248,7 +248,7 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
                 let difference_payload =
                     subtract_gf256_payload(&local_sketches, &remote_payload, &requests)
                         .expect("same-round sketches subtract");
-                let budget = recommended_bucket_decode_budget(&requests)
+                let budget = recommended_gf256_bucket_decode_budget(&requests)
                     .expect("round work budget fits usize");
                 let batch = decode_gf256_bucket_sketches_with_summaries(
                     &difference_payload,
