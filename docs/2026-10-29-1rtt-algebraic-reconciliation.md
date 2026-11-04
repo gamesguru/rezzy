@@ -172,9 +172,9 @@ The entire 32-byte digest is treated as an element of $\mathrm{GF}(2^{256})$.
 - **Topology:** Bucket placement and resident strata stay at 64 bits (`h64`).
   Only the bucket sketch element is widened to 256 bits.
 - **Semantics:** Decoded roots _are_ the full IDs. There are no locator
-  collisions ($x \oplus x = 0$ only if the full 256-bit digests match).
-  `verify_follow_up`, `m_roots`, and `SortedPopulation::candidates` disappear
-  entirely.
+  collisions ($x \oplus x = 0$ only if the full 256-bit digests match). This
+  path does not need `verify_follow_up`, `m_roots`, or
+  `SortedPopulation::candidates`; those remain in the existing GF(2^64) path.
 - **Zero-Element Invariant:** PinSketch requires non-zero elements ($x \ne 0$).
   Reject the all-zero 32-byte digest at insertion. Do not alias it to `1` or use
   an affine offset that leaves one digest unrepresentable. The placement key may
@@ -332,8 +332,8 @@ placement may use a zero prefix. Keep the zero-element rejection in
 `SyndromeSketch::toggle`, but apply it to the full 32-byte digest. The current
 first-non-zero scan makes `h64 | q3 | h128` disjoint only probabilistically;
 fixed windows make it strict. `FixedWindowElementHash` now represents this
-mapping explicitly, separately from the existing `ElementHash`; the GF(2^256) path uses it, and
-the existing path keeps `ElementHash`.
+mapping explicitly, separately from the existing `ElementHash`; the GF(2^256)
+path uses it, and the existing path keeps `ElementHash`.
 
 ### 8.2 Collision and security surfaces
 
@@ -505,10 +505,10 @@ interpretation of the complete digest.
 
 **5. Wire framing.** Carry the algorithm identifier and capacity in the
 authenticated request body when the transport needs to distinguish this format
-from existing GF(2^64) sketches. Require the payload length to be exactly `32 * C`. This
-framing identifies one format; it does not negotiate alternatives. Matrix
-federation authenticates requests with X-Matrix signatures and responses with
-the TLS server certificate
+from existing GF(2^64) sketches. Require the payload length to be exactly
+`32 * C`. This framing identifies one format; it does not negotiate
+alternatives. Matrix federation authenticates requests with X-Matrix
+signatures and responses with the TLS server certificate
 ([Server-Server API authentication](https://spec.matrix.org/latest/server-server-api/#authentication)).
 
 **6. Payload size.** The binary bucket payload is `32 * C` bytes: 1024 B at
@@ -537,6 +537,6 @@ bucket sketches and extract a full-digest symmetric difference. The existing
 MSC0501 client state machine and network adapter use the GF(2^64) bucket path
 and are unchanged; the GF(2^256) path sits beside them, and wiring its payload
 into the transport remains pending. No profile negotiation is needed while only
-`algebraic_gf256` is supported. Keep a small format header only if the transport
-needs to reject existing-path payloads explicitly; place it with wire framing, not in
-profile negotiation machinery.
+`algebraic_gf256` is supported. Keep a small format header only if the
+transport needs to reject existing-path payloads explicitly; place it with wire
+framing, not in profile negotiation machinery.
