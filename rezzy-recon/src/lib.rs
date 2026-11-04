@@ -74,8 +74,8 @@ pub use resident::{
 pub use server::{
     build_bucket_nodes, build_bucket_sketches, build_gf256_bucket_nodes,
     build_gf256_bucket_sketches, compute_fixed_window_frame_digest, compute_frame_digest,
-    FixedWindowPopulation, ForwardGraph, H64Index, Population, ReconciliationContext,
-    SortedPopulation,
+    FixedWindowPopulation, ForwardGraph, H64Index, IncrementalFixedWindowPopulation, Population,
+    ReconciliationContext, SortedPopulation, DEFAULT_BUCKET_CACHE_DEPTH,
 };
 pub use triage::{
     bucket_prefix, decode_bucket_sketches, decode_gf256_bucket_sketches,

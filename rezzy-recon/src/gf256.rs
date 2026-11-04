@@ -168,6 +168,35 @@ impl Gf256Sketch {
         Ok(())
     }
 
+    /// XORs the first `capacity` coordinates of `other` into this sketch.
+    ///
+    /// This is the incremental-cache path: a leaf sketch is maintained at the
+    /// maximum normal bucket capacity, while a request may ask for a smaller
+    /// prefix of the same odd-power coordinates.
+    ///
+    /// # Errors
+    /// Returns `InvalidSketchCapacity` for zero, or `InvalidSketchLength` when
+    /// `capacity` exceeds either sketch's capacity.
+    pub(crate) fn xor_prefix(
+        &mut self,
+        other: &Self,
+        capacity: usize,
+    ) -> Result<(), crate::algebraic::AlgebraicError> {
+        if capacity == 0 {
+            return Err(crate::algebraic::AlgebraicError::InvalidSketchCapacity);
+        }
+        if capacity > self.capacity() || capacity > other.capacity() {
+            return Err(crate::algebraic::AlgebraicError::InvalidSketchLength);
+        }
+        for (left, right) in self.coordinates[..capacity]
+            .iter_mut()
+            .zip(&other.coordinates[..capacity])
+        {
+            *left = BinaryField::add(*left, *right);
+        }
+        Ok(())
+    }
+
     /// Returns the symmetric-difference sketch of two equal-capacity sets.
     ///
     /// # Errors
