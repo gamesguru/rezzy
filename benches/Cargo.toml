@@ -8,6 +8,7 @@ autobenches = false
 
 # Keep benchmark-only comparison dependencies out of the main workspace.
 [workspace]
+members = ["gf256"]
 
 [dependencies]
 base64 = { version = "0.23", default-features = false, features = ["alloc"] }

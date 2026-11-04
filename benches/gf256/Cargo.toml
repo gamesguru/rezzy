@@ -1,0 +1,19 @@
+[package]
+name = "rezzy-bench-gf256"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+publish = false
+autobenches = false
+
+[dependencies]
+rezzy-recon = { path = "../../rezzy-recon" }
+sha2 = { version = "0.11", default-features = false }
+
+[lib]
+path = "src/lib.rs"
+
+[[bench]]
+name = "gf256"
+path = "benches/gf256.rs"
+harness = false
