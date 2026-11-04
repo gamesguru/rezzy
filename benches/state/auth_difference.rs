@@ -335,10 +335,7 @@ fn verify_resolver_results(fixture: &Fixture, provider: &CountingProvider<'_>) -
 /// Returns a `check` for `time_case` that requires the resolved state to equal `expected`.
 fn expect_state(expected: &StateMap) -> impl FnOnce(&StateMap) -> usize + '_ {
     move |state| {
-        assert_eq!(
-            state, expected,
-            "timed result matches the concrete reference"
-        );
+        assert_eq!(state, expected, "timed result matches the concrete reference");
         state.len()
     }
 }
@@ -377,7 +374,9 @@ pub fn run() {
         time_case(
             "concrete/computed-diff",
             iterations,
-            || rezzy::resolve_state_maps(&fixture.forks, &fixture.events, StateResVersion::V2),
+            || {
+                rezzy::resolve_state_maps(&fixture.forks, &fixture.events, StateResVersion::V2)
+            },
             expect_state(&reference_state),
             None,
         );
