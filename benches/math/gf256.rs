@@ -450,15 +450,25 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
 
 fn bench_room_matrix() {
     println!(
-        "\nGF256 room benchmark: in-process; setup, serialization framing, and network excluded."
+        "\nGF256 room (in-process; no setup/net/framing; times in ms; sketch_B excludes summaries/framing)"
     );
+    println!("REZZY_BENCH_GF256_ROUND_TRACE=1: per-round counts for multi-round/fallback cases.");
+    println!();
     println!(
-        "  phases: bucket construction / payload encoding+subtraction / decode / verify+advance"
-    );
-    println!("  rounds are request/response turns (one RTT each if batched); sketch bytes exclude summaries/framing");
-    println!("  percentage = sketch payload / (room_events × 32 B raw digests from one peer)");
-    println!(
-        "  Set REZZY_BENCH_GF256_ROUND_TRACE=1 for per-round counts on multi-round/fallback cases."
+        "{:<4} {:>5} {:>9} {:>5} {:>6} {:>7} {:>6} {:>6} {:<11} {:>6} {:<11} {:>8} {:>8}",
+        "Pop",
+        "Diff",
+        "Total ms",
+        "Plan",
+        "Bucket",
+        "Payload",
+        "Decode",
+        "Verify",
+        "Result",
+        "Rounds",
+        "Init/Total",
+        "Sketch B",
+        "% Peer"
     );
     for (room_events, differences) in [
         (100_000_usize, 10_usize),
