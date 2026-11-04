@@ -297,8 +297,54 @@ fn wide_cases(rng: &mut Rng) {
 }
 
 /// Entry point for the bitmap comparison benchmark.
+
+/// Single-value mutation around the array threshold, matching the flag-update
+/// path during ingest. Measured after the first promotion, and with a fresh
+/// clone each time to include the one-off crossing cost.
+fn mutation_boundary() {
+    let base: Bitmap = (0..4096u32).map(|v| v * 2).collect();
+    let clone_ns = ns_per_iter(1_000, || {
+        black_box(base.clone());
+    });
+    let crossing_ns = ns_per_iter(1_000, || {
+        let mut bitmap = base.clone();
+        black_box(bitmap.insert(1));
+    });
+    println!(
+        "{:<44} bitmap={:>12.0} ns  (clone {:.0} ns)",
+        "insert crossing array threshold",
+        crossing_ns - clone_ns,
+        clone_ns
+    );
+
+    let mut steady = base.clone();
+    steady.insert(1);
+    let mut next = 3u32;
+    let steady_ns = ns_per_iter(1_000, || {
+        black_box(steady.insert(next));
+        next = next.wrapping_add(2);
+    });
+    println!(
+        "{:<44} bitmap={:>12.0} ns",
+        "insert after promotion (steady)", steady_ns
+    );
+
+    let mut toggling = base;
+    toggling.insert(1);
+    toggling.remove(1);
+    let toggle_ns = ns_per_iter(1_000, || {
+        black_box(toggling.insert(1));
+        black_box(toggling.remove(1));
+    });
+    println!(
+        "{:<44} bitmap={:>12.0} ns",
+        "alternating insert/erase at threshold", toggle_ns
+    );
+}
+
 pub fn run() {
     println!("Bitmap vs roaring (ratio < 1 means Bitmap is faster)");
+    mutation_boundary();
     let mut rng = Rng::new(0x2545_f491_4f6c_dd1d);
 
     for &(span, pm, label) in &[

@@ -1,7 +1,7 @@
 //! `u64` and `u128` sets built on [`Bitmap`].
 //!
 //! The high bits of each value key a `BTreeMap`; the low 32 bits live in a
-//! [`Bitmap`], so all chunk-level behaviour (array/bitset containers,
+//! [`Bitmap`], so all chunk-level behaviour (array/bitset/run containers,
 //! copy-on-write sharing, canonical form) is inherited. Empty inner bitmaps are
 //! never stored, so `==` is structural.
 

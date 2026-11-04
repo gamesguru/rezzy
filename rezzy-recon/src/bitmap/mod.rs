@@ -2,11 +2,14 @@
 //!
 //! This is the 16/16 split behind Roaring bitmaps (the format, not the crate), restricted to what rezzy
 //! needs: each value is split into a high 16-bit key and a low 16-bit offset,
-//! and values sharing a key live in one container. A container is either a
-//! sorted `u16` array (at most 4096 values) or a fixed 8 KiB bitset.
-//! There are no run containers and no SIMD; the representation is canonical
-//! (a container is an array exactly when it holds `<= ARRAY_MAX` values, and
-//! empty containers are dropped), so `==` is structural.
+//! and values sharing a key live in one container. A container is a sorted
+//! `u16` array, a fixed 8 KiB bitset, or a list of `(start, length - 1)` runs.
+//! There is no SIMD; the representation is canonical (each container uses the
+//! smallest of its three encodings, with ties preferring arrays and bitsets,
+//! and empty containers are dropped), so `==` is structural.
+//!
+//! Container storage lives in `chunk.rs` and the run representation in
+//! `run.rs`.
 //!
 //! Only `alloc` is required.
 
@@ -24,7 +27,11 @@ use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
 /// Magic prefix for [`Bitmap::encode`].
 pub const BITMAP_MAGIC: [u8; 4] = *b"RBMP";
 /// Version of the [`Bitmap`] wire format.
-pub const BITMAP_FORMAT_VERSION: u8 = 1;
+///
+/// Version 2 adds run containers. Version 1 payloads remain decodable and are
+/// canonicalized on decode; readers that only know version 1 reject version 2
+/// with [`BitmapDecodeError::UnsupportedVersion`].
+pub const BITMAP_FORMAT_VERSION: u8 = 2;
 
 /// Errors returned by [`Bitmap::decode`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,22 +74,11 @@ const WORDS: usize = 1024;
 
 type Words = Box<[u64; WORDS]>;
 
-#[derive(Clone, PartialEq, Eq)]
-enum Store {
-    /// Sorted, deduplicated low halves.
-    Array(Vec<u16>),
-    /// Bitset over all 65 536 low halves.
-    Dense(Words),
-}
+mod chunk;
+mod run;
 
-#[derive(Clone, PartialEq, Eq)]
-struct Chunk {
-    key: u16,
-    /// Cached cardinality; always equals the number of values in `store`.
-    len: u32,
-    store: Store,
-}
-
+use self::chunk::{Chunk, Kind, Store};
+use self::run::Run;
 fn empty_words() -> Words {
     Box::new([0u64; WORDS])
 }
@@ -134,327 +130,22 @@ fn array_to_words(values: &[u16]) -> Words {
     words
 }
 
-impl Chunk {
-    fn from_array(key: u16, values: Vec<u16>) -> Option<Self> {
-        if values.is_empty() {
-            return None;
-        }
-        let len = u32::try_from(values.len()).expect("bitmap chunk length fits u32");
-        let store = if values.len() > ARRAY_MAX {
-            Store::Dense(array_to_words(&values))
-        } else {
-            Store::Array(values)
-        };
-        Some(Self { key, len, store })
-    }
-
-    /// Builds a canonical chunk from a bitset, recounting its cardinality.
-    fn from_words(key: u16, words: Words) -> Option<Self> {
-        let len = popcount(&words);
-        Self::from_counted_words(key, words, len)
-    }
-
-    /// Builds a canonical chunk from a bitset whose cardinality is `len`.
-    fn from_counted_words(key: u16, words: Words, len: u32) -> Option<Self> {
-        if len == 0 {
-            return None;
-        }
-        let store = if usize::try_from(len).expect("bitmap length fits usize") <= ARRAY_MAX {
-            Store::Array(words_to_array(&words))
-        } else {
-            Store::Dense(words)
-        };
-        Some(Self { key, len, store })
-    }
-
-    fn contains(&self, lo: u16) -> bool {
-        match &self.store {
-            Store::Array(v) => v.binary_search(&lo).is_ok(),
-            Store::Dense(w) => test_bit(w, lo),
-        }
-    }
-
-    fn insert(&mut self, lo: u16) -> bool {
-        match &mut self.store {
-            Store::Array(v) => {
-                if v.last().is_none_or(|&last| last < lo) {
-                    v.push(lo);
-                } else {
-                    match v.binary_search(&lo) {
-                        Ok(_) => return false,
-                        Err(pos) => v.insert(pos, lo),
-                    }
-                }
-                self.len = self
-                    .len
-                    .checked_add(1)
-                    .expect("bitmap chunk length overflow");
-                if v.len() > ARRAY_MAX {
-                    self.store = Store::Dense(array_to_words(v));
-                }
-                true
-            }
-            Store::Dense(w) => {
-                let fresh = set_bit(w, lo);
-                self.len = self
-                    .len
-                    .checked_add(u32::from(fresh))
-                    .expect("bitmap chunk length overflow");
-                fresh
-            }
-        }
-    }
-
-    fn remove(&mut self, lo: u16) -> bool {
-        match &mut self.store {
-            Store::Array(v) => {
-                let Ok(pos) = v.binary_search(&lo) else {
-                    return false;
-                };
-                v.remove(pos);
-                self.len = self
-                    .len
-                    .checked_sub(1)
-                    .expect("present bitmap value has length");
-                true
-            }
-            Store::Dense(w) => {
-                if !clear_bit(w, lo) {
-                    return false;
-                }
-                self.len = self
-                    .len
-                    .checked_sub(1)
-                    .expect("present bitmap value has length");
-                if usize::try_from(self.len).expect("bitmap length fits usize") <= ARRAY_MAX {
-                    self.store = Store::Array(words_to_array(w));
-                }
-                true
-            }
-        }
-    }
-
-    fn is_subset(&self, other: &Self) -> bool {
-        match (&self.store, &other.store) {
-            (Store::Array(a), Store::Array(b)) => a.iter().all(|x| b.binary_search(x).is_ok()),
-            (Store::Array(a), Store::Dense(b)) => a.iter().all(|&x| test_bit(b, x)),
-            (Store::Dense(_), Store::Array(_)) => false,
-            (Store::Dense(a), Store::Dense(b)) => a.iter().zip(b.iter()).all(|(x, y)| x & !y == 0),
-        }
-    }
-
-    fn is_disjoint(&self, other: &Self) -> bool {
-        match (&self.store, &other.store) {
-            (Store::Array(a), Store::Array(b)) => {
-                let (mut i, mut j) = (0, 0);
-                while i < a.len() && j < b.len() {
-                    match a[i].cmp(&b[j]) {
-                        core::cmp::Ordering::Less => {
-                            i = i.checked_add(1).expect("array index fits");
-                        }
-                        core::cmp::Ordering::Greater => {
-                            j = j.checked_add(1).expect("array index fits");
-                        }
-                        core::cmp::Ordering::Equal => return false,
-                    }
-                }
-                true
-            }
-            (Store::Array(a), Store::Dense(b)) | (Store::Dense(b), Store::Array(a)) => {
-                a.iter().all(|&x| !test_bit(b, x))
-            }
-            (Store::Dense(a), Store::Dense(b)) => a.iter().zip(b.iter()).all(|(x, y)| x & y == 0),
-        }
-    }
-
-    fn union(&self, other: &Self) -> Self {
-        let key = self.key;
-        let merged = match (&self.store, &other.store) {
-            (Store::Array(a), Store::Array(b)) => {
-                let capacity = a
-                    .len()
-                    .checked_add(b.len())
-                    .expect("bitmap union size fits");
-                let mut out = Vec::with_capacity(capacity);
-                let (mut i, mut j) = (0, 0);
-                while i < a.len() && j < b.len() {
-                    match a[i].cmp(&b[j]) {
-                        core::cmp::Ordering::Less => {
-                            out.push(a[i]);
-                            i = i.checked_add(1).expect("array index fits");
-                        }
-                        core::cmp::Ordering::Greater => {
-                            out.push(b[j]);
-                            j = j.checked_add(1).expect("array index fits");
-                        }
-                        core::cmp::Ordering::Equal => {
-                            out.push(a[i]);
-                            i = i.checked_add(1).expect("array index fits");
-                            j = j.checked_add(1).expect("array index fits");
-                        }
-                    }
-                }
-                out.extend_from_slice(&a[i..]);
-                out.extend_from_slice(&b[j..]);
-                return Self::from_array(key, out).expect("union of non-empty chunks");
-            }
-            (Store::Dense(a), Store::Dense(b)) => {
-                let mut w = a.clone();
-                for (x, y) in w.iter_mut().zip(b.iter()) {
-                    *x |= y;
-                }
-                w
-            }
-            (Store::Dense(d), Store::Array(v)) | (Store::Array(v), Store::Dense(d)) => {
-                let mut w = d.clone();
-                for &x in v {
-                    set_bit(&mut w, x);
-                }
-                w
-            }
-        };
-        Self::from_words(key, merged).expect("union of non-empty chunks")
-    }
-
-    /// Unions `other` into this chunk without replacing dense storage.
-    fn union_assign(&mut self, other: &Self) {
-        debug_assert_eq!(self.key, other.key);
-
-        match (&mut self.store, &other.store) {
-            (Store::Dense(a), Store::Dense(b)) => {
-                let mut added: u32 = 0;
-                for (x, y) in a.iter_mut().zip(b.iter()) {
-                    // Only the newly set bits need counting (one popcount per word).
-                    added = added
-                        .checked_add((y & !*x).count_ones())
-                        .expect("bitmap chunk length overflow");
-                    *x |= y;
-                }
-                self.len = self
-                    .len
-                    .checked_add(added)
-                    .expect("bitmap chunk length overflow");
-            }
-            (Store::Dense(a), Store::Array(b)) => {
-                let mut added: u32 = 0;
-                for &x in b {
-                    added = added
-                        .checked_add(u32::from(set_bit(a, x)))
-                        .expect("bitmap chunk length overflow");
-                }
-                self.len = self
-                    .len
-                    .checked_add(added)
-                    .expect("bitmap chunk length overflow");
-            }
-            (Store::Array(a), Store::Dense(b)) => {
-                let mut words = b.clone();
-                let mut added: u32 = 0;
-                for &x in a.iter() {
-                    added = added
-                        .checked_add(u32::from(set_bit(&mut words, x)))
-                        .expect("bitmap chunk length overflow");
-                }
-                self.store = Store::Dense(words);
-                self.len = other
-                    .len
-                    .checked_add(added)
-                    .expect("bitmap chunk length overflow");
-            }
-            (Store::Array(_), Store::Array(_)) => {
-                *self = self.union(other);
-            }
-        }
-    }
-
-    fn intersection(&self, other: &Self) -> Option<Self> {
-        let key = self.key;
-        match (&self.store, &other.store) {
-            (Store::Array(a), Store::Array(b)) => {
-                let mut out = Vec::new();
-                let (mut i, mut j) = (0, 0);
-                // Branch-free cursor advance: the three-way `match` mispredicts
-                // on interleaved random data, which dominates sparse `&`.
-                while i < a.len() && j < b.len() {
-                    let (lo_a, lo_b) = (a[i], b[j]);
-                    if lo_a == lo_b {
-                        out.push(lo_a);
-                    }
-                    i = i
-                        .checked_add(usize::from(lo_a <= lo_b))
-                        .expect("array index fits");
-                    j = j
-                        .checked_add(usize::from(lo_b <= lo_a))
-                        .expect("array index fits");
-                }
-                Self::from_array(key, out)
-            }
-            (Store::Dense(a), Store::Dense(b)) => {
-                // One pass: AND into a fresh bitset while counting, so the
-                // result needs neither a clone of `a` nor a recount.
-                let mut w = empty_words();
-                let mut len: u32 = 0;
-                for ((o, x), y) in w.iter_mut().zip(a.iter()).zip(b.iter()) {
-                    *o = x & y;
-                    len = len
-                        .checked_add(o.count_ones())
-                        .expect("bitmap chunk length overflow");
-                }
-                Self::from_counted_words(key, w, len)
-            }
-            (Store::Array(v), Store::Dense(d)) | (Store::Dense(d), Store::Array(v)) => {
-                let out = v.iter().copied().filter(|&x| test_bit(d, x)).collect();
-                Self::from_array(key, out)
-            }
-        }
-    }
-
-    fn difference(&self, other: &Self) -> Option<Self> {
-        let key = self.key;
-        match (&self.store, &other.store) {
-            (Store::Array(a), Store::Array(b)) => {
-                let mut out = Vec::with_capacity(a.len());
-                let mut j = 0;
-                for &x in a {
-                    while j < b.len() && b[j] < x {
-                        j = j.checked_add(1).expect("array index fits");
-                    }
-                    if j >= b.len() || b[j] != x {
-                        out.push(x);
-                    }
-                }
-                Self::from_array(key, out)
-            }
-            (Store::Array(a), Store::Dense(d)) => {
-                let out = a.iter().copied().filter(|&x| !test_bit(d, x)).collect();
-                Self::from_array(key, out)
-            }
-            (Store::Dense(a), Store::Array(b)) => {
-                let mut w = a.clone();
-                for &x in b {
-                    w[usize::from(x >> 6)] &= !(1u64 << (x & 63));
-                }
-                Self::from_words(key, w)
-            }
-            (Store::Dense(a), Store::Dense(b)) => {
-                let mut w = a.clone();
-                for (x, y) in w.iter_mut().zip(b.iter()) {
-                    *x &= !y;
-                }
-                Self::from_words(key, w)
-            }
-        }
-    }
-}
-
 /// A compressed set of `u32` values.
 ///
 /// See the [module documentation](self) for the representation.
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default)]
 pub struct Bitmap {
     /// Non-empty chunks, strictly ascending by key.
     chunks: Vec<Arc<Chunk>>,
 }
+
+impl PartialEq for Bitmap {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for Bitmap {}
 
 impl Bitmap {
     /// Creates an empty set.
@@ -538,10 +229,10 @@ impl Bitmap {
 
     /// Encodes this bitmap in a stable, versioned binary format.
     ///
-    /// The format is little-endian and stores each canonical chunk as either
-    /// its sorted `u16` values or its 1024-word bitset. It is intentionally a
-    /// payload format: callers that need domain separation should wrap it in
-    /// their own domain-tagged envelope.
+    /// The format is little-endian and stores each canonical chunk as its
+    /// sorted `u16` values, its 1024-word bitset, or its `(start, len - 1)`
+    /// runs. It is intentionally a payload format: callers that need domain
+    /// separation should wrap it in their own domain-tagged envelope.
     ///
     /// # Panics
     ///
@@ -566,11 +257,11 @@ impl Bitmap {
         );
         for chunk in &self.chunks {
             out.extend_from_slice(&chunk.key.to_le_bytes());
-            match &chunk.store {
+            match chunk.canonical_store() {
                 Store::Array(values) => {
                     out.push(0);
                     out.extend_from_slice(&chunk.len.to_le_bytes());
-                    for value in values {
+                    for value in &values {
                         out.extend_from_slice(&value.to_le_bytes());
                     }
                 }
@@ -581,6 +272,19 @@ impl Bitmap {
                         out.extend_from_slice(&word.to_le_bytes());
                     }
                 }
+                Store::Run(runs) => {
+                    out.push(2);
+                    out.extend_from_slice(&chunk.len.to_le_bytes());
+                    out.extend_from_slice(
+                        &u16::try_from(runs.len())
+                            .expect("bitmap run count fits u16")
+                            .to_le_bytes(),
+                    );
+                    for run in &runs {
+                        out.extend_from_slice(&run.start.to_le_bytes());
+                        out.extend_from_slice(&run.len_minus_one.to_le_bytes());
+                    }
+                }
             }
         }
         out
@@ -589,7 +293,8 @@ impl Bitmap {
     /// Decodes a bitmap produced by [`Bitmap::encode`].
     ///
     /// The decoder validates ordering, lengths, cardinalities and trailing
-    /// bytes, rejecting malformed or non-canonical input.
+    /// bytes. Array and bitset chunks written before runs existed are accepted
+    /// and canonicalized; run chunks must already be canonical.
     ///
     /// # Errors
     /// Returns [`BitmapDecodeError`] when the input is truncated, uses an
@@ -602,8 +307,9 @@ impl Bitmap {
         if input[..4] != BITMAP_MAGIC {
             return Err(BitmapDecodeError::InvalidMagic);
         }
-        if input[4] != BITMAP_FORMAT_VERSION {
-            return Err(BitmapDecodeError::UnsupportedVersion(input[4]));
+        let version = input[4];
+        if !matches!(version, 1 | 2) {
+            return Err(BitmapDecodeError::UnsupportedVersion(version));
         }
         input = &input[5..];
         let count =
@@ -618,53 +324,7 @@ impl Bitmap {
             previous = Some(key);
             let kind = read_byte(&mut input)?;
             let len = read_u32(&mut input)?;
-            let chunk = match kind {
-                0 => {
-                    let len_usize =
-                        usize::try_from(len).map_err(|_| BitmapDecodeError::NonCanonical)?;
-                    if len == 0 || len_usize > ARRAY_MAX {
-                        return Err(BitmapDecodeError::NonCanonical);
-                    }
-                    let raw = take(
-                        &mut input,
-                        len_usize
-                            .checked_mul(2)
-                            .ok_or(BitmapDecodeError::Truncated)?,
-                    )?;
-                    let values: Vec<u16> = raw
-                        .chunks_exact(2)
-                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                        .collect();
-                    if !values.windows(2).all(|pair| pair[0] < pair[1]) {
-                        return Err(BitmapDecodeError::NonCanonical);
-                    }
-                    Chunk::from_array(key, values).ok_or(BitmapDecodeError::NonCanonical)?
-                }
-                1 => {
-                    if usize::try_from(len).map_err(|_| BitmapDecodeError::NonCanonical)?
-                        <= ARRAY_MAX
-                    {
-                        return Err(BitmapDecodeError::NonCanonical);
-                    }
-                    let raw = take(&mut input, WORDS * 8)?;
-                    let mut words = empty_words();
-                    for (word, bytes) in words.iter_mut().zip(raw.chunks_exact(8)) {
-                        *word = u64::from_le_bytes([
-                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
-                            bytes[7],
-                        ]);
-                    }
-                    if popcount(&words) != len {
-                        return Err(BitmapDecodeError::NonCanonical);
-                    }
-                    Chunk {
-                        key,
-                        len,
-                        store: Store::Dense(words),
-                    }
-                }
-                other => return Err(BitmapDecodeError::InvalidChunkKind(other)),
-            };
+            let chunk = decode_chunk(key, kind, len, version, &mut input)?;
             chunks.push(Arc::new(chunk));
         }
         if !input.is_empty() {
@@ -700,6 +360,7 @@ impl Bitmap {
             Arc::new(Chunk {
                 key,
                 len: 1,
+                runs: 1,
                 store: Store::Array(alloc::vec![lo]),
             }),
         );
@@ -805,6 +466,87 @@ fn read_u32(input: &mut &[u8]) -> Result<u32, BitmapDecodeError> {
     Ok(u32::from_le_bytes(read_array(input)?))
 }
 
+fn decode_chunk(
+    key: u16,
+    kind: u8,
+    len: u32,
+    version: u8,
+    input: &mut &[u8],
+) -> Result<Chunk, BitmapDecodeError> {
+    match kind {
+        0 => {
+            let len_usize = usize::try_from(len).map_err(|_| BitmapDecodeError::NonCanonical)?;
+            if len == 0 || len_usize > ARRAY_MAX {
+                return Err(BitmapDecodeError::NonCanonical);
+            }
+            let raw = take(
+                input,
+                len_usize
+                    .checked_mul(2)
+                    .ok_or(BitmapDecodeError::Truncated)?,
+            )?;
+            let values: Vec<u16> = raw
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .collect();
+            if !values.windows(2).all(|pair| pair[0] < pair[1]) {
+                return Err(BitmapDecodeError::NonCanonical);
+            }
+            let chunk = Chunk::from_array(key, values).ok_or(BitmapDecodeError::NonCanonical)?;
+            if version == 2 && chunk.kind() != Kind::Array {
+                return Err(BitmapDecodeError::NonCanonical);
+            }
+            Ok(chunk)
+        }
+        1 => {
+            if usize::try_from(len).map_err(|_| BitmapDecodeError::NonCanonical)? <= ARRAY_MAX {
+                return Err(BitmapDecodeError::NonCanonical);
+            }
+            let raw = take(input, WORDS * 8)?;
+            let mut words = empty_words();
+            for (word, bytes) in words.iter_mut().zip(raw.chunks_exact(8)) {
+                *word = u64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                ]);
+            }
+            if popcount(&words) != len {
+                return Err(BitmapDecodeError::NonCanonical);
+            }
+            let chunk = Chunk::from_counted_words(key, words, len)
+                .ok_or(BitmapDecodeError::NonCanonical)?;
+            if version == 2 && chunk.kind() != Kind::Dense {
+                return Err(BitmapDecodeError::NonCanonical);
+            }
+            Ok(chunk)
+        }
+        2 => {
+            if version != 2 {
+                return Err(BitmapDecodeError::InvalidChunkKind(2));
+            }
+            let run_count = usize::from(read_u16(input)?);
+            let raw = take(
+                input,
+                run_count
+                    .checked_mul(4)
+                    .ok_or(BitmapDecodeError::Truncated)?,
+            )?;
+            let mut runs = Vec::with_capacity(run_count);
+            for pair in raw.chunks_exact(4) {
+                runs.push(Run {
+                    start: u16::from_le_bytes([pair[0], pair[1]]),
+                    len_minus_one: u16::from_le_bytes([pair[2], pair[3]]),
+                });
+            }
+            let chunk = Chunk::from_runs(key, runs).ok_or(BitmapDecodeError::NonCanonical)?;
+            if chunk.len != len {
+                return Err(BitmapDecodeError::NonCanonical);
+            }
+            Ok(chunk)
+        }
+        other => Err(BitmapDecodeError::InvalidChunkKind(other)),
+    }
+}
+
 /// Splits `n` bytes off the front of `input`.
 const fn take<'a>(input: &mut &'a [u8], n: usize) -> Result<&'a [u8], BitmapDecodeError> {
     if input.len() < n {
@@ -852,6 +594,33 @@ fn advance(chunks: &[Arc<Chunk>], cursor: &mut Cursor) -> Option<u32> {
                             break;
                         }
                         word = w[wi];
+                    }
+                }
+            }
+            Store::Run(runs) => {
+                // The cursor packs `(run index, offset within run)`.
+                let mut run_index =
+                    usize::try_from(cursor.pos >> 16).expect("run index fits usize");
+                let mut offset =
+                    usize::try_from(cursor.pos & 0xffff).expect("run offset fits usize");
+                if let Some(run) = runs.get(run_index) {
+                    if offset < run.len() {
+                        let lo = u32::from(run.start)
+                            .checked_add(u32::try_from(offset).expect("run offset fits u32"))
+                            .expect("run value fits u32");
+                        offset = offset.checked_add(1).expect("run offset fits usize");
+                        if offset == run.len() {
+                            run_index = run_index.checked_add(1).expect("run index fits");
+                            offset = 0;
+                        }
+                        cursor.pos = u32::try_from(run_index)
+                            .expect("run index fits u32")
+                            .checked_shl(16)
+                            .and_then(|high| {
+                                high.checked_add(u32::try_from(offset).expect("offset fits u32"))
+                            })
+                            .expect("run cursor fits u32");
+                        return Some(base | lo);
                     }
                 }
             }
@@ -1010,6 +779,7 @@ impl Sub for Bitmap {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) mod tests {
+    use super::chunk::{count_runs_store, pick_kind, Kind};
     use super::*;
     use std::collections::BTreeSet;
 
@@ -1036,21 +806,31 @@ pub(super) mod tests {
         set.iter().copied().collect()
     }
 
-    /// The bitmap equals `expected` and is in canonical form.
+    fn assert_canonical_chunks(bitmap: &Bitmap) {
+        assert!(bitmap.chunks.windows(2).all(|w| w[0].key < w[1].key));
+        for chunk in &bitmap.chunks {
+            assert_ne!(chunk.len, 0);
+            assert_eq!(chunk.runs as usize, count_runs_store(&chunk.store));
+            let canonical = chunk.canonical_store();
+            assert!(
+                match pick_kind(chunk.len as usize, chunk.runs as usize) {
+                    Kind::Array => matches!(canonical, Store::Array(_)),
+                    Kind::Dense => matches!(canonical, Store::Dense(_)),
+                    Kind::Run => matches!(canonical, Store::Run(_)),
+                },
+                "encode must pick the canonical container kind"
+            );
+        }
+    }
+
+    /// The bitmap equals `expected`.
     fn check(bitmap: &Bitmap, expected: &BTreeSet<u32>) {
         assert_eq!(bitmap.len(), expected.len() as u64);
         assert_eq!(bitmap.is_empty(), expected.is_empty());
         assert!(bitmap.iter().eq(expected.iter().copied()));
         assert!(bitmap.clone().into_iter().eq(expected.iter().copied()));
-        assert_eq!(bitmap, &build(expected), "non-canonical representation");
-        for chunk in &bitmap.chunks {
-            assert_ne!(chunk.len, 0);
-            assert_eq!(
-                matches!(chunk.store, Store::Array(_)),
-                chunk.len as usize <= ARRAY_MAX
-            );
-        }
-        assert!(bitmap.chunks.windows(2).all(|w| w[0].key < w[1].key));
+        assert_eq!(bitmap, &build(expected), "content equality");
+        assert_canonical_chunks(bitmap);
     }
 
     #[test]
@@ -1153,13 +933,7 @@ pub(super) mod tests {
         let check_values = |bitmap: &Bitmap, expected: &[u32]| {
             assert_eq!(bitmap.len(), expected.len() as u64);
             assert!(bitmap.iter().eq(expected.iter().copied()));
-            assert!(bitmap.chunks.windows(2).all(|w| w[0].key < w[1].key));
-            for chunk in &bitmap.chunks {
-                assert_eq!(
-                    matches!(chunk.store, Store::Array(_)),
-                    chunk.len as usize <= ARRAY_MAX
-                );
-            }
+            assert_canonical_chunks(bitmap);
         };
 
         check_values(&(&a | &b), &expected_union);
@@ -1183,7 +957,7 @@ pub(super) mod tests {
         let all: BTreeSet<u32> = (0..65_536).chain(u32::MAX - 3..=u32::MAX).collect();
         let b = build(&all);
         check(&b, &all);
-        assert!(matches!(b.chunks[0].store, Store::Dense(_)));
+        assert!(matches!(b.chunks[0].store, Store::Run(_)));
         let empty = Bitmap::new();
         assert_eq!((&b & &empty).len(), 0);
         assert_eq!(&b | &empty, b);
@@ -1230,7 +1004,7 @@ pub(super) mod tests {
         assert!(matches!(ba.chunks[0].store, Store::Array(_)));
         assert!(matches!(bb.chunks[0].store, Store::Array(_)));
         let both = &ba | &bb;
-        assert!(matches!(both.chunks[0].store, Store::Dense(_)));
+        assert!(matches!(both.chunks[0].store, Store::Run(_)));
         check(&both, &a.union(&b).copied().collect());
         // Intersecting back down returns to an array.
         let back = &both & &ba;
@@ -1254,7 +1028,7 @@ pub(super) mod tests {
     fn dense_insert_counts_and_dedups() {
         let array_max = u32::try_from(ARRAY_MAX).expect("test constant fits u32");
         let mut b: Bitmap = (0..=array_max).collect();
-        assert!(matches!(b.chunks[0].store, Store::Dense(_)));
+        assert!(matches!(b.chunks[0].store, Store::Run(_)));
         let before = b.len();
         assert!(!b.insert(10));
         assert!(b.insert(60_000));
@@ -1302,10 +1076,10 @@ pub(super) mod tests {
         assert_eq!(Bitmap::decode(&encoded).unwrap(), bitmap);
 
         let mut bad = encoded.clone();
-        bad[4] = 2;
+        bad[4] = 3;
         assert_eq!(
             Bitmap::decode(&bad),
-            Err(BitmapDecodeError::UnsupportedVersion(2))
+            Err(BitmapDecodeError::UnsupportedVersion(3))
         );
         assert_eq!(
             Bitmap::decode(&encoded[..encoded.len() - 1]),
@@ -1336,12 +1110,12 @@ pub(super) mod tests {
             }
             check(&bitmap, &set);
         }
-        // Removing across the threshold returns a dense chunk to an array.
+        // Removing from the front leaves the same contiguous run.
         let array_max = u32::try_from(ARRAY_MAX).expect("test constant fits u32");
         let mut b: Bitmap = (0..=array_max).collect();
-        assert!(matches!(b.chunks[0].store, Store::Dense(_)));
+        assert!(matches!(b.chunks[0].store, Store::Run(_)));
         assert!(b.remove(0));
-        assert!(matches!(b.chunks[0].store, Store::Array(_)));
+        assert!(matches!(b.chunks[0].store, Store::Run(_)));
         assert_eq!(b.len(), ARRAY_MAX as u64);
     }
 
@@ -1388,12 +1162,12 @@ pub(super) mod tests {
         for end in 0..good.len() {
             assert!(Bitmap::decode(&good[..end]).is_err(), "prefix {end}");
         }
-        // Chunk kind 2 does not exist: kind byte follows magic(4) ver(1) count(4) key(2).
+        // Chunk kind 3 does not exist: kind byte follows magic(4) ver(1) count(4) key(2).
         let mut bad_kind = good.clone();
-        bad_kind[11] = 2;
+        bad_kind[11] = 3;
         assert_eq!(
             Bitmap::decode(&bad_kind),
-            Err(BitmapDecodeError::InvalidChunkKind(2))
+            Err(BitmapDecodeError::InvalidChunkKind(3))
         );
         // Unsorted array values are non-canonical.
         let mut unsorted = good;
@@ -1418,5 +1192,194 @@ pub(super) mod tests {
         let mut dup = two;
         dup[9..11].copy_from_slice(&1u16.to_le_bytes());
         assert!(Bitmap::decode(&dup).is_err());
+    }
+
+    fn visible_run_container(bitmap: &Bitmap) -> bool {
+        bitmap
+            .chunks
+            .iter()
+            .all(|chunk| matches!(chunk.store, Store::Run(_)))
+    }
+
+    fn run_bitmap() -> Bitmap {
+        (0..1000u32)
+            .chain(2000..3000)
+            .chain(core::iter::once(5000))
+            .collect()
+    }
+
+    #[test]
+    fn run_container_selection_and_round_trip() {
+        let bitmap = run_bitmap();
+        let set: BTreeSet<u32> = (0..1000u32).chain(2000..3000).chain([5000]).collect();
+        check(&bitmap, &set);
+        let encoded = bitmap.encode();
+        assert!(
+            encoded.len() < 100,
+            "run encoding should be compact, got {} bytes",
+            encoded.len()
+        );
+        let decoded = Bitmap::decode(&encoded).unwrap();
+        assert!(
+            decoded
+                .chunks
+                .iter()
+                .all(|chunk| matches!(chunk.store, Store::Run(_))),
+            "decode must materialize the canonical run container"
+        );
+        assert_eq!(decoded, bitmap);
+    }
+
+    #[test]
+    fn run_insert_coalesces_and_remove_splits() {
+        // The row is large enough to start in the run container.
+        let mut bitmap: Bitmap = (0..5000u32).chain(5002..6000).collect();
+        assert!(bitmap
+            .chunks
+            .iter()
+            .all(|chunk| matches!(chunk.store, Store::Run(_))));
+        // Fill the two-value gap: the runs must coalesce.
+        assert!(bitmap.insert(5000));
+        assert!(bitmap.insert(5001));
+        let set: BTreeSet<u32> = (0..6000).collect();
+        check(&bitmap, &set);
+        assert!(visible_run_container(&bitmap));
+        // Extend the upper end.
+        assert!(bitmap.insert(6000));
+        let set: BTreeSet<u32> = (0..=6000).collect();
+        check(&bitmap, &set);
+        // Removing an interior value splits one run into two.
+        assert!(bitmap.remove(2500));
+        let set: BTreeSet<u32> = (0..2500).chain(2501..=6000).collect();
+        check(&bitmap, &set);
+        assert!(visible_run_container(&bitmap));
+    }
+
+    #[test]
+    fn run_set_operations_match_btreeset() {
+        let a_set: BTreeSet<u32> = (0..3000u32).chain(10_000..13_000).collect();
+        let b_set: BTreeSet<u32> = (1500..4500u32).chain(12_000..15_000).collect();
+        let (a, b) = (build(&a_set), build(&b_set));
+        assert!(a
+            .chunks
+            .iter()
+            .all(|chunk| matches!(chunk.store, Store::Run(_))));
+        let union = &a | &b;
+        check(&union, &a_set.union(&b_set).copied().collect());
+        check(&(&a & &b), &a_set.intersection(&b_set).copied().collect());
+        check(
+            &(a.clone() - &b),
+            &a_set.difference(&b_set).copied().collect(),
+        );
+        assert!(a.is_subset(&union));
+        assert!(a.is_disjoint(&core::iter::once(9999u32).collect()));
+        assert!(!a.is_disjoint(&b));
+    }
+
+    #[test]
+    fn full_chunk_run_encodes_compactly() {
+        let all: Bitmap = (0..65_536u32).collect();
+        assert!(matches!(all.chunks[0].store, Store::Run(_)));
+        let encoded = all.encode();
+        assert!(
+            encoded.len() < 32,
+            "full chunk encoded to {} bytes",
+            encoded.len()
+        );
+        assert_eq!(Bitmap::decode(&encoded).unwrap(), all);
+    }
+
+    #[test]
+    fn decode_rejects_noncanonical_run_rows() {
+        let mut adjacent = Vec::new();
+        adjacent.extend_from_slice(&BITMAP_MAGIC);
+        adjacent.push(BITMAP_FORMAT_VERSION);
+        adjacent.extend_from_slice(&1u32.to_le_bytes());
+        adjacent.extend_from_slice(&0u16.to_le_bytes());
+        adjacent.push(2);
+        adjacent.extend_from_slice(&4u32.to_le_bytes());
+        adjacent.extend_from_slice(&2u16.to_le_bytes());
+        adjacent.extend_from_slice(&0u16.to_le_bytes());
+        adjacent.extend_from_slice(&1u16.to_le_bytes());
+        adjacent.extend_from_slice(&2u16.to_le_bytes());
+        adjacent.extend_from_slice(&1u16.to_le_bytes());
+        assert_eq!(
+            Bitmap::decode(&adjacent),
+            Err(BitmapDecodeError::NonCanonical)
+        );
+
+        let mut wrong_len = run_bitmap().encode();
+        wrong_len[12..16].copy_from_slice(&99u32.to_le_bytes());
+        assert_eq!(
+            Bitmap::decode(&wrong_len),
+            Err(BitmapDecodeError::NonCanonical)
+        );
+    }
+
+    #[test]
+    fn run_selection_prefers_array_on_a_size_tie() {
+        let three: Bitmap = [0u32, 1, 2].into_iter().collect();
+        let four: Bitmap = [0u32, 1, 2, 3].into_iter().collect();
+        // In memory both stay arrays; the tie is resolved when encoding.
+        assert!(matches!(three.chunks[0].store, Store::Array(_)));
+        assert!(matches!(four.chunks[0].store, Store::Array(_)));
+        let three = Bitmap::decode(&three.encode()).unwrap();
+        let four = Bitmap::decode(&four.encode()).unwrap();
+        assert!(matches!(three.chunks[0].store, Store::Array(_)));
+        assert!(matches!(four.chunks[0].store, Store::Run(_)));
+    }
+
+    #[test]
+    fn random_clustered_mutations_match_btreeset() {
+        let mut rng = Rng(0x5eed_0bad_cafe_1234);
+        let mut set = BTreeSet::new();
+        let mut bitmap = Bitmap::new();
+        for step in 0..20_000u32 {
+            // Cluster insertions and removals so runs form, coalesce and split.
+            let base = (rng.next() % 64).checked_mul(1000).expect("base fits");
+            let value = u32::try_from(base + rng.next() % 900).expect("value fits u32");
+            if rng.next() % 3 == 0 {
+                assert_eq!(bitmap.remove(value), set.remove(&value), "remove {value}");
+            } else {
+                assert_eq!(bitmap.insert(value), set.insert(value), "insert {value}");
+            }
+            if step % 1_000 == 0 {
+                check(&bitmap, &set);
+            }
+        }
+        check(&bitmap, &set);
+    }
+
+    #[test]
+    fn version_one_rejects_run_chunks() {
+        let mut bytes = run_bitmap().encode();
+        bytes[4] = 1;
+        assert_eq!(
+            Bitmap::decode(&bytes),
+            Err(BitmapDecodeError::InvalidChunkKind(2))
+        );
+    }
+
+    #[test]
+    fn legacy_array_payload_canonicalizes_to_runs() {
+        let values: Vec<u16> = (0..10).collect();
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&BITMAP_MAGIC);
+        bytes.push(1);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(
+            &u32::try_from(values.len())
+                .expect("test length fits u32")
+                .to_le_bytes(),
+        );
+        for value in &values {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        let decoded = Bitmap::decode(&bytes).expect("version 1 decodes");
+        assert!(matches!(decoded.chunks[0].store, Store::Run(_)));
+        let expected: Bitmap = values.into_iter().map(u32::from).collect();
+        assert_eq!(decoded, expected);
     }
 }
