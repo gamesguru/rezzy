@@ -26,11 +26,11 @@ const MAX_FACTOR_WORK_GF256: usize = 300_000_000;
 /// splits maximizes this model; the DP test below proves that for the model.
 /// Constructing an input that reaches it is still open, and the 300M budget
 /// is deliberately a practical policy ceiling rather than this bound.
-#[cfg(all(test, target_pointer_width = "64"))]
-const MAX_FACTOR_WORK_GF256_WORST_CASE: usize = 5_148_287_480;
-#[cfg(all(test, target_pointer_width = "64"))]
+#[cfg(test)]
+const MAX_FACTOR_WORK_GF256_WORST_CASE: u64 = 5_148_287_480;
+#[cfg(test)]
 #[allow(clippy::assertions_on_constants)]
-const _: () = assert!(MAX_FACTOR_WORK_GF256 < MAX_FACTOR_WORK_GF256_WORST_CASE);
+const _: () = assert!((MAX_FACTOR_WORK_GF256 as u64) < MAX_FACTOR_WORK_GF256_WORST_CASE);
 // KNOWN GAP, still open: this covers observed *balanced* recursive
 // splitting, not a proven worst-case recursion bound.
 //
@@ -1766,36 +1766,36 @@ mod tests {
     fn theoretical_degenerate_chain_cost_evaluation() {
         // Sum of single_call_work_ceiling(d) for d in 2..=256:
         // sum_{d=2}^{256} [63 d^2 + 72 (64 d + d^2) + d^2] = 916,609,400 (~917M)
-        let total_degenerate_work: usize = (2..=256)
-            .map(|d| single_call_work_ceiling(d).expect("does not overflow"))
+        let total_degenerate_work: u64 = (2..=256)
+            .map(|d| single_call_work_ceiling(d).expect("does not overflow") as u64)
             .sum();
         assert_eq!(total_degenerate_work, 916_609_400);
     }
 
-    #[cfg(target_pointer_width = "64")]
     #[test]
     fn gf256_work_model_worst_case_matches_degenerate_chain() {
-        let mut worst = vec![0_usize; 257];
+        let mut worst = vec![0_u64; 257];
         for degree in 2_usize..=256 {
             let split = (1..degree)
                 .map(|left| {
                     let right = degree.checked_sub(left).expect("left is below degree");
                     worst[left]
                         .checked_add(worst[right])
-                        .expect("split subtree cost fits usize")
+                        .expect("split subtree cost fits u64")
                 })
                 .max()
                 .expect("degree two has one split");
             worst[degree] = WorkModel::GF256
                 .single_call_work_ceiling(degree)
+                .map(|cost| cost as u64)
                 .and_then(|cost| cost.checked_add(split))
-                .expect("worst-case cost fits usize");
+                .expect("worst-case cost fits u64");
         }
-        let chain: usize = (2..=256)
+        let chain: u64 = (2..=256)
             .map(|degree| {
                 WorkModel::GF256
                     .single_call_work_ceiling(degree)
-                    .expect("does not overflow")
+                    .expect("does not overflow") as u64
             })
             .sum();
         assert_eq!(worst[256], chain);
