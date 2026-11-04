@@ -214,7 +214,15 @@ enum RoomExchangeOutcome {
     Fallback,
 }
 
-fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExchangeOutcome {
+#[derive(Debug, Clone, Copy)]
+struct RoomExchangeResult {
+    outcome: RoomExchangeOutcome,
+    rounds: usize,
+    bucket_requests: usize,
+    sketch_payload_bytes: usize,
+}
+
+fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExchangeResult {
     let client = ReconciliationClient::default().allow_unlimited_delta();
     let Gf256ClientAction::BucketSketches { requests } =
         client.select_gf256_action(&fixture.local_kernel, fixture.remote_digest, 0)
@@ -225,10 +233,20 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
     let mut action = exchange
         .start_with_requests(requests)
         .expect("client requests cover the digest key space");
+    let mut rounds = 0_usize;
+    let mut bucket_requests = 0_usize;
+    let mut sketch_payload_bytes = 0_usize;
 
     loop {
         match action {
             Gf256Action::Request(requests) => {
+                rounds = rounds.saturating_add(1);
+                bucket_requests = bucket_requests.saturating_add(requests.len());
+                let round_capacity = requests.iter().fold(0_usize, |total, request| {
+                    total.saturating_add(request.capacity)
+                });
+                sketch_payload_bytes =
+                    sketch_payload_bytes.saturating_add(round_capacity.saturating_mul(32));
                 let local_nodes = fixture
                     .local_population
                     .bucket_nodes(&requests)
@@ -275,9 +293,21 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
             } => {
                 assert_eq!(local_only.len(), fixture.difference_each_way);
                 assert_eq!(remote_only.len(), fixture.difference_each_way);
-                return RoomExchangeOutcome::Complete;
+                return RoomExchangeResult {
+                    outcome: RoomExchangeOutcome::Complete,
+                    rounds,
+                    bucket_requests,
+                    sketch_payload_bytes,
+                };
             }
-            Gf256Action::Fallback => return RoomExchangeOutcome::Fallback,
+            Gf256Action::Fallback => {
+                return RoomExchangeResult {
+                    outcome: RoomExchangeOutcome::Fallback,
+                    rounds,
+                    bucket_requests,
+                    sketch_payload_bytes,
+                };
+            }
         }
     }
 }
@@ -292,10 +322,14 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
     let elapsed = measure(1, || {
         outcome = Some(reconcile_room_once(black_box(&fixture), &decoder));
     });
+    let result = outcome.expect("one benchmark iteration ran");
     println!(
-        "GF256 room exchange/{room_events}/diff_each_way_{difference_each_way}: {:.3} ms/op (one exchange; result={:?}; setup excluded)",
+        "GF256/{room_events}/diff_each_way_{difference_each_way}: {:.1} ms, {:?}, {} rounds, {} buckets, {} B",
         elapsed.as_secs_f64() * 1e3,
-        outcome.expect("one benchmark iteration ran"),
+        result.outcome,
+        result.rounds,
+        result.bucket_requests,
+        result.sketch_payload_bytes,
     );
 }
 
