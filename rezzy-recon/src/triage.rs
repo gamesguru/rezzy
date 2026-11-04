@@ -1232,6 +1232,19 @@ mod tests {
         (sketch.to_bytes(), digests)
     }
 
+    fn decode_gf256_with_summary(
+        encoded: &[u8],
+        summary: NodeSummary,
+        budget: usize,
+        decoder: &Gf256Decoder,
+    ) -> Result<Gf256BucketDecodeBatch, AlgebraicError> {
+        let request = [BucketRequest::new(0, 0, 4)];
+        let summaries = [summary];
+        decode_gf256_bucket_sketches_with_summaries(
+            encoded, &request, &summaries, &summaries, budget, decoder,
+        )
+    }
+
     #[test]
     fn gf256_batch_recovers_full_digests_per_bucket() {
         let decoder = Gf256Decoder::build().unwrap();
@@ -1283,13 +1296,9 @@ mod tests {
     #[test]
     fn gf256_batch_skips_decode_when_node_summaries_match() {
         let decoder = Gf256Decoder::build().unwrap();
-        let requests = [BucketRequest::new(0, 0, 4)];
-        let summary = [NodeSummary::default()];
         let (encoded, _) = gf256_payload(4, &[1]);
-        let batch = decode_gf256_bucket_sketches_with_summaries(
-            &encoded, &requests, &summary, &summary, 0, &decoder,
-        )
-        .unwrap();
+        let batch =
+            decode_gf256_with_summary(&encoded, NodeSummary::default(), 0, &decoder).unwrap();
         assert!(batch.failed_buckets.is_empty());
         assert_eq!(batch.successful_buckets.len(), 1);
         assert!(batch.successful_buckets[0].digests.is_empty());
@@ -1298,17 +1307,13 @@ mod tests {
     #[test]
     fn gf256_batch_does_not_skip_equal_nonempty_summaries() {
         let decoder = Gf256Decoder::build().unwrap();
-        let requests = [BucketRequest::new(0, 0, 4)];
-        let summary = [NodeSummary {
+        let summary = NodeSummary {
             count: 10,
             digest: 0x1234,
-        }];
+        };
         let (encoded, _) = gf256_payload(4, &[1]);
 
-        let batch = decode_gf256_bucket_sketches_with_summaries(
-            &encoded, &requests, &summary, &summary, 0, &decoder,
-        )
-        .unwrap();
+        let batch = decode_gf256_with_summary(&encoded, summary, 0, &decoder).unwrap();
         assert!(batch.failed_buckets.is_empty());
         assert_eq!(batch.successful_buckets.len(), 1);
         assert_eq!(batch.successful_buckets[0].digests.len(), 1);
