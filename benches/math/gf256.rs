@@ -215,12 +215,6 @@ enum RoomExchangeOutcome {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-struct RoomSetupTimes {
-    fixture: std::time::Duration,
-    decoder: std::time::Duration,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
 struct RoomPhaseTimes {
     plan: std::time::Duration,
     local_build: std::time::Duration,
@@ -228,21 +222,6 @@ struct RoomPhaseTimes {
     payload: std::time::Duration,
     decode: std::time::Duration,
     verify: std::time::Duration,
-}
-
-impl RoomPhaseTimes {
-    fn total_accounted(&self) -> std::time::Duration {
-        self.plan
-            .saturating_add(self.local_build)
-            .saturating_add(self.remote_build)
-            .saturating_add(self.payload)
-            .saturating_add(self.decode)
-            .saturating_add(self.verify)
-    }
-
-    fn other(&self, total: std::time::Duration) -> std::time::Duration {
-        total.saturating_sub(self.total_accounted())
-    }
 }
 
 #[derive(Debug)]
@@ -471,24 +450,15 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
 
 fn bench_room_matrix() {
     println!(
-        "\nGF256 room (in-process; no setup/net/framing; times in ms; sketch_B excludes summaries/framing)"
+        "\nGF256 room benchmark: in-process; setup, serialization framing, and network excluded."
     );
-    println!("REZZY_BENCH_GF256_ROUND_TRACE=1: per-round counts for multi-round/fallback cases.");
     println!(
-        "{:<4} {:>5} {:>9} {:>5} {:>6} {:>7} {:>6} {:>6} {:<11} {:>6} {:<11} {:>8} {:>8}",
-        "Pop",
-        "Diff",
-        "Total ms",
-        "Plan",
-        "Bucket",
-        "Payload",
-        "Decode",
-        "Verify",
-        "Result",
-        "Rounds",
-        "Init/Total",
-        "Sketch B",
-        "% Peer"
+        "  phases: bucket construction / payload encoding+subtraction / decode / verify+advance"
+    );
+    println!("  rounds are request/response turns (one RTT each if batched); sketch bytes exclude summaries/framing");
+    println!("  percentage = sketch payload / (room_events × 32 B raw digests from one peer)");
+    println!(
+        "  Set REZZY_BENCH_GF256_ROUND_TRACE=1 for per-round counts on multi-round/fallback cases."
     );
     for (room_events, differences) in [
         (100_000_usize, 10_usize),
