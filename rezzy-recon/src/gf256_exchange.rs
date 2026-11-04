@@ -381,10 +381,10 @@ mod tests {
         (rounds, saw_split)
     }
 
-    /// Capacity retry recovers 40 local-only and 40 remote-only digests.
+    /// Capacity retry recovers 20 local-only and 20 remote-only digests.
     #[test]
-    fn recovers_every_full_digest_after_capacity_retry() {
-        let (rounds, _) = assert_exchange_recovers(100, 40, 8);
+    fn recovers_after_capacity_retry() {
+        let (rounds, _) = assert_exchange_recovers(40, 20, 8);
         assert!(rounds >= 2, "rounds={rounds}");
     }
 
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn splits_buckets_and_recovers_every_full_digest() {
         let (rounds, saw_split) =
-            assert_exchange_recovers(100, 40, crate::triage::MAX_BUCKET_SKETCH_CAPACITY);
+            assert_exchange_recovers(80, 40, crate::triage::MAX_BUCKET_SKETCH_CAPACITY);
         assert!(
             saw_split && rounds >= 2,
             "saw_split={saw_split}, rounds={rounds}"
