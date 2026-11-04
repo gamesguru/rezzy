@@ -269,40 +269,51 @@ pub trait ForwardGraph<Id: EventId> {
     }
 }
 
-/// Computes the MSC0501 room digest over a negotiated frame.
-///
-/// The frame is mathematically bounded by the causal graph. The digested
-/// population includes only the known events that **causally succeed** (are
-/// topological descendants of) the anchor antichain. Events that causally
-/// precede the anchor, such as pre-join history, are excluded.
-///
-/// # Errors
-/// Returns [`AlgebraicError::UnsupportedRoomVersion`] for a room whose event
-/// IDs are not reference hashes (checked once, before any work), or an error
-/// if any frame event IDs violate format rules or element hashing limits.
-pub fn compute_frame_digest<Id: EventId, G: ForwardGraph<Id>>(
-    kind: RoomEventIdKind,
-    graph: &G,
-    frame_anchors: &[Id],
-) -> Result<RoomAccumulator, AlgebraicError> {
-    fold_frame(kind, graph, frame_anchors, |id| graph.event_hash(id))
+/// Defines a public frame-digest entry point that folds one element type over
+/// the shared traversal. Both entry points have identical signatures, so the
+/// macro keeps them from drifting apart.
+macro_rules! frame_digest_fn {
+    ($(#[$doc:meta])* $name:ident, |$graph:ident, $id:ident| $hash_of:expr) => {
+        $(#[$doc])*
+        pub fn $name<Id: EventId, G: ForwardGraph<Id>>(
+            kind: RoomEventIdKind,
+            graph: &G,
+            frame_anchors: &[Id],
+        ) -> Result<RoomAccumulator, AlgebraicError> {
+            fold_frame(kind, graph, frame_anchors, |$id| {
+                let $graph = graph;
+                $hash_of
+            })
+        }
+    };
 }
 
-/// [`compute_frame_digest`] over full-digest elements: the same traversal,
-/// accumulating each event's fixed-window residual.
-///
-/// # Errors
-/// Same as [`compute_frame_digest`]; additionally rejects an all-zero digest.
-pub fn compute_fixed_window_frame_digest<Id: EventId, G: ForwardGraph<Id>>(
-    kind: RoomEventIdKind,
-    graph: &G,
-    frame_anchors: &[Id],
-) -> Result<RoomAccumulator, AlgebraicError> {
-    fold_frame(kind, graph, frame_anchors, |id| {
+frame_digest_fn! {
+    /// Computes the MSC0501 room digest over a negotiated frame.
+    ///
+    /// The frame is mathematically bounded by the causal graph. The digested
+    /// population includes only the known events that **causally succeed** (are
+    /// topological descendants of) the anchor antichain. Events that causally
+    /// precede the anchor, such as pre-join history, are excluded.
+    ///
+    /// # Errors
+    /// Returns [`AlgebraicError::UnsupportedRoomVersion`] for a room whose event
+    /// IDs are not reference hashes (checked once, before any work), or an error
+    /// if any frame event IDs violate format rules or element hashing limits.
+    compute_frame_digest, |graph, id| graph.event_hash(id)
+}
+
+frame_digest_fn! {
+    /// [`compute_frame_digest`] over full-digest elements: the same traversal,
+    /// accumulating each event's fixed-window residual.
+    ///
+    /// # Errors
+    /// Same as [`compute_frame_digest`]; additionally rejects an all-zero digest.
+    compute_fixed_window_frame_digest, |graph, id| {
         let hash = graph.fixed_window_hash(id)?;
         hash.validate()?;
         Ok(hash)
-    })
+    }
 }
 
 fn fold_frame<Id: EventId, G: ForwardGraph<Id>, E: AccumulatedElement>(
