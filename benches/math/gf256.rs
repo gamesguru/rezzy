@@ -214,16 +214,43 @@ enum RoomExchangeOutcome {
     Fallback(Gf256FallbackReason),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
+struct RoomPhaseTimes {
+    plan: std::time::Duration,
+    local_build: std::time::Duration,
+    remote_build: std::time::Duration,
+    payload: std::time::Duration,
+    decode: std::time::Duration,
+    verify: std::time::Duration,
+}
+
+#[derive(Debug)]
+struct RoomRoundTrace {
+    requests: usize,
+    capacity: usize,
+    successful: usize,
+    failed: usize,
+    next_requests: usize,
+}
+
+#[derive(Debug)]
 struct RoomExchangeResult {
     outcome: RoomExchangeOutcome,
     rounds: usize,
     initial_requests: usize,
     total_requests: usize,
     sketch_payload_bytes: usize,
+    phases: RoomPhaseTimes,
+    round_trace: Vec<RoomRoundTrace>,
 }
 
-fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExchangeResult {
+fn reconcile_room_once(
+    fixture: &RoomFixture,
+    decoder: &Gf256Decoder,
+    trace_rounds: bool,
+) -> RoomExchangeResult {
+    let mut phases = RoomPhaseTimes::default();
+    let phase_start = std::time::Instant::now();
     let client = ReconciliationClient::default().allow_unlimited_delta();
     let Gf256ClientAction::BucketSketches { requests } =
         client.select_gf256_action(&fixture.local_kernel, fixture.remote_digest, 0)
@@ -235,9 +262,11 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
     let mut action = exchange
         .start_with_requests(requests)
         .expect("client requests cover the digest key space");
+    phases.plan = phase_start.elapsed();
     let mut rounds = 0_usize;
     let mut total_requests = 0_usize;
     let mut sketch_payload_bytes = 0_usize;
+    let mut round_trace = Vec::new();
 
     loop {
         match action {
@@ -249,14 +278,21 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
                 });
                 sketch_payload_bytes =
                     sketch_payload_bytes.saturating_add(round_capacity.saturating_mul(32));
+                let phase_start = std::time::Instant::now();
                 let local_nodes = fixture
                     .local_population
                     .bucket_nodes(&requests)
                     .expect("local bucket construction succeeds");
+                phases.local_build = phases.local_build.saturating_add(phase_start.elapsed());
+
+                let phase_start = std::time::Instant::now();
                 let remote_nodes = fixture
                     .remote_population
                     .bucket_nodes(&requests)
                     .expect("remote bucket construction succeeds");
+                phases.remote_build = phases.remote_build.saturating_add(phase_start.elapsed());
+
+                let phase_start = std::time::Instant::now();
                 let (local_sketches, local_summaries): (Vec<_>, Vec<_>) =
                     local_nodes.into_iter().unzip();
                 let (remote_sketches, remote_summaries): (Vec<_>, Vec<_>) =
@@ -268,6 +304,9 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
                 let difference_payload =
                     subtract_gf256_payload(&local_sketches, &remote_payload, &requests)
                         .expect("same-round sketches subtract");
+                phases.payload = phases.payload.saturating_add(phase_start.elapsed());
+
+                let phase_start = std::time::Instant::now();
                 let budget = recommended_gf256_bucket_decode_budget(&requests)
                     .expect("round work budget fits usize");
                 let batch = decode_gf256_bucket_sketches_with_summaries(
@@ -279,7 +318,12 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
                     decoder,
                 )
                 .expect("benchmark batch is well-formed");
-                action = exchange
+                phases.decode = phases.decode.saturating_add(phase_start.elapsed());
+
+                let successful = batch.successful_buckets.len();
+                let failed = batch.failed_buckets.len();
+                let phase_start = std::time::Instant::now();
+                let next_action = exchange
                     .advance_verified(
                         batch,
                         &requests,
@@ -288,6 +332,21 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
                         |digest| fixture.local_digests.contains(digest),
                     )
                     .expect("verified round advances");
+                phases.verify = phases.verify.saturating_add(phase_start.elapsed());
+                let next_requests = match &next_action {
+                    Gf256Action::Request(requests) => requests.len(),
+                    Gf256Action::Complete { .. } | Gf256Action::Fallback { .. } => 0,
+                };
+                if trace_rounds {
+                    round_trace.push(RoomRoundTrace {
+                        requests: requests.len(),
+                        capacity: round_capacity,
+                        successful,
+                        failed,
+                        next_requests,
+                    });
+                }
+                action = next_action;
             }
             Gf256Action::Complete {
                 local_only,
@@ -301,6 +360,8 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
                     initial_requests,
                     total_requests,
                     sketch_payload_bytes,
+                    phases,
+                    round_trace,
                 };
             }
             Gf256Action::Fallback { reason } => {
@@ -310,6 +371,8 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExc
                     initial_requests,
                     total_requests,
                     sketch_payload_bytes,
+                    phases,
+                    round_trace,
                 };
             }
         }
@@ -322,22 +385,44 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
     // client/server exchange over prebuilt room snapshots.
     let fixture = build_room_fixture(room_events, difference_each_way);
     let decoder = Gf256Decoder::build().expect("GF(2^256) decoder builds");
+    let trace_rounds = std::env::var_os("REZZY_BENCH_GF256_ROUND_TRACE").is_some();
     let mut outcome = None;
     let elapsed = measure(1, || {
-        outcome = Some(reconcile_room_once(black_box(&fixture), &decoder));
+        outcome = Some(reconcile_room_once(
+            black_box(&fixture),
+            &decoder,
+            trace_rounds,
+        ));
     });
     let result = outcome.expect("one benchmark iteration ran");
     let peer_raw_bytes = room_events.saturating_mul(32);
     let sketch_pct = (result.sketch_payload_bytes as f64 / peer_raw_bytes as f64) * 100.0;
     let outcome_str = match result.outcome {
-        RoomExchangeOutcome::Complete => "Complete,".to_string(),
-        RoomExchangeOutcome::Fallback(reason) => format!("Fallback ({reason}),"),
+        RoomExchangeOutcome::Complete => "Complete".to_string(),
+        RoomExchangeOutcome::Fallback(reason) => {
+            let mut reason = reason.to_string();
+            if let Some(first) = reason.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            reason
+        }
     };
+    let room_label = if room_events >= 1_000_000 {
+        format!("{}M", room_events / 1_000_000)
+    } else {
+        format!("{}k", room_events / 1_000)
+    };
+    let bucket_build = result.phases.local_build + result.phases.remote_build;
     println!(
-        "GF256/{:>7}/diff_each_way_{:<5}: {:>6.1} ms, {:<30} {:>2} rounds (1 RTT/ea), {:>3} init / {:>4} total reqs, {:>7} B sketch payload ({:>6.3}% of room_events×32B, est)",
-        room_events,
+        "{:<4} diff={:<5}: {:>6.1} ms [pl{:>4.1} b{:>6.1} p{:>5.1} dec{:>6.1} v{:>4.1}] {:<11} {:>2}r {:>4}/{:<4} req {:>8} B {:>6.3}%",
+        room_label,
         difference_each_way,
         elapsed.as_secs_f64() * 1e3,
+        result.phases.plan.as_secs_f64() * 1e3,
+        bucket_build.as_secs_f64() * 1e3,
+        result.phases.payload.as_secs_f64() * 1e3,
+        result.phases.decode.as_secs_f64() * 1e3,
+        result.phases.verify.as_secs_f64() * 1e3,
         outcome_str,
         result.rounds,
         result.initial_requests,
@@ -345,13 +430,29 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
         result.sketch_payload_bytes,
         sketch_pct,
     );
+
+    if trace_rounds
+        && (result.rounds > 1 || matches!(result.outcome, RoomExchangeOutcome::Fallback(_)))
+    {
+        for (index, round) in result.round_trace.iter().enumerate() {
+            println!(
+                "  round {:>2}: {:>3} requests, capacity {:>4}, {:>3} succeeded, {:>3} failed, {:>3} next-round requests",
+                index + 1,
+                round.requests,
+                round.capacity,
+                round.successful,
+                round.failed,
+                round.next_requests,
+            );
+        }
+    }
 }
 
 fn bench_room_matrix() {
     println!(
-        "\nGF(2^256) room reconciliation matrix (in-process exchange; network/framing excluded):"
+        "\nGF256 room (in-process; no setup/net/framing): ms pl/b/p/dec/v=plan/bucket(both)/payload/decode/verify; req=init/total; %=sketch/peer-32B"
     );
-    println!("  note: rounds = 1 RTT each; sketch payload excludes 24 B node summaries and transport framing");
+    println!("REZZY_BENCH_GF256_ROUND_TRACE=1: per-round counts for multi-round/fallback cases.");
     for (room_events, differences) in [
         (100_000_usize, 10_usize),
         (100_000, 100),
