@@ -347,6 +347,7 @@ impl Gf256Verified {
 /// `D_A xor D_B` equals the XOR of the residual windows of every digest.
 ///
 /// # Errors
+/// Returns an error if `request` is malformed, or
 /// [`AlgebraicError::DecodeFailure`] on any failed check.
 pub fn verify_gf256_decode<F>(
     request: &BucketRequest,
@@ -358,6 +359,7 @@ pub fn verify_gf256_decode<F>(
 where
     F: FnMut(&[u8; 32]) -> bool,
 {
+    crate::triage::validate_adaptive_bucket_requests(core::slice::from_ref(request))?;
     let mut distinct = digests.to_vec();
     distinct.sort_unstable();
     if distinct.windows(2).any(|pair| pair[0] == pair[1]) || distinct.contains(&[0; 32]) {
@@ -905,6 +907,22 @@ mod tests {
         // Digest outside the node.
         let narrow = BucketRequest::new(1, 0, 8);
         assert!(verify_gf256_decode(&narrow, local, remote, &digests, in_local).is_err());
+    }
+
+    #[test]
+    fn gf256_verify_rejects_invalid_bucket_geometry() {
+        let (valid, local, remote, digests) = gf_fixture();
+        for invalid in [
+            BucketRequest::new(crate::MAX_DEPTH + 1, 0, 8),
+            BucketRequest::new(u8::MAX, 0, 8),
+            BucketRequest::new(1, 2, 8),
+        ] {
+            assert_eq!(
+                verify_gf256_decode(&invalid, local, remote, &digests, in_local),
+                Err(AlgebraicError::InvalidBucketIndex)
+            );
+        }
+        assert!(verify_gf256_decode(&valid, local, remote, &digests, in_local).is_ok());
     }
 
     #[test]

@@ -258,6 +258,11 @@ pub trait ForwardGraph<Id: EventId> {
     /// Returns the full-digest element for a given event ID, using the same
     /// string and format resolution as [`Self::event_hash`].
     ///
+    /// Implementations that override [`Self::event_hash`] to customize hashing
+    /// must also override this method if the custom behavior should apply to
+    /// full-digest reconciliation. The default derives the canonical digest
+    /// from the event ID string; a truncated `ElementHash` cannot recover it.
+    ///
     /// # Errors
     /// Returns an error if the event ID format is invalid or hashing fails.
     fn fixed_window_hash(&self, id: &Id) -> Result<FixedWindowElementHash, AlgebraicError> {

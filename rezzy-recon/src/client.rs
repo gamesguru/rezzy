@@ -1238,10 +1238,10 @@ impl ReconciliationClient {
         // omit key space: every plan covers the complete digest-prefix space,
         // and failed buckets still retry or split. Start at the per-bucket
         // maximum so an underestimated root cannot select an undersized sketch.
-        let estimate = Self::estimate_delta(local, &remote).unwrap_or(0);
         if self.max_aggregate_capacity < MAX_BUCKET_SKETCH_CAPACITY {
             return Gf256ClientAction::ExtremityDiff;
         }
+        let estimate = Self::estimate_delta(local, &remote).unwrap_or(0);
         let headroom = u64::try_from(concurrency_headroom).unwrap_or(u64::MAX);
         let target = provision_capacity(estimate, headroom)
             .unwrap_or(u64::MAX)
@@ -1635,7 +1635,9 @@ mod tests {
 
     #[test]
     fn gf256_selection_clamps_low_and_high_strata_hints() {
-        let client = ReconciliationClient::default().with_gate_threshold(None);
+        let client = ReconciliationClient::default()
+            .with_max_aggregate_capacity(128)
+            .with_gate_threshold(None);
         let local = ResidentKernel::new();
         let under_estimate = RemoteDigest {
             digest: 1,
@@ -1644,6 +1646,12 @@ mod tests {
             frame_matches: true,
             has_unknown_extremity: false,
         };
+        assert_eq!(
+            ReconciliationClient::default()
+                .with_max_aggregate_capacity(MAX_BUCKET_SKETCH_CAPACITY - 1)
+                .select_gf256_action(&local, under_estimate, 0),
+            Gf256ClientAction::ExtremityDiff
+        );
         let Gf256ClientAction::BucketSketches {
             requests: under_requests,
         } = client.select_gf256_action(&local, under_estimate, 0)
@@ -1664,7 +1672,7 @@ mod tests {
         }
         let over_estimate = RemoteDigest {
             digest: 1,
-            known_event_count: 0,
+            known_event_count: u64::MAX,
             strata: *high_delta.strata(),
             frame_matches: true,
             has_unknown_extremity: false,
@@ -1675,7 +1683,17 @@ mod tests {
         else {
             panic!("over-estimate should be capped to a bounded bucket plan");
         };
-        assert!(over_requests.len() <= MAX_BUCKETS_PER_ROUND);
+        assert_eq!(
+            over_requests.len(),
+            4,
+            "the configured four-bucket cap is hit"
+        );
+        assert_eq!(over_requests[0].depth, 2);
+        assert_eq!(
+            over_requests.len(),
+            1_usize << over_requests[0].depth,
+            "the requests still cover the full key space"
+        );
         assert!(over_requests
             .iter()
             .all(|request| request.capacity == MAX_BUCKET_SKETCH_CAPACITY));

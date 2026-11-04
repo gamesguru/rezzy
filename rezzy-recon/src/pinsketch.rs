@@ -26,9 +26,9 @@ const MAX_FACTOR_WORK_GF256: usize = 300_000_000;
 /// splits maximizes this model; the DP test below proves that for the model.
 /// Constructing an input that reaches it is still open, and the 300M budget
 /// is deliberately a practical policy ceiling rather than this bound.
-#[cfg(test)]
+#[cfg(all(test, target_pointer_width = "64"))]
 const MAX_FACTOR_WORK_GF256_WORST_CASE: usize = 5_148_287_480;
-#[cfg(test)]
+#[cfg(all(test, target_pointer_width = "64"))]
 #[allow(clippy::assertions_on_constants)]
 const _: () = assert!(MAX_FACTOR_WORK_GF256 < MAX_FACTOR_WORK_GF256_WORST_CASE);
 // KNOWN GAP, still open: this covers observed *balanced* recursive
@@ -954,6 +954,15 @@ fn find_roots_with_solver<F: BinaryField>(
         let trials = model.factor_trials().ok_or(AlgebraicError::DecodeFailure)?;
         let mut split = None;
         let mut mixed_parameter = FACTOR_PARAMETER_SEED;
+        let dense_multiplier = if model.mixed_squarings == 0 {
+            None
+        } else {
+            let mut dense = F::from_u64(DENSE_PARAMETER_SEED);
+            for _ in 0..model.mixed_squarings {
+                dense = dense.square();
+            }
+            Some(dense)
+        };
         for trial in 0..trials {
             let parameter = if trial >= model.mixed_trials {
                 let basis_bit = trial
@@ -962,18 +971,12 @@ fn find_roots_with_solver<F: BinaryField>(
                 F::bit(basis_bit).ok_or(AlgebraicError::DecodeFailure)?
             } else {
                 let parameter = F::from_u64(mixed_parameter);
-                if model.mixed_squarings == 0 {
-                    parameter
-                } else {
+                dense_multiplier.map_or(parameter, |dense| {
                     // Multiply by a fixed dense constant. Squaring alone is not
                     // enough: `Tr(a^8 * 1) = Tr(a)` is still zero, so roots
                     // that differ by 1 could never be split by a low-degree seed.
-                    let mut dense = F::from_u64(DENSE_PARAMETER_SEED);
-                    for _ in 0..model.mixed_squarings {
-                        dense = dense.square();
-                    }
                     parameter.mul(dense)
-                }
+                })
             };
             let cost = model
                 .factor_trial_cost_with_basis(degree)
@@ -1543,17 +1546,17 @@ mod tests {
         assert!(!splits_completely(&basis, &broken));
     }
 
-    /// An over-capacity sketch yields a locator that cannot split. It must be
-    /// rejected after one basis build, not by burning the trial ladder.
+    /// A non-splitting locator must be rejected after one basis build, not by
+    /// burning the trial ladder.
     #[test]
-    fn over_capacity_garbage_locator_fails_without_exhausting_work() {
-        let expected: Vec<Gf256> = (1..=40_u64).map(Gf256::from_u64).collect();
-        let odd = odd_syndromes_field(&expected);
-        // Decode as though only 16 odd syndromes (capacity 16) were sent.
-        let result = prepare_locator(&odd[..16], 16);
-        let Ok(Some((locator, _))) = result else {
-            return; // BM already rejected it: also fine.
-        };
+    fn non_splitting_locator_fails_without_exhausting_work() {
+        // A non-splitting degree-16 locator constructed from arbitrary syndromes.
+        let odd: Vec<Gf256> = (0..16).map(|i| Gf256::from_u64(31 + i)).collect();
+        let (locator, _) = prepare_locator(&odd, 16)
+            .expect("prepare_locator must succeed")
+            .expect("fixture must produce a locator");
+        let basis = build_frobenius_basis(&locator).expect("locator is monic");
+        assert!(!splits_completely(&basis, &locator));
         let mut roots = Vec::new();
         let mut work = WorkModel::GF256.max_factor_work();
         let started = work;
@@ -1769,6 +1772,7 @@ mod tests {
         assert_eq!(total_degenerate_work, 916_609_400);
     }
 
+    #[cfg(target_pointer_width = "64")]
     #[test]
     fn gf256_work_model_worst_case_matches_degenerate_chain() {
         let mut worst = vec![0_usize; 257];

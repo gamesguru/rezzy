@@ -605,10 +605,12 @@ pub fn decode_gf256_bucket_sketches(
     decode_gf256_bucket_sketches_inner(encoded, requests, budget, decoder, None)
 }
 
-/// Decodes a GF(2^256) batch while skipping buckets whose actual local and
-/// remote node summaries are equal. Skipped buckets produce an empty success
-/// outcome, which is checked against those summaries by the batch verifier.
-/// The strata estimate does not participate in this decision.
+/// Decodes a GF(2^256) batch while skipping buckets whose local and remote
+/// summaries are both empty and whose corresponding sketch bytes are all zero.
+/// Skipped buckets produce an empty success outcome. Nonzero payload bytes are
+/// decoded even with empty summaries so the batch verifier can reject an
+/// inconsistent responder. The strata estimate does not participate in this
+/// decision.
 ///
 /// # Errors
 /// Returns the same errors as [`decode_gf256_bucket_sketches`], and
@@ -652,7 +654,9 @@ fn decode_gf256_bucket_sketches_inner(
         let bytes = payload.take(request.capacity, 32)?;
 
         if summaries.is_some_and(|(local, remote)| {
-            local[index] == NodeSummary::default() && remote[index] == NodeSummary::default()
+            local[index] == NodeSummary::default()
+                && remote[index] == NodeSummary::default()
+                && bytes.iter().all(|byte| *byte == 0)
         }) {
             batch.successful_buckets.push(Gf256BucketDecodeSuccess {
                 depth: request.depth,
@@ -1296,12 +1300,36 @@ mod tests {
     #[test]
     fn gf256_batch_skips_decode_when_node_summaries_match() {
         let decoder = Gf256Decoder::build().unwrap();
-        let (encoded, _) = gf256_payload(4, &[1]);
+        let encoded = Gf256Sketch::new(4).unwrap().to_bytes();
         let batch =
             decode_gf256_with_summary(&encoded, NodeSummary::default(), 0, &decoder).unwrap();
         assert!(batch.failed_buckets.is_empty());
         assert_eq!(batch.successful_buckets.len(), 1);
         assert!(batch.successful_buckets[0].digests.is_empty());
+    }
+
+    #[test]
+    fn gf256_batch_decodes_nonzero_payload_with_empty_summaries() {
+        let decoder = Gf256Decoder::build().unwrap();
+        let request = [BucketRequest::new(0, 0, 4)];
+        let summaries = [NodeSummary::default()];
+        let (encoded, expected) = gf256_payload(4, &[1]);
+        let batch = decode_gf256_bucket_sketches_with_summaries(
+            &encoded,
+            &request,
+            &summaries,
+            &summaries,
+            100_000_000,
+            &decoder,
+        )
+        .unwrap();
+        assert_eq!(batch.successful_buckets[0].digests, expected);
+
+        let (verified_batch, verified) =
+            crate::verify_gf256_batch(batch, &request, &summaries, &summaries, |_| false).unwrap();
+        assert!(verified.is_empty());
+        assert!(verified_batch.successful_buckets.is_empty());
+        assert_eq!(verified_batch.failed_buckets, vec![(0, 0)]);
     }
 
     #[test]

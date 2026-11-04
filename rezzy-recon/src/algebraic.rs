@@ -337,12 +337,14 @@ impl ElementHash {
 pub trait AccumulatedElement: Copy {
     /// The value folded by xor into the level-0 digest and node summaries (128 bits).
     fn residual128(self) -> u128;
-    /// The raw 64-bit strata key, before the nonzero alias is applied.
+    /// The 64-bit value used as the strata key. Implementations may apply the
+    /// nonzero alias here or in the resident accumulator.
     fn strata_key(self) -> u64;
     /// Rejects values outside the element universe.
     ///
     /// # Errors
-    /// Returns a zero-identifier error for an unusable element.
+    /// Returns [`AlgebraicError::ZeroShortIdentifier`] or
+    /// [`AlgebraicError::ZeroSketchElement`] for an unusable element.
     fn validate(self) -> Result<(), AlgebraicError>;
 }
 

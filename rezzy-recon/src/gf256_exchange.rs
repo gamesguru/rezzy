@@ -42,6 +42,7 @@ pub enum Gf256Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gf256BucketExchange {
     pending: VecDeque<BucketRequest>,
+    last_emitted_round: Option<Vec<BucketRequest>>,
     rounds_emitted: usize,
     max_rounds: usize,
     max_buckets_per_round: usize,
@@ -70,6 +71,7 @@ impl Gf256BucketExchange {
     ) -> Self {
         Self {
             pending: VecDeque::new(),
+            last_emitted_round: None,
             rounds_emitted: 0,
             max_rounds,
             max_buckets_per_round,
@@ -95,13 +97,16 @@ impl Gf256BucketExchange {
     /// [`crate::Gf256ClientAction::BucketSketches`].
     ///
     /// # Errors
-    /// Returns an error if the initial request set is malformed or exceeds
-    /// the protocol's aggregate capacity.
+    /// Returns an error if the initial request set is malformed, exceeds the
+    /// protocol's aggregate capacity, or does not cover the full key space.
     pub fn start_with_requests(
         &mut self,
         requests: Vec<BucketRequest>,
     ) -> Result<Gf256Action, AlgebraicError> {
         validate_adaptive_bucket_requests(&requests)?;
+        if !requests_cover_full_prefix_space(&requests) {
+            return Err(AlgebraicError::InvalidBucketIndex);
+        }
         self.reset();
         self.pending.extend(requests);
         Ok(self.drain_round())
@@ -109,6 +114,7 @@ impl Gf256BucketExchange {
 
     fn reset(&mut self) {
         self.pending.clear();
+        self.last_emitted_round = None;
         self.rounds_emitted = 0;
         self.local_only.clear();
         self.remote_only.clear();
@@ -116,7 +122,8 @@ impl Gf256BucketExchange {
 
     /// Verifies a decoded round against both sides' node summaries and
     /// advances. `requests`, `local` and `remote` are index-aligned with the
-    /// round that produced `batch`; `is_local` is exact local membership.
+    /// most recently emitted round that produced `batch`; stale or mismatched
+    /// request lists are rejected. `is_local` is exact local membership.
     ///
     /// The batch must hold exactly one outcome (success or failure) per
     /// request; a missing, duplicate or unrequested node is rejected so the
@@ -144,10 +151,14 @@ impl Gf256BucketExchange {
     where
         F: FnMut(&[u8; 32]) -> bool,
     {
+        if self.last_emitted_round.as_deref() != Some(requests) {
+            return Err(AlgebraicError::InvalidBucketIndex);
+        }
         if !bucket_batch_covers_requests(&batch, requests) {
             return Err(AlgebraicError::InvalidBucketIndex);
         }
         let (batch, verified) = verify_gf256_batch(batch, requests, local, remote, is_local)?;
+        self.last_emitted_round = None;
         for node in verified {
             self.local_only.extend_from_slice(node.local_only());
             self.remote_only.extend_from_slice(node.remote_only());
@@ -194,6 +205,7 @@ impl Gf256BucketExchange {
 
     fn drain_round(&mut self) -> Gf256Action {
         if self.rounds_emitted >= self.max_rounds {
+            self.last_emitted_round = None;
             return Gf256Action::Fallback;
         }
         let mut total = 0_usize;
@@ -211,11 +223,38 @@ impl Gf256BucketExchange {
             round.push(candidate);
         }
         if round.is_empty() || validate_adaptive_bucket_requests(&round).is_err() {
+            self.last_emitted_round = None;
             return Gf256Action::Fallback;
         }
         self.rounds_emitted = self.rounds_emitted.saturating_add(1);
+        self.last_emitted_round = Some(round.clone());
         Gf256Action::Request(round)
     }
+}
+
+/// Returns whether ordered, disjoint requests tile the whole digest prefix
+/// space from its first key through the exclusive end.
+fn requests_cover_full_prefix_space(requests: &[BucketRequest]) -> bool {
+    let Some(space_end) = 1_u128.checked_shl(u32::from(crate::MAX_DEPTH)) else {
+        return false;
+    };
+    let mut next_start = 0_u128;
+    for request in requests {
+        let Some(remaining_depth) = crate::MAX_DEPTH.checked_sub(request.depth) else {
+            return false;
+        };
+        let Some(width) = 1_u128.checked_shl(u32::from(remaining_depth)) else {
+            return false;
+        };
+        if bucket_range_start(request) != next_start {
+            return false;
+        }
+        let Some(end) = next_start.checked_add(width) else {
+            return false;
+        };
+        next_start = end;
+    }
+    next_start == space_end
 }
 
 /// Whether `batch` holds exactly one outcome for every request and nothing
@@ -556,6 +595,11 @@ mod tests {
             exchange.start_with_requests(alloc::vec![BucketRequest::new(0, 0, 33)]),
             Err(AlgebraicError::InvalidSketchCapacity)
         );
+        assert_eq!(
+            exchange.start_with_requests(alloc::vec![BucketRequest::new(1, 0, 32)]),
+            Err(AlgebraicError::InvalidBucketIndex),
+            "a partial initial prefix cover cannot produce an exact result"
+        );
     }
 
     #[test]
@@ -573,7 +617,12 @@ mod tests {
             count: 0,
             digest: 0,
         }];
-        let action = Gf256BucketExchange::default()
+        let mut exchange = Gf256BucketExchange::default();
+        assert_eq!(
+            exchange.start(32),
+            Gf256Action::Request(alloc::vec![request])
+        );
+        let action = exchange
             .advance_verified(batch, &[request], &local, &remote, |_| false)
             .unwrap();
         let Gf256Action::Request(children) = action else {
@@ -613,13 +662,9 @@ mod tests {
             digest: 0,
         }; 2];
         let run = |batch: Gf256BucketDecodeBatch| {
-            Gf256BucketExchange::default().advance_verified(
-                batch,
-                &requests,
-                &summaries,
-                &summaries,
-                |_| true,
-            )
+            let mut exchange = Gf256BucketExchange::default();
+            exchange.start_with_requests(requests.to_vec()).unwrap();
+            exchange.advance_verified(batch, &requests, &summaries, &summaries, |_| true)
         };
         // Complete: accepted.
         let full = Gf256BucketDecodeBatch {
@@ -651,5 +696,37 @@ mod tests {
             failed_buckets: Vec::new(),
         };
         assert_eq!(run(extra), Err(AlgebraicError::InvalidBucketIndex));
+    }
+
+    #[test]
+    fn stale_round_response_is_rejected() {
+        let mut exchange = Gf256BucketExchange::default();
+        let root = [BucketRequest::new(0, 0, 32)];
+        assert_eq!(
+            exchange.start_with_requests(root.to_vec()).unwrap(),
+            Gf256Action::Request(root.to_vec())
+        );
+        let failed = Gf256BucketDecodeBatch {
+            successful_buckets: Vec::new(),
+            failed_buckets: alloc::vec![(0, 0)],
+        };
+        let local = [NodeSummary {
+            count: 40,
+            digest: 0,
+        }];
+        let remote = [NodeSummary::default()];
+        let next = exchange
+            .advance_verified(failed.clone(), &root, &local, &remote, |_| false)
+            .unwrap();
+        let Gf256Action::Request(children) = next else {
+            panic!("over-capacity root should emit a split round");
+        };
+        assert!(exchange
+            .advance_verified(failed, &root, &local, &remote, |_| false)
+            .is_err());
+        assert_eq!(
+            exchange.last_emitted_round.as_deref(),
+            Some(children.as_slice())
+        );
     }
 }

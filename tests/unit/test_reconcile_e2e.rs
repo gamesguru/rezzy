@@ -783,9 +783,9 @@ fn phase_two_failure_is_narrowed_by_rerunning_the_children() {
 
 /// Shared decode budget for the GF(2^256) e2e tests, in `WorkModel::GF256`
 /// units. Measured by bisecting the 20-each-way scenario below: the exchange
-/// completes with a budget of about 0.73M units (bisection resolution 1M) and
-/// fails below that. 2M leaves roughly 2.7x headroom. This is a fixture for
-/// one scenario, not a recommended production default.
+/// completes with at most 1M units (the bisection resolution) and fails below
+/// that. A 2M budget therefore leaves at least 2x headroom. This is a fixture
+/// for one scenario, not a recommended production default.
 const GF256_E2E_BUDGET: usize = 2_000_000;
 
 fn gf256_test_digest(seed: u64) -> [u8; 32] {
@@ -811,13 +811,14 @@ fn gf256_side(seeds: std::ops::Range<u64>) -> (ResidentKernel, FixedWindowPopula
     (kernel, FixedWindowPopulation::new(elements).unwrap())
 }
 
-/// Runs the opt-in exchange and returns `(local_only, remote_only, rounds)`.
+/// Runs the opt-in exchange and returns
+/// `(local_only, remote_only, rounds, initial_buckets)`.
 fn run_gf256_exchange(
     local: &(ResidentKernel, FixedWindowPopulation),
     local_seeds: std::ops::Range<u64>,
     remote: &(ResidentKernel, FixedWindowPopulation),
     budget: usize,
-) -> (Vec<[u8; 32]>, Vec<[u8; 32]>, usize) {
+) -> (Vec<[u8; 32]>, Vec<[u8; 32]>, usize, usize) {
     let client = ReconciliationClient::default().allow_unlimited_delta();
     let Gf256ClientAction::BucketSketches { requests } =
         client.select_gf256_action(&local.0, remote_digest(&remote.0), 0)
@@ -828,6 +829,7 @@ fn run_gf256_exchange(
         local_seeds.map(gf256_test_digest).collect();
     let decoder = Gf256Decoder::build().unwrap();
     let mut exchange = Gf256BucketExchange::default();
+    let initial_buckets = requests.len();
     let mut action = exchange.start_with_requests(requests).unwrap();
     let mut rounds = 0_usize;
     loop {
@@ -864,7 +866,7 @@ fn run_gf256_exchange(
             Gf256Action::Complete {
                 local_only,
                 remote_only,
-            } => return (local_only, remote_only, rounds),
+            } => return (local_only, remote_only, rounds, initial_buckets),
             Gf256Action::Fallback => panic!("exchange fell back"),
         }
     }
@@ -875,7 +877,7 @@ fn gf256_opt_in_exchange_recovers_exact_full_digests() {
     // 20 differences each way: more than one capacity-32 bucket can hold.
     let local = gf256_side(0..120);
     let remote = gf256_side(20..140);
-    let (local_only, remote_only, rounds) =
+    let (local_only, remote_only, rounds, initial_buckets) =
         run_gf256_exchange(&local, 0..120, &remote, GF256_E2E_BUDGET);
     let mut expect_local: Vec<_> = (0..20).map(gf256_test_digest).collect();
     let mut expect_remote: Vec<_> = (120..140).map(gf256_test_digest).collect();
@@ -883,7 +885,11 @@ fn gf256_opt_in_exchange_recovers_exact_full_digests() {
     expect_remote.sort_unstable();
     assert_eq!(local_only, expect_local);
     assert_eq!(remote_only, expect_remote);
-    assert!(rounds >= 1);
+    assert!(
+        initial_buckets > 1,
+        "the 40-element difference must start with multiple buckets, got {initial_buckets}"
+    );
+    assert_eq!(rounds, 1);
 }
 
 #[test]
