@@ -208,7 +208,13 @@ fn build_room_fixture(room_events_per_side: usize, difference_each_way: usize) -
     }
 }
 
-fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) {
+#[derive(Debug, Clone, Copy)]
+enum RoomExchangeOutcome {
+    Complete,
+    Fallback,
+}
+
+fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) -> RoomExchangeOutcome {
     let client = ReconciliationClient::default().allow_unlimited_delta();
     let Gf256ClientAction::BucketSketches { requests } =
         client.select_gf256_action(&fixture.local_kernel, fixture.remote_digest, 0)
@@ -269,9 +275,9 @@ fn reconcile_room_once(fixture: &RoomFixture, decoder: &Gf256Decoder) {
             } => {
                 assert_eq!(local_only.len(), fixture.difference_each_way);
                 assert_eq!(remote_only.len(), fixture.difference_each_way);
-                return;
+                return RoomExchangeOutcome::Complete;
             }
-            Gf256Action::Fallback => panic!("benchmark exchange unexpectedly fell back"),
+            Gf256Action::Fallback => return RoomExchangeOutcome::Fallback,
         }
     }
 }
@@ -282,10 +288,14 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
     // client/server exchange over prebuilt room snapshots.
     let fixture = build_room_fixture(room_events, difference_each_way);
     let decoder = Gf256Decoder::build().expect("GF(2^256) decoder builds");
-    let elapsed = measure(1, || reconcile_room_once(black_box(&fixture), &decoder));
+    let mut outcome = None;
+    let elapsed = measure(1, || {
+        outcome = Some(reconcile_room_once(black_box(&fixture), &decoder));
+    });
     println!(
-        "GF256 room exchange/{room_events}/diff_each_way_{difference_each_way}: {:.3} ms/op (one full exchange; setup excluded)",
+        "GF256 room exchange/{room_events}/diff_each_way_{difference_each_way}: {:.3} ms/op (one exchange; result={:?}; setup excluded)",
         elapsed.as_secs_f64() * 1e3,
+        outcome.expect("one benchmark iteration ran"),
     );
 }
 
