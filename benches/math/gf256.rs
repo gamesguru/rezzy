@@ -215,6 +215,12 @@ enum RoomExchangeOutcome {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+struct RoomSetupTimes {
+    fixture: std::time::Duration,
+    decoder: std::time::Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 struct RoomPhaseTimes {
     plan: std::time::Duration,
     local_build: std::time::Duration,
@@ -222,6 +228,21 @@ struct RoomPhaseTimes {
     payload: std::time::Duration,
     decode: std::time::Duration,
     verify: std::time::Duration,
+}
+
+impl RoomPhaseTimes {
+    fn total_accounted(&self) -> std::time::Duration {
+        self.plan
+            .saturating_add(self.local_build)
+            .saturating_add(self.remote_build)
+            .saturating_add(self.payload)
+            .saturating_add(self.decode)
+            .saturating_add(self.verify)
+    }
+
+    fn other(&self, total: std::time::Duration) -> std::time::Duration {
+        total.saturating_sub(self.total_accounted())
+    }
 }
 
 #[derive(Debug)]
@@ -414,7 +435,7 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
     };
     let bucket_build = result.phases.local_build + result.phases.remote_build;
     println!(
-        "{:<4} diff={:<5}: {:>6.1} ms [pl{:>4.1} b{:>6.1} p{:>5.1} dec{:>6.1} v{:>4.1}] {:<11} {:>2}r {:>4}/{:<4} req {:>8} B {:>6.3}%",
+        "{:<4} {:>5} {:>9.1} {:>5.1} {:>6.1} {:>7.1} {:>6.1} {:>6.1} {:<11} {:>6} {:>5}/{:<5} {:>8} {:>8.3}",
         room_label,
         difference_each_way,
         elapsed.as_secs_f64() * 1e3,
@@ -450,9 +471,25 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
 
 fn bench_room_matrix() {
     println!(
-        "\nGF256 room (in-process; no setup/net/framing): ms pl/b/p/dec/v=plan/bucket(both)/payload/decode/verify; req=init/total; %=sketch/peer-32B"
+        "\nGF256 room (in-process; no setup/net/framing; times in ms; sketch_B excludes summaries/framing)"
     );
     println!("REZZY_BENCH_GF256_ROUND_TRACE=1: per-round counts for multi-round/fallback cases.");
+    println!(
+        "{:<4} {:>5} {:>9} {:>5} {:>6} {:>7} {:>6} {:>6} {:<11} {:>6} {:<11} {:>8} {:>8}",
+        "Pop",
+        "Diff",
+        "Total ms",
+        "Plan",
+        "Bucket",
+        "Payload",
+        "Decode",
+        "Verify",
+        "Result",
+        "Rounds",
+        "Init/Total",
+        "Sketch B",
+        "% Peer"
+    );
     for (room_events, differences) in [
         (100_000_usize, 10_usize),
         (100_000, 100),
