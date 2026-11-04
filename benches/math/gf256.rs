@@ -2,12 +2,17 @@
 //!
 //! Run with: `cargo bench --bench rezzy -- gf256`
 
-use std::{collections::HashSet, hint::black_box, time::Instant};
+use std::{
+    collections::HashSet,
+    hint::black_box,
+    time::{Duration, Instant},
+};
 
 use rezzy_recon::{
     decode_gf256_bucket_sketches_with_summaries, gf64_mul, recommended_gf256_bucket_decode_budget,
-    subtract_gf256_payload, FixedWindowElementHash, FixedWindowPopulation, Gf256, Gf256Action,
-    Gf256BucketExchange, Gf256ClientAction, Gf256Decoder, Gf256FallbackReason,
+    subtract_gf256_payload, AlgebraicError, BucketRequest, FixedWindowElementHash,
+    FixedWindowPopulation, Gf256, Gf256Action, Gf256BucketExchange, Gf256ClientAction,
+    Gf256Decoder, Gf256FallbackReason, Gf256Sketch, IncrementalFixedWindowPopulation, NodeSummary,
     ReconciliationClient, RemoteDigest, ResidentKernel,
 };
 use sha2::{Digest, Sha256};
@@ -137,13 +142,36 @@ fn bench_decode(decoder: &Gf256Decoder, count: usize, random: bool, iterations: 
     );
 }
 
+#[derive(Debug)]
+enum RoomPopulation {
+    Cold(FixedWindowPopulation),
+    Incremental(IncrementalFixedWindowPopulation),
+}
+
+impl RoomPopulation {
+    fn is_incremental(&self) -> bool {
+        matches!(self, Self::Incremental(_))
+    }
+
+    fn bucket_nodes(
+        &self,
+        requests: &[BucketRequest],
+    ) -> Result<Vec<(Gf256Sketch, NodeSummary)>, AlgebraicError> {
+        match self {
+            Self::Cold(population) => population.bucket_nodes(requests),
+            Self::Incremental(population) => population.bucket_nodes(requests),
+        }
+    }
+}
+
 struct RoomFixture {
     local_kernel: ResidentKernel,
-    local_population: FixedWindowPopulation,
-    remote_population: FixedWindowPopulation,
+    local_population: RoomPopulation,
+    remote_population: RoomPopulation,
     local_digests: HashSet<[u8; 32]>,
     remote_digest: RemoteDigest,
     difference_each_way: usize,
+    bucket_cache_build: Duration,
 }
 
 fn room_digest(namespace: u8, index: usize) -> [u8; 32] {
@@ -196,15 +224,41 @@ fn build_room_fixture(room_events_per_side: usize, difference_each_way: usize) -
     }
 
     let remote_digest = crate::common::build_remote_digest(&remote_kernel);
+    let (local_population, remote_population, bucket_cache_build) =
+        if std::env::var_os("REZZY_BENCH_GF256_CACHED").is_some() {
+            let cache_start = Instant::now();
+            let local_population =
+                IncrementalFixedWindowPopulation::with_default_depth(local_elements)
+                    .expect("local incremental fixture is valid");
+            let remote_population =
+                IncrementalFixedWindowPopulation::with_default_depth(remote_elements)
+                    .expect("remote incremental fixture is valid");
+            (
+                RoomPopulation::Incremental(local_population),
+                RoomPopulation::Incremental(remote_population),
+                cache_start.elapsed(),
+            )
+        } else {
+            (
+                RoomPopulation::Cold(
+                    FixedWindowPopulation::new(local_elements)
+                        .expect("local fixture population is valid"),
+                ),
+                RoomPopulation::Cold(
+                    FixedWindowPopulation::new(remote_elements)
+                        .expect("remote fixture population is valid"),
+                ),
+                Duration::ZERO,
+            )
+        };
     RoomFixture {
         local_kernel,
-        local_population: FixedWindowPopulation::new(local_elements)
-            .expect("local fixture population is valid"),
-        remote_population: FixedWindowPopulation::new(remote_elements)
-            .expect("remote fixture population is valid"),
+        local_population,
+        remote_population,
         local_digests,
         remote_digest,
         difference_each_way,
+        bucket_cache_build,
     }
 }
 
@@ -413,10 +467,16 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
         format!("{}k", room_events / 1_000)
     };
     let bucket_build = result.phases.local_build + result.phases.remote_build;
+    let cache_ms = if fixture.local_population.is_incremental() {
+        format!("{:.1}", fixture.bucket_cache_build.as_secs_f64() * 1e3)
+    } else {
+        "-".to_string()
+    };
     println!(
-        "{:<4} {:>5} {:>9.1} {:>5.1} {:>6.1} {:>7.1} {:>6.1} {:>6.1} {:<11} {:>6} {:>5}/{:<5} {:>8} {:>8.3}",
+        "{:<4} {:>5} {:>7} {:>9.1} {:>5.1} {:>6.1} {:>7.1} {:>6.1} {:>6.1} {:<11} {:>6} {:>5}/{:<5} {:>8} {:>8.3}",
         room_label,
         difference_each_way,
+        cache_ms,
         elapsed.as_secs_f64() * 1e3,
         result.phases.plan.as_secs_f64() * 1e3,
         bucket_build.as_secs_f64() * 1e3,
@@ -453,11 +513,13 @@ fn bench_room_matrix() {
         "\nGF256 room (in-process; no setup/net/framing; times in ms; sketch_B excludes summaries/framing)"
     );
     println!("REZZY_BENCH_GF256_ROUND_TRACE=1: per-round counts for multi-round/fallback cases.");
+    println!("REZZY_BENCH_GF256_CACHED=1: Bucket uses the incremental cache; Cache is fixture build time outside Total.");
     println!();
     println!(
-        "{:<4} {:>5} {:>9} {:>5} {:>6} {:>7} {:>6} {:>6} {:<11} {:>6} {:<11} {:>8} {:>8}",
+        "{:<4} {:>5} {:>7} {:>9} {:>5} {:>6} {:>7} {:>6} {:>6} {:<11} {:>6} {:<11} {:>8} {:>8}",
         "Pop",
         "Diff",
+        "Cache",
         "Total ms",
         "Plan",
         "Bucket",

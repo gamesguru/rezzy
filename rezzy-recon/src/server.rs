@@ -514,7 +514,10 @@ impl CachedBucket {
 pub struct IncrementalFixedWindowPopulation {
     depth: u8,
     leaves: Vec<CachedBucket>,
-    elements: BTreeMap<u64, Vec<FixedWindowElementHash>>,
+    /// `(bucket key, full digest) -> multiplicity`. A map rather than a
+    /// `Vec` per key avoids one heap allocation for every distinct 64-bit
+    /// prefix in a large room.
+    elements: BTreeMap<(u64, [u8; 32]), u64>,
     len: usize,
 }
 
@@ -598,7 +601,10 @@ impl IncrementalFixedWindowPopulation {
             .checked_add(1)
             .ok_or(AlgebraicError::CountOverflow)?;
         leaf.digest ^= element.residual();
-        self.elements.entry(key).or_default().push(element);
+        let multiplicity = self.elements.entry((key, element.digest())).or_insert(0);
+        *multiplicity = multiplicity
+            .checked_add(1)
+            .ok_or(AlgebraicError::CountOverflow)?;
         self.len = self
             .len
             .checked_add(1)
@@ -613,15 +619,14 @@ impl IncrementalFixedWindowPopulation {
     /// element was local or remote.
     pub fn remove(&mut self, element: FixedWindowElementHash) -> bool {
         let key = element.bucket_key();
-        let Some(bucket) = self.elements.get_mut(&key) else {
+        let element_key = (key, element.digest());
+        let Some(multiplicity) = self.elements.get_mut(&element_key) else {
             return false;
         };
-        let Some(position) = bucket.iter().position(|candidate| *candidate == element) else {
-            return false;
-        };
-        bucket.swap_remove(position);
-        if bucket.is_empty() {
-            self.elements.remove(&key);
+        if *multiplicity == 1 {
+            self.elements.remove(&element_key);
+        } else {
+            *multiplicity = multiplicity.saturating_sub(1);
         }
 
         let index = self.leaf_index(key);
@@ -715,35 +720,59 @@ impl IncrementalFixedWindowPopulation {
         let mut sketch = Gf256Sketch::new(request.capacity)?;
         let mut summary = NodeSummary::default();
         if request.depth == 0 {
-            for element in self.elements.values().flatten() {
-                Self::add_element(&mut sketch, &mut summary, *element)?;
+            for (&(_, digest), &multiplicity) in &self.elements {
+                Self::add_repeated(
+                    &mut sketch,
+                    &mut summary,
+                    FixedWindowElementHash::from_digest32(digest),
+                    multiplicity,
+                )?;
             }
         } else {
             let shift = 64_u32.saturating_sub(u32::from(request.depth));
             let start = request.prefix << shift;
-            let end = start.saturating_add(1_u64 << shift);
-            for element in self
-                .elements
-                .range(start..end)
-                .flat_map(|(_, bucket)| bucket.iter())
-            {
-                Self::add_element(&mut sketch, &mut summary, *element)?;
+            let start_key = (start, [0; 32]);
+            let width = 1_u64 << shift;
+            if let Some(end) = start.checked_add(width) {
+                for (&(_, digest), &multiplicity) in self.elements.range(start_key..(end, [0; 32]))
+                {
+                    Self::add_repeated(
+                        &mut sketch,
+                        &mut summary,
+                        FixedWindowElementHash::from_digest32(digest),
+                        multiplicity,
+                    )?;
+                }
+            } else {
+                // The last depth-32 prefix ends at 2^64, which is not a valid
+                // `u64` range bound. An unbounded tail includes it exactly.
+                for (&(_, digest), &multiplicity) in self.elements.range(start_key..) {
+                    Self::add_repeated(
+                        &mut sketch,
+                        &mut summary,
+                        FixedWindowElementHash::from_digest32(digest),
+                        multiplicity,
+                    )?;
+                }
             }
         }
         Ok((sketch, summary))
     }
 
-    fn add_element(
+    fn add_repeated(
         sketch: &mut Gf256Sketch,
         summary: &mut NodeSummary,
         element: FixedWindowElementHash,
+        multiplicity: u64,
     ) -> Result<(), AlgebraicError> {
-        sketch.toggle(element.sketch_element())?;
-        summary.count = summary
-            .count
-            .checked_add(1)
-            .ok_or(AlgebraicError::CountOverflow)?;
-        summary.digest ^= element.residual();
+        for _ in 0..multiplicity {
+            sketch.toggle(element.sketch_element())?;
+            summary.count = summary
+                .count
+                .checked_add(1)
+                .ok_or(AlgebraicError::CountOverflow)?;
+            summary.digest ^= element.residual();
+        }
         Ok(())
     }
 }
@@ -1844,6 +1873,7 @@ mod tests {
 mod incremental_tests {
     use super::*;
     use crate::test_util::digest32;
+    use alloc::vec;
 
     fn elements(count: usize) -> Vec<FixedWindowElementHash> {
         (0..count)
@@ -1956,6 +1986,52 @@ mod incremental_tests {
             &cold,
             &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
         );
+    }
+
+    #[test]
+    fn deepest_prefix_includes_the_largest_bucket_key() {
+        let element = FixedWindowElementHash::from_digest32([0xFF; 32]);
+        let cold = FixedWindowPopulation::new(vec![element]).unwrap();
+        let cached =
+            IncrementalFixedWindowPopulation::new([element], DEFAULT_BUCKET_CACHE_DEPTH).unwrap();
+        assert_same(
+            &cached,
+            &cold,
+            &[BucketRequest::new(
+                crate::MAX_DEPTH,
+                (1_u64 << crate::MAX_DEPTH) - 1,
+                CACHED_LEAF_CAPACITY,
+            )],
+        );
+    }
+
+    #[test]
+    fn duplicate_elements_keep_their_multiplicity() {
+        let element = FixedWindowElementHash::from_digest32(digest32(7));
+        let mut cached = IncrementalFixedWindowPopulation::new([element, element], 3).unwrap();
+        assert_eq!(cached.len(), 2);
+        assert_same(
+            &cached,
+            &FixedWindowPopulation::new(vec![element, element]).unwrap(),
+            &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
+        );
+
+        assert!(cached.remove(element));
+        assert_eq!(cached.len(), 1);
+        assert_same(
+            &cached,
+            &FixedWindowPopulation::new(vec![element]).unwrap(),
+            &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
+        );
+
+        assert!(cached.remove(element));
+        assert!(cached.is_empty());
+        assert_same(
+            &cached,
+            &FixedWindowPopulation::new(Vec::new()).unwrap(),
+            &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
+        );
+        assert!(!cached.remove(element));
     }
 
     #[test]

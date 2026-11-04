@@ -5,6 +5,10 @@ use rezzy_recon::{
     RemoteDigest, ResidentKernel, SyndromeSketch,
 };
 
+#[path = "bench.rs"]
+#[allow(dead_code)]
+mod bench_support;
+
 /// Deterministic xorshift PRNG used by the reconciliation test and benchmark
 /// harnesses. Seed initialization is kept stable so fixtures reproduce.
 pub struct Xorshift128Hash {
@@ -18,13 +22,9 @@ impl Xorshift128Hash {
         }
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> u64 {
-        let mut value = self.state[0];
-        let other = self.state[1];
-        value ^= value << 23;
-        value ^= value >> 17;
-        value ^= other ^ (other >> 26);
-        self.state = [other, value];
+        let (value, _) = bench_support::xorshift128_step(&mut self.state);
         value
     }
 

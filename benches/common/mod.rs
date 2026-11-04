@@ -8,13 +8,16 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 use rezzy::hamt::codec::HamtCodec;
 use rezzy::hamt::{self, HamtNode, PersistedInternalNode};
 use rezzy::{json, LeanEvent};
 use rezzy_recon::{ElementHash, ResidentKernel};
 use sha2::Digest;
+
+#[path = "../../support/bench.rs"]
+mod bench_support;
+pub use bench_support::{measure, Xorshift128};
 
 #[path = "../../support/reconciliation.rs"]
 mod reconciliation_support;
@@ -27,31 +30,6 @@ pub use reconciliation_support::{
 pub mod prelude {
     pub use std::collections::HashMap;
     pub use std::hint::black_box;
-}
-
-/// Deterministic PRNG (`xorshift128+`) so bench inputs are reproducible
-/// without adding a `rand` dependency.
-pub struct Xorshift128 {
-    state: [u64; 2],
-}
-
-impl Xorshift128 {
-    pub fn new(seed: u64) -> Self {
-        Self {
-            state: [seed ^ 0x9E37_79B9_7F4A_7C15, seed.wrapping_add(1) | 1],
-        }
-    }
-
-    pub fn next_u64(&mut self) -> u64 {
-        let mut x = self.state[0];
-        let y = self.state[1];
-        self.state[0] = y;
-        x ^= x << 23;
-        x ^= x >> 17;
-        x ^= y ^ (y >> 26);
-        self.state[1] = x;
-        x.wrapping_add(y)
-    }
 }
 
 /// Single-word `xorshift64`. Kept apart from [`Xorshift128`] where a benchmark
@@ -144,15 +122,6 @@ pub fn to_persisted<K: Clone, V: Clone>(node: &HamtNode<K, V>) -> PersistedInter
             .map(hamt::NodeRef::structural_hash)
             .collect(),
     }
-}
-
-/// Runs `operation` `iterations` times and returns the elapsed wall time.
-pub fn measure(iterations: u32, mut operation: impl FnMut()) -> Duration {
-    let start = Instant::now();
-    for _ in 0..iterations {
-        operation();
-    }
-    start.elapsed()
 }
 
 /// Inserts every hash into a local/remote [`ResidentKernel`] pair and
