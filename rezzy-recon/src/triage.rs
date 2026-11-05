@@ -1338,6 +1338,11 @@ mod tests {
         (sketch.to_bytes(), digests)
     }
 
+    // The budget starts at the compile-time ceiling and every production
+    // charge uses checked_sub, returning BudgetExhausted rather than going
+    // negative. This expect therefore exposes a broken decoder invariant, not
+    // malformed input. It is test-only; production decoding keeps its normal
+    // error path.
     fn gf256_work_used(decoder: &Gf256Decoder, capacity: usize, seeds: &[u64]) -> usize {
         let (encoded, _) = gf256_payload(capacity, seeds);
         let sketch = Gf256Sketch::from_bytes(capacity, &encoded).unwrap();
