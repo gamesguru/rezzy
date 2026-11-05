@@ -14,10 +14,11 @@ spec_audit.md.
 
 The full-digest path (`select_default_action`, `Gf256BucketExchange`) is the
 default for new callers; the existing GF(2^64) path remains available through
-`select_action`. A 100-batch, capacity-32 work-unit calibration is recorded in
+`select_action`. A capacity-32 work-unit calibration, including an expanded
+1,000-batch sample, is recorded in
 [`gf256-batch-budget-calibration.md`](gf256-batch-budget-calibration.md) and
 `benches/bench-results.csv`. Across random and consecutive roots, the largest
-successful bucket used 712,488 units; the largest 128-bucket batch used
+successful bucket used 753,949 units; the largest 128-bucket batch used
 33,423,360 units, including failed over-capacity buckets. No lower production
 budget is selected. `single_call_work_ceiling(32)` is 2,695,168 units, but the
 decoder accepts a shared batch budget, not per-bucket allowances: a lower

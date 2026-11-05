@@ -116,3 +116,68 @@ an explicit decision whether sub-ceiling exhaustion should fail just that bucket
 for retry or abort the batch. Keep the 300,000,000 per-sketch ceiling and
 `MAX_BATCH_FACTOR_WORK` unchanged. These measurements do not prove the recursive
 work bound.
+
+## Expanded batch sample
+
+Follow-up run at revision `5b6653a6` on 2026-11-05 with rustc 1.99.0. The same
+reproducible ignored release test now uses 1,000 repetitions per pattern and
+scenario: 128,000 bucket samples and 1,000 batch samples in each cell. The raw
+P50/P95/P99/max values are appended to `benches/bench-results.csv` under
+`samples=128000` and `samples=1000`.
+
+All buckets decoded successfully for total differences 10, 100, and 1,000,
+and for the single 32-root stress bucket. For total differences 10,000, all
+128,000 buckets failed in both patterns: the average occupancy is over the
+capacity of 32. Their work is failed-decode work, not successful factoring.
+
+### Per-bucket work (work units)
+
+| Pattern | Scenario | Outcome | Samples | P50 | P95 | P99 | Max |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| random | total 10 | success | 128,000 | 0 | 0 | 0 | 3,858 |
+| random | total 100 | success | 128,000 | 0 | 0 | 4,635 | 28,864 |
+| random | total 1,000 | success | 128,000 | 36,023 | 104,788 | 146,794 | 311,293 |
+| random | total 10,000 | failed | 128,000 | 261,120 | 261,120 | 261,120 | 261,120 |
+| random | worst bucket 32 | success | 128,000 | 0 | 0 | 0 | 753,949 |
+| consecutive | total 10 | success | 128,000 | 0 | 0 | 0 | 3,858 |
+| consecutive | total 100 | success | 128,000 | 0 | 0 | 3,858 | 24,419 |
+| consecutive | total 1,000 | success | 128,000 | 35,999 | 95,446 | 124,782 | 285,202 |
+| consecutive | total 10,000 | failed | 128,000 | 0 | 261,120 | 544,314 | 583,995 |
+| consecutive | worst bucket 32 | success | 128,000 | 0 | 0 | 0 | 584,511 |
+
+### Aggregate work per 128-bucket batch (work units)
+
+Failed-bucket work is included in total work and shown separately.
+
+| Pattern | Scenario | Work group | Samples | P50 | P95 | P99 | Max |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| random | total 10 | success | 1,000 | 0 | 0 | 0 | 3,858 |
+| random | total 10 | failed | 1,000 | 0 | 0 | 0 | 0 |
+| random | total 10 | total | 1,000 | 0 | 0 | 0 | 3,858 |
+| random | total 100 | success | 1,000 | 23,121 | 41,136 | 50,368 | 66,331 |
+| random | total 100 | failed | 1,000 | 0 | 0 | 0 | 0 |
+| random | total 100 | total | 1,000 | 23,121 | 41,136 | 50,368 | 66,331 |
+| random | total 1,000 | success | 1,000 | 5,501,574 | 5,685,146 | 5,754,975 | 5,867,486 |
+| random | total 1,000 | failed | 1,000 | 0 | 0 | 0 | 0 |
+| random | total 1,000 | total | 1,000 | 5,501,574 | 5,685,146 | 5,754,975 | 5,867,486 |
+| random | total 10,000 | success | 1,000 | 0 | 0 | 0 | 0 |
+| random | total 10,000 | failed | 1,000 | 33,423,360 | 33,423,360 | 33,423,360 | 33,423,360 |
+| random | total 10,000 | total | 1,000 | 33,423,360 | 33,423,360 | 33,423,360 | 33,423,360 |
+| random | worst bucket 32 | success | 1,000 | 639,288 | 682,069 | 713,566 | 753,949 |
+| random | worst bucket 32 | failed | 1,000 | 0 | 0 | 0 | 0 |
+| random | worst bucket 32 | total | 1,000 | 639,288 | 682,069 | 713,566 | 753,949 |
+| consecutive | total 10 | success | 1,000 | 0 | 0 | 0 | 3,858 |
+| consecutive | total 10 | failed | 1,000 | 0 | 0 | 0 | 0 |
+| consecutive | total 10 | total | 1,000 | 0 | 0 | 0 | 3,858 |
+| consecutive | total 100 | success | 1,000 | 27,006 | 44,994 | 53,226 | 64,260 |
+| consecutive | total 100 | failed | 1,000 | 0 | 0 | 0 | 0 |
+| consecutive | total 100 | total | 1,000 | 27,006 | 44,994 | 53,226 | 64,260 |
+| consecutive | total 1,000 | success | 1,000 | 4,962,248 | 5,093,064 | 5,162,327 | 5,247,121 |
+| consecutive | total 1,000 | failed | 1,000 | 0 | 0 | 0 | 0 |
+| consecutive | total 1,000 | total | 1,000 | 4,962,248 | 5,093,064 | 5,162,327 | 5,247,121 |
+| consecutive | total 10,000 | success | 1,000 | 0 | 0 | 0 | 0 |
+| consecutive | total 10,000 | failed | 1,000 | 2,511,841 | 3,910,187 | 4,580,722 | 5,089,712 |
+| consecutive | total 10,000 | total | 1,000 | 2,511,841 | 3,910,187 | 4,580,722 | 5,089,712 |
+| consecutive | worst bucket 32 | success | 1,000 | 584,511 | 584,511 | 584,511 | 584,511 |
+| consecutive | worst bucket 32 | failed | 1,000 | 0 | 0 | 0 | 0 |
+| consecutive | worst bucket 32 | total | 1,000 | 584,511 | 584,511 | 584,511 | 584,511 |
