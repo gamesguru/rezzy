@@ -340,10 +340,48 @@ fn mutation_boundary() {
     );
 }
 
+/// Run-backed containers are in-memory only: `encode` expands them to a v1
+/// array or bitset, and `decode` re-forms the run representation. Measure both
+/// directions, since the random sparse/dense cases never build runs.
+fn run_container_round_trip() {
+    println!("run container round trip (in-memory runs, v1 wire)");
+    for &(runs, per_run) in &[
+        (2u32, 500u32),
+        (1, 65_000),
+        (10, 6_000),
+        (100, 600),
+        (1_000, 60),
+    ] {
+        let values: Vec<u32> = (0..runs)
+            .flat_map(|run| {
+                let start = run * (per_run + 2);
+                (start..start + per_run).collect::<Vec<_>>()
+            })
+            .collect();
+        let bitmap: Bitmap = values.iter().copied().collect();
+        let encoded = bitmap.encode();
+        let encode_ns = ns_per_iter(200, || {
+            black_box(bitmap.encode());
+        });
+        let decode_ns = ns_per_iter(200, || {
+            black_box(Bitmap::decode(&encoded).expect("decode"));
+        });
+        println!(
+            "{:<44} runs={runs:<5} values={:<6} bytes={:<6} encode={:>7.0} ns decode={:>7.0} ns",
+            "run-backed container",
+            values.len(),
+            encoded.len(),
+            encode_ns,
+            decode_ns
+        );
+    }
+}
+
 /// Entry point for the bitmap comparison benchmark.
 pub fn run() {
     println!("Bitmap vs roaring (ratio < 1 means Bitmap is faster)");
     mutation_boundary();
+    run_container_round_trip();
     let mut rng = Rng::new(0x2545_f491_4f6c_dd1d);
 
     for &(span, pm, label) in &[
