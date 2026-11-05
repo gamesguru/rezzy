@@ -34,10 +34,11 @@
   union/intersection/difference operations handle all three. Containers are
   canonicalized at `encode`, not on every mutation, so a size boundary cannot
   thrash on alternating insert/erase; `Bitmap` equality compares contents, not
-  the in-memory container kind. The wire format is now version 2; version 1
-  payloads still decode, and version 1 readers reject version 2 rather than
-  misreading a run chunk. This does not change the reverse-edge schema; it only
-  makes the container available.
+  the in-memory container kind. Run containers are chunk kind 2 within wire
+  version 1; the envelope version does not change because version 1 has not been
+  released. A pre-run reader rejects kind 2 with `InvalidChunkKind` rather than
+  misreading it. This does not change the reverse-edge schema; it only makes the
+  container available.
 
 ### Changed (breaking)
 

@@ -28,10 +28,10 @@ use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
 pub const BITMAP_MAGIC: [u8; 4] = *b"RBMP";
 /// Version of the [`Bitmap`] wire format.
 ///
-/// Version 2 adds run containers. Version 1 payloads remain decodable and are
-/// canonicalized on decode; readers that only know version 1 reject version 2
-/// with [`BitmapDecodeError::UnsupportedVersion`].
-pub const BITMAP_FORMAT_VERSION: u8 = 2;
+/// Run containers are chunk kind 2 within version 1; adding a container kind
+/// does not change the envelope version. Version 1 has not been released, so
+/// the format is iterated in place instead of introducing a version 2.
+pub const BITMAP_FORMAT_VERSION: u8 = 1;
 
 /// Errors returned by [`Bitmap::decode`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +77,7 @@ type Words = Box<[u64; WORDS]>;
 mod chunk;
 mod run;
 
-use self::chunk::{Chunk, Kind, Store};
+use self::chunk::{Chunk, Store};
 use self::run::Run;
 fn empty_words() -> Words {
     Box::new([0u64; WORDS])
@@ -307,9 +307,8 @@ impl Bitmap {
         if input[..4] != BITMAP_MAGIC {
             return Err(BitmapDecodeError::InvalidMagic);
         }
-        let version = input[4];
-        if !matches!(version, 1 | 2) {
-            return Err(BitmapDecodeError::UnsupportedVersion(version));
+        if input[4] != BITMAP_FORMAT_VERSION {
+            return Err(BitmapDecodeError::UnsupportedVersion(input[4]));
         }
         input = &input[5..];
         let count =
@@ -324,7 +323,7 @@ impl Bitmap {
             previous = Some(key);
             let kind = read_byte(&mut input)?;
             let len = read_u32(&mut input)?;
-            let chunk = decode_chunk(key, kind, len, version, &mut input)?;
+            let chunk = decode_chunk(key, kind, len, &mut input)?;
             chunks.push(Arc::new(chunk));
         }
         if !input.is_empty() {
@@ -470,7 +469,6 @@ fn decode_chunk(
     key: u16,
     kind: u8,
     len: u32,
-    version: u8,
     input: &mut &[u8],
 ) -> Result<Chunk, BitmapDecodeError> {
     match kind {
@@ -492,11 +490,7 @@ fn decode_chunk(
             if !values.windows(2).all(|pair| pair[0] < pair[1]) {
                 return Err(BitmapDecodeError::NonCanonical);
             }
-            let chunk = Chunk::from_array(key, values).ok_or(BitmapDecodeError::NonCanonical)?;
-            if version == 2 && chunk.kind() != Kind::Array {
-                return Err(BitmapDecodeError::NonCanonical);
-            }
-            Ok(chunk)
+            Chunk::from_array(key, values).ok_or(BitmapDecodeError::NonCanonical)
         }
         1 => {
             if usize::try_from(len).map_err(|_| BitmapDecodeError::NonCanonical)? <= ARRAY_MAX {
@@ -512,17 +506,9 @@ fn decode_chunk(
             if popcount(&words) != len {
                 return Err(BitmapDecodeError::NonCanonical);
             }
-            let chunk = Chunk::from_counted_words(key, words, len)
-                .ok_or(BitmapDecodeError::NonCanonical)?;
-            if version == 2 && chunk.kind() != Kind::Dense {
-                return Err(BitmapDecodeError::NonCanonical);
-            }
-            Ok(chunk)
+            Chunk::from_counted_words(key, words, len).ok_or(BitmapDecodeError::NonCanonical)
         }
         2 => {
-            if version != 2 {
-                return Err(BitmapDecodeError::InvalidChunkKind(2));
-            }
             let run_count = usize::from(read_u16(input)?);
             let raw = take(
                 input,
@@ -1351,13 +1337,11 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn version_one_rejects_run_chunks() {
-        let mut bytes = run_bitmap().encode();
-        bytes[4] = 1;
-        assert_eq!(
-            Bitmap::decode(&bytes),
-            Err(BitmapDecodeError::InvalidChunkKind(2))
-        );
+    fn run_chunks_are_version_one_and_round_trip() {
+        let bitmap = run_bitmap();
+        let encoded = bitmap.encode();
+        assert_eq!(encoded[4], 1, "run containers stay in wire version 1");
+        assert_eq!(Bitmap::decode(&encoded).unwrap(), bitmap);
     }
 
     #[test]

@@ -235,14 +235,6 @@ pub(super) fn remove_run(runs: &mut Vec<Run>, lo: u16) -> Option<u32> {
 }
 
 impl Chunk {
-    pub(super) const fn kind(&self) -> Kind {
-        match self.store {
-            Store::Array(_) => Kind::Array,
-            Store::Dense(_) => Kind::Dense,
-            Store::Run(_) => Kind::Run,
-        }
-    }
-
     pub(super) fn from_array(key: u16, values: Vec<u16>) -> Option<Self> {
         if values.is_empty() {
             return None;
