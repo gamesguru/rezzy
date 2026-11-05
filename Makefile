@@ -195,7 +195,8 @@ rust/publish: ##H Preview package and simulate dry-run publish
 	@echo ""
 	@echo "Simulating publish (--dry-run)"
 	@echo "-----------------------------------"
-	$(CARGO) publish --dry-run
+	# $(CARGO) publish --dry-run
+	cargo +nightly publish --workspace -Z package-workspace --dry-run
 
 # Convenience aliases
 .PHONY: build test bench install clean uninstall so
