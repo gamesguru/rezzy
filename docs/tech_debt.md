@@ -20,12 +20,12 @@ default for new callers; the existing GF(2^64) path remains available through
 `benches/bench-results.csv`. Across random and consecutive roots, the largest
 successful bucket used 753,949 units; the largest 128-bucket batch used
 33,423,360 units, including failed over-capacity buckets. No lower production
-budget is selected. `single_call_work_ceiling(32)` is 2,695,168 units, but the
-decoder accepts a shared batch budget, not per-bucket allowances: a lower
-aggregate can let early buckets consume more than that amount, and sub-ceiling
-`BudgetExhausted` is now a failed bucket (retry/split), not a batch abort. A
-per-bucket default still needs a fairness rule (per-request cap or accepting
-starvation retries). The samples are synthetic and do not prove
+budget is selected. `single_call_work_ceiling(32)` is 2,695,168 units. Under a
+constrained shared budget, active requests receive an equal initial share and
+unused work rolls forward; this is not a hard per-bucket cap. Sub-ceiling
+`BudgetExhausted` is a failed bucket (retry/split), not a batch abort. A lower
+default still needs an explicit hard-cap versus rollover policy. The samples
+are synthetic and do not prove
 the 300M per-sketch ceiling or cover pathological recursive splits. Keep both
 ceilings unchanged. The payload is also not wired into any transport or
 advertised in a capability field. The lane-parallel `gf256_simd` MAC is selected

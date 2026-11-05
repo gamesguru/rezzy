@@ -20,10 +20,9 @@ pub const MAX_BUCKET_SKETCH_CAPACITY: usize = 32;
 /// Recommended default work budget for [`decode_bucket_sketches`], sized to
 /// cover a full normal-path batch: [`MAX_BUCKETS_PER_ROUND`] buckets each at
 /// the worst-case per-bucket work ceiling for [`MAX_BUCKET_SKETCH_CAPACITY`].
-/// A caller passing less than this to `decode_bucket_sketches` risks a
-/// bucket near the end of a full-size batch reporting `BudgetExhausted` for
-/// no reason but this constant not being wired through -- see that
-/// function's doc comment.
+/// A caller passing less than this to `decode_bucket_sketches` may cause a
+/// bucket to be reported as failed because its fair share was insufficient;
+/// see that function's doc comment.
 pub const MAX_BATCH_FACTOR_WORK: usize = MAX_BUCKETS_PER_ROUND
     * match pinsketch::single_call_work_ceiling(MAX_BUCKET_SKETCH_CAPACITY) {
         Some(ceiling) => ceiling,
@@ -59,7 +58,7 @@ pub fn recommended_bucket_decode_budget(
 ///
 /// This is the GF(2^256) counterpart of [`recommended_bucket_decode_budget`].
 /// Using the GF(2^64) helper for a GF(2^256) batch under-budgets it and can
-/// return [`AlgebraicError::BudgetExhausted`] for an ordinary bucket. The
+/// cause ordinary buckets to be reported as failed. The
 /// GF(2^256) decoder clamps each bucket to
 /// `Gf256Decoder::per_sketch_work_ceiling`, so the shared budget must grant
 /// that full allowance for every request rather than a per-capacity estimate.
@@ -128,6 +127,23 @@ fn charge_shared_budget(
         .checked_sub(spent)
         .ok_or(AlgebraicError::BudgetExhausted)?;
     Ok(())
+}
+
+fn shared_bucket_allowance(
+    budget: usize,
+    ceiling: usize,
+    remaining_requests: usize,
+    remaining_ceilings: Option<usize>,
+) -> usize {
+    debug_assert!(remaining_requests > 0);
+    if remaining_ceilings.is_some_and(|total| budget >= total) {
+        ceiling
+    } else {
+        budget
+            .checked_div(remaining_requests)
+            .unwrap_or(0)
+            .min(ceiling)
+    }
 }
 /// Recommended default work budget for [`estimate_strata`], sized to
 /// cover a full strata-estimator pass: [`STRATA_COUNT`] strata each at
@@ -468,16 +484,13 @@ fn estimate_delta_internal(
     Ok((decoded_tail.saturating_mul(1_u64 << shift), false))
 }
 
-/// Parses and independently decodes concatenated residual bucket sketches.
+/// Decodes a batch of bucket sketches under a single, shared work budget.
 ///
 /// Requests are validated in canonical key-space range order. Each requested
 /// sketch is serialized as little-endian syndrome coordinates with no length
-/// prefix; the request capacities define the boundaries.
-///
-/// Structural and budget errors abort the batch. A normal decode failure is
-/// isolated to its bucket so successfully decoded roots can be retained.
-///
-/// Decodes a batch of bucket sketches under a single, shared work budget.
+/// prefix; the request capacities define the boundaries. Structural errors
+/// abort the batch. Decode and bucket-budget failures are isolated to their
+/// buckets so successfully decoded roots can be retained.
 ///
 /// `budget` bounds the *total* factoring work across every bucket in the
 /// batch, not just each bucket individually. Without this, each bucket gets
@@ -486,21 +499,11 @@ fn estimate_delta_internal(
 /// aggregate capacity) could cost the caller an unbounded multiple of a
 /// single bucket's work -- the batch size itself was not a cost input.
 ///
-/// Each bucket's draw against `budget` is further clamped to a per-bucket
-/// work ceiling for that bucket's declared capacity (an internal
-/// `pinsketch` cost-model helper, not part of this crate's public API), so
-/// one pathological sketch (corrupt, over capacity, or deliberately ground
-/// to resist factoring) cannot exhaust the shared pool before later,
-/// cheaper buckets in `requests` are even attempted -- otherwise batch
-/// outcomes would depend on request order, since a successful decode and a
-/// proven-undecodable one differ in cost by roughly two orders of
-/// magnitude (see `MAX_FACTOR_WORK`'s comment). Callers sizing `budget`
-/// should account for this clamp: budgeting less than that per-bucket
-/// ceiling for even one request in the batch means that request will be
-/// reported as a failed bucket if it exhausts that allotment. A request that
-/// exhausts what is left of the shared pool is also reported as a failed
-/// bucket, so earlier successes are kept and the caller can retry or split it
-/// with a fresh allowance.
+/// Each bucket's draw is clamped to its per-bucket ceiling. If the shared
+/// budget cannot fund every remaining request up to its ceiling, it is divided
+/// evenly among the remaining requests; unused work rolls forward. A bucket
+/// that exhausts its share is reported as failed, and later buckets still get
+/// a share instead of being starved by request order.
 /// [`MAX_BATCH_FACTOR_WORK`] is sized to cover
 /// a full normal-path batch and is the right default absent a
 /// caller-specific budget.
@@ -509,11 +512,9 @@ fn estimate_delta_internal(
 ///
 /// Returns an error for invalid ordering, capacity, aggregate or byte
 /// length, or an arithmetic error charging the shared budget. A bucket that
-/// exhausts its per-bucket ceiling or the remaining shared pool is instead
-/// reported in `failed_buckets`, allowing the caller to retry or split that
-/// node. Later buckets then see whatever budget is left (possibly none, in
-/// which case they fail too). [`recommended_bucket_decode_budget`] grants each request its full
-/// ceiling in one shared budget.
+/// exhausts its allowance is instead reported in `failed_buckets`, allowing
+/// the caller to retry or split that node. [`recommended_bucket_decode_budget`]
+/// grants each request its full ceiling in one shared budget.
 pub fn decode_bucket_sketches(
     encoded: &[u8],
     requests: &[BucketRequest],
@@ -521,10 +522,17 @@ pub fn decode_bucket_sketches(
 ) -> Result<BucketDecodeBatch, AlgebraicError> {
     validate_adaptive_bucket_requests(requests)?;
 
+    let ceilings: Vec<usize> = requests
+        .iter()
+        .map(|request| {
+            pinsketch::single_call_work_ceiling(request.capacity)
+                .ok_or(AlgebraicError::InvalidSketchCapacity)
+        })
+        .collect::<Result<_, _>>()?;
     let mut payload = PayloadCursor::new(encoded);
     let mut successful_buckets = Vec::new();
     let mut failed_buckets = Vec::new();
-    for request in requests {
+    for (index, request) in requests.iter().enumerate() {
         let bytes = payload.take(request.capacity, 8)?;
 
         let coordinates = bytes
@@ -544,9 +552,13 @@ pub fn decode_bucket_sketches(
         // Clamp this bucket's draw so it can't outspend its own fair
         // ceiling and starve buckets later in `requests` of the shared
         // pool -- see this function's doc comment.
-        let ceiling = pinsketch::single_call_work_ceiling(request.capacity)
-            .ok_or(AlgebraicError::InvalidSketchCapacity)?;
-        let allowance = budget.min(ceiling);
+        let ceiling = ceilings[index];
+        let remaining_requests = requests.len().saturating_sub(index);
+        let remaining_ceilings = ceilings[index..]
+            .iter()
+            .try_fold(0_usize, |total, ceiling| total.checked_add(*ceiling));
+        let allowance =
+            shared_bucket_allowance(budget, ceiling, remaining_requests, remaining_ceilings);
         let mut remaining = allowance;
         let result = if request.overflow {
             sketch.decode_elements_overflow_with_shared_budget(request.capacity, &mut remaining)
@@ -603,9 +615,10 @@ pub struct Gf256BucketDecodeBatch {
 ///
 /// Each request occupies `32 * capacity` bytes, in canonical range order, with
 /// no length prefix. Each bucket is allowed at most the per-sketch GF(2^256)
-/// ceiling (the same allowance a stand-alone decode gets) and at most what is
-/// left of `budget`, so one ground sketch cannot starve later buckets and
-/// outcomes do not depend on request order beyond the shared pool.
+/// ceiling. If the shared budget cannot cover every remaining bucket ceiling,
+/// the remainder is divided evenly across the buckets still requiring decode;
+/// unused work rolls forward. This prevents an early expensive bucket from
+/// taking the entire pool.
 ///
 /// A bucket that fails to decode, or that exhausts its full per-sketch
 /// ceiling or the remaining shared pool, is reported in `failed_buckets`;
@@ -618,8 +631,9 @@ pub struct Gf256BucketDecodeBatch {
 ///
 /// # Errors
 /// Returns an error for invalid request ordering or capacity, a payload whose
-/// length is not exactly the sum of the request sizes, a non-canonical field
-/// element, or an exhausted shared budget.
+/// length is not exactly the sum of the request sizes, or a non-canonical
+/// field element. Exhausted bucket allowances are recorded in
+/// `failed_buckets`.
 pub fn decode_gf256_bucket_sketches(
     encoded: &[u8],
     requests: &[BucketRequest],
@@ -672,16 +686,30 @@ fn decode_gf256_bucket_sketches_inner(
     }
 
     let ceiling = Gf256Decoder::per_sketch_work_ceiling();
+    let mut active_requests = 0_usize;
+    let mut offset = 0_usize;
+    for (index, request) in requests.iter().enumerate() {
+        let length = request
+            .capacity
+            .checked_mul(32)
+            .ok_or(AlgebraicError::InvalidSketchLength)?;
+        let end = offset
+            .checked_add(length)
+            .ok_or(AlgebraicError::InvalidSketchLength)?;
+        let bytes = encoded
+            .get(offset..end)
+            .ok_or(AlgebraicError::InvalidSketchLength)?;
+        if !should_skip_empty_gf256_bucket(bytes, index, summaries) {
+            active_requests = active_requests.saturating_add(1);
+        }
+        offset = end;
+    }
     let mut payload = PayloadCursor::new(encoded);
     let mut batch = Gf256BucketDecodeBatch::default();
     for (index, request) in requests.iter().enumerate() {
         let bytes = payload.take(request.capacity, 32)?;
 
-        if summaries.is_some_and(|(local, remote)| {
-            local[index] == NodeSummary::default()
-                && remote[index] == NodeSummary::default()
-                && bytes.iter().all(|byte| *byte == 0)
-        }) {
+        if should_skip_empty_gf256_bucket(bytes, index, summaries) {
             batch.successful_buckets.push(Gf256BucketDecodeSuccess {
                 depth: request.depth,
                 prefix: request.prefix,
@@ -691,7 +719,10 @@ fn decode_gf256_bucket_sketches_inner(
         }
 
         let sketch = Gf256Sketch::from_bytes(request.capacity, bytes)?;
-        let allowance = budget.min(ceiling);
+        let remaining_ceilings = active_requests.checked_mul(ceiling);
+        let allowance =
+            shared_bucket_allowance(budget, ceiling, active_requests, remaining_ceilings);
+        active_requests = active_requests.saturating_sub(1);
         let mut remaining = allowance;
         let result = sketch.decode_elements_with_budget(request.capacity, decoder, &mut remaining);
         charge_shared_budget(&mut budget, allowance, remaining)?;
@@ -709,6 +740,18 @@ fn decode_gf256_bucket_sketches_inner(
     }
     debug_assert!(payload.is_finished());
     Ok(batch)
+}
+
+fn should_skip_empty_gf256_bucket(
+    bytes: &[u8],
+    index: usize,
+    summaries: Option<(&[NodeSummary], &[NodeSummary])>,
+) -> bool {
+    summaries.is_some_and(|(local, remote)| {
+        local[index] == NodeSummary::default()
+            && remote[index] == NodeSummary::default()
+            && bytes.iter().all(|byte| *byte == 0)
+    })
 }
 
 /// Validates a list of bucket requests to ensure they adhere to limits and form an antichain.
@@ -1101,6 +1144,21 @@ mod tests {
             .collect()
     }
 
+    fn syndrome_work_used(capacity: usize, roots: impl IntoIterator<Item = u64>) -> usize {
+        let mut sketch = SyndromeSketch::new(capacity).unwrap();
+        for root in roots {
+            sketch.toggle(root).unwrap();
+        }
+        let ceiling = pinsketch::single_call_work_ceiling(capacity).unwrap();
+        let mut remaining = ceiling;
+        sketch
+            .decode_elements_with_shared_budget(capacity, &mut remaining)
+            .unwrap();
+        ceiling
+            .checked_sub(remaining)
+            .expect("decode remaining work cannot exceed its allowance")
+    }
+
     #[test]
     fn bucket_decoder_isolates_per_bucket_budget_exhaustion() {
         let requests = [BucketRequest::new(8, 1, 32), BucketRequest::new(8, 9, 4)];
@@ -1125,12 +1183,31 @@ mod tests {
 
         let batch = decode_bucket_sketches(&encoded, &requests, 0).unwrap();
         assert_eq!(batch.failed_buckets, [(8, 1)]);
-        assert!(batch.successful_buckets.is_empty());
+        assert_eq!(batch.successful_buckets.len(), 0);
         // Retry with a fresh full allowance succeeds.
         let fresh = recommended_bucket_decode_budget(&requests).unwrap();
         let retry = decode_bucket_sketches(&encoded, &requests, fresh).unwrap();
-        assert!(retry.failed_buckets.is_empty());
+        assert_eq!(retry.failed_buckets.len(), 0);
         assert_eq!(retry.successful_buckets[0].roots, [7, 11, 19]);
+    }
+
+    #[test]
+    fn bucket_decoder_fair_shares_sub_ceiling_budget_with_later_bucket() {
+        let expensive_roots = 1..=8;
+        let cheap_roots = [100];
+        let expensive_work = syndrome_work_used(8, expensive_roots.clone());
+        let cheap_work = syndrome_work_used(8, cheap_roots);
+        assert!(expensive_work > cheap_work);
+
+        let mut encoded = encoded_sketch(8, false, expensive_roots);
+        encoded.extend(encoded_sketch(8, false, cheap_roots));
+        let requests = [BucketRequest::new(1, 0, 8), BucketRequest::new(1, 1, 8)];
+        let batch = decode_bucket_sketches(&encoded, &requests, 2 * cheap_work).unwrap();
+
+        assert_eq!(batch.failed_buckets, [(1, 0)]);
+        assert_eq!(batch.successful_buckets.len(), 1);
+        assert_eq!(batch.successful_buckets[0].prefix, 1);
+        assert_eq!(batch.successful_buckets[0].roots, cheap_roots);
     }
 
     fn assert_overflow_round_trip(request: BucketRequest, count: usize, budget: usize) {
@@ -1261,6 +1338,17 @@ mod tests {
         (sketch.to_bytes(), digests)
     }
 
+    fn gf256_work_used(decoder: &Gf256Decoder, capacity: usize, seeds: &[u64]) -> usize {
+        let (encoded, _) = gf256_payload(capacity, seeds);
+        let sketch = Gf256Sketch::from_bytes(capacity, &encoded).unwrap();
+        let ceiling = Gf256Decoder::per_sketch_work_ceiling();
+        let mut remaining = ceiling;
+        sketch
+            .decode_elements_with_budget(capacity, decoder, &mut remaining)
+            .unwrap();
+        ceiling - remaining
+    }
+
     fn decode_gf256_with_summary(
         encoded: &[u8],
         summary: NodeSummary,
@@ -1304,8 +1392,9 @@ mod tests {
         let (second, right) = gf256_payload(4, &[7]);
         encoded.extend_from_slice(&second);
         let requests = [BucketRequest::new(1, 0, 4), BucketRequest::new(1, 1, 4)];
+        let full_allowance = recommended_gf256_bucket_decode_budget(&requests).unwrap();
         let batch =
-            decode_gf256_bucket_sketches(&encoded, &requests, 100_000_000, &decoder).unwrap();
+            decode_gf256_bucket_sketches(&encoded, &requests, full_allowance, &decoder).unwrap();
         assert_eq!(batch.failed_buckets, vec![(1, 0)]);
         assert_eq!(batch.successful_buckets.len(), 1);
         assert_eq!(batch.successful_buckets[0].digests, right);
@@ -1379,11 +1468,11 @@ mod tests {
         let request = [BucketRequest::new(0, 0, 8)];
         let batch = decode_gf256_bucket_sketches(&encoded, &request, 0, &decoder).unwrap();
         assert_eq!(batch.failed_buckets, [(0, 0)]);
-        assert!(batch.successful_buckets.is_empty());
+        assert_eq!(batch.successful_buckets.len(), 0);
         // Retry with a fresh full allowance succeeds.
         let fresh = recommended_gf256_bucket_decode_budget(&request).unwrap();
         let retry = decode_gf256_bucket_sketches(&encoded, &request, fresh, &decoder).unwrap();
-        assert!(retry.failed_buckets.is_empty());
+        assert_eq!(retry.failed_buckets.len(), 0);
         assert_eq!(retry.successful_buckets[0].digests.len(), expected.len());
     }
 
@@ -1422,26 +1511,25 @@ mod tests {
     }
 
     #[test]
-    fn gf256_batch_total_work_over_budget_fails_later_bucket() {
+    fn gf256_batch_fair_shares_sub_ceiling_budget_with_later_bucket() {
         let decoder = Gf256Decoder::build().unwrap();
-        let (mut encoded, _) = gf256_payload(8, &[1, 2, 3, 4, 5, 6, 7, 8]);
-        let (second, _) = gf256_payload(8, &[20, 21, 22, 23, 24, 25, 26, 27]);
+        let expensive_seeds: Vec<u64> = (1..=8).collect();
+        let cheap_seeds = [100];
+        let expensive_work = gf256_work_used(&decoder, 8, &expensive_seeds);
+        let cheap_work = gf256_work_used(&decoder, 8, &cheap_seeds);
+        assert!(expensive_work > cheap_work);
+
+        let (mut encoded, _) = gf256_payload(8, &expensive_seeds);
+        let (second, expected) = gf256_payload(8, &cheap_seeds);
         encoded.extend_from_slice(&second);
         let requests = [BucketRequest::new(1, 0, 8), BucketRequest::new(1, 1, 8)];
-        // Enough for the first bucket, not for both.
-        let mut probe = Gf256Decoder::per_sketch_work_ceiling();
-        let sketch = Gf256Sketch::from_bytes(8, &encoded[..256]).unwrap();
-        sketch
-            .decode_elements_with_budget(8, &decoder, &mut probe)
-            .unwrap();
-        let one = Gf256Decoder::per_sketch_work_ceiling() - probe;
-        // Sub-ceiling starvation of the second bucket keeps the first.
-        let starved =
-            decode_gf256_bucket_sketches(&encoded, &requests, one + one / 2, &decoder).unwrap();
-        assert_eq!(starved.successful_buckets.len(), 1);
-        assert_eq!(starved.successful_buckets[0].prefix, 0);
-        assert_eq!(starved.failed_buckets, [(1, 1)]);
-        assert!(decode_gf256_bucket_sketches(&encoded, &requests, one * 2 + 1, &decoder).is_ok());
+        let batch =
+            decode_gf256_bucket_sketches(&encoded, &requests, 2 * cheap_work, &decoder).unwrap();
+
+        assert_eq!(batch.failed_buckets, [(1, 0)]);
+        assert_eq!(batch.successful_buckets.len(), 1);
+        assert_eq!(batch.successful_buckets[0].prefix, 1);
+        assert_eq!(batch.successful_buckets[0].digests, expected);
     }
 
     #[test]
