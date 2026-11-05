@@ -26,12 +26,12 @@ aggregate can let early buckets consume more than that amount, and sub-ceiling
 and retry-semantics decision first. The samples are synthetic and do not prove
 the 300M per-sketch ceiling or cover pathological recursive splits. Keep both
 ceilings unchanged. The payload is also not wired into any transport or
-advertised in a capability field. The
-lane-parallel `gf256_simd` MAC is selected at runtime when the CPU supports
-`avx512f` and `vpclmulqdq`; builds with Rust before 1.89, non-x86_64 targets, or
-`no_std` use the scalar path. It still needs throughput measurement on AVX-512
-hardware. `benches/bench-results.csv` still contains no GF(2^256) wall-clock
-metrics; the separate calibration document records work units, not timings.
+advertised in a capability field. The lane-parallel `gf256_simd` MAC is selected
+at runtime when the CPU supports `avx512f` and `vpclmulqdq`; builds with Rust
+before 1.89, non-x86_64 targets, or `no_std` use the scalar path. It still needs
+throughput measurement on AVX-512 hardware. `benches/bench-results.csv` still
+contains no GF(2^256) wall-clock metrics; the separate calibration document
+records work units, not timings.
 
 ### Dense-index (`id_to_index`/`index_to_id`) pattern reimplemented 5+ times independently
 
