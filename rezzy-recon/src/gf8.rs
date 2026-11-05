@@ -18,11 +18,10 @@ const REDUCTION: u8 = 0x1d;
 const EXP: [u8; 512] = build_exp();
 const LOG: [u8; 256] = build_log(&EXP);
 
-#[allow(clippy::arithmetic_side_effects)]
 const fn build_exp() -> [u8; 512] {
     let mut table = [0_u8; 512];
     let mut value = 1_u8;
-    let mut index = 0;
+    let mut index = 0_usize;
     while index < 255 {
         table[index] = value;
         let carry = value & 0x80;
@@ -30,24 +29,23 @@ const fn build_exp() -> [u8; 512] {
         if carry != 0 {
             value ^= REDUCTION;
         }
-        index += 1;
+        index = index.wrapping_add(1);
     }
     // Mirror the cycle so `EXP[LOG[a] + LOG[b]]` never needs a modulo.
-    let mut repeat = 0;
+    let mut repeat = 0_usize;
     while repeat < 255 {
-        table[255 + repeat] = table[repeat];
-        repeat += 1;
+        table[repeat.wrapping_add(255)] = table[repeat];
+        repeat = repeat.wrapping_add(1);
     }
     table
 }
 
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 const fn build_log(exp: &[u8; 512]) -> [u8; 256] {
     let mut table = [0_u8; 256];
-    let mut index = 0;
+    let mut index = 0_u8;
     while index < 255 {
-        table[exp[index] as usize] = index as u8;
-        index += 1;
+        table[exp[index as usize] as usize] = index;
+        index = index.wrapping_add(1);
     }
     table
 }
@@ -84,53 +82,48 @@ impl Gf8 {
     }
 
     /// Field addition, which is XOR.
-    pub const fn add(self, other: Self) -> Self {
+    pub const fn plus(self, other: Self) -> Self {
         Self(self.0 ^ other.0)
     }
 
     /// Field subtraction, which is the same as addition in characteristic 2.
     pub const fn sub(self, other: Self) -> Self {
-        self.add(other)
+        self.plus(other)
     }
 
     /// Field multiplication.
-    #[allow(clippy::arithmetic_side_effects, clippy::should_implement_trait)]
-    pub fn mul(self, other: Self) -> Self {
-        if self.0 == 0 || other.0 == 0 {
-            return Self::ZERO;
-        }
-        let index = usize::from(LOG[usize::from(self.0)]) + usize::from(LOG[usize::from(other.0)]);
-        Self(EXP[index])
+    pub fn times(self, other: Self) -> Self {
+        multiply(self, other)
     }
 
     /// Squares this element.
     pub fn square(self) -> Self {
-        self.mul(self)
+        self.times(self)
     }
 
     /// Returns the multiplicative inverse, or `None` for zero.
     #[must_use = "the inverse is discarded"]
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn inv(self) -> Option<Self> {
         if self.0 == 0 {
             return None;
         }
-        let index = 255 - usize::from(LOG[usize::from(self.0)]);
+        let index = 255_usize.saturating_sub(usize::from(LOG[usize::from(self.0)]));
         Some(Self(EXP[index]))
     }
 
     /// Divides this element by `other`, or returns `None` when `other` is zero.
     #[must_use = "the quotient is discarded"]
-    #[allow(clippy::should_implement_trait)]
-    pub fn div(self, other: Self) -> Option<Self> {
-        other.inv().map(|inverse| self.mul(inverse))
+    pub fn checked_div(self, other: Self) -> Option<Self> {
+        other.inv().map(|inverse| self.times(inverse))
     }
 
     /// Raises this element to `exponent`.
     ///
     /// `Gf8::ZERO.pow(0)` is [`Self::ONE`], matching the usual field
     /// convention for an empty product.
-    #[allow(clippy::arithmetic_side_effects)]
+    ///
+    /// # Panics
+    /// Never: the table index is reduced modulo 255 first.
     pub fn pow(self, exponent: u32) -> Self {
         if exponent == 0 {
             return Self::ONE;
@@ -139,8 +132,18 @@ impl Gf8 {
             return Self::ZERO;
         }
         let logarithm = u32::from(LOG[usize::from(self.0)]);
-        let index = usize::try_from((logarithm * (exponent % 255)) % 255).unwrap_or_default();
+        let index =
+            usize::try_from(logarithm.wrapping_mul(exponent % 255) % 255).expect("index below 255");
         Self(EXP[index])
+    }
+
+    /// Returns the 256-entry table of `self * v` for every byte `v`.
+    pub(crate) fn mul_table(self) -> [u8; 256] {
+        let mut table = [0_u8; 256];
+        for (value, slot) in (0..=u8::MAX).zip(table.iter_mut()) {
+            *slot = self.times(Self(value)).0;
+        }
+        table
     }
 
     /// Returns the discrete logarithm of this element in base
@@ -151,9 +154,11 @@ impl Gf8 {
     }
 
     /// Returns [`Self::GENERATOR`] raised to `exponent`.
-    #[allow(clippy::arithmetic_side_effects)]
+    ///
+    /// # Panics
+    /// Never: the exponent is reduced modulo 255 first.
     pub fn exp(exponent: u32) -> Self {
-        let index = usize::try_from(exponent % 255).unwrap_or_default();
+        let index = usize::try_from(exponent % 255).expect("index below 255");
         Self(EXP[index])
     }
 }
@@ -170,9 +175,41 @@ impl From<Gf8> for u8 {
     }
 }
 
-// `Self::add`/`Self::mul` would resolve to the trait methods being defined
-// here, so the inherent functions must be named explicitly.
-#[allow(clippy::use_self)]
+fn multiply(left: Gf8, right: Gf8) -> Gf8 {
+    if left.0 == 0 || right.0 == 0 {
+        return Gf8::ZERO;
+    }
+    let index =
+        usize::from(LOG[usize::from(left.0)]).wrapping_add(usize::from(LOG[usize::from(right.0)]));
+    Gf8(EXP[index])
+}
+
+// In characteristic 2, addition is XOR and subtraction is the same operation.
+impl core::ops::Add for Gf8 {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        self.plus(rhs)
+    }
+}
+
+// In characteristic 2, subtraction is the same XOR as addition.
+impl core::ops::Sub for Gf8 {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self {
+        self.plus(rhs)
+    }
+}
+
+impl core::ops::Mul for Gf8 {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self {
+        multiply(self, rhs)
+    }
+}
+
 impl BinaryField for Gf8 {
     const BITS: usize = 8;
     const BYTES: usize = 1;
@@ -181,11 +218,11 @@ impl BinaryField for Gf8 {
     const ONE: Self = Self::ONE;
 
     fn add(self, other: Self) -> Self {
-        Gf8::add(self, other)
+        Self::plus(self, other)
     }
 
     fn mul(self, other: Self) -> Self {
-        Gf8::mul(self, other)
+        Self::times(self, other)
     }
 
     fn bit(index: usize) -> Option<Self> {
@@ -232,7 +269,7 @@ mod tests {
         for left in 0..=u8::MAX {
             for right in 0..=u8::MAX {
                 assert_eq!(
-                    Gf8::from_u8(left).mul(Gf8::from_u8(right)).to_u8(),
+                    (Gf8::from_u8(left) * Gf8::from_u8(right)).to_u8(),
                     reference_mul(left, right),
                     "{left:#04x} * {right:#04x}"
                 );
@@ -246,8 +283,8 @@ mod tests {
             for right in 0..=u8::MAX {
                 let left = Gf8::from_u8(left);
                 let right = Gf8::from_u8(right);
-                assert_eq!(left.add(right).to_u8(), left.to_u8() ^ right.to_u8());
-                assert_eq!(left.sub(right), left.add(right));
+                assert_eq!((left + right).to_u8(), left.to_u8() ^ right.to_u8());
+                assert_eq!(left - right, left + right);
             }
         }
     }
@@ -257,8 +294,8 @@ mod tests {
         for value in 1..=u8::MAX {
             let value = Gf8::from_u8(value);
             let inverse = value.inv().expect("nonzero elements are invertible");
-            assert_eq!(value.mul(inverse), Gf8::ONE);
-            assert_eq!(value.div(value), Some(Gf8::ONE));
+            assert_eq!(value * inverse, Gf8::ONE);
+            assert_eq!(value.checked_div(value), Some(Gf8::ONE));
         }
         assert_eq!(Gf8::ZERO.inv(), None);
         assert_eq!(Gf8::ONE.inv(), Some(Gf8::ONE));
@@ -284,7 +321,7 @@ mod tests {
             let mut expected = Gf8::ONE;
             for exponent in 0..16 {
                 assert_eq!(base.pow(exponent), expected);
-                expected = expected.mul(base);
+                expected = expected * base;
             }
         }
     }

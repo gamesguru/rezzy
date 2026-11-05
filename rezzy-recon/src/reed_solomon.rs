@@ -17,6 +17,14 @@
 //! The systematic generator matrix is `[I | C]`, where `C` is a Cauchy matrix
 //! over the nonzero elements of GF(2^8). It is MDS, so every subset of `k`
 //! rows is invertible.
+//!
+//! # Performance
+//!
+//! Encoding builds a 256-byte multiplication table per parity/data coefficient
+//! and is `O(p · k · (len + 256))`. Erasure decoding adds a `k × k` matrix
+//! inversion and is `O(k³ + k² · (len + 256))`. The implementation is intended
+//! for modest shard counts and shard lengths; very large workloads may want a
+//! dedicated SIMD codec.
 
 use crate::gf8::Gf8;
 use alloc::{vec, vec::Vec};
@@ -63,8 +71,9 @@ impl ReedSolomon {
     /// # Errors
     /// Returns [`ReedSolomonError::InvalidShardCount`] when either count is
     /// zero or `data_shards + parity_shards > 255`.
-    #[must_use = "a ReedSolomon configuration has no effect unless used to encode or decode"]
-    #[allow(clippy::arithmetic_side_effects)]
+    ///
+    /// # Panics
+    /// Never: the count check bounds every shard index below 255.
     pub fn new(data_shards: usize, parity_shards: usize) -> Result<Self, ReedSolomonError> {
         let total = data_shards
             .checked_add(parity_shards)
@@ -82,11 +91,14 @@ impl ReedSolomon {
             // disjoint because k + p <= 255, so every Cauchy denominator is
             // nonzero.
             // `total <= 255` guarantees both conversions fit in `u32`.
-            let left = Gf8::exp(u32::try_from(data_shards + parity_index).unwrap_or_default());
+            let left = Gf8::exp(
+                u32::try_from(data_shards.saturating_add(parity_index))
+                    .expect("shard index below 255"),
+            );
             for data_index in 0..data_shards {
-                let right = Gf8::exp(u32::try_from(data_index).unwrap_or_default());
+                let right = Gf8::exp(u32::try_from(data_index).expect("shard index below 255"));
                 let coefficient = left
-                    .add(right)
+                    .plus(right)
                     .inv()
                     .ok_or(ReedSolomonError::SingularMatrix)?;
                 parity_matrix.push(coefficient);
@@ -114,9 +126,8 @@ impl ReedSolomon {
 
     /// Total number of shards (`data_shards + parity_shards`).
     #[must_use]
-    #[allow(clippy::arithmetic_side_effects)]
     pub const fn shard_count(&self) -> usize {
-        self.data_shards + self.parity_shards
+        self.data_shards.saturating_add(self.parity_shards)
     }
 
     /// Encodes `data`, returning only the parity shards.
@@ -126,8 +137,6 @@ impl ReedSolomon {
     /// contain exactly [`Self::data_shards`] entries, or
     /// [`ReedSolomonError::UnequalShardLengths`] when the data shards differ in
     /// length.
-    #[must_use = "encoding produces the parity shards that the caller must store or send"]
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn encode<S: AsRef<[u8]>>(&self, data: &[S]) -> Result<Vec<Vec<u8>>, ReedSolomonError> {
         if data.len() != self.data_shards {
             return Err(ReedSolomonError::ShardCountMismatch {
@@ -143,10 +152,12 @@ impl ReedSolomon {
         let mut parity = vec![vec![0_u8; length]; self.parity_shards];
         for (parity_index, output) in parity.iter_mut().enumerate() {
             for (data_index, input) in data.iter().enumerate() {
-                let coefficient = self.parity_matrix[parity_index * self.data_shards + data_index];
-                let input = input.as_ref();
-                for (out, &value) in output.iter_mut().zip(input) {
-                    *out ^= coefficient.mul(Gf8::from_u8(value)).to_u8();
+                let table = self.parity_matrix[parity_index
+                    .saturating_mul(self.data_shards)
+                    .saturating_add(data_index)]
+                .mul_table();
+                for (out, &value) in output.iter_mut().zip(input.as_ref()) {
+                    *out ^= table[usize::from(value)];
                 }
             }
         }
@@ -157,7 +168,6 @@ impl ReedSolomon {
     ///
     /// # Errors
     /// Returns the same errors as [`Self::encode`].
-    #[must_use = "the returned shards are the encoded codeword"]
     pub fn encode_systematic<S: AsRef<[u8]>>(
         &self,
         data: &[S],
@@ -183,8 +193,6 @@ impl ReedSolomon {
     /// survivors differ in length, or [`ReedSolomonError::SingularMatrix`] if
     /// the selected generator rows are singular (this should not happen for a
     /// valid configuration).
-    #[must_use = "decoding produces the recovered data shards"]
-    #[allow(clippy::arithmetic_side_effects)]
     pub fn decode(&self, shards: &[Option<&[u8]>]) -> Result<Vec<Vec<u8>>, ReedSolomonError> {
         let total = self.shard_count();
         if shards.len() != total {
@@ -224,26 +232,20 @@ impl ReedSolomon {
         let inverse = invert(matrix).ok_or(ReedSolomonError::SingularMatrix)?;
 
         let mut data = vec![vec![0_u8; length]; self.data_shards];
-        let mut symbols = Vec::with_capacity(self.data_shards);
-        for byte_index in 0..length {
-            symbols.clear();
-            symbols.extend(
-                selected
-                    .iter()
-                    .map(|(_, shard)| Gf8::from_u8(shard[byte_index])),
-            );
-            for (row_index, coefficients) in inverse.iter().enumerate() {
-                let mut value = Gf8::ZERO;
-                for (coefficient, symbol) in coefficients.iter().zip(&symbols) {
-                    value = value.add(coefficient.mul(*symbol));
+        for (output, coefficients) in data.iter_mut().zip(&inverse) {
+            for (coefficient, (_, shard)) in coefficients.iter().zip(selected) {
+                if coefficient.is_zero() {
+                    continue;
                 }
-                data[row_index][byte_index] = value.to_u8();
+                let table = coefficient.mul_table();
+                for (out, &value) in output.iter_mut().zip(*shard) {
+                    *out ^= table[usize::from(value)];
+                }
             }
         }
         Ok(data)
     }
 
-    #[allow(clippy::arithmetic_side_effects)]
     fn coefficient(&self, row: usize, column: usize) -> Gf8 {
         if row < self.data_shards {
             if row == column {
@@ -252,7 +254,10 @@ impl ReedSolomon {
                 Gf8::ZERO
             }
         } else {
-            self.parity_matrix[(row - self.data_shards) * self.data_shards + column]
+            self.parity_matrix[row
+                .saturating_sub(self.data_shards)
+                .saturating_mul(self.data_shards)
+                .saturating_add(column)]
         }
     }
 
@@ -267,7 +272,6 @@ impl ReedSolomon {
 }
 
 /// Inverts a square matrix over GF(2^8) with Gauss-Jordan elimination.
-#[allow(clippy::arithmetic_side_effects)]
 fn invert(matrix: Vec<Vec<Gf8>>) -> Option<Vec<Vec<Gf8>>> {
     let size = matrix.len();
     let width = size.checked_mul(2)?;
@@ -275,7 +279,7 @@ fn invert(matrix: Vec<Vec<Gf8>>) -> Option<Vec<Vec<Gf8>>> {
     for (row_index, coefficients) in matrix.into_iter().enumerate() {
         let mut row = vec![Gf8::ZERO; width];
         row[..size].copy_from_slice(&coefficients);
-        row[size + row_index] = Gf8::ONE;
+        row[size.saturating_add(row_index)] = Gf8::ONE;
         augmented.push(row);
     }
 
@@ -286,7 +290,7 @@ fn invert(matrix: Vec<Vec<Gf8>>) -> Option<Vec<Vec<Gf8>>> {
 
         let pivot_inverse = augmented[pivot_column][pivot_column].inv()?;
         for value in &mut augmented[pivot_column] {
-            *value = value.mul(pivot_inverse);
+            *value = value.times(pivot_inverse);
         }
 
         for row_index in 0..size {
@@ -297,10 +301,11 @@ fn invert(matrix: Vec<Vec<Gf8>>) -> Option<Vec<Vec<Gf8>>> {
             if factor.is_zero() {
                 continue;
             }
-            let pivot = augmented[pivot_column].clone();
+            let pivot = core::mem::take(&mut augmented[pivot_column]);
             for (target, source) in augmented[row_index].iter_mut().zip(&pivot) {
-                *target = target.add(source.mul(factor));
+                *target = target.plus(source.times(factor));
             }
+            augmented[pivot_column] = pivot;
         }
     }
 
@@ -436,6 +441,46 @@ mod tests {
             codec.decode(&[Some(&[0_u8; 4]), Some(&[0_u8; 5]), None]),
             Err(ReedSolomonError::UnequalShardLengths)
         );
+    }
+
+    #[test]
+    fn maximum_width_codec_recovers_maximum_erasures() {
+        let codec = ReedSolomon::new(200, 55).expect("valid configuration");
+        let data = sample_data(200, 16);
+        let shards = codec.encode_systematic(&data).expect("encoding succeeds");
+        assert_eq!(shards.len(), 255);
+        // Erase 55 shards: a mix of data and parity, then all-parity-for-data.
+        for stride in [3_usize, 4, 5] {
+            let slots: Vec<Option<&[u8]>> = shards
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (i % stride != 0 || i / stride >= 55).then_some(s.as_slice()))
+                .collect();
+            assert!(slots.iter().filter(|s| s.is_none()).count() <= 55);
+            assert_eq!(codec.decode(&slots).expect("decodes"), data);
+        }
+        let slots: Vec<Option<&[u8]>> = shards
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i >= 55).then_some(s.as_slice()))
+            .collect();
+        assert_eq!(codec.decode(&slots).expect("decodes"), data);
+    }
+
+    #[test]
+    fn missing_only_parity_uses_the_fast_path() {
+        let codec = ReedSolomon::new(3, 2).expect("valid configuration");
+        let data = sample_data(3, 5);
+        let shards = codec.encode_systematic(&data).expect("encoding succeeds");
+        assert_eq!(decode_with_erasures(&codec, &shards, 0b11_000), Ok(data));
+    }
+
+    #[test]
+    fn single_byte_shards_round_trip() {
+        let codec = ReedSolomon::new(3, 2).expect("valid configuration");
+        let data = sample_data(3, 1);
+        let shards = codec.encode_systematic(&data).expect("encoding succeeds");
+        assert_eq!(decode_with_erasures(&codec, &shards, 0b00_101), Ok(data));
     }
 
     #[test]

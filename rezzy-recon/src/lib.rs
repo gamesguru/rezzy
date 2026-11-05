@@ -63,8 +63,6 @@ pub use client::{
     ReconciliationClient, RemoteDigest, MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
 };
 pub use gf256::{Gf256, Gf256Decoder, Gf256Sketch};
-pub use gf8::Gf8;
-pub use reed_solomon::{ReedSolomon, ReedSolomonError};
 
 /// Profile identifier selected by default for full-digest reconciliation.
 pub const DEFAULT_PROFILE_ID: &str = gf256::PROFILE_ID;

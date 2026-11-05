@@ -1029,8 +1029,8 @@ mod tests {
             let mut next = vec![Gf8::ZERO; len];
             for (index, coefficient) in poly.iter().enumerate() {
                 let next_index = index.checked_add(1).expect("small test polynomial");
-                next[index] = next[index].add(coefficient.mul(root));
-                next[next_index] = next[next_index].add(*coefficient);
+                next[index] = next[index].plus(coefficient.times(root));
+                next[next_index] = next[next_index].plus(*coefficient);
             }
             poly = next;
         }
@@ -1064,7 +1064,7 @@ mod tests {
         for value in 1..=u8::MAX {
             let value = Gf8::from_u8(value);
             let inverse = value.inv().expect("non-zero");
-            assert_eq!(value.mul(inverse), Gf8::ONE);
+            assert_eq!(value * inverse, Gf8::ONE);
         }
     }
 
