@@ -300,6 +300,8 @@ fn wide_cases(rng: &mut Rng) {
 /// path during ingest. Measured after the first promotion, and with a fresh
 /// clone each time to include the one-off crossing cost.
 fn mutation_boundary() {
+    // This isolates Bitmap's representation transition; there is no
+    // corresponding Roaring operation whose threshold matches this boundary.
     let base: Bitmap = (0..4096u32).map(|v| v * 2).collect();
     let clone_ns = ns_per_iter(1_000, || {
         black_box(base.clone());
@@ -362,6 +364,7 @@ fn run_container_round_trip() {
             .collect();
         let bitmap: Bitmap = values.iter().copied().collect();
         let encoded = bitmap.encode();
+        assert_eq!(Bitmap::decode(&encoded).expect("decode"), bitmap);
         let encode_ns = ns_per_iter(200, || {
             black_box(bitmap.encode());
         });

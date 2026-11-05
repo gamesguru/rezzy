@@ -3,7 +3,7 @@
 //! A run stores `(start, length - 1)`, so a full 65,536-value range fits in two
 //! `u16`s.
 
-use super::{empty_words, set_bit, Words, WORDS};
+use super::{empty_words, Words, WORDS};
 use alloc::vec::Vec;
 
 /// A contiguous range of low halves: `len_minus_one + 1` values from `start`.
@@ -94,16 +94,41 @@ pub(super) fn values_from_runs(runs: &[Run]) -> Vec<u16> {
 }
 
 pub(super) fn words_from_runs(runs: &[Run]) -> Words {
+    const WORD_BITS: usize = 64;
     let mut words = empty_words();
     for run in runs {
-        let end = run.end();
-        let mut value = u32::from(run.start);
-        while value < end {
-            set_bit(
-                &mut words,
-                u16::try_from(value).expect("run value fits u16"),
-            );
-            value = value.checked_add(1).expect("run value fits u32");
+        let start = usize::from(run.start);
+        let end = usize::try_from(run.end()).expect("run end fits usize"); // exclusive
+        let mut bit = start;
+        while bit < end {
+            let word = bit / WORD_BITS;
+            let lo = bit % WORD_BITS;
+            let word_base = word
+                .checked_mul(WORD_BITS)
+                .expect("bitmap word base fits usize");
+            let word_end = word
+                .checked_add(1)
+                .and_then(|next| next.checked_mul(WORD_BITS))
+                .expect("bitmap word end fits usize");
+            let hi = end
+                .min(word_end)
+                .checked_sub(word_base)
+                .expect("word range contains the current bit"); // exclusive, 1..=64
+            let width = hi.checked_sub(lo).expect("lo is below hi");
+            let mask = if width == WORD_BITS {
+                u64::MAX
+            } else {
+                let lower = 1_u64
+                    .checked_shl(u32::try_from(width).expect("width fits u32"))
+                    .expect("width is below 64")
+                    .checked_sub(1)
+                    .expect("width is nonzero");
+                lower
+                    .checked_shl(u32::try_from(lo).expect("lo fits u32"))
+                    .expect("lo is below 64")
+            };
+            words[word] |= mask;
+            bit = word_base.checked_add(hi).expect("next bit fits usize");
         }
     }
     words

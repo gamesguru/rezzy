@@ -191,11 +191,11 @@ rust/e2e: ##H Run e2e integration test on real JSON
 rust/publish: ##H Preview package and simulate dry-run publish
 	@echo "Previewing packaged files..."
 	@echo "-----------------------------------"
-	cargo +nightly package --workspace --list
+	$(CARGO) +nightly package --workspace --list
 	@echo ""
 	@echo "Simulating publish (--dry-run)"
 	@echo "-----------------------------------"
-	cargo +nightly publish --workspace --dry-run
+	$(CARGO) +nightly publish --workspace --dry-run
 
 # Convenience aliases
 .PHONY: build test bench install clean uninstall so

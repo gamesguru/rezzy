@@ -33,9 +33,12 @@ factoring is never entered and factoring work is 0, explaining the 0-unit median
 in consecutive over-capacity scenarios.
 
 The full output is in `benches/bench-results.csv` under the `work_units` column.
-The run used `rustc 1.99.0` on `x86_64-unknown-linux-gnu`, against revision
-`1172b82a` on 2026-11-04. Historical rows in that CSV predate the `work_units`
-column and remain millisecond measurements.
+New work-unit rows can be appended with
+`scripts/record_bench.py --work-units <captured calibration output>`. The run
+used `rustc 1.99.0` on `x86_64-unknown-linux-gnu`, against revision `5b6653a6`,
+which contains the ignored harness. The appended calibration rows carry the same
+revision (recorded on 2026-11-04 and 2026-11-05). Historical rows in that CSV
+predate the `work_units` column and remain millisecond measurements.
 
 ## Per-bucket work
 
@@ -98,9 +101,9 @@ These distributions have 100 batch samples each. `failed_work` is included in
 
 The largest successful per-bucket sample was 712,488 units; the largest batch
 sample was 33,423,360 units, including failed buckets. These observations are
-not a tail bound. For context, `single_call_work_ceiling(32)` is 2,695,168
-units: the model ceiling for one root-finding call at degree 32. It is not a
-bound on total recursive work for every valid bucket.
+not a tail bound. For context, `WorkModel::GF256.single_call_work_ceiling(32)`
+is 2,695,168 units: the model ceiling for one root-finding call at degree 32. It
+is not a bound on total recursive work for every valid bucket.
 
 The decoder takes one shared batch budget. If it is less than the sum of the
 remaining per-request ceilings, the current allowance is divided evenly among

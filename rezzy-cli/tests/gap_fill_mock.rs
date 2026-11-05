@@ -244,7 +244,6 @@ impl Fixture {
         let encrypted = ENCRYPTED_KEY.get_or_init(|| {
             let out = Command::new(env!("CARGO_BIN_EXE_rezzy"))
                 .env("REZZY_KEY_PASSPHRASE", "test")
-                .env("REZZY_TEST_FAST_KDF", "1")
                 .args(["federation", "encrypt-key", "-i"])
                 .arg(dir.join("key.plain"))
                 .arg("-o")

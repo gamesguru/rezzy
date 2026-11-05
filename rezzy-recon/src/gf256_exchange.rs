@@ -202,6 +202,9 @@ impl Gf256BucketExchange {
         if !bucket_batch_covers_requests(&batch, requests) {
             return Err(AlgebraicError::InvalidBucketIndex);
         }
+        if local.len() != requests.len() || remote.len() != requests.len() {
+            return Err(AlgebraicError::InvalidSketchLength);
+        }
         if self.split_summaries_are_inconsistent(requests, remote) {
             self.last_emitted_round = None;
             return Ok(Gf256Action::Fallback {

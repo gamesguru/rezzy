@@ -117,7 +117,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(coverage_nightly)",
     "cfg(tarpaulin)",
     "cfg(tarpaulin_include)",
-    "cfg(has_res_submodule)",
 ] }
 [workspace.lints.rustdoc]
 all = "warn"
@@ -197,7 +196,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(coverage)",
     "cfg(coverage_nightly)",
     "cfg(tarpaulin)",
-    "cfg(has_res_submodule)",
     "cfg(tarpaulin_include)",
 ] }
 

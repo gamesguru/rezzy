@@ -78,13 +78,6 @@ fn seal_with(
 /// # Errors
 /// Returns an error if the RNG, KDF, or cipher fails.
 pub fn seal(plaintext: &[u8], passphrase: &[u8]) -> Result<Vec<u8>, String> {
-    // Integration tests need to exercise key loading in many short-lived CLI
-    // processes. Permit a low-cost test key only in debug builds and only when
-    // the test harness opts in; release builds always use production costs.
-    #[cfg(debug_assertions)]
-    if std::env::var_os("REZZY_TEST_FAST_KDF").is_some() {
-        return seal_with(plaintext, passphrase, (8, 1, 1));
-    }
     seal_with(
         plaintext,
         passphrase,

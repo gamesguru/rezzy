@@ -91,6 +91,12 @@ impl Gf256 {
             solver,
         );
         #[cfg(not(feature = "std"))]
+        if odd_syndromes.iter().all(|s| *s == Self::ZERO) {
+            // An all-zero sketch decodes to the empty set; skip building the
+            // quadratic solver.
+            return Ok(alloc::vec::Vec::new());
+        }
+        #[cfg(not(feature = "std"))]
         Gf256Decoder::build()
             .ok_or(crate::algebraic::AlgebraicError::DecodeFailure)?
             .decode(odd_syndromes, max_elements)

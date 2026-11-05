@@ -20,9 +20,10 @@
 //!
 //! # Performance
 //!
-//! Encoding builds a 256-byte multiplication table per parity/data coefficient
-//! and is `O(p · k · (len + 256))`. Erasure decoding adds a `k × k` matrix
-//! inversion and is `O(k³ + k² · (len + 256))`. The implementation is intended
+//! Construction builds a 256-byte multiplication table per parity/data
+//! coefficient. Encoding reuses those tables and is `O(p · k · len)`. Erasure
+//! decoding adds a `k × k` matrix inversion and is
+//! `O(k³ + k² · (len + 256))`. The implementation is intended
 //! for modest shard counts and shard lengths; very large workloads may want a
 //! dedicated SIMD codec.
 
@@ -37,6 +38,9 @@ pub struct ReedSolomon {
     /// Cauchy parity coefficients in row-major `parity_shards × data_shards`
     /// order.
     parity_matrix: Vec<Gf8>,
+    /// Byte lookup tables for the fixed encoding coefficients, in the same
+    /// row-major order as `parity_matrix`.
+    parity_tables: Vec<[u8; 256]>,
 }
 
 /// Invalid Reed-Solomon configuration, input, or shard set.
@@ -86,6 +90,7 @@ impl ReedSolomon {
             .checked_mul(data_shards)
             .ok_or(ReedSolomonError::InvalidShardCount)?;
         let mut parity_matrix = Vec::with_capacity(capacity);
+        let mut parity_tables = Vec::with_capacity(capacity);
         for parity_index in 0..parity_shards {
             // Data columns use α^j; parity rows use α^(k+i). The two ranges are
             // disjoint because k + p <= 255, so every Cauchy denominator is
@@ -102,6 +107,7 @@ impl ReedSolomon {
                     .inv()
                     .ok_or(ReedSolomonError::SingularMatrix)?;
                 parity_matrix.push(coefficient);
+                parity_tables.push(coefficient.mul_table());
             }
         }
 
@@ -109,6 +115,7 @@ impl ReedSolomon {
             data_shards,
             parity_shards,
             parity_matrix,
+            parity_tables,
         })
     }
 
@@ -152,10 +159,9 @@ impl ReedSolomon {
         let mut parity = vec![vec![0_u8; length]; self.parity_shards];
         for (parity_index, output) in parity.iter_mut().enumerate() {
             for (data_index, input) in data.iter().enumerate() {
-                let table = self.parity_matrix[parity_index
+                let table = &self.parity_tables[parity_index
                     .saturating_mul(self.data_shards)
-                    .saturating_add(data_index)]
-                .mul_table();
+                    .saturating_add(data_index)];
                 for (out, &value) in output.iter_mut().zip(input.as_ref()) {
                     *out ^= table[usize::from(value)];
                 }
@@ -449,14 +455,17 @@ mod tests {
         let data = sample_data(200, 16);
         let shards = codec.encode_systematic(&data).expect("encoding succeeds");
         assert_eq!(shards.len(), 255);
-        // Erase 55 shards: a mix of data and parity, then all-parity-for-data.
-        for stride in [3_usize, 4, 5] {
+        // Erase regularly spaced shards, then all-parity-for-data.
+        for (stride, expected_erasures) in [(3_usize, 55), (4, 55), (5, 51)] {
             let slots: Vec<Option<&[u8]>> = shards
                 .iter()
                 .enumerate()
                 .map(|(i, s)| (i % stride != 0 || i / stride >= 55).then_some(s.as_slice()))
                 .collect();
-            assert!(slots.iter().filter(|s| s.is_none()).count() <= 55);
+            assert_eq!(
+                slots.iter().filter(|s| s.is_none()).count(),
+                expected_erasures
+            );
             assert_eq!(codec.decode(&slots).expect("decodes"), data);
         }
         let slots: Vec<Option<&[u8]>> = shards

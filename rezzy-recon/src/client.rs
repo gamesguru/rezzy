@@ -541,6 +541,16 @@ impl BucketExchange {
                     actual_digest = descendant_summary.digest,
                     "split summaries are inconsistent; discarding parent bucket"
                 );
+                // A parent already covered by an earlier ladder failure in
+                // this call must not be recorded again: ladder_fail appends
+                // regions, so re-failing it would duplicate the entry.
+                if self
+                    .ladder_failed
+                    .iter()
+                    .any(|&region| covers(region, parent))
+                {
+                    continue;
+                }
                 self.ladder_fail(parent, batch);
             }
         }

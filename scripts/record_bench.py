@@ -26,17 +26,52 @@ def git_value(*args: str) -> str:
     return subprocess.check_output(["git", *args], text=True).strip()
 
 
+def extract_work_units(path: str) -> dict[str, str]:
+    """Parse the ignored GF(2^256) calibration harness output.
+
+    The harness prints CSV rows shaped like
+    ``pattern,scenario,scope,outcome,samples,p50,p95,p99,max``. Each
+    percentile becomes its own work-unit metric, matching the names already
+    used in the history CSV.
+    """
+    work_units: dict[str, str] = {}
+    with open(path, newline="", encoding="utf-8", errors="replace") as stream:
+        reader = csv.reader(stream)
+        header = next(reader, [])
+        expected = ["pattern", "scenario", "scope", "outcome", "samples"]
+        if header[: len(expected)] != expected:
+            raise SystemExit(
+                f"{path}: unexpected calibration header {header}; "
+                f"expected {expected} prefix"
+            )
+        for row in reader:
+            if len(row) < 9 or row[0].startswith("#"):
+                continue
+            pattern, scenario, scope, outcome, samples = row[:5]
+            base = (
+                f"gf256_work/{pattern}/{scenario}/{scope}/{outcome}/samples={samples}"
+            )
+            for label, value in zip(("p50", "p95", "p99", "max"), row[5:9]):
+                work_units[f"{base}/{label}"] = value
+    return work_units
+
+
 def main() -> int:
     """Append this successful benchmark run to the CSV history."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--current", required=True, help="captured benchmark output")
+    parser.add_argument("--current", help="captured wall-clock benchmark output")
+    parser.add_argument(
+        "--work-units",
+        help="captured GF(2^256) calibration harness output (work units)",
+    )
     parser.add_argument(
         "--out", default="benches/bench-results.csv", help="CSV history path"
     )
     args = parser.parse_args()
 
-    metrics = extract(args.current)
-    if not metrics:
+    metrics = extract(args.current) if args.current else {}
+    work_units_in = extract_work_units(args.work_units) if args.work_units else {}
+    if not metrics and not work_units_in:
         parser.error("no benchmark metrics parsed; refusing to append an empty run")
 
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -44,6 +79,14 @@ def main() -> int:
     branch = git_value("branch", "--show-current") or "detached"
     output = Path(args.out)
     needs_header = not output.exists() or output.stat().st_size == 0
+    if not needs_header:
+        with output.open(newline="", encoding="utf-8") as existing:
+            header = next(csv.reader(existing), [])
+        if tuple(header) != FIELDS:
+            parser.error(
+                f"{output} has header {header}, expected {list(FIELDS)}; "
+                "migrate it before appending"
+            )
 
     with output.open("a", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=FIELDS, lineterminator="\n")
@@ -60,8 +103,22 @@ def main() -> int:
                     "work_units": "",
                 }
             )
+        for metric, work in sorted(work_units_in.items()):
+            writer.writerow(
+                {
+                    "timestamp_utc": timestamp,
+                    "revision": revision,
+                    "branch": branch,
+                    "metric": metric,
+                    "milliseconds": "",
+                    "work_units": work,
+                }
+            )
 
-    print(f"appended {len(metrics)} benchmark metrics to {output}")
+    print(
+        f"appended {len(metrics)} benchmark metrics and "
+        f"{len(work_units_in)} work-unit metrics to {output}"
+    )
     return 0
 
 

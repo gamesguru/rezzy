@@ -3642,6 +3642,95 @@ fn test_check_auth_chain_aliases_v5_requires_create_citation_and_valid_auth_even
     assert!(rejected.is_empty());
 }
 
+#[test]
+fn test_check_auth_chain_aliases_v5_checks_power_levels_citations_and_duplicates() {
+    // Room v5 with both create and power-levels in state. Rule 2.2 now
+    // requires the alias event to cite the current power-levels event too.
+    let create_ev = make_create("$c", "@admin:example.com", json!({"room_version": "5"}));
+    let pl_ev = make_event(
+        "$pl_new",
+        M_ROOM_POWER_LEVELS,
+        Some(""),
+        "@admin:example.com",
+        json!({"users": {"@admin:example.com": 100}}),
+    );
+    let mut state = RoomState::new();
+    insert_event(&mut state, M_ROOM_CREATE, "", create_ev);
+    insert_event(&mut state, M_ROOM_POWER_LEVELS, "", pl_ev);
+
+    let alias_with = |event_id: &str, auth_events: &[&str]| {
+        let mut event = make_event(
+            event_id,
+            "m.room.aliases",
+            Some("example.com"),
+            "@admin:example.com",
+            json!({"aliases": ["#test:example.com"]}),
+        );
+        event.auth_events = auth_events.iter().map(|id| (*id).to_string()).collect();
+        event
+    };
+
+    // Omitted power-levels citation.
+    let (accepted, rejected) = check_auth_chain(
+        &[alias_with("$alias_no_pl", &["$c"])],
+        &state,
+        StateResVersion::V2,
+    );
+    assert!(accepted.is_empty());
+    assert_eq!(rejected.len(), 1);
+    assert!(
+        matches!(
+            &rejected[0].1,
+            AuthError::IncompleteAuthEvents { event_type, state_key }
+                if event_type.as_str() == M_ROOM_POWER_LEVELS && state_key.is_empty()
+        ),
+        "Expected missing power-levels citation, got: {:?}",
+        rejected[0].1
+    );
+
+    // Superseded power-levels citation. The old event stays in the auth-event
+    // map (so the citation resolves) but current state has a newer one.
+    let old_pl = make_event(
+        "$pl_old",
+        M_ROOM_POWER_LEVELS,
+        Some(""),
+        "@admin:example.com",
+        json!({"users": {"@admin:example.com": 50}}),
+    );
+    let (accepted, rejected) = check_auth_chain(
+        &[alias_with("$alias_stale_pl", &["$c", "$pl_old"]), old_pl],
+        &state,
+        StateResVersion::V2,
+    );
+    assert!(!accepted.iter().any(|id| id.as_str() == "$alias_stale_pl"));
+    let stale_error = rejected
+        .iter()
+        .find(|(id, _)| id == "$alias_stale_pl")
+        .map(|(_, error)| error);
+    assert!(
+        matches!(
+            stale_error,
+            Some(AuthError::IncompleteAuthEvents { event_type, state_key })
+                if event_type.as_str() == M_ROOM_POWER_LEVELS && state_key.is_empty()
+        ),
+        "Expected superseded power-levels citation rejection, got: {rejected:?}"
+    );
+
+    // Duplicate create citation. This needs no power-levels state.
+    let (accepted, rejected) = check_auth_chain(
+        &[alias_with("$alias_dup", &["$c", "$c"])],
+        &state,
+        StateResVersion::V2,
+    );
+    assert!(accepted.is_empty());
+    assert_eq!(rejected.len(), 1);
+    assert!(
+        matches!(&rejected[0].1, AuthError::InvalidSyntax(msg) if msg.contains("duplicate (type, state_key)")),
+        "Expected duplicate citation rejection, got: {:?}",
+        rejected[0].1
+    );
+}
+
 /// Builds room state (v1 by default) with a creator and a joined `@bob:domain1.com`.
 fn rule_11_base_state(room_version: &str) -> RoomState {
     let mut state = RoomState::new();

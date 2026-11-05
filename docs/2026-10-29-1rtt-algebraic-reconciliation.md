@@ -177,13 +177,14 @@ The entire 32-byte digest is treated as an element of $\mathrm{GF}(2^{256})$.
   path does not need `verify_follow_up`, `m_roots`, or
   `SortedPopulation::candidates`; those remain in the existing GF(2^64) path.
 - **Zero-Element Invariant:** PinSketch requires non-zero elements ($x \ne 0$).
-  Reject the all-zero 32-byte digest at insertion and route that one reserved
-  identifier through the caller's non-algebraic fallback (for example, direct ID
-  fetch) for exact coverage. Do not alias it to `1` or use an affine offset that
-  leaves another digest unrepresentable. The placement key may be zero; only the
-  full field element must be nonzero. This is a single reserved sentinel, not a
-  locator-collision fallback for other digests, so the scheme is not literally
-  lossless for that one field value.
+  Treat the all-zero 32-byte digest as one reserved sentinel: inserting it into
+  the algebraic population reports `ZeroSketchElement`, and the caller covers it
+  through an explicit non-algebraic fallback (for example, direct ID fetch for
+  that event or a direct event-ID difference for the room) so it is still
+  reconciled exactly. Do not alias it to `1` or use an affine offset that leaves
+  another digest unrepresentable. The placement key may be zero; only the full
+  field element must be nonzero. This is a single reserved sentinel with its own
+  exact fallback, not a locator-collision fallback for other digests.
 - **Compute Cost:** Using the pinned work model
   $\text{ceiling}(d) = (2F+8)d^2 + F(F+8)d$:
 
@@ -370,8 +371,9 @@ the work model's full binary recursion bound is 5,148,287,480 units (a chain of
 it is still open. When the budget is exhausted, `Gf256Decoder::decode` returns
 `AlgebraicError::BudgetExhausted`; fallback selection (such as falling back to
 the non-algebraic path or the fallback ladder) is the responsibility of the
-caller / integration layer, as the decoder does not invoke a fallback internally
-and the wide-field profile is not yet wired into bucket exchange.
+caller / integration layer, as the decoder does not invoke a fallback
+internally. Default selection and server-side sketch building are live, but the
+bucket exchange driver is not yet used in production.
 
 Before the reduce/square optimization, the 232.6M consecutive case took about
 4.78 s and the 36.1M random case about 1.54 s. Those imply different observed
@@ -494,8 +496,10 @@ digests; identity still inherits SHA-256's collision bound. PinSketch's set
 universe is the nonzero field elements
 ([construction over GF(2^m)\*](https://courses.csail.mit.edu/6.857/2009/handouts/DodisReyzinSmith-FuzzyExtractors.pdf)),
 so the all-zero digest is a valid field element but an invalid set element;
-reject it at insertion and element toggle. Do not alias it to one. Zero
-syndromes remain valid.
+reject it at insertion and element toggle. Do not alias it to one. If this
+otherwise valid digest occurs, abandon algebraic reconciliation for the room and
+use the caller's direct event-ID difference fallback. Zero syndromes remain
+valid.
 
 **2. Zero placement prefix.** The placement key is
 `u64::from_be_bytes(digest[0..8])`, matching the existing big-endian prefix

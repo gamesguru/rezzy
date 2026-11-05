@@ -1607,17 +1607,19 @@ mod tests {
     }
 
     #[cfg(feature = "std")]
-    fn calibration_stats(values: &[usize]) -> Option<(usize, usize, usize, usize)> {
+    fn calibration_stats(values: &[u64]) -> Option<(u64, u64, u64, u64)> {
         if values.is_empty() {
             return None;
         }
         let mut sorted = values.to_vec();
         sorted.sort_unstable();
         let nearest_rank = |percentile: usize| {
-            let rank = percentile
-                .checked_mul(sorted.len())
-                .expect("calibration percentile multiplication fits usize");
-            sorted[rank.div_ceil(100).saturating_sub(1)]
+            let rank = u64::try_from(percentile)
+                .expect("percentile fits u64")
+                .checked_mul(u64::try_from(sorted.len()).expect("sample count fits u64"))
+                .expect("calibration percentile multiplication fits u64");
+            sorted[usize::try_from(rank.div_ceil(100).saturating_sub(1))
+                .expect("percentile rank fits usize")]
         };
         Some((
             nearest_rank(50),
@@ -1633,7 +1635,7 @@ mod tests {
         scenario: &str,
         scope: &str,
         outcome: &str,
-        values: &[usize],
+        values: &[u64],
     ) {
         if let Some((p50, p95, p99, max)) = calibration_stats(values) {
             std::println!(
@@ -1652,7 +1654,13 @@ mod tests {
         const CAPACITY: usize = MAX_BUCKET_SKETCH_CAPACITY;
         let decoder = Gf256Decoder::build().expect("cached GF256 decoder");
         let per_bucket_allowance = Gf256Decoder::per_sketch_work_ceiling();
-        let batch_allowance = per_bucket_allowance.checked_mul(BUCKETS).unwrap();
+        // The theoretical batch total is tracked as u64 so it remains
+        // representable on 32-bit targets; only each per-bucket allowance is
+        // converted back to usize for the decoder.
+        let batch_allowance = u64::try_from(per_bucket_allowance)
+            .expect("per-bucket allowance fits u64")
+            .checked_mul(u64::try_from(BUCKETS).expect("bucket count fits u64"))
+            .expect("batch allowance fits u64");
 
         std::println!("pattern,scenario,scope,outcome,samples,p50,p95,p99,max");
         for (pattern, random) in [("random", true), ("consecutive", false)] {
@@ -1687,8 +1695,8 @@ mod tests {
                     }
 
                     let mut remaining_batch = batch_allowance;
-                    let mut this_batch_success = 0_usize;
-                    let mut this_batch_failure = 0_usize;
+                    let mut this_batch_success = 0_u64;
+                    let mut this_batch_failure = 0_u64;
                     for (bucket, count) in counts.into_iter().enumerate() {
                         let expected = calibration_roots(repetition, bucket, count, random);
                         let mut sketch = Gf256Sketch::new(CAPACITY).unwrap();
@@ -1696,14 +1704,17 @@ mod tests {
                             sketch.toggle(*root).unwrap();
                         }
 
-                        let allowance = remaining_batch.min(per_bucket_allowance);
+                        let allowance = remaining_batch
+                            .min(u64::try_from(per_bucket_allowance).expect("fits u64"))
+                            as usize;
                         let mut remaining_bucket = allowance;
                         let decoded = decoder.decode_with_budget(
                             sketch.coordinates(),
                             CAPACITY,
                             &mut remaining_bucket,
                         );
-                        let spent = allowance - remaining_bucket;
+                        let spent = u64::try_from(allowance - remaining_bucket)
+                            .expect("spent work fits u64");
                         remaining_batch = remaining_batch.checked_sub(spent).unwrap();
                         bucket_all.push(spent);
 

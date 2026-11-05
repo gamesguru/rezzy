@@ -6,7 +6,8 @@
 //! `u16` array, a fixed 8 KiB bitset, or a list of `(start, length - 1)` runs.
 //! There is no SIMD; the representation is canonical (each container uses the
 //! smallest of its three encodings, with ties preferring arrays and bitsets,
-//! and empty containers are dropped), so `==` is structural.
+//! and empty containers are dropped). `==` compares contents and ignores
+//! container kind.
 //!
 //! Container storage lives in `chunk.rs` and the run representation in
 //! `run.rs`.
@@ -229,8 +230,9 @@ impl Bitmap {
     /// Encodes this bitmap in a stable, versioned binary format.
     ///
     /// The format is little-endian and stores each canonical chunk as its
-    /// sorted `u16` values, its 1024-word bitset, or its `(start, len - 1)`
-    /// runs. It is intentionally a payload format: callers that need domain
+    /// sorted `u16` values or its 1024-word bitset. In-memory run containers
+    /// are expanded to array or bitset chunks before writing. It is
+    /// intentionally a payload format: callers that need domain
     /// separation should wrap it in their own domain-tagged envelope.
     ///
     /// # Panics
@@ -1090,6 +1092,29 @@ pub(super) mod tests {
                 assert!(a.is_subset(&a) && a.is_disjoint(&(both.clone() - &both)));
             }
         }
+    }
+
+    #[test]
+    fn dense_shrunk_to_array_size_is_subset_of_array() {
+        let mut dense: Bitmap = (0..4097u32).map(|v| v * 2).collect();
+        assert!(dense.remove(0));
+        let removed: u32 = 8192;
+        assert!(dense.remove(removed));
+        let array: Bitmap = (0..4095u32).map(|v| (v + 1) * 2).collect();
+        assert!(dense.is_subset(&array) && array.is_subset(&dense));
+    }
+
+    #[test]
+    fn full_run_chunk_round_trips_words() {
+        let full: Bitmap = (0..65_536u32).collect();
+        assert_eq!(full.len(), 65_536);
+        let mut m = full.clone();
+        for v in (0..65_536u32).step_by(2) {
+            assert!(m.remove(v));
+        }
+        assert_eq!(m.len(), 32_768);
+        assert!(m.is_subset(&full));
+        assert!(!full.is_subset(&m));
     }
 
     #[test]

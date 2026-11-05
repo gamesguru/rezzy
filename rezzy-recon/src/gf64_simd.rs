@@ -274,6 +274,7 @@ fn warn_if_scalar(backend: EvaluatorBackend) {
 
 #[cfg(any(not(feature = "std"), not(target_arch = "x86_64")))]
 #[must_use]
+/// Returns the evaluator backend selected for this build/target.
 pub fn get_evaluator() -> EvaluatorBackend {
     EvaluatorBackend::Scalar
 }

@@ -302,7 +302,7 @@ fn reconcile_room_once(
     fixture: &RoomFixture,
     decoder: &Gf256Decoder,
     trace_rounds: bool,
-) -> RoomExchangeResult {
+) -> Option<RoomExchangeResult> {
     let mut phases = RoomPhaseTimes::default();
     let phase_start = std::time::Instant::now();
     let client = ReconciliationClient::default().allow_unlimited_delta();
@@ -361,8 +361,12 @@ fn reconcile_room_once(
                 phases.payload = phases.payload.saturating_add(phase_start.elapsed());
 
                 let phase_start = std::time::Instant::now();
-                let budget = recommended_gf256_bucket_decode_budget(&requests)
-                    .expect("round work budget fits usize");
+                let Ok(budget) = recommended_gf256_bucket_decode_budget(&requests) else {
+                    // The theoretical batch allowance does not fit this
+                    // target's usize (possible on 32-bit). Skip the case
+                    // instead of aborting the whole benchmark.
+                    return None;
+                };
                 let batch = decode_gf256_bucket_sketches_with_summaries(
                     &difference_payload,
                     &requests,
@@ -408,7 +412,7 @@ fn reconcile_room_once(
             } => {
                 assert_eq!(local_only.len(), fixture.difference_each_way);
                 assert_eq!(remote_only.len(), fixture.difference_each_way);
-                return RoomExchangeResult {
+                return Some(RoomExchangeResult {
                     outcome: RoomExchangeOutcome::Complete,
                     rounds,
                     initial_requests,
@@ -416,10 +420,10 @@ fn reconcile_room_once(
                     sketch_payload_bytes,
                     phases,
                     round_trace,
-                };
+                });
             }
             Gf256Action::Fallback { reason } => {
-                return RoomExchangeResult {
+                return Some(RoomExchangeResult {
                     outcome: RoomExchangeOutcome::Fallback(reason),
                     rounds,
                     initial_requests,
@@ -427,7 +431,7 @@ fn reconcile_room_once(
                     sketch_payload_bytes,
                     phases,
                     round_trace,
-                };
+                });
             }
         }
     }
@@ -448,7 +452,13 @@ fn bench_room_reconciliation(room_events: usize, difference_each_way: usize) {
             trace_rounds,
         ));
     });
-    let result = outcome.expect("one benchmark iteration ran");
+    let Some(result) = outcome.flatten() else {
+        println!(
+            "skipping {room_events}-event room with {difference_each_way} differences: \
+             round work budget does not fit usize"
+        );
+        return;
+    };
     let peer_raw_bytes = room_events.saturating_mul(32);
     let sketch_pct = (result.sketch_payload_bytes as f64 / peer_raw_bytes as f64) * 100.0;
     let outcome_str = match result.outcome {

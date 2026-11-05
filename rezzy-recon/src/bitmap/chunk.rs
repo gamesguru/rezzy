@@ -394,6 +394,7 @@ impl Chunk {
         };
         self.len = adjust_count(self.len, -1);
         self.runs = new_runs;
+        self.promote();
         true
     }
 
@@ -406,7 +407,11 @@ impl Chunk {
         match (&self.store, &other.store) {
             (Store::Array(a), Store::Array(b)) => a.iter().all(|x| b.binary_search(x).is_ok()),
             (Store::Array(a), Store::Dense(b)) => a.iter().all(|&x| test_bit(b, x)),
-            (Store::Dense(_), Store::Array(_)) => false,
+            (Store::Dense(a), Store::Array(b)) => {
+                // Dense chunks are never demoted, so one can hold few enough
+                // values to be a subset of an array.
+                words_to_array(a).iter().all(|x| b.binary_search(x).is_ok())
+            }
             (Store::Dense(a), Store::Dense(b)) => a.iter().zip(b.iter()).all(|(x, y)| x & !y == 0),
             _ => unreachable!("run stores handled above"),
         }

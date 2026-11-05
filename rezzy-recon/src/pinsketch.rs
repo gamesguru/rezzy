@@ -1526,8 +1526,16 @@ mod tests {
             Some(crate::gf256::cached_quadratic_solver()),
         );
         assert_eq!(outcome, Err(AlgebraicError::DecodeFailure));
-        // Only the single basis build was charged, never the 288-trial ladder.
-        assert!(started - work < started / 10, "spent {}", started - work);
+        // Only the single basis build may be charged before rejection; any
+        // trial-ladder work means the splitting guard did not short-circuit.
+        assert_eq!(
+            started - work,
+            WorkModel::GF256
+                .frobenius_basis_cost(16)
+                .expect("degree-16 basis cost"),
+            "spent {}",
+            started - work
+        );
     }
 
     #[test]

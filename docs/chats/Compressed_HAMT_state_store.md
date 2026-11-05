@@ -163,7 +163,10 @@ path = H(type)[..10 bits] ‖ H(type, state_key)[10..]
 ```
 
 That places each event type under a stable 2-level prefix. A filtered read for
-one type then costs O(d + r), at the price of about one extra level for
+one type then costs O(d + r + c), where `c` is the number of entries in
+attacker-chosen types that collide on that prefix; without collisions this is
+O(d + r). A permitted sender can grind colliding types in about 2¹⁰ attempts,
+so `c` is unbounded. The price is about one extra level for
 `m.room.member` and lumpy fanout near the root.
 
 Prolly trees or MSTs keyed on `(type, state_key)` would give you true ordered

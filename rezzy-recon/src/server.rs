@@ -496,9 +496,8 @@ impl CachedBucket {
 ///
 /// The cache keeps a normal-capacity sketch and [`NodeSummary`] for each prefix
 /// at [`DEFAULT_BUCKET_CACHE_DEPTH`] (or a caller-chosen shallower depth).
-/// Inserting or removing one element toggles exactly one leaf, so the cost is
-/// independent of room size.
-///
+/// Inserting or removing one element toggles exactly one leaf, so the leaf
+/// work is constant in room size; the `BTreeMap` update costs `O(log n)`.
 /// Lookups work as follows:
 ///
 /// - requests at or above the cached depth, with capacity at most
@@ -765,14 +764,17 @@ impl IncrementalFixedWindowPopulation {
         element: FixedWindowElementHash,
         multiplicity: u64,
     ) -> Result<(), AlgebraicError> {
-        for _ in 0..multiplicity {
+        // `multiplicity` copies of the same element toggle the sketch (and
+        // the residual digest) only when the count is odd; the count always
+        // adds the full multiplicity.
+        if multiplicity % 2 == 1 {
             sketch.toggle(element.sketch_element())?;
-            summary.count = summary
-                .count
-                .checked_add(1)
-                .ok_or(AlgebraicError::CountOverflow)?;
             summary.digest ^= element.residual();
         }
+        summary.count = summary
+            .count
+            .checked_add(multiplicity)
+            .ok_or(AlgebraicError::CountOverflow)?;
         Ok(())
     }
 }
@@ -1968,6 +1970,12 @@ mod incremental_tests {
             assert!(cached.remove(*element));
             assert!(!cached.remove(*element));
         }
+        // Exercise the scan path after removal, not just the cached leaves.
+        assert_same(
+            &cached,
+            &FixedWindowPopulation::new(all[80..].to_vec()).unwrap(),
+            &[BucketRequest::with_overflow(0, 0, 256)],
+        );
         let remaining = all[80..].to_vec();
         let cold = FixedWindowPopulation::new(remaining).unwrap();
         assert_eq!(cached.len(), all.len() - 80);
@@ -2022,6 +2030,13 @@ mod incremental_tests {
             &cached,
             &FixedWindowPopulation::new(vec![element]).unwrap(),
             &[BucketRequest::new(0, 0, CACHED_LEAF_CAPACITY)],
+        );
+        // An overflow request takes the scan path over `elements`, so a stale
+        // multiplicity would show up here even though the cached leaf is right.
+        assert_same(
+            &cached,
+            &FixedWindowPopulation::new(vec![element]).unwrap(),
+            &[BucketRequest::with_overflow(0, 0, 256)],
         );
 
         assert!(cached.remove(element));
