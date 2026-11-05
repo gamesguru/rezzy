@@ -1525,7 +1525,7 @@ mod tests {
     #[test]
     #[ignore = "release GF256 batch work-unit calibration"]
     fn gf256_128_bucket_batch_work_calibration() {
-        const REPETITIONS: usize = 100;
+        const REPETITIONS: usize = 1_000;
         const BUCKETS: usize = MAX_BUCKETS_PER_ROUND;
         const CAPACITY: usize = MAX_BUCKET_SKETCH_CAPACITY;
         let decoder = Gf256Decoder::build().expect("cached GF256 decoder");
