@@ -341,10 +341,12 @@ fn mutation_boundary() {
 }
 
 /// Run-backed containers are in-memory only: `encode` expands them to a v1
-/// array or bitset, and `decode` re-forms the run representation. Measure both
-/// directions, since the random sparse/dense cases never build runs.
+/// array or bitset, and `decode` parses the wire chunk and then canonicalizes
+/// it back into the smallest in-memory container (often a run). The timings
+/// below therefore cover those combined operations, not raw wire parsing
+/// alone. The random sparse/dense cases never build runs.
 fn run_container_round_trip() {
-    println!("run container round trip (in-memory runs, v1 wire)");
+    println!("run container round trip (in-memory runs, v1 wire, decode re-canonicalizes)");
     for &(runs, per_run) in &[
         (2u32, 500u32),
         (1, 65_000),
@@ -367,7 +369,7 @@ fn run_container_round_trip() {
             black_box(Bitmap::decode(&encoded).expect("decode"));
         });
         println!(
-            "{:<44} runs={runs:<5} values={:<6} bytes={:<6} encode={:>7.0} ns decode={:>7.0} ns",
+            "{:<30} runs={runs:<5} values={:<6} bytes={:<6} encode+expand={:>7.0} ns decode+canon={:>7.0} ns",
             "run-backed container",
             values.len(),
             encoded.len(),
