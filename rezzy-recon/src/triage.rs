@@ -1159,6 +1159,20 @@ mod tests {
             .expect("decode remaining work cannot exceed its allowance")
     }
 
+    fn fair_share_requests() -> [BucketRequest; 2] {
+        [BucketRequest::new(1, 0, 8), BucketRequest::new(1, 1, 8)]
+    }
+
+    fn assert_first_prefix_failed(
+        failed_buckets: &[(u8, u64)],
+        successful_buckets: usize,
+        first_prefix: u64,
+    ) {
+        assert_eq!(failed_buckets, [(1, 0)]);
+        assert_eq!(successful_buckets, 1);
+        assert_eq!(first_prefix, 1);
+    }
+
     #[test]
     fn bucket_decoder_isolates_per_bucket_budget_exhaustion() {
         let requests = [BucketRequest::new(8, 1, 32), BucketRequest::new(8, 9, 4)];
@@ -1201,12 +1215,14 @@ mod tests {
 
         let mut encoded = encoded_sketch(8, false, expensive_roots);
         encoded.extend(encoded_sketch(8, false, cheap_roots));
-        let requests = [BucketRequest::new(1, 0, 8), BucketRequest::new(1, 1, 8)];
+        let requests = fair_share_requests();
         let batch = decode_bucket_sketches(&encoded, &requests, 2 * cheap_work).unwrap();
 
-        assert_eq!(batch.failed_buckets, [(1, 0)]);
-        assert_eq!(batch.successful_buckets.len(), 1);
-        assert_eq!(batch.successful_buckets[0].prefix, 1);
+        assert_first_prefix_failed(
+            &batch.failed_buckets,
+            batch.successful_buckets.len(),
+            batch.successful_buckets[0].prefix,
+        );
         assert_eq!(batch.successful_buckets[0].roots, cheap_roots);
     }
 
@@ -1529,13 +1545,15 @@ mod tests {
         let (mut encoded, _) = gf256_payload(8, &expensive_seeds);
         let (second, expected) = gf256_payload(8, &cheap_seeds);
         encoded.extend_from_slice(&second);
-        let requests = [BucketRequest::new(1, 0, 8), BucketRequest::new(1, 1, 8)];
+        let requests = fair_share_requests();
         let batch =
             decode_gf256_bucket_sketches(&encoded, &requests, 2 * cheap_work, &decoder).unwrap();
 
-        assert_eq!(batch.failed_buckets, [(1, 0)]);
-        assert_eq!(batch.successful_buckets.len(), 1);
-        assert_eq!(batch.successful_buckets[0].prefix, 1);
+        assert_first_prefix_failed(
+            &batch.failed_buckets,
+            batch.successful_buckets.len(),
+            batch.successful_buckets[0].prefix,
+        );
         assert_eq!(batch.successful_buckets[0].digests, expected);
     }
 
