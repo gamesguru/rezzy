@@ -7,7 +7,6 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "C ABI for rezzy event hashing, for cgo, ctypes and other FFI callers."
-publish = false
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
