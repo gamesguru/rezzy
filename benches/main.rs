@@ -140,7 +140,7 @@ const BENCHMARKS: &[BenchmarkEntry] = &[
         domain: "math",
         name: "gf256",
         description: "GF(2^256) arithmetic, syndrome construction, and decoding",
-        run_fn: math::gf256::run,
+        run_fn: rezzy_bench_gf256::gf256::run,
     },
     BenchmarkEntry {
         domain: "math",

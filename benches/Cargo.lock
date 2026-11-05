@@ -1335,6 +1335,7 @@ dependencies = [
  "mtxdb",
  "rand 0.8.8",
  "rezzy",
+ "rezzy-bench-gf256",
  "rezzy-recon",
  "roaring",
  "ruma-common",
