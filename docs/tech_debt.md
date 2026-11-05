@@ -18,13 +18,13 @@ default for new callers; the existing GF(2^64) path remains available through
 [`gf256-batch-budget-calibration.md`](gf256-batch-budget-calibration.md) and
 `benches/bench-results.csv`. Across random and consecutive roots, the largest
 successful bucket used 712,488 units; the largest 128-bucket batch used
-33,423,360 units, including failed over-capacity buckets. A 3M-unit per-request
-budget is a candidate (4.2× the observed per-bucket max; 11.5× the observed
-batch max at 128 requests), not yet an applied production default. The samples
-are synthetic and do not prove the 300M per-sketch ceiling or cover pathological
-recursive splits. Keep the current ceilings and behavior unchanged in the
-measurement commit. The payload is also not wired into any transport or
-advertised in a capability field. The
+33,423,360 units, including failed over-capacity buckets. The exported
+`default_gf256_bucket_decode_budget` helper supplies 3M units per normal request
+(4.2× the observed per-bucket max; 11.5× the observed batch max at 128
+requests). `recommended_gf256_bucket_decode_budget` still grants the full
+per-sketch allowance. The samples are synthetic and do not prove the 300M
+per-sketch ceiling or cover pathological recursive splits. The payload is also
+not wired into any transport or advertised in a capability field. The
 lane-parallel `gf256_simd` MAC is selected at runtime when the CPU supports
 `avx512f` and `vpclmulqdq`; builds with Rust before 1.89, non-x86_64 targets, or
 `no_std` use the scalar path. It still needs throughput measurement on AVX-512

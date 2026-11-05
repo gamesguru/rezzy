@@ -30,6 +30,14 @@ pub const MAX_BATCH_FACTOR_WORK: usize = MAX_BUCKETS_PER_ROUND
         None => panic!("single_call_work_ceiling overflowed for MAX_BUCKET_SKETCH_CAPACITY"),
     };
 
+/// Measured default GF(2^256) work budget for each normal bucket request.
+///
+/// This leaves more than four times the largest successful capacity-32 bucket
+/// observed in the release calibration. It is a practical default, not a
+/// worst-case bound; callers requiring the full per-sketch allowance can use
+/// [`recommended_gf256_bucket_decode_budget`].
+pub const DEFAULT_GF256_BUCKET_DECODE_BUDGET_PER_REQUEST: usize = 3_000_000;
+
 /// Returns a shared budget that grants every request its full per-bucket work
 /// ceiling, including overflow requests.
 ///
@@ -74,6 +82,27 @@ pub fn recommended_gf256_bucket_decode_budget(
     requests
         .len()
         .checked_mul(Gf256Decoder::per_sketch_work_ceiling())
+        .ok_or(AlgebraicError::InvalidSketchCapacity)
+}
+
+/// Returns the measured default shared budget for a batch of normal GF(2^256)
+/// bucket requests: [`DEFAULT_GF256_BUCKET_DECODE_BUDGET_PER_REQUEST`] units
+/// per request.
+///
+/// Requests with overflow capacity are rejected; use
+/// [`recommended_gf256_bucket_decode_budget`] when the batch needs the full
+/// per-sketch allowance, including for overflow requests.
+///
+/// # Errors
+/// Returns an error if requests are invalid or the total budget overflows
+/// `usize`.
+pub fn default_gf256_bucket_decode_budget(
+    requests: &[BucketRequest],
+) -> Result<usize, AlgebraicError> {
+    validate_bucket_requests(requests)?;
+    requests
+        .len()
+        .checked_mul(DEFAULT_GF256_BUCKET_DECODE_BUDGET_PER_REQUEST)
         .ok_or(AlgebraicError::InvalidSketchCapacity)
 }
 
@@ -1441,6 +1470,45 @@ mod tests {
         assert_eq!(
             recommended_gf256_bucket_decode_budget(&requests).unwrap(),
             2 * Gf256Decoder::per_sketch_work_ceiling()
+        );
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn measured_gf256_default_budget_decodes_a_random_32_root_bucket() {
+        let decoder = Gf256Decoder::build().unwrap();
+        let request = [BucketRequest::new(0, 0, MAX_BUCKET_SKETCH_CAPACITY)];
+        let expected = calibration_roots(0, 0, MAX_BUCKET_SKETCH_CAPACITY, true);
+        let mut sketch = Gf256Sketch::new(MAX_BUCKET_SKETCH_CAPACITY).unwrap();
+        for root in &expected {
+            sketch.toggle(*root).unwrap();
+        }
+
+        let budget = default_gf256_bucket_decode_budget(&request).unwrap();
+        assert_eq!(budget, DEFAULT_GF256_BUCKET_DECODE_BUDGET_PER_REQUEST);
+        let batch =
+            decode_gf256_bucket_sketches(&sketch.to_bytes(), &request, budget, &decoder).unwrap();
+
+        assert_eq!(batch.failed_buckets.len(), 0);
+        let expected_digests: Vec<_> = expected.iter().map(|root| root.to_le_bytes()).collect();
+        assert_eq!(batch.successful_buckets[0].digests, expected_digests);
+
+        let max_round: Vec<_> = (0..MAX_BUCKETS_PER_ROUND)
+            .map(|prefix| {
+                BucketRequest::new(
+                    7,
+                    u64::try_from(prefix).unwrap(),
+                    MAX_BUCKET_SKETCH_CAPACITY,
+                )
+            })
+            .collect();
+        assert_eq!(
+            default_gf256_bucket_decode_budget(&max_round).unwrap(),
+            MAX_BUCKETS_PER_ROUND * DEFAULT_GF256_BUCKET_DECODE_BUDGET_PER_REQUEST
+        );
+        assert_eq!(
+            default_gf256_bucket_decode_budget(&[BucketRequest::with_overflow(1, 0, 33)]),
+            Err(AlgebraicError::InvalidSketchCapacity)
         );
     }
 
