@@ -1346,7 +1346,9 @@ mod tests {
         sketch
             .decode_elements_with_budget(capacity, decoder, &mut remaining)
             .unwrap();
-        ceiling.saturating_sub(remaining)
+        ceiling
+            .checked_sub(remaining)
+            .expect("GF256 decode cannot consume more work than its ceiling")
     }
 
     fn decode_gf256_with_summary(
