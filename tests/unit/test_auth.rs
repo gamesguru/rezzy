@@ -3670,22 +3670,27 @@ fn test_check_auth_chain_aliases_v5_checks_power_levels_citations_and_duplicates
         event
     };
 
+    // Run a single alias event and return its sole rejection.
+    let rejection = |event_id: &str, auth_events: &[&str]| {
+        let (accepted, rejected) = check_auth_chain(
+            &[alias_with(event_id, auth_events)],
+            &state,
+            StateResVersion::V2,
+        );
+        assert!(accepted.is_empty());
+        assert_eq!(rejected.len(), 1);
+        rejected.into_iter().next().unwrap().1
+    };
+
     // Omitted power-levels citation.
-    let (accepted, rejected) = check_auth_chain(
-        &[alias_with("$alias_no_pl", &["$c"])],
-        &state,
-        StateResVersion::V2,
-    );
-    assert!(accepted.is_empty());
-    assert_eq!(rejected.len(), 1);
+    let error = rejection("$alias_no_pl", &["$c"]);
     assert!(
         matches!(
-            &rejected[0].1,
+            &error,
             AuthError::IncompleteAuthEvents { event_type, state_key }
                 if event_type.as_str() == M_ROOM_POWER_LEVELS && state_key.is_empty()
         ),
-        "Expected missing power-levels citation, got: {:?}",
-        rejected[0].1
+        "Expected missing power-levels citation, got: {error:?}"
     );
 
     // Superseded power-levels citation. The old event stays in the auth-event
@@ -3716,18 +3721,11 @@ fn test_check_auth_chain_aliases_v5_checks_power_levels_citations_and_duplicates
         "Expected superseded power-levels citation rejection, got: {rejected:?}"
     );
 
-    // Duplicate create citation. This needs no power-levels state.
-    let (accepted, rejected) = check_auth_chain(
-        &[alias_with("$alias_dup", &["$c", "$c"])],
-        &state,
-        StateResVersion::V2,
-    );
-    assert!(accepted.is_empty());
-    assert_eq!(rejected.len(), 1);
+    // Duplicate create citation.
+    let error = rejection("$alias_dup", &["$c", "$c"]);
     assert!(
-        matches!(&rejected[0].1, AuthError::InvalidSyntax(msg) if msg.contains("duplicate (type, state_key)")),
-        "Expected duplicate citation rejection, got: {:?}",
-        rejected[0].1
+        matches!(&error, AuthError::InvalidSyntax(msg) if msg.contains("duplicate (type, state_key)")),
+        "Expected duplicate citation rejection, got: {error:?}"
     );
 }
 
