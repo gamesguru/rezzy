@@ -19,7 +19,6 @@ description = "Core Matrix state resolution engine: auth, state, resolve, HAMT, 
 keywords = ["matrix", "state-resolution", "federation", "verification"]
 categories = ["algorithms", "mathematics"]
 exclude = [
-    "build.rs",
     "res/",
     "scripts/",
     "docs/",
