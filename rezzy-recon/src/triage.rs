@@ -1346,7 +1346,7 @@ mod tests {
         sketch
             .decode_elements_with_budget(capacity, decoder, &mut remaining)
             .unwrap();
-        ceiling - remaining
+        ceiling.saturating_sub(remaining)
     }
 
     fn decode_gf256_with_summary(
