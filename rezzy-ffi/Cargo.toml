@@ -7,6 +7,8 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "C ABI for rezzy event hashing, for cgo, ctypes and other FFI callers."
+keywords = ["matrix", "state-resolution", "ffi", "c-abi"]
+categories = ["api-bindings", "development-tools::ffi"]
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
