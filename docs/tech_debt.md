@@ -23,8 +23,9 @@ successful bucket used 753,949 units; the largest 128-bucket batch used
 budget is selected. `single_call_work_ceiling(32)` is 2,695,168 units, but the
 decoder accepts a shared batch budget, not per-bucket allowances: a lower
 aggregate can let early buckets consume more than that amount, and sub-ceiling
-`BudgetExhausted` currently aborts the batch. A per-bucket default needs an API
-and retry-semantics decision first. The samples are synthetic and do not prove
+`BudgetExhausted` is now a failed bucket (retry/split), not a batch abort. A
+per-bucket default still needs a fairness rule (per-request cap or accepting
+starvation retries). The samples are synthetic and do not prove
 the 300M per-sketch ceiling or cover pathological recursive splits. Keep both
 ceilings unchanged. The payload is also not wired into any transport or
 advertised in a capability field. The lane-parallel `gf256_simd` MAC is selected

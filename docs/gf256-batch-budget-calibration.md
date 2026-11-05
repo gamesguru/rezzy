@@ -105,15 +105,15 @@ bound on total recursive work for every valid bucket.
 The current decoder takes one shared batch budget. It computes each bucket's
 allowance as `min(shared_remaining, 300,000,000)`. Therefore a shared budget of
 `128 × 2,695,168 = 344,981,504` does not enforce 2,695,168 units per bucket:
-early buckets can draw much more. If a bucket exhausts a sub-ceiling allowance,
-the current batch decoder returns `BudgetExhausted` for the batch instead of
-recording that bucket as failed. The full helper's `128 × 300,000,000` budget
+early buckets can draw much more. A bucket that exhausts a sub-ceiling
+allowance (the remaining shared pool) is recorded as a failed bucket, like one
+that exhausts its full ceiling; earlier successes are kept and the caller can
+retry or split it with a fresh allowance. The full helper's `128 × 300,000,000` budget
 does give each request its full current allowance.
 
 No lower production batch budget is selected here. A per-bucket policy needs an
 API/behavior change to allocate and account for each request independently, plus
-an explicit decision whether sub-ceiling exhaustion should fail just that bucket
-for retry or abort the batch. Keep the 300,000,000 per-sketch ceiling and
+the shared-pool fairness rule (per-request cap or accepting starvation retries). Keep the 300,000,000 per-sketch ceiling and
 `MAX_BATCH_FACTOR_WORK` unchanged. These measurements do not prove the recursive
 work bound.
 

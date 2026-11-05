@@ -498,7 +498,9 @@ fn estimate_delta_internal(
 /// should account for this clamp: budgeting less than that per-bucket
 /// ceiling for even one request in the batch means that request will be
 /// reported as a failed bucket if it exhausts that allotment. A request that
-/// exhausts the shared budget still returns [`AlgebraicError::BudgetExhausted`].
+/// exhausts what is left of the shared pool is also reported as a failed
+/// bucket, so earlier successes are kept and the caller can retry or split it
+/// with a fresh allowance.
 /// [`MAX_BATCH_FACTOR_WORK`] is sized to cover
 /// a full normal-path batch and is the right default absent a
 /// caller-specific budget.
@@ -506,11 +508,11 @@ fn estimate_delta_internal(
 /// # Errors
 ///
 /// Returns an error for invalid ordering, capacity, aggregate or byte
-/// length, or [`AlgebraicError::BudgetExhausted`] when a bucket needs more
-/// than the remaining shared budget. A bucket that exhausts its full
-/// per-bucket ceiling is instead reported in `failed_buckets`, allowing the
-/// caller to retry or split that node while later buckets use the remaining
-/// budget. [`recommended_bucket_decode_budget`] grants each request its full
+/// length, or an arithmetic error charging the shared budget. A bucket that
+/// exhausts its per-bucket ceiling or the remaining shared pool is instead
+/// reported in `failed_buckets`, allowing the caller to retry or split that
+/// node. Later buckets then see whatever budget is left (possibly none, in
+/// which case they fail too). [`recommended_bucket_decode_budget`] grants each request its full
 /// ceiling in one shared budget.
 pub fn decode_bucket_sketches(
     encoded: &[u8],
@@ -558,10 +560,9 @@ pub fn decode_bucket_sketches(
                 prefix: request.prefix,
                 roots,
             }),
-            Err(AlgebraicError::DecodeFailure) => {
-                failed_buckets.push((request.depth, request.prefix));
-            }
-            Err(AlgebraicError::BudgetExhausted) if allowance == ceiling => {
+            // A starved shared pool is a failed bucket too, so earlier
+            // successes survive and the caller can retry or split.
+            Err(AlgebraicError::DecodeFailure | AlgebraicError::BudgetExhausted) => {
                 failed_buckets.push((request.depth, request.prefix));
             }
             Err(error) => return Err(error),
@@ -607,9 +608,9 @@ pub struct Gf256BucketDecodeBatch {
 /// outcomes do not depend on request order beyond the shared pool.
 ///
 /// A bucket that fails to decode, or that exhausts its full per-sketch
-/// ceiling, is reported in `failed_buckets`. A bucket that runs out of the
-/// *shared* pool before reaching its own ceiling aborts the batch with
-/// [`AlgebraicError::BudgetExhausted`]. Structural errors also abort.
+/// ceiling or the remaining shared pool, is reported in `failed_buckets`;
+/// earlier successes are kept so the caller can retry or split it with a
+/// fresh allowance. Structural errors abort.
 ///
 /// `budget` has no default: the GF(2^256) batch budget has not been
 /// re-derived (see `MAX_BATCH_FACTOR_WORK`, which is GF(2^64)-sized), so the
@@ -700,10 +701,7 @@ fn decode_gf256_bucket_sketches_inner(
                 prefix: request.prefix,
                 digests: elements.into_iter().map(Gf256::to_le_bytes).collect(),
             }),
-            Err(AlgebraicError::DecodeFailure) => {
-                batch.failed_buckets.push((request.depth, request.prefix));
-            }
-            Err(AlgebraicError::BudgetExhausted) if allowance == ceiling => {
+            Err(AlgebraicError::DecodeFailure | AlgebraicError::BudgetExhausted) => {
                 batch.failed_buckets.push((request.depth, request.prefix));
             }
             Err(error) => return Err(error),
@@ -1121,14 +1119,18 @@ mod tests {
     }
 
     #[test]
-    fn bucket_decoder_returns_error_when_shared_budget_is_exhausted() {
+    fn bucket_decoder_reports_failed_bucket_when_shared_budget_is_exhausted() {
         let requests = [BucketRequest::new(8, 1, 4)];
         let encoded = encoded_sketch(4, false, [7, 11, 19]);
 
-        assert_eq!(
-            decode_bucket_sketches(&encoded, &requests, 0),
-            Err(AlgebraicError::BudgetExhausted)
-        );
+        let batch = decode_bucket_sketches(&encoded, &requests, 0).unwrap();
+        assert_eq!(batch.failed_buckets, [(8, 1)]);
+        assert!(batch.successful_buckets.is_empty());
+        // Retry with a fresh full allowance succeeds.
+        let fresh = recommended_bucket_decode_budget(&requests).unwrap();
+        let retry = decode_bucket_sketches(&encoded, &requests, fresh).unwrap();
+        assert!(retry.failed_buckets.is_empty());
+        assert_eq!(retry.successful_buckets[0].roots, [7, 11, 19]);
     }
 
     fn assert_overflow_round_trip(request: BucketRequest, count: usize, budget: usize) {
@@ -1371,13 +1373,18 @@ mod tests {
     }
 
     #[test]
-    fn gf256_batch_shared_budget_exhaustion_aborts() {
+    fn gf256_batch_shared_budget_exhaustion_is_a_failed_bucket() {
         let decoder = Gf256Decoder::build().unwrap();
-        let (encoded, _) = gf256_payload(8, &[1, 2, 3, 4, 5, 6]);
-        assert_eq!(
-            decode_gf256_bucket_sketches(&encoded, &[BucketRequest::new(0, 0, 8)], 0, &decoder),
-            Err(AlgebraicError::BudgetExhausted)
-        );
+        let (encoded, expected) = gf256_payload(8, &[1, 2, 3, 4, 5, 6]);
+        let request = [BucketRequest::new(0, 0, 8)];
+        let batch = decode_gf256_bucket_sketches(&encoded, &request, 0, &decoder).unwrap();
+        assert_eq!(batch.failed_buckets, [(0, 0)]);
+        assert!(batch.successful_buckets.is_empty());
+        // Retry with a fresh full allowance succeeds.
+        let fresh = recommended_gf256_bucket_decode_budget(&request).unwrap();
+        let retry = decode_gf256_bucket_sketches(&encoded, &request, fresh, &decoder).unwrap();
+        assert!(retry.failed_buckets.is_empty());
+        assert_eq!(retry.successful_buckets[0].digests.len(), expected.len());
     }
 
     #[test]
@@ -1415,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn gf256_batch_total_work_over_budget_aborts_later_bucket() {
+    fn gf256_batch_total_work_over_budget_fails_later_bucket() {
         let decoder = Gf256Decoder::build().unwrap();
         let (mut encoded, _) = gf256_payload(8, &[1, 2, 3, 4, 5, 6, 7, 8]);
         let (second, _) = gf256_payload(8, &[20, 21, 22, 23, 24, 25, 26, 27]);
@@ -1428,10 +1435,12 @@ mod tests {
             .decode_elements_with_budget(8, &decoder, &mut probe)
             .unwrap();
         let one = Gf256Decoder::per_sketch_work_ceiling() - probe;
-        assert_eq!(
-            decode_gf256_bucket_sketches(&encoded, &requests, one + one / 2, &decoder),
-            Err(AlgebraicError::BudgetExhausted)
-        );
+        // Sub-ceiling starvation of the second bucket keeps the first.
+        let starved =
+            decode_gf256_bucket_sketches(&encoded, &requests, one + one / 2, &decoder).unwrap();
+        assert_eq!(starved.successful_buckets.len(), 1);
+        assert_eq!(starved.successful_buckets[0].prefix, 0);
+        assert_eq!(starved.failed_buckets, [(1, 1)]);
         assert!(decode_gf256_bucket_sketches(&encoded, &requests, one * 2 + 1, &decoder).is_ok());
     }
 
