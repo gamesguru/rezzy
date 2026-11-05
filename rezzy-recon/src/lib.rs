@@ -25,7 +25,9 @@ pub mod gf256_exchange;
 mod gf256_simd;
 pub mod gf64;
 pub mod gf64_simd;
+pub mod gf8;
 mod pinsketch;
+pub mod reed_solomon;
 pub mod resident;
 pub mod server;
 #[cfg(test)]
@@ -61,6 +63,8 @@ pub use client::{
     ReconciliationClient, RemoteDigest, MAX_BUCKETS_PER_ROUND, MAX_RECONCILIATION_ROUNDS,
 };
 pub use gf256::{Gf256, Gf256Decoder, Gf256Sketch};
+pub use gf8::Gf8;
+pub use reed_solomon::{ReedSolomon, ReedSolomonError};
 
 /// Profile identifier selected by default for full-digest reconciliation.
 pub const DEFAULT_PROFILE_ID: &str = gf256::PROFILE_ID;

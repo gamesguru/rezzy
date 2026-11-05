@@ -1020,57 +1020,7 @@ mod tests {
     use super::*;
     use crate::algebraic::gf64_mul;
     use crate::gf256::Gf256;
-
-    /// Test-only GF(2^8) with the AES reduction polynomial
-    /// `x^8 + x^4 + x^3 + x + 1`. Small enough to brute-force roots.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct Gf8(u8);
-
-    impl BinaryField for Gf8 {
-        const BITS: usize = 8;
-        const BYTES: usize = 1;
-        type Bytes = [u8; 1];
-        const ZERO: Self = Self(0);
-        const ONE: Self = Self(1);
-
-        fn add(self, other: Self) -> Self {
-            Self(self.0 ^ other.0)
-        }
-
-        fn mul(self, other: Self) -> Self {
-            let mut a = self.0;
-            let mut b = other.0;
-            let mut product = 0_u8;
-            for _ in 0..8 {
-                if b & 1 != 0 {
-                    product ^= a;
-                }
-                let high = a & 0x80;
-                a <<= 1;
-                if high != 0 {
-                    a ^= 0x1b; // low byte of x^8 + x^4 + x^3 + x + 1
-                }
-                b >>= 1;
-            }
-            Self(product)
-        }
-
-        fn bit(index: usize) -> Option<Self> {
-            (index < <Self as BinaryField>::BITS).then(|| Self(1_u8 << index))
-        }
-
-        fn from_u64(value: u64) -> Self {
-            Self(u8::try_from(value & 0xff).expect("masked to eight bits"))
-        }
-
-        fn to_le_bytes(self) -> Self::Bytes {
-            [self.0]
-        }
-
-        fn from_le_bytes(bytes: &[u8]) -> Option<Self> {
-            (bytes.len() == 1).then(|| Self(bytes[0]))
-        }
-    }
+    use crate::gf8::Gf8;
 
     fn gf8_poly_from_roots(roots: &[Gf8]) -> Vec<Gf8> {
         let mut poly = vec![Gf8::ONE];
@@ -1095,7 +1045,7 @@ mod tests {
 
     fn gf8_brute_force_roots(poly: &[Gf8]) -> Vec<Gf8> {
         (0..=u8::MAX)
-            .map(Gf8)
+            .map(Gf8::from_u8)
             .filter(|&point| gf8_eval(poly, point) == Gf8::ZERO)
             .collect()
     }
@@ -1112,7 +1062,7 @@ mod tests {
     #[test]
     fn gf8_inverse_round_trips() {
         for value in 1..=u8::MAX {
-            let value = Gf8(value);
+            let value = Gf8::from_u8(value);
             let inverse = value.inv().expect("non-zero");
             assert_eq!(value.mul(inverse), Gf8::ONE);
         }
@@ -1121,7 +1071,7 @@ mod tests {
     #[test]
     fn gf8_quadratic_solver_matches_trace() {
         for target in 0..=u8::MAX {
-            let target = Gf8(target);
+            let target = Gf8::from_u8(target);
             let mut trace = Gf8::ZERO;
             let mut power = target;
             for _ in 0..8 {
@@ -1142,10 +1092,15 @@ mod tests {
     fn gf8_root_finding_matches_brute_force() {
         let cases: &[&[Gf8]] = &[
             &[],
-            &[Gf8(1)],
-            &[Gf8(3), Gf8(5)],
-            &[Gf8(1), Gf8(2), Gf8(3)],
-            &[Gf8(1), Gf8(0x53), Gf8(0xa7), Gf8(0xff)],
+            &[Gf8::from_u8(1)],
+            &[Gf8::from_u8(3), Gf8::from_u8(5)],
+            &[Gf8::from_u8(1), Gf8::from_u8(2), Gf8::from_u8(3)],
+            &[
+                Gf8::from_u8(1),
+                Gf8::from_u8(0x53),
+                Gf8::from_u8(0xa7),
+                Gf8::from_u8(0xff),
+            ],
         ];
         for roots in cases {
             let poly = gf8_poly_from_roots(roots);
@@ -1154,8 +1109,8 @@ mod tests {
             let mut found = Vec::new();
             find_roots_with_model(poly, &mut found, &mut work, gf8_work_model())
                 .expect("GF(2^8) roots");
-            expected.sort_unstable_by_key(|root| root.0);
-            found.sort_unstable_by_key(|root| root.0);
+            expected.sort_unstable_by_key(|root| root.to_u8());
+            found.sort_unstable_by_key(|root| root.to_u8());
             assert_eq!(found, expected);
         }
     }
@@ -1497,7 +1452,9 @@ mod tests {
         }
         let mut state = 0x1234_5678_9abc_def1_u64;
         for degree in 2..=9 {
-            let modulus = random_monic(degree, &mut state, |v| Gf8((v & 0xff) as u8));
+            let modulus = random_monic(degree, &mut state, |v| {
+                Gf8::from_u8(u8::try_from(v & 0xff).expect("masked to eight bits"))
+            });
             assert_eq!(
                 build_frobenius_basis(&modulus).unwrap(),
                 build_frobenius_basis_by_division(&modulus).unwrap(),
