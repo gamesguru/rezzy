@@ -27,7 +27,10 @@ comparable while changing root structure. `worst_bucket_32` places 32 roots in
 one bucket and leaves the other 127 empty. Roots and sketches are generated
 before each decode; decoder construction, population setup, and sketch-building
 work are excluded. The work counter covers root finding/factoring, not
-Berlekamp–Massey locator preparation.
+Berlekamp–Massey locator preparation. When an over-capacity bucket fails during
+locator computation (such as locator degree exceeding capacity 32 or syndrome
+inconsistency), root factoring is never entered and factoring work is 0,
+explaining the 0-unit median in consecutive over-capacity scenarios.
 
 The full output is in `benches/bench-results.csv` under the `work_units`
 column. The run used `rustc 1.99.0` on `x86_64-unknown-linux-gnu`, against
@@ -91,17 +94,25 @@ These distributions have 100 batch samples each. `failed_work` is included in
 | consecutive | worst bucket 32 | failed | 0 | 0 | 0 | 0 |
 | consecutive | worst bucket 32 | total | 584,511 | 584,511 | 584,511 | 584,511 |
 
-## Budget proposal
+## Budget interpretation
 
-The largest successful per-bucket sample was 712,488 units. A **3,000,000-unit
-per-request default** is a candidate: 4.2× that observed maximum, and slightly
-above the 2,695,168-unit modeled cost of one full capacity-32 root-finding
-call. For 128 requests it gives a 384,000,000-unit shared batch budget. The
-largest observed total batch was 33,423,360 units, so this candidate leaves
-11.5× headroom over the measured maximum, including failed buckets.
+The largest successful per-bucket sample was 712,488 units; the largest batch
+sample was 33,423,360 units, including failed buckets. These observations are
+not a tail bound. For context, `single_call_work_ceiling(32)` is 2,695,168
+units: the model ceiling for one root-finding call at degree 32. It is not a
+bound on total recursive work for every valid bucket.
 
-This is an empirical operating default, not a worst-case guarantee. The
-300,000,000 per-sketch ceiling remains the hard limit; unusual recursive splits
-can exhaust a smaller default and cause a safe fallback. The measurement does
-not prove the recursion ceiling, and no budget behavior changes are part of the
-measurement commit.
+The current decoder takes one shared batch budget. It computes each bucket's
+allowance as `min(shared_remaining, 300,000,000)`. Therefore a shared budget of
+`128 × 2,695,168 = 344,981,504` does not enforce 2,695,168 units per bucket:
+early buckets can draw much more. If a bucket exhausts a sub-ceiling allowance,
+the current batch decoder returns `BudgetExhausted` for the batch instead of
+recording that bucket as failed. The full helper's `128 × 300,000,000` budget
+does give each request its full current allowance.
+
+No lower production batch budget is selected here. A per-bucket policy needs
+an API/behavior change to allocate and account for each request independently,
+plus an explicit decision whether sub-ceiling exhaustion should fail just that
+bucket for retry or abort the batch. Keep the 300,000,000 per-sketch ceiling
+and `MAX_BATCH_FACTOR_WORK` unchanged. These measurements do not prove the
+recursive work bound.

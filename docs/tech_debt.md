@@ -18,12 +18,14 @@ default for new callers; the existing GF(2^64) path remains available through
 [`gf256-batch-budget-calibration.md`](gf256-batch-budget-calibration.md) and
 `benches/bench-results.csv`. Across random and consecutive roots, the largest
 successful bucket used 712,488 units; the largest 128-bucket batch used
-33,423,360 units, including failed over-capacity buckets. A 3M-unit per-request
-budget is a candidate (4.2× the observed per-bucket max; 11.5× the observed
-batch max at 128 requests), not yet an applied production default. The samples
-are synthetic and do not prove the 300M per-sketch ceiling or cover pathological
-recursive splits. Keep the current ceilings and behavior unchanged in the
-measurement commit. The payload is also not wired into any transport or
+33,423,360 units, including failed over-capacity buckets. No lower production
+budget is selected. `single_call_work_ceiling(32)` is 2,695,168 units, but the
+decoder accepts a shared batch budget, not per-bucket allowances: a lower
+aggregate can let early buckets consume more than that amount, and sub-ceiling
+`BudgetExhausted` currently aborts the batch. A per-bucket default needs an API
+and retry-semantics decision first. The samples are synthetic and do not prove
+the 300M per-sketch ceiling or cover pathological recursive splits. Keep both
+ceilings unchanged. The payload is also not wired into any transport or
 advertised in a capability field. The
 lane-parallel `gf256_simd` MAC is selected at runtime when the CPU supports
 `avx512f` and `vpclmulqdq`; builds with Rust before 1.89, non-x86_64 targets, or
