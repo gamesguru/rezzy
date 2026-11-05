@@ -5,13 +5,13 @@
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 use std::io::Write as _;
 
-#[cfg(all(target_arch = "x86_64", has_avx512_support))]
+#[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
     __m512i, _mm512_and_si512, _mm512_bsrli_epi128, _mm512_clmulepi64_epi128, _mm512_set_epi64,
     _mm512_slli_epi64, _mm512_srli_epi64, _mm512_store_si512, _mm512_xor_si512,
 };
 
-#[cfg(all(target_arch = "x86_64", has_avx512_support))]
+#[cfg(target_arch = "x86_64")]
 #[repr(align(64))]
 struct AlignedArray([u64; 8]);
 
@@ -35,24 +35,22 @@ impl Gf64Evaluator for ScalarEvaluator {
     }
 }
 
-#[cfg(all(target_arch = "x86_64", has_avx512_support))]
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
 pub(crate) struct Avx512Evaluator;
 
-#[cfg(all(target_arch = "x86_64", has_avx512_support))]
+#[cfg(target_arch = "x86_64")]
 impl Gf64Evaluator for Avx512Evaluator {
-    #[allow(clippy::incompatible_msrv)]
-    #[cfg_attr(all(coverage_nightly, not(has_avx512_host_support)), coverage(off))]
+    #[cfg_attr(coverage_nightly, coverage(off))]
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
         // SAFETY: The dispatcher only selects this backend after runtime AVX-512 detection.
         unsafe { poly_mac_avx512(term, source, target) }
     }
 }
 
-#[cfg(all(target_arch = "x86_64", has_avx512_support))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
-#[allow(clippy::incompatible_msrv)]
-#[cfg_attr(all(coverage_nightly, not(has_avx512_host_support)), coverage(off))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 // SAFETY: Only called by `Avx512Evaluator::poly_mac`, which enforces CPU feature constraints.
 unsafe fn poly_mac_avx512(term: u64, source: &[u64], target: &mut [u64]) {
     assert_eq!(source.len(), target.len());
@@ -132,10 +130,9 @@ unsafe fn poly_mac_avx512(term: u64, source: &[u64], target: &mut [u64]) {
     }
 }
 
-#[allow(clippy::incompatible_msrv)]
-#[cfg(all(target_arch = "x86_64", has_avx512_support))]
+#[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
-#[cfg_attr(all(coverage_nightly, not(has_avx512_host_support)), coverage(off))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 // SAFETY: Only called by `Avx512Evaluator::poly_mac` which enforces CPU feature constraints.
 unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
     let product = _mm512_clmulepi64_epi128(a, b, 0x00);
@@ -187,8 +184,8 @@ pub enum EvaluatorBackend {
     #[cfg(target_arch = "x86_64")]
     /// `x86_64` evaluator.
     Sse,
-    #[cfg(all(target_arch = "x86_64", has_avx512_support))]
-    /// AVX-512 evaluator when supported by the compiler and CPU.
+    #[cfg(target_arch = "x86_64")]
+    /// AVX-512 evaluator when supported by the CPU.
     Avx512,
 }
 
@@ -232,7 +229,6 @@ const fn cached_evaluator(cached: u8, fallback: EvaluatorBackend) -> EvaluatorBa
     match cached {
         1 => EvaluatorBackend::Scalar,
         2 => EvaluatorBackend::Sse,
-        #[cfg(has_avx512_support)]
         3 => EvaluatorBackend::Avx512,
         _ => fallback,
     }
@@ -243,7 +239,6 @@ const fn encode_backend(backend: EvaluatorBackend) -> u8 {
     match backend {
         EvaluatorBackend::Scalar => 1,
         EvaluatorBackend::Sse => 2,
-        #[cfg(has_avx512_support)]
         EvaluatorBackend::Avx512 => 3,
     }
 }
@@ -314,7 +309,7 @@ fn get_dispatch_evaluator() -> EvaluatorBackend {
 /// evaluator backend without emitting diagnostic warnings to stderr.
 pub(crate) fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
     match get_dispatch_evaluator() {
-        #[cfg(all(target_arch = "x86_64", has_avx512_support))]
+        #[cfg(target_arch = "x86_64")]
         EvaluatorBackend::Avx512 => Avx512Evaluator::poly_mac(term, source, target),
         #[cfg(target_arch = "x86_64")]
         EvaluatorBackend::Sse => SseEvaluator::poly_mac(term, source, target),
@@ -329,32 +324,20 @@ fn get_evaluator_internal() -> EvaluatorBackend {
 }
 
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
-#[cfg_attr(all(coverage_nightly, not(has_avx512_host_support)), coverage(off))]
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn get_evaluator_features() -> (bool, bool) {
-    #[cfg(has_avx512_support)]
     let has_avx512 = std::is_x86_feature_detected!("avx512f")
         && std::is_x86_feature_detected!("avx512bw")
         && std::is_x86_feature_detected!("vpclmulqdq");
-    #[cfg(not(has_avx512_support))]
-    let has_avx512 = false;
     let has_pclmul = std::is_x86_feature_detected!("pclmulqdq");
     (has_avx512, has_pclmul)
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64", has_avx512_support))]
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 const fn select_evaluator_backend(has_avx512: bool, has_pclmul: bool) -> EvaluatorBackend {
     if has_avx512 {
         EvaluatorBackend::Avx512
     } else if has_pclmul {
-        EvaluatorBackend::Sse
-    } else {
-        EvaluatorBackend::Scalar
-    }
-}
-
-#[cfg(all(feature = "std", target_arch = "x86_64", not(has_avx512_support)))]
-const fn select_evaluator_backend(_has_avx512: bool, has_pclmul: bool) -> EvaluatorBackend {
-    if has_pclmul {
         EvaluatorBackend::Sse
     } else {
         EvaluatorBackend::Scalar
@@ -368,18 +351,7 @@ mod tests {
     use super::*;
     use alloc::{string::String, vec::Vec};
 
-    #[cfg(all(feature = "std", target_arch = "x86_64", not(has_avx512_support)))]
-    #[test]
-    fn select_evaluator_backend_prefers_sse_then_scalar() {
-        assert_eq!(select_evaluator_backend(true, true), EvaluatorBackend::Sse);
-        assert_eq!(select_evaluator_backend(false, true), EvaluatorBackend::Sse);
-        assert_eq!(
-            select_evaluator_backend(false, false),
-            EvaluatorBackend::Scalar
-        );
-    }
-
-    #[cfg(all(feature = "std", target_arch = "x86_64", has_avx512_support))]
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
     #[test]
     fn select_evaluator_backend_prefers_avx512_when_available() {
         assert_eq!(
@@ -418,7 +390,7 @@ mod tests {
             }
         }
 
-        #[cfg(all(target_arch = "x86_64", has_avx512_support))]
+        #[cfg(target_arch = "x86_64")]
         {
             if std::is_x86_feature_detected!("avx512f")
                 && std::is_x86_feature_detected!("avx512bw")
@@ -446,7 +418,6 @@ mod tests {
             cached_evaluator(255, EvaluatorBackend::Sse),
             EvaluatorBackend::Sse
         );
-        #[cfg(has_avx512_support)]
         assert_eq!(
             cached_evaluator(3, EvaluatorBackend::Scalar),
             EvaluatorBackend::Avx512
@@ -458,7 +429,6 @@ mod tests {
     fn evaluator_backends_encode_to_cache_values() {
         assert_eq!(encode_backend(EvaluatorBackend::Scalar), 1);
         assert_eq!(encode_backend(EvaluatorBackend::Sse), 2);
-        #[cfg(has_avx512_support)]
         assert_eq!(encode_backend(EvaluatorBackend::Avx512), 3);
     }
 
@@ -506,7 +476,7 @@ mod tests {
     /// it, so this test drives many random and top-nibble-heavy operands
     /// directly through `gf64_mul_x4_avx512` and checks each lane against
     /// the known-correct scalar `mul_bitwise` reference.
-    #[cfg(all(target_arch = "x86_64", has_avx512_support))]
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx512_mul_matches_scalar_for_high_bit_heavy_operands() {
         use core::arch::x86_64::{_mm512_set_epi64, _mm512_store_si512};

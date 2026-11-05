@@ -296,8 +296,6 @@ fn wide_cases(rng: &mut Rng) {
     }
 }
 
-/// Entry point for the bitmap comparison benchmark.
-
 /// Single-value mutation around the array threshold, matching the flag-update
 /// path during ingest. Measured after the first promotion, and with a fresh
 /// clone each time to include the one-off crossing cost.
@@ -342,6 +340,7 @@ fn mutation_boundary() {
     );
 }
 
+/// Entry point for the bitmap comparison benchmark.
 pub fn run() {
     println!("Bitmap vs roaring (ratio < 1 means Bitmap is faster)");
     mutation_boundary();

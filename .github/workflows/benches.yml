@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # benches/ is its own workspace (rust-version = 1.90, and its deps need
-      # 1.89+), while the root rust-toolchain.toml pins the 1.88 MSRV. A
+      # 1.89+), while the root rust-toolchain.toml pins the 1.89 MSRV. A
       # directory override beats `rustup default`, so the install step alone
       # is not enough: RUSTUP_TOOLCHAIN outranks it and pins this job to 1.90.
       RUSTUP_TOOLCHAIN: "1.90.0"

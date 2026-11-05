@@ -70,7 +70,7 @@ members = ["rezzy-cli", "rezzy-ffi", "rezzy-json", "rezzy-log", "rezzy-recon"]
 [workspace.package]
 version = "0.6.0-rc.1"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 authors = ["Shane Jaroch <chown_tee@proton.me>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/gamesguru/rezzy"
@@ -118,8 +118,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(tarpaulin)",
     "cfg(tarpaulin_include)",
     "cfg(has_res_submodule)",
-    "cfg(has_avx512_support)",
-    "cfg(has_avx512_host_support)",
 ] }
 [workspace.lints.rustdoc]
 all = "warn"
@@ -201,8 +199,6 @@ unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(tarpaulin)",
     "cfg(has_res_submodule)",
     "cfg(tarpaulin_include)",
-    "cfg(has_avx512_support)",
-    "cfg(has_avx512_host_support)",
 ] }
 
 [lints.clippy]

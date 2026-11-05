@@ -472,7 +472,7 @@ fn clmul128(a: [u64; 2], b: [u64; 2]) -> [u64; 4] {
     ]
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64", has_avx512_support))]
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 pub(crate) fn reduce_limbs(limbs: [u64; 8]) -> Gf256 {
     Gf256(reduce(Wide(limbs)))
 }
@@ -574,7 +574,7 @@ impl BinaryField for Gf256 {
 
     /// Dispatches to the lane-parallel backend when it is compiled in and the
     /// CPU supports AVX-512 VPCLMULQDQ; otherwise uses the scalar fallback.
-    /// Rust 1.88 and non-x86_64/`no_std` builds do not compile the vector path.
+    /// Non-x86_64/`no_std` builds do not compile the vector path.
     fn mac(term: Self, source: &[Self], target: &mut [Self]) {
         crate::gf256_simd::poly_mac(term, source, target);
     }

@@ -11,10 +11,9 @@
 //! vector carry-less multiply computes the same schoolbook product for four
 //! coefficients. Reduction remains scalar per coefficient.
 //!
-//! The vector backend is compiled only when `has_avx512_support` is set
-//! (`std`, `x86_64`, and Rust 1.89 or newer) and is selected at runtime when
-//! the CPU reports `avx512f` and `vpclmulqdq`. Older toolchains and other
-//! targets use the scalar fallback.
+//! The vector backend is compiled for `std` on `x86_64` and is selected at
+//! runtime when the CPU reports `avx512f` and `vpclmulqdq`. Other targets and
+//! `no_std` builds use the scalar fallback.
 
 #![allow(unsafe_code)]
 
@@ -23,14 +22,10 @@ use crate::gf256::Gf256;
 
 /// `target[i] ^= term * source[i]`, with a lane-parallel backend when
 /// available.
-#[cfg_attr(
-    all(feature = "std", target_arch = "x86_64", has_avx512_support),
-    allow(clippy::incompatible_msrv)
-)]
 pub(crate) fn poly_mac(term: Gf256, source: &[Gf256], target: &mut [Gf256]) {
     debug_assert_eq!(source.len(), target.len());
 
-    #[cfg(all(feature = "std", target_arch = "x86_64", has_avx512_support))]
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
     if std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("vpclmulqdq") {
         // SAFETY: the runtime checks above prove both required feature sets.
         unsafe { poly_mac_avx512(term, source, target) };
@@ -46,9 +41,9 @@ fn scalar_poly_mac(term: Gf256, source: &[Gf256], target: &mut [Gf256]) {
     }
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64", has_avx512_support))]
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,vpclmulqdq")]
-#[allow(clippy::arithmetic_side_effects, clippy::incompatible_msrv)]
+#[allow(clippy::arithmetic_side_effects)]
 unsafe fn poly_mac_avx512(term: Gf256, source: &[Gf256], target: &mut [Gf256]) {
     use core::arch::x86_64::{_mm512_clmulepi64_epi128, _mm512_storeu_si512};
 
@@ -110,16 +105,14 @@ unsafe fn poly_mac_avx512(term: Gf256, source: &[Gf256], target: &mut [Gf256]) {
     }
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64", has_avx512_support))]
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
-#[allow(clippy::incompatible_msrv)]
 fn broadcast(value: u64) -> core::arch::x86_64::__m512i {
     pack([value; 4])
 }
 
-#[cfg(all(feature = "std", target_arch = "x86_64", has_avx512_support))]
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f")]
-#[allow(clippy::incompatible_msrv)]
 fn pack(values: [u64; 4]) -> core::arch::x86_64::__m512i {
     use core::arch::x86_64::_mm512_set_epi64;
 
@@ -174,7 +167,7 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    #[cfg(all(feature = "std", target_arch = "x86_64", has_avx512_support))]
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
     #[test]
     fn lane_parallel_mac_matches_scalar() {
         if !std::is_x86_feature_detected!("avx512f") || !std::is_x86_feature_detected!("vpclmulqdq")

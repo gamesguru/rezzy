@@ -105,11 +105,11 @@ bound on total recursive work for every valid bucket.
 The decoder takes one shared batch budget. If it is less than the sum of the
 remaining per-request ceilings, the current allowance is divided evenly among
 the requests still requiring decode; unused work rolls forward. This reduces
-request-order starvation, but is not a strict per-bucket cap: later requests
-can receive rolled-over work. A bucket that exhausts its share is recorded as
-failed while other buckets continue; the caller can retry or split failed
-buckets with a fresh allowance. The full helper's `128 × 300,000,000` budget
-gives every request its full current allowance.
+request-order starvation, but is not a strict per-bucket cap: later requests can
+receive rolled-over work. A bucket that exhausts its share is recorded as failed
+while other buckets continue; the caller can retry or split failed buckets with
+a fresh allowance. The full helper's `128 × 300,000,000` budget gives every
+request its full current allowance.
 
 No lower production batch budget is selected here. Enforcing a hard per-bucket
 cap would still require separate per-request accounting; the shared fair-share

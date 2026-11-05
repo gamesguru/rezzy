@@ -24,16 +24,15 @@ budget is selected. `single_call_work_ceiling(32)` is 2,695,168 units. Under a
 constrained shared budget, active requests receive an equal initial share and
 unused work rolls forward; this is not a hard per-bucket cap. Sub-ceiling
 `BudgetExhausted` is a failed bucket (retry/split), not a batch abort. A lower
-default still needs an explicit hard-cap versus rollover policy. The samples
-are synthetic and do not prove
-the 300M per-sketch ceiling or cover pathological recursive splits. Keep both
-ceilings unchanged. The payload is also not wired into any transport or
-advertised in a capability field. The lane-parallel `gf256_simd` MAC is selected
-at runtime when the CPU supports `avx512f` and `vpclmulqdq`; builds with Rust
-before 1.89, non-x86_64 targets, or `no_std` use the scalar path. It still needs
-throughput measurement on AVX-512 hardware. `benches/bench-results.csv` still
-contains no GF(2^256) wall-clock metrics; the separate calibration document
-records work units, not timings.
+default still needs an explicit hard-cap versus rollover policy. The samples are
+synthetic and do not prove the 300M per-sketch ceiling or cover pathological
+recursive splits. Keep both ceilings unchanged. The payload is also not wired
+into any transport or advertised in a capability field. The lane-parallel
+`gf256_simd` MAC is selected at runtime when the CPU supports `avx512f` and
+`vpclmulqdq`; non-x86_64 targets and `no_std` builds use the scalar path. It
+still needs throughput measurement on AVX-512 hardware.
+`benches/bench-results.csv` still contains no GF(2^256) wall-clock metrics; the
+separate calibration document records work units, not timings.
 
 ### Dense-index (`id_to_index`/`index_to_id`) pattern reimplemented 5+ times independently
 
