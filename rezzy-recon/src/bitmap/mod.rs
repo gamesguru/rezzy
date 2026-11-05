@@ -28,9 +28,9 @@ use core::ops::{BitAnd, BitAndAssign, BitOr, BitOrAssign, Sub, SubAssign};
 pub const BITMAP_MAGIC: [u8; 4] = *b"RBMP";
 /// Version of the [`Bitmap`] wire format.
 ///
-/// Run containers are chunk kind 2 within version 1; adding a container kind
-/// does not change the envelope version. Version 1 has not been released, so
-/// the format is iterated in place instead of introducing a version 2.
+/// Version 1 has two chunk kinds: a sorted array and a bitset. Run containers
+/// exist only in memory; they are materialized as arrays or bitsets at
+/// `encode`, so the wire format is unchanged.
 pub const BITMAP_FORMAT_VERSION: u8 = 1;
 
 /// Errors returned by [`Bitmap::decode`].
@@ -78,7 +78,6 @@ mod chunk;
 mod run;
 
 use self::chunk::{Chunk, Store};
-use self::run::Run;
 fn empty_words() -> Words {
     Box::new([0u64; WORDS])
 }
@@ -257,7 +256,7 @@ impl Bitmap {
         );
         for chunk in &self.chunks {
             out.extend_from_slice(&chunk.key.to_le_bytes());
-            match chunk.canonical_store() {
+            match chunk.encode_store() {
                 Store::Array(values) => {
                     out.push(0);
                     out.extend_from_slice(&chunk.len.to_le_bytes());
@@ -272,19 +271,7 @@ impl Bitmap {
                         out.extend_from_slice(&word.to_le_bytes());
                     }
                 }
-                Store::Run(runs) => {
-                    out.push(2);
-                    out.extend_from_slice(&chunk.len.to_le_bytes());
-                    out.extend_from_slice(
-                        &u16::try_from(runs.len())
-                            .expect("bitmap run count fits u16")
-                            .to_le_bytes(),
-                    );
-                    for run in &runs {
-                        out.extend_from_slice(&run.start.to_le_bytes());
-                        out.extend_from_slice(&run.len_minus_one.to_le_bytes());
-                    }
-                }
+                Store::Run(_) => unreachable!("encode_store never yields a run container"),
             }
         }
         out
@@ -293,8 +280,9 @@ impl Bitmap {
     /// Decodes a bitmap produced by [`Bitmap::encode`].
     ///
     /// The decoder validates ordering, lengths, cardinalities and trailing
-    /// bytes. Array and bitset chunks written before runs existed are accepted
-    /// and canonicalized; run chunks must already be canonical.
+    /// bytes. Only array and bitset chunks are accepted: the wire format has no
+    /// run chunk kind. Both kinds are canonicalized to the smallest in-memory
+    /// container, which may be a run.
     ///
     /// # Errors
     /// Returns [`BitmapDecodeError`] when the input is truncated, uses an
@@ -507,27 +495,6 @@ fn decode_chunk(
                 return Err(BitmapDecodeError::NonCanonical);
             }
             Chunk::from_counted_words(key, words, len).ok_or(BitmapDecodeError::NonCanonical)
-        }
-        2 => {
-            let run_count = usize::from(read_u16(input)?);
-            let raw = take(
-                input,
-                run_count
-                    .checked_mul(4)
-                    .ok_or(BitmapDecodeError::Truncated)?,
-            )?;
-            let mut runs = Vec::with_capacity(run_count);
-            for pair in raw.chunks_exact(4) {
-                runs.push(Run {
-                    start: u16::from_le_bytes([pair[0], pair[1]]),
-                    len_minus_one: u16::from_le_bytes([pair[2], pair[3]]),
-                });
-            }
-            let chunk = Chunk::from_runs(key, runs).ok_or(BitmapDecodeError::NonCanonical)?;
-            if chunk.len != len {
-                return Err(BitmapDecodeError::NonCanonical);
-            }
-            Ok(chunk)
         }
         other => Err(BitmapDecodeError::InvalidChunkKind(other)),
     }
@@ -765,7 +732,7 @@ impl Sub for Bitmap {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(super) mod tests {
-    use super::chunk::{count_runs_store, pick_kind, Kind};
+    use super::chunk::count_runs_store;
     use super::*;
     use std::collections::BTreeSet;
 
@@ -797,15 +764,18 @@ pub(super) mod tests {
         for chunk in &bitmap.chunks {
             assert_ne!(chunk.len, 0);
             assert_eq!(chunk.runs as usize, count_runs_store(&chunk.store));
-            let canonical = chunk.canonical_store();
-            assert!(
-                match pick_kind(chunk.len as usize, chunk.runs as usize) {
-                    Kind::Array => matches!(canonical, Store::Array(_)),
-                    Kind::Dense => matches!(canonical, Store::Dense(_)),
-                    Kind::Run => matches!(canonical, Store::Run(_)),
-                },
-                "encode must pick the canonical container kind"
-            );
+            let encoded = chunk.encode_store();
+            if chunk.len as usize <= ARRAY_MAX {
+                assert!(
+                    matches!(encoded, Store::Array(_)),
+                    "encode must write a sorted array for sparse chunks"
+                );
+            } else {
+                assert!(
+                    matches!(encoded, Store::Dense(_)),
+                    "encode must write a bitset for dense chunks"
+                );
+            }
         }
     }
 
@@ -1200,10 +1170,9 @@ pub(super) mod tests {
         let set: BTreeSet<u32> = (0..1000u32).chain(2000..3000).chain([5000]).collect();
         check(&bitmap, &set);
         let encoded = bitmap.encode();
-        assert!(
-            encoded.len() < 100,
-            "run encoding should be compact, got {} bytes",
-            encoded.len()
+        assert_eq!(
+            encoded[11], 0,
+            "runs must serialize through the sorted-array kind"
         );
         let decoded = Bitmap::decode(&encoded).unwrap();
         assert!(
@@ -1211,7 +1180,7 @@ pub(super) mod tests {
                 .chunks
                 .iter()
                 .all(|chunk| matches!(chunk.store, Store::Run(_))),
-            "decode must materialize the canonical run container"
+            "an array payload canonicalizes to the in-memory run container"
         );
         assert_eq!(decoded, bitmap);
     }
@@ -1263,42 +1232,32 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn full_chunk_run_encodes_compactly() {
+    fn full_chunk_stays_a_bitset_on_the_wire() {
         let all: Bitmap = (0..65_536u32).collect();
         assert!(matches!(all.chunks[0].store, Store::Run(_)));
         let encoded = all.encode();
-        assert!(
-            encoded.len() < 32,
-            "full chunk encoded to {} bytes",
-            encoded.len()
+        assert_eq!(
+            encoded[11], 1,
+            "dense payload uses the bitset kind, not a run kind"
         );
         assert_eq!(Bitmap::decode(&encoded).unwrap(), all);
     }
 
     #[test]
-    fn decode_rejects_noncanonical_run_rows() {
-        let mut adjacent = Vec::new();
-        adjacent.extend_from_slice(&BITMAP_MAGIC);
-        adjacent.push(BITMAP_FORMAT_VERSION);
-        adjacent.extend_from_slice(&1u32.to_le_bytes());
-        adjacent.extend_from_slice(&0u16.to_le_bytes());
-        adjacent.push(2);
-        adjacent.extend_from_slice(&4u32.to_le_bytes());
-        adjacent.extend_from_slice(&2u16.to_le_bytes());
-        adjacent.extend_from_slice(&0u16.to_le_bytes());
-        adjacent.extend_from_slice(&1u16.to_le_bytes());
-        adjacent.extend_from_slice(&2u16.to_le_bytes());
-        adjacent.extend_from_slice(&1u16.to_le_bytes());
+    fn decode_rejects_run_chunk_kind() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&BITMAP_MAGIC);
+        bytes.push(BITMAP_FORMAT_VERSION);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.push(2);
+        bytes.extend_from_slice(&3u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
         assert_eq!(
-            Bitmap::decode(&adjacent),
-            Err(BitmapDecodeError::NonCanonical)
-        );
-
-        let mut wrong_len = run_bitmap().encode();
-        wrong_len[12..16].copy_from_slice(&99u32.to_le_bytes());
-        assert_eq!(
-            Bitmap::decode(&wrong_len),
-            Err(BitmapDecodeError::NonCanonical)
+            Bitmap::decode(&bytes),
+            Err(BitmapDecodeError::InvalidChunkKind(2))
         );
     }
 
@@ -1337,10 +1296,11 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn run_chunks_are_version_one_and_round_trip() {
+    fn run_containers_stay_off_the_wire() {
         let bitmap = run_bitmap();
         let encoded = bitmap.encode();
-        assert_eq!(encoded[4], 1, "run containers stay in wire version 1");
+        assert_eq!(encoded[4], 1, "wire version stays 1");
+        assert_eq!(encoded[11], 0, "runs serialize as arrays, not chunk kind 2");
         assert_eq!(Bitmap::decode(&encoded).unwrap(), bitmap);
     }
 

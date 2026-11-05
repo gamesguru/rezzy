@@ -282,47 +282,15 @@ impl Chunk {
         })
     }
 
-    /// Validates and builds a canonical run chunk. Returns `None` when the
-    /// ranges are empty, unordered, overlapping, adjacent or non-canonical.
-    pub(super) fn from_runs(key: u16, runs: Vec<Run>) -> Option<Self> {
-        if runs.is_empty() {
-            return None;
-        }
-        let mut len = 0usize;
-        let mut previous_end = 0u32;
-        for (index, run) in runs.iter().enumerate() {
-            let start = u32::from(run.start);
-            if index != 0 && start <= previous_end {
-                return None;
-            }
-            let end = run.end();
-            if end > 65_536 {
-                return None;
-            }
-            len = len
-                .checked_add(run.len())
-                .expect("bitmap chunk length fits usize");
-            previous_end = end;
-        }
-        if pick_kind(len, runs.len()) != Kind::Run {
-            return None;
-        }
-        Some(Self {
-            key,
-            len: u32::try_from(len).expect("bitmap chunk length fits u32"),
-            runs: u32::try_from(runs.len()).expect("bitmap run count fits u32"),
-            store: Store::Run(runs),
-        })
-    }
-
-    /// The representation that `encode` must write: the smallest of the three.
-    pub(super) fn canonical_store(&self) -> Store {
+    /// The representation that `encode` must write. Run containers stay in
+    /// memory, but the wire format has no run chunk kind, so runs are
+    /// materialized as the smaller of an array and a bitset.
+    pub(super) fn encode_store(&self) -> Store {
         let len = usize::try_from(self.len).expect("bitmap length fits usize");
-        let runs = usize::try_from(self.runs).expect("bitmap run count fits usize");
-        match pick_kind(len, runs) {
-            Kind::Array => Store::Array(self.values()),
-            Kind::Dense => Store::Dense(self.words()),
-            Kind::Run => Store::Run(self.runs_vec()),
+        if len <= ARRAY_MAX {
+            Store::Array(self.values())
+        } else {
+            Store::Dense(self.words())
         }
     }
 
