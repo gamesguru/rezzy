@@ -692,7 +692,9 @@ fn parse_conduwuit_keypair(hex: &str) -> Result<SigningKeySpec, String> {
         })
         .ok_or("conduwuit keypair has no ASCII key version")?;
     let malformed = "conduwuit keypair is not a PKCS#8 Ed25519 private key";
-    let rest = bytes[split + 1..]
+    let rest = bytes
+        .get(split.saturating_add(1)..)
+        .ok_or(malformed)?
         .strip_prefix(&PKCS8_ED25519_PREFIX)
         .ok_or(malformed)?;
     // seed, then the `[1]` public-key field `81 21 00 <pub>`, and nothing after.
@@ -2489,6 +2491,8 @@ fn write_frontier_checkpoint(path: &Path, frontier: &[String]) -> Result<(), App
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::{
         domain_env_suffix, parse_signing_key, AppError, ErrorCode, FetchFailures, SigningKey,
         VerificationKey, PKCS8_ED25519_PREFIX,
@@ -2561,7 +2565,10 @@ mod tests {
         bytes.extend_from_slice(&<[u8; 32]>::from(VerificationKey::from(&SigningKey::from(
             seed,
         ))));
-        let digits: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let mut digits = String::with_capacity(bytes.len().saturating_mul(2));
+        for byte in bytes {
+            write!(digits, "{byte:02x}").expect("writing to a String cannot fail");
+        }
         format!("0x{digits}")
     }
 
@@ -2592,7 +2599,7 @@ mod tests {
         wrong.replace_range(dump.len() - 2.., "00");
         assert!(parse_signing_key(&wrong).is_err());
         // The DER sequence declares 81 content bytes; reject a different length.
-        let mut wrong_length = dump.clone();
+        let mut wrong_length = dump;
         wrong_length.replace_range(2 + 9 * 2 + 2..2 + 9 * 2 + 4, "00");
         assert!(parse_signing_key(&wrong_length).is_err());
     }
