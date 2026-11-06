@@ -241,18 +241,7 @@ impl Fixture {
         }
         fs::write(dir.join("base.jsonl"), lines.join("\n") + "\n").unwrap();
         fs::write(dir.join("key.plain"), format!("{KEY_LINE}\n")).unwrap();
-        let encrypted = ENCRYPTED_KEY.get_or_init(|| {
-            let out = Command::new(env!("CARGO_BIN_EXE_rezzy"))
-                .env("REZZY_KEY_PASSPHRASE", "test")
-                .args(["federation", "encrypt-key", "-i"])
-                .arg(dir.join("key.plain"))
-                .arg("-o")
-                .arg(dir.join("key.enc"))
-                .output()
-                .unwrap();
-            assert!(out.status.success(), "encrypt-key failed: {out:?}");
-            fs::read(dir.join("key.enc")).unwrap()
-        });
+        let encrypted = ENCRYPTED_KEY.get_or_init(|| fast_encrypted_key(KEY_LINE.as_bytes()));
         fs::write(dir.join("key.enc"), encrypted).unwrap();
         Self { dir }
     }
@@ -1322,4 +1311,44 @@ fn state_diff_rejects_a_room_without_the_sigil_before_any_request() {
     let fx = Fixture::new("sd-bad-room");
     let out = fx.state_diff(&[&a.url], "clearR", &[]);
     assert_rejects_room_without_sigil(&out, &a);
+}
+
+/// Builds a key file in the production layout (see `keyfile.rs`) with minimal
+/// Argon2 cost. `open` accepts any parameters within its upper bounds, so the
+/// many short-lived CLI processes in these tests skip the 64 MiB derivation
+/// without any test hook in production code.
+fn fast_encrypted_key(plaintext: &[u8]) -> Vec<u8> {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    use chacha20poly1305::{
+        aead::{Aead, Payload},
+        KeyInit, XChaCha20Poly1305, XNonce,
+    };
+    let (m, t, p) = (8u32, 1u32, 1u32);
+    let salt = [7u8; 16];
+    let nonce = [9u8; 24];
+    let mut header = b"REZKEY\x00\x01".to_vec();
+    for v in [m, t, p] {
+        header.extend_from_slice(&v.to_be_bytes());
+    }
+    header.extend_from_slice(&salt);
+    header.extend_from_slice(&nonce);
+    let mut key = [0u8; 32];
+    Argon2::new(
+        Algorithm::Argon2id,
+        Version::V0x13,
+        Params::new(m, t, p, Some(32)).unwrap(),
+    )
+    .hash_password_into(b"test", &salt, &mut key)
+    .unwrap();
+    let ct = XChaCha20Poly1305::new((&key).into())
+        .encrypt(
+            &XNonce::from(nonce),
+            Payload {
+                msg: plaintext,
+                aad: &header,
+            },
+        )
+        .unwrap();
+    header.extend_from_slice(&ct);
+    header
 }
