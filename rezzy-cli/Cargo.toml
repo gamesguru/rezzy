@@ -46,9 +46,5 @@ rpassword = { workspace = true, optional = true }
 sha2.workspace = true
 ureq.workspace = true
 
-[dev-dependencies]
-argon2.workspace = true
-chacha20poly1305.workspace = true
-
 [lints]
 workspace = true

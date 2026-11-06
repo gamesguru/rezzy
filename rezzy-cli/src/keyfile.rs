@@ -35,7 +35,16 @@ fn derive(passphrase: &[u8], salt: &[u8], m: u32, t: u32, p: u32) -> Result<[u8;
     Ok(key)
 }
 
-fn seal_with(
+/// Encrypt `plaintext` with explicit Argon2id costs `(m_cost KiB, t_cost, lanes)`.
+///
+/// The CLI never calls this directly: `encrypt-key` goes through [`seal`], which
+/// is pinned to the production costs. This exists so tests can create key files
+/// cheaply through the real sealing code. A key sealed with low costs is weak
+/// against offline guessing, so do not use this for real keys.
+///
+/// # Errors
+/// Returns an error if the costs are rejected, or the RNG, KDF, or cipher fails.
+pub fn seal_with(
     plaintext: &[u8],
     passphrase: &[u8],
     (m, t, p): (u32, u32, u32),
