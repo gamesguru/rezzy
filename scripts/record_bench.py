@@ -37,12 +37,14 @@ def extract_work_units(path: str) -> dict[str, str]:
     work_units: dict[str, str] = {}
     with open(path, newline="", encoding="utf-8", errors="replace") as stream:
         reader = csv.reader(stream)
-        header = next(reader, [])
         expected = ["pattern", "scenario", "scope", "outcome", "samples"]
-        if header[: len(expected)] != expected:
+        # `cargo test --nocapture` writes status lines before the CSV header.
+        for header in reader:
+            if header[: len(expected)] == expected:
+                break
+        else:
             raise SystemExit(
-                f"{path}: unexpected calibration header {header}; "
-                f"expected {expected} prefix"
+                f"{path}: no calibration header with prefix {expected} found"
             )
         for row in reader:
             if len(row) < 9 or row[0].startswith("#"):
@@ -52,7 +54,10 @@ def extract_work_units(path: str) -> dict[str, str]:
                 f"gf256_work/{pattern}/{scenario}/{scope}/{outcome}/samples={samples}"
             )
             for label, value in zip(("p50", "p95", "p99", "max"), row[5:9]):
-                work_units[f"{base}/{label}"] = value
+                key = f"{base}/{label}"
+                if key in work_units:
+                    raise SystemExit(f"{path}: duplicate calibration key {key}")
+                work_units[key] = value
     return work_units
 
 

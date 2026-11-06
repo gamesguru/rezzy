@@ -4,10 +4,10 @@
 //! needs: each value is split into a high 16-bit key and a low 16-bit offset,
 //! and values sharing a key live in one container. A container is a sorted
 //! `u16` array, a fixed 8 KiB bitset, or a list of `(start, length - 1)` runs.
-//! There is no SIMD; the representation is canonical (each container uses the
-//! smallest of its three encodings, with ties preferring arrays and bitsets,
-//! and empty containers are dropped). `==` compares contents and ignores
-//! container kind.
+//! There is no SIMD. In memory a container is never demoted after growing,
+//! so the representation is not canonical; `==` compares contents and ignores
+//! container kind. `encode` writes each non-empty chunk as a sorted array or a
+//! bitset, whichever is smaller (runs are expanded), and drops empty chunks.
 //!
 //! Container storage lives in `chunk.rs` and the run representation in
 //! `run.rs`.

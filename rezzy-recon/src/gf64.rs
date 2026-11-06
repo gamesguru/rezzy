@@ -128,7 +128,7 @@ pub fn mul(left: u64, right: u64) -> u64 {
 
 #[must_use]
 #[cfg(not(all(feature = "std", any(target_arch = "x86", target_arch = "x86_64"))))]
-/// Multiplies two elements of GF(2^64) (no_std fallback build).
+/// Multiplies two elements of GF(2^64) using the portable bitwise fallback.
 pub fn mul(left: u64, right: u64) -> u64 {
     mul_bitwise(left, right)
 }

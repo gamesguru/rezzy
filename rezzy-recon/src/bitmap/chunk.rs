@@ -408,6 +408,9 @@ impl Chunk {
             (Store::Array(a), Store::Array(b)) => a.iter().all(|x| b.binary_search(x).is_ok()),
             (Store::Array(a), Store::Dense(b)) => a.iter().all(|&x| test_bit(b, x)),
             (Store::Dense(a), Store::Array(b)) => {
+                if self.len as usize > b.len() {
+                    return false;
+                }
                 // Dense chunks are never demoted, so one can hold few enough
                 // values to be a subset of an array.
                 words_to_array(a).iter().all(|x| b.binary_search(x).is_ok())
