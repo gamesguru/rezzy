@@ -1113,7 +1113,7 @@ mod tests {
 {"event_id":"$name_bob","type":"m.room.name","state_key":"","sender":"@bob:b.com","depth":6,"origin_server_ts":1700,"content":{"name":"bob"},"prev_events":["$pl_diff"],"auth_events":["$create","$bob_join","$pl_diff"]}
 "#,
         );
-        let mut state_alice: ResolvedState = [
+        let state_alice: ResolvedState = [
             ((EventType::from("m.room.create"), String::new()), "$create"),
             (
                 (EventType::from("m.room.member"), "@alice:a.com".into()),

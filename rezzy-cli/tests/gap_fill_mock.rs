@@ -12,7 +12,6 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Command, Output};
-use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -27,10 +26,13 @@ const PDU: &str = r#"{"auth_events":["$sbusQdJu8vp4mYghGgIdFrz9K_UbSNVmVr3UBxLM2
 /// 32 bytes (0..31), base64 without padding: a valid, throwaway ed25519 seed.
 const KEY_LINE: &str = "ed25519 test AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
 
-// All subprocesses can share the same encrypted test key. The key is created
-// once per test binary rather than paying the production-strength Argon2 cost
-// for every fixture.
-static ENCRYPTED_KEY: OnceLock<Vec<u8>> = OnceLock::new();
+/// A throwaway key sealed with deliberately low Argon2 costs `(m=8, t=1, p=1)`.
+///
+/// Every `rezzy` subprocess decrypts this file, so using the production 64 MiB
+/// KDF here made each test pay a full interactive-strength derivation. `open`
+/// already accepts these header-declared costs, and the plaintext is only the
+/// throwaway `KEY_LINE` above.
+const ENCRYPTED_KEY: &[u8] = include_bytes!("fixtures/key-lowcost.enc");
 
 #[derive(Clone, Copy)]
 enum Backfill {
@@ -241,8 +243,7 @@ impl Fixture {
         }
         fs::write(dir.join("base.jsonl"), lines.join("\n") + "\n").unwrap();
         fs::write(dir.join("key.plain"), format!("{KEY_LINE}\n")).unwrap();
-        let encrypted = ENCRYPTED_KEY.get_or_init(encrypted_key);
-        fs::write(dir.join("key.enc"), encrypted).unwrap();
+        fs::write(dir.join("key.enc"), ENCRYPTED_KEY).unwrap();
         Self { dir }
     }
 
@@ -1313,9 +1314,4 @@ fn state_diff_rejects_a_room_without_the_sigil_before_any_request() {
     assert_rejects_room_without_sigil(&out, &a);
 }
 
-/// Seals the test key once through the production `keyfile::seal` path. The
-/// result is cached, so the 64 MiB KDF runs once per test binary rather than
-/// once per fixture.
-fn encrypted_key() -> Vec<u8> {
-    rezzy_cli::keyfile::seal(format!("{KEY_LINE}\n").as_bytes(), b"test").unwrap()
-}
+
