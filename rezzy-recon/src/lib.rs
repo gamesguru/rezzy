@@ -26,6 +26,7 @@ mod gf256_simd;
 pub mod gf64;
 pub mod gf64_simd;
 pub mod gf8;
+pub mod incremental;
 mod pinsketch;
 pub mod reed_solomon;
 pub mod resident;

@@ -1704,9 +1704,11 @@ mod tests {
                             sketch.toggle(*root).unwrap();
                         }
 
-                        let allowance = remaining_batch
-                            .min(u64::try_from(per_bucket_allowance).expect("fits u64"))
-                            as usize;
+                        let allowance = usize::try_from(
+                            remaining_batch
+                                .min(u64::try_from(per_bucket_allowance).expect("fits u64")),
+                        )
+                        .expect("batch allowance fits usize");
                         let mut remaining_bucket = allowance;
                         let decoded = decoder.decode_with_budget(
                             sketch.coordinates(),

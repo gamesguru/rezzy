@@ -1,5 +1,6 @@
 use crate::utils;
 
+use rezzy::state::lthash::FromState;
 use rezzy::{verify_pagination, EventType, LeanEvent, PaginationViolation, StateResVersion};
 use std::collections::HashMap;
 

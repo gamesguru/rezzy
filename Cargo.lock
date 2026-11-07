@@ -650,6 +650,7 @@ name = "rezzy-recon"
 version = "0.6.0-rc.1"
 dependencies = [
  "base64",
+ "blake3",
  "rezzy-log",
  "sha2",
 ]

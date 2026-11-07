@@ -289,13 +289,13 @@ impl<const LANES: usize> LtLattice<LANES> {
 
     /// Borrow the raw lanes.
     #[must_use]
-    pub fn lattice(&self) -> &[u16; LANES] {
+    pub const fn lattice(&self) -> &[u16; LANES] {
         &self.0
     }
 
     /// Consume the accumulator and return its raw lanes.
     #[must_use]
-    pub fn into_lattice(self) -> [u16; LANES] {
+    pub const fn into_lattice(self) -> [u16; LANES] {
         self.0
     }
 

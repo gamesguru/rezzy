@@ -68,12 +68,11 @@
 //!
 //! This module has no dependency on room state. The MSC4500 domain layers
 //! (`RedactionOverlay`, `ResolutionInputs`, `PduLtHash`) and `from_state`
-//! live in [`crate::state::lthash`].
+//! live in the `rezzy` crate's `state::lthash` module.
 
 mod encoding;
 mod lattice;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use self::encoding::{seed_lattice, truncate_to_u16_limit};
 pub use self::lattice::{LtHash, LtLattice, WrongLatticeLength};

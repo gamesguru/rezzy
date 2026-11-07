@@ -2831,6 +2831,7 @@ mod tests {
     use crate::auth::StateProvider;
     use crate::basespec::event_types::M_ROOM_POWER_LEVELS;
     use crate::json;
+    use crate::state::lthash::FromState;
     use alloc::string::ToString;
     use alloc::vec;
     use std::collections::BTreeSet;

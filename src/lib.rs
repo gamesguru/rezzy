@@ -81,7 +81,7 @@ pub mod dense_index;
 #[cfg(feature = "std")]
 pub mod event_report;
 pub mod hamt;
-pub mod incremental;
+pub use rezzy_recon::incremental;
 pub mod merkle;
 pub mod raw_event;
 pub mod resolve;
