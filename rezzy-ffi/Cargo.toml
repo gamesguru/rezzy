@@ -10,6 +10,8 @@ description = "C ABI for rezzy event hashing, for cgo, ctypes and other FFI call
 keywords = ["matrix", "state-resolution", "ffi", "c-abi"]
 categories = ["api-bindings", "development-tools::ffi"]
 
+exclude = ["examples/"]
+
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
