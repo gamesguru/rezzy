@@ -619,6 +619,7 @@ dependencies = [
  "getrandom 0.4.3",
  "mimalloc",
  "rezzy",
+ "rezzy-cli",
  "rpassword",
  "sha2",
  "ureq",

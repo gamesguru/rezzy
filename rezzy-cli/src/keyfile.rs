@@ -37,14 +37,26 @@ fn derive(passphrase: &[u8], salt: &[u8], m: u32, t: u32, p: u32) -> Result<[u8;
 
 /// Encrypt `plaintext` with explicit Argon2id costs `(m_cost KiB, t_cost, lanes)`.
 ///
-/// The CLI never calls this directly: `encrypt-key` goes through [`seal`], which
-/// is pinned to the production costs. This exists so tests can create key files
-/// cheaply through the real sealing code. A key sealed with low costs is weak
-/// against offline guessing, so do not use this for real keys.
+/// Only compiled for this crate's own tests or with the non-default
+/// `insecure-test-kdf` feature, so shipped builds cannot write low-cost key
+/// files. `encrypt-key` goes through [`seal`], pinned to the production costs.
+/// The costs must be within the bounds `open` accepts.
 ///
 /// # Errors
-/// Returns an error if the costs are rejected, or the RNG, KDF, or cipher fails.
+/// Returns an error if the costs are out of bounds, or the RNG, KDF, or cipher fails.
+#[cfg(any(test, feature = "insecure-test-kdf"))]
 pub fn seal_with(
+    plaintext: &[u8],
+    passphrase: &[u8],
+    (m, t, p): (u32, u32, u32),
+) -> Result<Vec<u8>, String> {
+    if m > MAX_M_COST_KIB || t == 0 || t > MAX_T_COST || p == 0 || p > MAX_LANES {
+        return Err("KDF costs outside the range `open` accepts".to_owned());
+    }
+    seal_impl(plaintext, passphrase, (m, t, p))
+}
+
+fn seal_impl(
     plaintext: &[u8],
     passphrase: &[u8],
     (m, t, p): (u32, u32, u32),
@@ -87,7 +99,7 @@ pub fn seal_with(
 /// # Errors
 /// Returns an error if the RNG, KDF, or cipher fails.
 pub fn seal(plaintext: &[u8], passphrase: &[u8]) -> Result<Vec<u8>, String> {
-    seal_with(
+    seal_impl(
         plaintext,
         passphrase,
         (DEFAULT_M_COST_KIB, DEFAULT_T_COST, DEFAULT_LANES),

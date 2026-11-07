@@ -166,10 +166,12 @@ That places each event type under a stable 2-level prefix. A filtered read for
 one type then costs O(d + r), at the price of about one extra level for
 `m.room.member` and lumpy fanout near the root.
 
+> ¹ Holds only absent colliding types; see the correction below.
+>
 > **Correction (2026-11-05):** the O(d + r) bound above assumes no prefix
 > collisions. A permitted sender can grind event types that collide on the
-> 10-bit prefix in about 2¹⁰ attempts, so a filtered read costs
-> O(d + r + c), where `c` counts the colliding entries, and `c` is unbounded.
+> 10-bit prefix in about 2¹⁰ attempts, so a filtered read costs O(d + r + c),
+> where `c` counts the colliding entries, and `c` is unbounded.
 
 Prolly trees or MSTs keyed on `(type, state_key)` would give you true ordered
 ranges with the same canonicity and diff properties. They come with
@@ -310,7 +312,7 @@ throughout.
 
 | Typed read                                         | HAMT as it is today | HAMT with type-prefix routing                                                                        | Synapse (`state_groups`)                                                                                   | conduwuit                          |
 | -------------------------------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ---------------------------------- |
-| A small type (power levels, join rules, and so on) | Full scan, Θ(S)     | About 2–3 node fetches                                                                               | Up to 100 index probes along the delta chain                                                               | Θ(S) to reconstruct, then a lookup |
+| A small type (power levels, join rules, and so on) | Full scan, Θ(S)     | About 2–3 node fetches¹                                                                              | Up to 100 index probes along the delta chain                                                               | Θ(S) to reconstruct, then a lookup |
 | One member by state_key                            | d ≈ 4–5 fetches     | d + 1 or 2 fetches. The extra levels are single-child chains, because CHAMP has no path compression. | Up to 100 probes                                                                                           | Θ(S)                               |
 | All members                                        | Θ(S)                | **About 0.29·r ≈ 29k random node fetches**                                                           | About 2k mostly sequential pages, because a snapshot's rows sit together in the heap, plus the delta chain | Θ(S)                               |
 | Everything except members (the lazy-loading case)  | Θ(S)                | O(size of the non-member state). The member subtree is skipped entirely.                             | Index range scans along the chain                                                                          | Θ(S)                               |
@@ -397,7 +399,7 @@ migration, and the secret must be kept forever.
 |                                                                      | Typed scan                             | Point read (cold)         | Bytes written per version                                  | Diff                            | Canonical                        | Worst-case bounds                                                                         |
 | -------------------------------------------------------------------- | -------------------------------------- | ------------------------- | ---------------------------------------------------------- | ------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------- |
 | CHAMP as it is                                                       | Θ(S)                                   | log₃₂ S                   | **≈ 3.5 KB**                                               | O(k·d)                          | Yes                              | **Hard**                                                                                  |
-| CHAMP with type prefix                                               | Small types fast; members 0.29·r       | +1–2 levels               | ≈ 3.6 KB                                                   | O(k·d)                          | Yes                              | Hard, but the prefix can be ground                                                        |
+| CHAMP with type prefix                                               | Small types fast¹; members 0.29·r      | +1–2 levels               | ≈ 3.6 KB                                                   | O(k·d)                          | Yes                              | Hard, but the prefix can be ground                                                        |
 | Nested type map over CHAMP                                           | Small types exact; members 0.29·r      | +1 level                  | ≈ 4.3 KB                                                   | O(k·d)                          | Yes                              | Hard                                                                                      |
 | MST or B-skip-list on (type, state_key), secret level hash           | **≈ r/32**                             | log₃₂ S                   | ≈ 6–9 KB                                                   | O(k·log S), output in key order | Yes, given the secret            | With high probability                                                                     |
 | Prolly tree, secret boundary hash, ~4 KB chunks                      | **≈ r/50, sequential**                 | ≈ log₆₄ S (2–3 levels)    | ≈ 8–12 KB                                                  | O(k·log S)                      | Yes, given the secret            | With high probability; a maximum-chunk rule bounds node size but causes boundary cascades |
