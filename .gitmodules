@@ -1,0 +1,4 @@
+[submodule "docs"]
+	path = docs
+	url = git@nutra.tk:wombat-foundation/rezzy-docs.git
+	update = none
