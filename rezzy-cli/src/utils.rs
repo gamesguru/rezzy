@@ -414,97 +414,182 @@ pub fn parse_and_extract_heads(
     }
 }
 
-fn collect_reachable_events<'a, S: std::hash::BuildHasher>(
-    start_id: &str,
-    events_map: &'a HashMap<String, LeanEvent, S>,
-) -> Vec<&'a LeanEvent> {
-    let mut visited = std::collections::HashSet::new();
-    let mut stack = vec![start_id.to_string()];
-    let mut reachable = Vec::new();
-    while let Some(ev_id) = stack.pop() {
-        if visited.insert(ev_id.clone()) {
-            if let Some(ev) = events_map.get(&ev_id) {
-                reachable.push(ev);
-                for pe in &ev.prev_events {
-                    stack.push(pe.clone());
-                }
-            }
-        }
-    }
-    reachable
-}
-
-fn build_state_map<S: std::hash::BuildHasher>(
-    sorted_events: Vec<&LeanEvent>,
-    raw_map: &HashMap<String, rezzy::JsonValue, S>,
-) -> HashMap<(EventType, String), String> {
-    let mut state_map = HashMap::new();
-    for ev in sorted_events {
-        if raw_map
-            .get(&ev.event_id)
-            .is_some_and(|r| r.get(FIELD_STATE_KEY).is_some())
-        {
-            let key = (
-                EventType::from(ev.event_type.clone()),
-                ev.state_key.clone().unwrap(),
-            );
-            state_map.insert(key, ev.event_id.clone());
-        }
-    }
-    state_map
-}
-
-/// Compute state maps for the given events.
+/// Partition the per-head state maps directly from the DAG.
+///
+/// This is equivalent to building one full state map per head and passing them
+/// to [`rezzy::partition_state_maps`], but it never materializes those maps.
+/// Each event carries the bitset of heads it is an ancestor of; walking the
+/// state events by descending `(depth, event_id)` assigns the winning event
+/// for every key/head pair. The cost is proportional to
+/// `edges × heads/64 + state_events × heads/64`, not `heads × events`.
+///
+/// # Panics
+///
+/// Panics only if an event index built from `events_map` is missing from that
+/// same map, which cannot happen for a consistent snapshot.
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
 #[must_use]
-pub fn compute_state_maps<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
+pub fn partition_state_maps_fast<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
     heads: &[String],
     events_map: &HashMap<String, LeanEvent, S1>,
     raw_map: &HashMap<String, rezzy::JsonValue, S2>,
     debug: bool,
-) -> Vec<HashMap<(EventType, String), String>> {
-    if heads.len() <= 1 {
-        let reachable_set: std::collections::HashSet<String> = if heads.len() == 1 {
-            collect_reachable_events(&heads[0], events_map)
-                .into_iter()
-                .map(|ev| ev.event_id.clone())
-                .collect()
-        } else {
-            events_map.keys().cloned().collect()
-        };
+) -> (ResolvedState, Vec<String>) {
+    let start = Instant::now();
+    let n = events_map.len();
+    let head_count = heads.len();
+    if head_count == 0 || n == 0 {
+        return (ResolvedState::new(), Vec::new());
+    }
 
-        let mut sorted_events: Vec<&LeanEvent> = events_map
-            .values()
-            .filter(|ev| reachable_set.contains(&ev.event_id))
-            .collect();
-        sorted_events.sort_by(|a, b| a.cmp_by_depth(b));
+    let words = head_count.div_ceil(64);
 
-        vec![build_state_map(sorted_events, raw_map)]
-    } else {
-        if debug {
-            eprintln!(
-                "[DEBUG] computing state maps for {} heads over {} events...",
-                heads.len(),
-                events_map.len()
-            );
-        }
-        let mut maps = Vec::new();
-        for (i, head_id) in heads.iter().enumerate() {
-            let t = Instant::now();
-            let mut reachable = collect_reachable_events(head_id, events_map);
-            let reachable_count = reachable.len();
-            reachable.sort_by(|a, b| a.cmp_by_depth(b));
-            maps.push(build_state_map(reachable, raw_map));
-            if debug {
-                eprintln!(
-                    "[DEBUG] head {}/{} ({head_id}): {reachable_count} reachable events in {:.2?}",
-                    i.saturating_add(1),
-                    heads.len(),
-                    t.elapsed()
-                );
+    let mut ids: Vec<String> = Vec::with_capacity(n);
+    let mut parents: Vec<Vec<String>> = Vec::with_capacity(n);
+    let mut timestamps: Vec<u64> = Vec::with_capacity(n);
+    let mut depths: Vec<u64> = Vec::with_capacity(n);
+    for event in events_map.values() {
+        ids.push(event.event_id.clone());
+        parents.push(event.prev_events.clone());
+        timestamps.push(event.origin_server_ts);
+        depths.push(event.depth);
+    }
+
+    let order = crate::timeline_order::kahn_order(&ids, &parents, &timestamps, &depths);
+    let mut index_of: HashMap<&str, usize> = HashMap::with_capacity(n);
+    for (index, id) in ids.iter().enumerate() {
+        index_of.insert(id.as_str(), index);
+    }
+
+    // Child adjacency, for propagating head bitsets from children to parents.
+    let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (child, event_parents) in parents.iter().enumerate() {
+        for parent in event_parents {
+            if let Some(&parent_index) = index_of.get(parent.as_str()) {
+                children[parent_index].push(child);
             }
         }
-        maps
     }
+
+    // head_bits[event] = the heads that are descendants of `event`.
+    let mut head_bits = vec![0_u64; n.saturating_mul(words)];
+    for (head_index, head) in heads.iter().enumerate() {
+        if let Some(&event_index) = index_of.get(head.as_str()) {
+            head_bits[event_index
+                .saturating_mul(words)
+                .saturating_add(head_index / 64)] |= 1_u64 << (head_index % 64);
+        }
+    }
+
+    for &event_index in order.iter().rev() {
+        let base = event_index.saturating_mul(words);
+        for &child in &children[event_index] {
+            let child_base = child.saturating_mul(words);
+            for word in 0..words {
+                let bits = head_bits[child_base.saturating_add(word)];
+                head_bits[base.saturating_add(word)] |= bits;
+            }
+        }
+    }
+
+    // Group state events by logical key. Descending rank gives each head its
+    // winning event for the key: the same last-write-wins order the per-head
+    // depth sort produced.
+    let mut by_key: HashMap<(EventType, String), Vec<usize>> = HashMap::new();
+    for (index, id) in ids.iter().enumerate() {
+        let event = events_map.get(id).expect("ids came from events_map");
+        if raw_map
+            .get(&event.event_id)
+            .is_some_and(|raw| raw.get(FIELD_STATE_KEY).is_some())
+        {
+            let key = (
+                EventType::from(event.event_type.clone()),
+                event
+                    .state_key
+                    .clone()
+                    .expect("state event has a state key"),
+            );
+            by_key.entry(key).or_default().push(index);
+        }
+    }
+
+    for event_indices in by_key.values_mut() {
+        event_indices.sort_unstable_by(|&a, &b| {
+            let event_a = events_map.get(&ids[a]).expect("ids came from events_map");
+            let event_b = events_map.get(&ids[b]).expect("ids came from events_map");
+            (event_b.depth, event_b.event_id.as_str())
+                .cmp(&(event_a.depth, event_a.event_id.as_str()))
+        });
+    }
+
+    let key_count = by_key.len();
+    let valid_bits = head_count % 64;
+    let last_mask = if valid_bits == 0 {
+        u64::MAX
+    } else {
+        u64::MAX >> (64 - valid_bits)
+    };
+    let mut unconflicted_state = ResolvedState::new();
+    let mut conflicted_ids = Vec::new();
+
+    for (key, event_indices) in by_key {
+        let mut remaining = vec![u64::MAX; words];
+        if let Some(last) = remaining.last_mut() {
+            *last = last_mask;
+        }
+
+        let mut assigned = 0_usize;
+        let mut winners: Vec<(&str, usize)> = Vec::new();
+        for event_index in event_indices {
+            let base = event_index.saturating_mul(words);
+            let mut here_count = 0_usize;
+            for word in 0..words {
+                let here = head_bits[base.saturating_add(word)] & remaining[word];
+                if here != 0 {
+                    here_count = here_count.saturating_add(here.count_ones() as usize);
+                    remaining[word] &= !here;
+                }
+            }
+
+            if here_count > 0 {
+                assigned = assigned.saturating_add(here_count);
+                let event = events_map
+                    .get(&ids[event_index])
+                    .expect("ids came from events_map");
+                if let Some(slot) = winners
+                    .iter_mut()
+                    .find(|(id, _)| *id == event.event_id.as_str())
+                {
+                    slot.1 = slot.1.saturating_add(here_count);
+                } else {
+                    winners.push((event.event_id.as_str(), here_count));
+                }
+            }
+
+            if assigned == head_count {
+                break;
+            }
+        }
+
+        let absent = head_count.saturating_sub(assigned);
+        if winners.len() == 1 && absent == 0 {
+            let (id, _) = winners[0];
+            unconflicted_state.insert(key, id.to_owned());
+        } else if winners.len() > 1 {
+            conflicted_ids.extend(winners.into_iter().map(|(id, _)| id.to_owned()));
+        } else if let Some((id, _)) = winners.first() {
+            conflicted_ids.push((*id).to_owned());
+        }
+    }
+
+    if debug {
+        eprintln!(
+            "[DEBUG] partitioned {key_count} state keys over {head_count} heads in {:.2?}",
+            start.elapsed()
+        );
+    }
+
+    (unconflicted_state, conflicted_ids)
 }
 
 /// Resolved state: `(type, state_key)` to event ID.
@@ -554,10 +639,10 @@ pub fn resolve_parent_states<S: std::hash::BuildHasher>(
 /// Panics if an auth-chain bitmap contains an index absent from its own
 /// graph index, or if `version` is [`StateResVersion::V3`].
 #[must_use]
-pub fn partition_and_resolve_state<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
+pub fn partition_and_resolve_state<S1: std::hash::BuildHasher>(
     heads: &[String],
     events_map: &HashMap<String, LeanEvent, S1>,
-    state_maps: &[HashMap<(EventType, String), String, S2>],
+    state_maps: &[ResolvedState],
     version: StateResVersion,
     auth_graph: &rezzy::auth::roaring::AuthGraph,
 ) -> (ResolvedState, std::time::Duration) {
@@ -565,6 +650,35 @@ pub fn partition_and_resolve_state<S1: std::hash::BuildHasher, S2: std::hash::Bu
     let (unconflicted_state, conflicted_state_set) =
         rezzy::partition_state_maps(state_maps, state_maps.len());
 
+    resolve_partitioned_state(
+        heads,
+        events_map,
+        version,
+        auth_graph,
+        &unconflicted_state,
+        &conflicted_state_set,
+        start,
+    )
+}
+
+/// Resolve a pre-partitioned unconflicted state plus its conflicted event set.
+///
+/// `start` is the start of the partition phase, so the returned duration covers
+/// the whole partition-and-resolve operation.
+///
+/// # Panics
+///
+/// Panics if an auth-chain bitmap references an index absent from its own
+/// graph index.
+pub fn resolve_partitioned_state<S1: std::hash::BuildHasher>(
+    heads: &[String],
+    events_map: &HashMap<String, LeanEvent, S1>,
+    version: StateResVersion,
+    auth_graph: &rezzy::auth::roaring::AuthGraph,
+    unconflicted_state: &ResolvedState,
+    conflicted_state_set: &[String],
+    start: Instant,
+) -> (ResolvedState, std::time::Duration) {
     let mut auth_difference = std::collections::HashSet::new();
     if version != StateResVersion::V1 && !heads.is_empty() {
         let mut union = rezzy::bitmap::Bitmap::new();
@@ -601,7 +715,7 @@ pub fn partition_and_resolve_state<S1: std::hash::BuildHasher, S2: std::hash::Bu
     }
 
     let mut conflicted_events = HashMap::new();
-    for id in &conflicted_state_set {
+    for id in conflicted_state_set {
         if let Some(ev) = events_map.get(id) {
             conflicted_events.insert(id.clone(), ev.clone());
         }
@@ -614,7 +728,7 @@ pub fn partition_and_resolve_state<S1: std::hash::BuildHasher, S2: std::hash::Bu
     }
 
     if version == StateResVersion::V2_1 || version == StateResVersion::V2_1_1 {
-        let subgraph = rezzy::compute_v2_1_conflicted_subgraph(events_map, &conflicted_state_set);
+        let subgraph = rezzy::compute_v2_1_conflicted_subgraph(events_map, conflicted_state_set);
         for (id, ev) in subgraph {
             conflicted_events.insert(id, ev);
         }
@@ -622,7 +736,7 @@ pub fn partition_and_resolve_state<S1: std::hash::BuildHasher, S2: std::hash::Bu
 
     let mut pl_cache = HashMap::new();
     let final_state_map = rezzy::resolve_iterative_sort(rezzy::IterativeInputs::new(
-        &unconflicted_state,
+        unconflicted_state,
         &conflicted_events,
         events_map,
         version,
@@ -999,28 +1113,28 @@ mod tests {
 {"event_id":"$name_bob","type":"m.room.name","state_key":"","sender":"@bob:b.com","depth":6,"origin_server_ts":1700,"content":{"name":"bob"},"prev_events":["$pl_diff"],"auth_events":["$create","$bob_join","$pl_diff"]}
 "#,
         );
-        let mut state_alice: std::collections::HashMap<(EventType, String), String> =
-            std::collections::HashMap::new();
-        state_alice.insert(
-            (EventType::from("m.room.create"), String::new()),
-            "$create".into(),
-        );
-        state_alice.insert(
-            (EventType::from("m.room.member"), "@alice:a.com".into()),
-            "$alice_join".into(),
-        );
-        state_alice.insert(
-            (EventType::from("m.room.member"), "@bob:b.com".into()),
-            "$bob_join".into(),
-        );
-        state_alice.insert(
-            (EventType::from("m.room.power_levels"), String::new()),
-            "$pl".into(),
-        );
-        state_alice.insert(
-            (EventType::from("m.room.name"), String::new()),
-            "$name_alice".into(),
-        );
+        let mut state_alice: ResolvedState = [
+            ((EventType::from("m.room.create"), String::new()), "$create"),
+            (
+                (EventType::from("m.room.member"), "@alice:a.com".into()),
+                "$alice_join",
+            ),
+            (
+                (EventType::from("m.room.member"), "@bob:b.com".into()),
+                "$bob_join",
+            ),
+            (
+                (EventType::from("m.room.power_levels"), String::new()),
+                "$pl",
+            ),
+            (
+                (EventType::from("m.room.name"), String::new()),
+                "$name_alice",
+            ),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key, String::from(value)))
+        .collect();
 
         let mut state_bob = state_alice.clone();
         state_bob.insert(

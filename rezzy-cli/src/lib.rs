@@ -51,8 +51,8 @@ use std::io::{self, BufWriter, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 use utils::{
-    apply_global_power_levels, compute_state_maps, detect_version, load_or_fetch_input_value,
-    parse_and_extract_heads, partition_and_resolve_state,
+    apply_global_power_levels, detect_version, load_or_fetch_input_value, parse_and_extract_heads,
+    partition_state_maps_fast, resolve_partitioned_state,
 };
 
 #[allow(clippy::struct_excessive_bools)]
@@ -545,12 +545,12 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
         }
     }
 
-    let state_maps = {
+    let (unconflicted_state, conflicted_state_set) = {
         if !args.quiet {
             eprintln!("[progress] building state maps...");
         }
         let t = Instant::now();
-        let m = compute_state_maps(&heads, &events_map, &raw_map, args.debug);
+        let m = partition_state_maps_fast(&heads, &events_map, &raw_map, args.debug);
         if !args.quiet {
             eprintln!("[progress] state maps built in {:.2?}", t.elapsed());
         }
@@ -578,7 +578,15 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
             eprintln!("[progress] resolving state...");
         }
         let t = Instant::now();
-        let r = partition_and_resolve_state(&heads, &events_map, &state_maps, version, &auth_graph);
+        let r = resolve_partitioned_state(
+            &heads,
+            &events_map,
+            version,
+            &auth_graph,
+            &unconflicted_state,
+            &conflicted_state_set,
+            Instant::now(),
+        );
         if !args.quiet {
             eprintln!(
                 "[progress] state resolved in {:?} (wall {:?})",
