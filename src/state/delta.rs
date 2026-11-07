@@ -172,14 +172,15 @@ fn decode_hex_32(s: &str) -> Result<[u8; 32], &'static str> {
     Ok(bytes)
 }
 
-/// Maximum number of delta hops before a full snapshot is inserted (default: 100,
-/// configurable: true).
+/// Maximum number of delta hops before a full snapshot is inserted (default:
+/// 500, configurable: true).
 ///
-/// Matches Synapse's `MAX_STATE_DELTA_HOPS`. When a delta chain would exceed
-/// this length, [`compute_compacted_delta_chain_from_resolved`] inserts a full
-/// base snapshot instead of another delta, bounding reconstruction cost to at
-/// most this many hops.
-pub const MAX_DELTA_CHAIN_HOPS: usize = 100;
+/// Larger than Synapse's `MAX_STATE_DELTA_HOPS` because each hop here is a
+/// compact per-entry delta rather than a full state row. When a delta chain
+/// would reach this length, [`compute_compacted_delta_chain_from_resolved`]
+/// inserts a full base snapshot instead of another delta, bounding
+/// reconstruction cost to at most this many hops.
+pub const MAX_DELTA_CHAIN_HOPS: usize = 500;
 
 /// A checkpoint that may be either a delta from a parent or a full snapshot.
 ///
@@ -210,7 +211,7 @@ pub struct CompactedCheckpoint<Id: crate::basespec::rezzy_types::EventId = Strin
 /// storage compression concern.
 ///
 /// A custom `max_hops` can be provided; pass `None` to use the default
-/// [`MAX_DELTA_CHAIN_HOPS`] (100).
+/// [`MAX_DELTA_CHAIN_HOPS`] (500).
 #[must_use]
 pub fn compute_compacted_delta_chain_from_resolved<Id: crate::basespec::rezzy_types::EventId>(
     resolved_states: impl IntoIterator<Item = (Id, crate::state::at::SharedState<Id>)>,

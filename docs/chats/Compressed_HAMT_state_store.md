@@ -166,7 +166,8 @@ That places each event type under a stable 2-level prefix. A filtered read for
 one type then costs O(d + r), at the price of about one extra level for
 `m.room.member` and lumpy fanout near the root.
 
-> ¹ Holds only when no colliding event types are present; see the correction below.
+> ¹ Holds only when no colliding event types are present; see the correction
+> below.
 >
 > **Correction (2026-11-05):** the O(d + r) bound above assumes no prefix
 > collisions. A permitted sender can grind event types that collide on the
@@ -317,6 +318,11 @@ throughout.
 | All members                                        | Θ(S)                | **About 0.29·r ≈ 29k random node fetches**                                                           | About 2k mostly sequential pages, because a snapshot's rows sit together in the heap, plus the delta chain | Θ(S)                               |
 | Everything except members (the lazy-loading case)  | Θ(S)                | O(size of the non-member state). The member subtree is skipped entirely.                             | Index range scans along the chain                                                                          | Θ(S)                               |
 
+> **Correction (2026-11-06):** The “About 2–3 node fetches” estimate and the
+> following claim that small-type reads become better assume there are no
+> colliding attacker-controlled event types. Colliding entries add `c` work as
+> described above; `c` is unbounded for this prefix scheme.
+
 Small-type reads become better than both alternatives. The full member scan
 stays about 15× behind Synapse in fetch count.
 
@@ -405,6 +411,10 @@ migration, and the secret must be kept forever.
 | Prolly tree, secret boundary hash, ~4 KB chunks                      | **≈ r/50, sequential**                 | ≈ log₆₄ S (2–3 levels)    | ≈ 8–12 KB                                                  | O(k·log S)                      | Yes, given the secret            | With high probability; a maximum-chunk rule bounds node size but causes boundary cascades |
 | Merkle Patricia trie on raw keys                                     | Natural prefix scan                    | Depth depends on the keys | Small                                                      | O(k·d)                          | Yes                              | **None.** Long shared state_key prefixes produce O(r) depth. Reject it.                   |
 | Any of the above, stored as a checkpoint plus a delta of ≤ L changes | Same as the underlying tree, plus O(L) | +1 fetch for the delta    | **O(\|Δ\|), ~100 B**, plus the checkpoint amortized over L | O(k·log S + L)                  | Identity still holds, via LtHash | Same as the underlying tree                                                               |
+
+> **Correction (2026-11-06):** “Small types fast” for CHAMP with type prefix
+> assumes no colliding attacker-controlled event types. Such collisions add `c`
+> reads, where `c` is unbounded; see the earlier correction.
 
 The last row is the only design that improves both typed reads and bytes written
 per transition. It does so by combining fat ordered leaves, which favour scans,

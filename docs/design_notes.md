@@ -201,7 +201,7 @@ Full delta chain support with Synapse-like compaction:
 
 - `compute_state_delta` / `apply_state_delta` — single-event delta math
 - `compute_compacted_delta_chain_from_resolved` — bulk backfill with
-  auto-snapshot every `MAX_DELTA_CHAIN_HOPS` (default: `100`) events
+  auto-snapshot every `MAX_DELTA_CHAIN_HOPS` (default: `500`) events
 - `reconstruct_state_at` / `reconstruct_state_batch` — reconstruct state from
   stored delta chains
 - All checkpoint types derive `Serialize` / `Deserialize` for direct storage in
