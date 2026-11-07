@@ -341,7 +341,7 @@ const fn format_name(format: OutputFormat) -> &'static str {
 pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
     validate_timeline_args(args)?;
     let input_val = load_or_fetch_input_value(args)?;
-    let (raw_events, heads) = parse_and_extract_heads(&input_val, args.debug)?;
+    let (raw_events, heads) = parse_and_extract_heads(input_val, args.debug)?;
 
     // --check mode: validate input only, suppress state output
     if args.check {
@@ -361,7 +361,8 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
     let syntactic_room_version =
         utils::detect_room_version_string(&raw_events).unwrap_or_else(|| "1".to_string());
 
-    let mut raw_map = HashMap::with_capacity(event_count);
+    let mut raw_map: HashMap<String, rezzy::JsonValue> = HashMap::with_capacity(event_count);
+    let needs_raw_events = format::needs_raw_events(args);
     let mut events_map = HashMap::with_capacity(event_count);
     let mut creator_user_id = String::new();
     let mut syntactically_rejected: usize = 0;
@@ -435,8 +436,11 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
                         .and_then(|v| v.as_str())
                         .map(str::to_owned);
                 }
-                raw_map.insert(ev.event_id.clone(), val);
-                events_map.insert(ev.event_id.clone(), ev);
+                let event_id = ev.event_id.clone();
+                if needs_raw_events {
+                    raw_map.insert(event_id.clone(), val);
+                }
+                events_map.insert(event_id, ev);
             }
             Err(e) => {
                 if args.debug {
@@ -458,15 +462,20 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
     }
 
     let heads = if heads.is_empty() {
-        let all_ids: std::collections::HashSet<String> = events_map.keys().cloned().collect();
-        let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // Borrow while scanning: cloning every id and every referenced id into
+        // two string sets is measurable on a backfilled room.
+        let mut referenced: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for ev in events_map.values() {
             for pe in &ev.prev_events {
-                referenced.insert(pe.clone());
+                referenced.insert(pe.as_str());
             }
         }
-        let mut auto_heads: Vec<String> = all_ids.difference(&referenced).cloned().collect();
-        auto_heads.sort();
+        let mut auto_heads: Vec<String> = events_map
+            .keys()
+            .filter(|id| !referenced.contains(id.as_str()))
+            .cloned()
+            .collect();
+        auto_heads.sort_unstable();
         if args.debug {
             eprintln!(
                 "[DEBUG] Auto-computed {} heads: {:?}",
@@ -497,38 +506,39 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
 
     if !args.quiet {
         // No external event store is available; every referenced-but-absent event is a gap.
-        let (backward, missing_auth) = utils::report_gaps(&events_map, |_| false);
+        // Only the first 20 are printed, so do not materialize one record per gap.
+        let (backward, missing_auth) = utils::summarize_gaps(&events_map, 20);
         let describe = |id: &str| -> String {
             events_map.get(id).map_or_else(
                 || String::from("<?>"),
                 |ev| format!("{} {} ts={}", ev.event_type, ev.sender, ev.origin_server_ts),
             )
         };
-        if !missing_auth.is_empty() {
+        if missing_auth.count > 0 {
             eprintln!(
                 "[WARN] {} event(s) reference auth_events absent from local set (auth cannot be fully verified):",
-                missing_auth.len()
+                missing_auth.count
             );
-            for gap in missing_auth.iter().take(20) {
+            for (event_id, missing) in &missing_auth.samples {
                 eprintln!(
                     "    {} ({}) -> missing auth {}",
-                    gap.event_id,
-                    describe(&gap.event_id),
-                    gap.missing_auth_events.join(", ")
+                    event_id,
+                    describe(event_id),
+                    missing.join(", ")
                 );
             }
         }
-        if !backward.is_empty() {
+        if backward.count > 0 {
             eprintln!(
                 "[WARN] {} event(s) reference prev_events absent from local set (backfill/backward extremity):",
-                backward.len()
+                backward.count
             );
-            for gap in backward.iter().take(20) {
+            for (event_id, missing) in &backward.samples {
                 eprintln!(
                     "    {} ({}) -> missing prev {}",
-                    gap.event_id,
-                    describe(&gap.event_id),
-                    gap.missing_prev_events.join(", ")
+                    event_id,
+                    describe(event_id),
+                    missing.join(", ")
                 );
             }
         }
@@ -550,7 +560,7 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
             eprintln!("[progress] building state maps...");
         }
         let t = Instant::now();
-        let m = partition_state_maps_fast(&heads, &events_map, &raw_map, args.debug);
+        let m = partition_state_maps_fast(&heads, &events_map, args.debug);
         if !args.quiet {
             eprintln!("[progress] state maps built in {:.2?}", t.elapsed());
         }

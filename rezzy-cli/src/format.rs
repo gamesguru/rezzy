@@ -848,6 +848,22 @@ pub fn needs_stream_order(args: &Args) -> bool {
                 .any(OrderKey::needs_stream_order))
 }
 
+/// Whether the selected output format reads the original JSON events.
+///
+/// Summary, default, resolve-state and delta output are all derived from the
+/// parsed [`LeanEvent`](rezzy::LeanEvent) map, so building a second map of every
+/// raw event only costs memory and time.
+#[must_use]
+pub fn needs_raw_events(args: &Args) -> bool {
+    matches!(
+        args.format,
+        OutputFormat::Events
+            | OutputFormat::Federation
+            | OutputFormat::Timeline
+            | OutputFormat::TimelineChronological
+    ) || needs_stream_order(args)
+}
+
 /// Load and validate the stream-order index for `--timeline-order synapse`.
 ///
 /// An explicit `--metadata` path is fatal on error. Auto-discovered sibling

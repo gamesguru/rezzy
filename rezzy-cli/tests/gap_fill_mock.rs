@@ -1313,5 +1313,3 @@ fn state_diff_rejects_a_room_without_the_sigil_before_any_request() {
     let out = fx.state_diff(&[&a.url], "clearR", &[]);
     assert_rejects_room_without_sigil(&out, &a);
 }
-
-

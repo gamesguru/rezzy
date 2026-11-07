@@ -16,9 +16,8 @@ use crate::error::{AppError, ErrorCode};
 use crate::network::fetch_room_state;
 use crate::Args;
 use rezzy::basespec::event_types::{
-    EventType, FIELD_CONTENT, FIELD_EVENT_ID, FIELD_ROOM_VERSION, FIELD_STATE_KEY, FIELD_TYPE,
-    FIELD_USERS, FIELD_USERS_DEFAULT, M_ROOM_CREATE, M_ROOM_JOIN_RULES, M_ROOM_MEMBER,
-    M_ROOM_POWER_LEVELS,
+    EventType, FIELD_CONTENT, FIELD_EVENT_ID, FIELD_ROOM_VERSION, FIELD_TYPE, FIELD_USERS,
+    FIELD_USERS_DEFAULT, M_ROOM_CREATE, M_ROOM_JOIN_RULES, M_ROOM_MEMBER, M_ROOM_POWER_LEVELS,
 };
 use rezzy::{LeanEvent, SharedState, StateResVersion};
 use std::collections::HashMap;
@@ -173,6 +172,85 @@ where
     (backward, missing_auth)
 }
 
+/// The number of gap events and a bounded, shallow-first sample of them.
+///
+/// [`report_gaps`] materializes one record per gap, which is the right shape
+/// for callers that consume every gap. The CLI only prints a handful, so it
+/// uses this instead: a full scan with no per-gap allocation beyond the sample.
+pub struct GapSummary {
+    /// How many events have at least one missing reference.
+    pub count: usize,
+    /// At most the requested number of `(event_id, missing_ids)` pairs,
+    /// ordered by the referencing event's depth then id.
+    pub samples: Vec<(String, Vec<String>)>,
+}
+
+fn collect_gap_samples<S, F>(
+    events_map: &HashMap<String, LeanEvent, S>,
+    references: F,
+    limit: usize,
+) -> GapSummary
+where
+    S: std::hash::BuildHasher,
+    F: Fn(&LeanEvent) -> &[String],
+{
+    let mut count = 0_usize;
+    let mut samples: Vec<(u64, String, Vec<String>)> = Vec::with_capacity(limit);
+    for event in events_map.values() {
+        let mut missing: Vec<String> = Vec::new();
+        for id in references(event) {
+            if !events_map.contains_key(id) {
+                missing.push(id.clone());
+            }
+        }
+        if missing.is_empty() {
+            continue;
+        }
+        count = count.saturating_add(1);
+        let rank = (event.depth, event.event_id.as_str());
+        if samples.len() < limit {
+            samples.push((event.depth, event.event_id.clone(), missing));
+            continue;
+        }
+        // Keep the `limit` shallowest events. The sample is small, so a linear
+        // scan for the current maximum is cheaper than a heap.
+        if let Some((worst, _)) = samples
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (depth, id, _))| (*depth, id.as_str()))
+        {
+            let worst_rank = (samples[worst].0, samples[worst].1.as_str());
+            if rank < worst_rank {
+                samples[worst] = (event.depth, event.event_id.clone(), missing);
+            }
+        }
+    }
+    samples.sort_by(|a, b| (a.0, a.1.as_str()).cmp(&(b.0, b.1.as_str())));
+    for (_, _, missing) in &mut samples {
+        missing.sort();
+    }
+    GapSummary {
+        count,
+        samples: samples
+            .into_iter()
+            .map(|(_, event_id, missing)| (event_id, missing))
+            .collect(),
+    }
+}
+
+/// Summarize missing `prev_events` and `auth_events` without materializing one
+/// record per gap. `limit` bounds the printed sample.
+#[must_use]
+pub fn summarize_gaps<S: std::hash::BuildHasher>(
+    events_map: &HashMap<String, LeanEvent, S>,
+    limit: usize,
+) -> (GapSummary, GapSummary) {
+    (
+        collect_gap_samples(events_map, |event| &event.prev_events, limit),
+        collect_gap_samples(events_map, |event| &event.auth_events, limit),
+    )
+}
+
 /// Computes an FNV-1a hash of `StateEntries`.
 #[must_use]
 pub fn compute_state_hash(state: &SharedState<String, String>) -> String {
@@ -220,14 +298,18 @@ pub fn load_file(input_path: &PathBuf) -> Result<Vec<rezzy::JsonValue>, AppError
     let mut reader = BufReader::new(input_reader);
 
     if is_jsonl {
+        // Read the whole stream once and split on newlines. `BufRead::lines`
+        // allocates a fresh `String` per event; a large export has enough
+        // lines that the parser should get byte slices directly.
+        let mut content = Vec::new();
+        reader.read_to_end(&mut content)?;
         let mut values = Vec::new();
-        for line in reader.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
+        for raw_line in content.split(|byte| *byte == b'\n') {
+            let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
+            if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
             }
-            let val = rezzy::JsonValue::parse(&line)?;
-            values.push(val);
+            values.push(rezzy::JsonValue::parse_bytes(line)?);
         }
         if values.is_empty() {
             bail_code!(
@@ -346,34 +428,21 @@ pub fn load_or_fetch_input_value(args: &Args) -> Result<rezzy::JsonValue, AppErr
 
 /// Parse input and extract the state heads.
 ///
+/// Consumes `input_val`: the caller owns it and, for inputs with tens of
+/// thousands of events, cloning the array only to drop the original doubles
+/// both peak memory and startup time.
+///
 /// # Errors
 ///
 /// Returns an error when the input structure is unsupported, the `events`
 /// field is not an array, or a head is not a string.
 pub fn parse_and_extract_heads(
-    input_val: &rezzy::JsonValue,
+    input_val: rezzy::JsonValue,
     debug: bool,
 ) -> Result<(Vec<rezzy::JsonValue>, Vec<String>), AppError> {
-    if let Some(obj) = input_val.as_object() {
-        match obj.get("events") {
-            Some(events) => {
-                let arr = events.as_array().ok_or_else(|| {
-                    err!(
-                        ErrorCode::EventsNotArray,
-                        "'events' field must be a JSON array"
-                    )
-                })?;
-                if debug {
-                    eprintln!(
-                        "[DEBUG] cloning {} events out of 'events' field...",
-                        arr.len()
-                    );
-                }
-                let t = Instant::now();
-                let evs = arr.clone();
-                if debug {
-                    eprintln!("[DEBUG] cloned events in {:.2?}", t.elapsed());
-                }
+    match input_val {
+        rezzy::JsonValue::Object(mut obj) => match obj.remove("events") {
+            Some(rezzy::JsonValue::Array(evs)) => {
                 let mut hds = Vec::new();
                 if let Some(hds_arr) = obj.get("heads").and_then(|h| h.as_array()) {
                     for v in hds_arr {
@@ -388,29 +457,28 @@ pub fn parse_and_extract_heads(
                 }
                 Ok((evs, hds))
             }
+            Some(_) => bail_code!(
+                ErrorCode::EventsNotArray,
+                "'events' field must be a JSON array"
+            ),
             None if obj.contains_key(FIELD_EVENT_ID) || obj.contains_key(FIELD_TYPE) => {
-                Ok((vec![input_val.clone()], Vec::new()))
+                Ok((vec![rezzy::JsonValue::Object(obj)], Vec::new()))
             }
             None => bail_code!(
                 ErrorCode::UnrecognisedStructure,
                 "Unrecognized JSON object structure. Top-level object must either contain 'events' or represent a single event with 'event_id' or 'type'."
             ),
+        },
+        rezzy::JsonValue::Array(evs) => {
+            if debug {
+                eprintln!("[DEBUG] took ownership of {} top-level events", evs.len());
+            }
+            Ok((evs, Vec::new()))
         }
-    } else if let Some(arr) = input_val.as_array() {
-        if debug {
-            eprintln!("[DEBUG] cloning {} top-level events...", arr.len());
-        }
-        let t = Instant::now();
-        let evs = arr.clone();
-        if debug {
-            eprintln!("[DEBUG] cloned events in {:.2?}", t.elapsed());
-        }
-        Ok((evs, Vec::new()))
-    } else {
-        bail_code!(
+        _ => bail_code!(
             ErrorCode::UnexpectedFormat,
             "Unexpected JSON format: expected object or array"
-        )
+        ),
     }
 }
 
@@ -429,10 +497,9 @@ pub fn parse_and_extract_heads(
 /// same map, which cannot happen for a consistent snapshot.
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
 #[must_use]
-pub fn partition_state_maps_fast<S1: std::hash::BuildHasher, S2: std::hash::BuildHasher>(
+pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
     heads: &[String],
     events_map: &HashMap<String, LeanEvent, S1>,
-    raw_map: &HashMap<String, rezzy::JsonValue, S2>,
     debug: bool,
 ) -> (ResolvedState, Vec<String>) {
     let start = Instant::now();
@@ -444,27 +511,27 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher, S2: std::hash::Buil
 
     let words = head_count.div_ceil(64);
 
-    let mut ids: Vec<String> = Vec::with_capacity(n);
-    let mut parents: Vec<Vec<String>> = Vec::with_capacity(n);
+    let mut ids: Vec<&str> = Vec::with_capacity(n);
+    let mut parents: Vec<&[String]> = Vec::with_capacity(n);
     let mut timestamps: Vec<u64> = Vec::with_capacity(n);
     let mut depths: Vec<u64> = Vec::with_capacity(n);
     for event in events_map.values() {
-        ids.push(event.event_id.clone());
-        parents.push(event.prev_events.clone());
+        ids.push(event.event_id.as_str());
+        parents.push(event.prev_events.as_slice());
         timestamps.push(event.origin_server_ts);
         depths.push(event.depth);
     }
 
-    let order = crate::timeline_order::kahn_order(&ids, &parents, &timestamps, &depths);
+    let order = crate::timeline_order::kahn_order_borrowed(&ids, &parents, &timestamps, &depths);
     let mut index_of: HashMap<&str, usize> = HashMap::with_capacity(n);
     for (index, id) in ids.iter().enumerate() {
-        index_of.insert(id.as_str(), index);
+        index_of.insert(*id, index);
     }
 
     // Child adjacency, for propagating head bitsets from children to parents.
     let mut children: Vec<Vec<usize>> = vec![Vec::new(); n];
     for (child, event_parents) in parents.iter().enumerate() {
-        for parent in event_parents {
+        for parent in *event_parents {
             if let Some(&parent_index) = index_of.get(parent.as_str()) {
                 children[parent_index].push(child);
             }
@@ -497,26 +564,17 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher, S2: std::hash::Buil
     // depth sort produced.
     let mut by_key: HashMap<(EventType, String), Vec<usize>> = HashMap::new();
     for (index, id) in ids.iter().enumerate() {
-        let event = events_map.get(id).expect("ids came from events_map");
-        if raw_map
-            .get(&event.event_id)
-            .is_some_and(|raw| raw.get(FIELD_STATE_KEY).is_some())
-        {
-            let key = (
-                EventType::from(event.event_type.clone()),
-                event
-                    .state_key
-                    .clone()
-                    .expect("state event has a state key"),
-            );
+        let event = events_map.get(*id).expect("ids came from events_map");
+        if let Some(state_key) = &event.state_key {
+            let key = (EventType::from(event.event_type.clone()), state_key.clone());
             by_key.entry(key).or_default().push(index);
         }
     }
 
     for event_indices in by_key.values_mut() {
         event_indices.sort_unstable_by(|&a, &b| {
-            let event_a = events_map.get(&ids[a]).expect("ids came from events_map");
-            let event_b = events_map.get(&ids[b]).expect("ids came from events_map");
+            let event_a = events_map.get(ids[a]).expect("ids came from events_map");
+            let event_b = events_map.get(ids[b]).expect("ids came from events_map");
             (event_b.depth, event_b.event_id.as_str())
                 .cmp(&(event_a.depth, event_a.event_id.as_str()))
         });
@@ -554,7 +612,7 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher, S2: std::hash::Buil
             if here_count > 0 {
                 assigned = assigned.saturating_add(here_count);
                 let event = events_map
-                    .get(&ids[event_index])
+                    .get(ids[event_index])
                     .expect("ids came from events_map");
                 if let Some(slot) = winners
                     .iter_mut()
@@ -714,8 +772,20 @@ pub fn resolve_partitioned_state<S1: std::hash::BuildHasher>(
         }
     }
 
-    let mut conflicted_events = HashMap::new();
+    // V2.1 computes a subgraph that already contains every conflicted event
+    // (and its auth closure). Start from it so each event is cloned once,
+    // instead of cloning the conflicted set and then cloning it again when the
+    // subgraph is merged in.
+    let mut conflicted_events =
+        if version == StateResVersion::V2_1 || version == StateResVersion::V2_1_1 {
+            rezzy::compute_v2_1_conflicted_subgraph(events_map, conflicted_state_set)
+        } else {
+            HashMap::new()
+        };
     for id in conflicted_state_set {
+        if conflicted_events.contains_key(id) {
+            continue;
+        }
         if let Some(ev) = events_map.get(id) {
             conflicted_events.insert(id.clone(), ev.clone());
         }
@@ -724,13 +794,6 @@ pub fn resolve_partitioned_state<S1: std::hash::BuildHasher>(
     for id in &auth_difference {
         if let Some(ev) = events_map.get(id) {
             conflicted_events.insert(id.clone(), ev.clone());
-        }
-    }
-
-    if version == StateResVersion::V2_1 || version == StateResVersion::V2_1_1 {
-        let subgraph = rezzy::compute_v2_1_conflicted_subgraph(events_map, conflicted_state_set);
-        for (id, ev) in subgraph {
-            conflicted_events.insert(id, ev);
         }
     }
 

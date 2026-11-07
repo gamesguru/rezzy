@@ -234,6 +234,75 @@ pub fn kahn_order_by(
     ordered
 }
 
+/// Kahn topological sort over borrowed ids.
+///
+/// Equivalent to [`kahn_order`] but does not clone every event id and parent
+/// list into owned `String`s first. The ready heap orders by
+/// `(timestamp, depth, event_id)`, matching [`kahn_order`]'s key vector.
+#[must_use]
+pub fn kahn_order_borrowed(
+    ids: &[&str],
+    parents: &[&[String]],
+    timestamps: &[u64],
+    depths: &[u64],
+) -> Vec<usize> {
+    let mut indices = HashMap::with_capacity(ids.len());
+    for (index, id) in ids.iter().enumerate() {
+        indices.insert(*id, index);
+    }
+    let mut indegree = vec![0_usize; ids.len()];
+    let mut children = vec![Vec::new(); ids.len()];
+    for (child, event_parents) in parents.iter().enumerate() {
+        for parent in *event_parents {
+            if let Some(&parent_index) = indices.get(parent.as_str()) {
+                indegree[child] = indegree[child].saturating_add(1);
+                children[parent_index].push(child);
+            }
+        }
+    }
+    let mut ready = BinaryHeap::new();
+    for (index, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            ready.push(Reverse((
+                timestamps[index],
+                depths[index],
+                ids[index],
+                index,
+            )));
+        }
+    }
+    let mut emitted = vec![false; ids.len()];
+    let mut ordered = Vec::with_capacity(ids.len());
+    while let Some(Reverse((_, _, _, index))) = ready.pop() {
+        if emitted[index] {
+            continue;
+        }
+        emitted[index] = true;
+        ordered.push(index);
+        for child in &children[index] {
+            indegree[*child] = indegree[*child].saturating_sub(1);
+            if indegree[*child] == 0 {
+                ready.push(Reverse((
+                    timestamps[*child],
+                    depths[*child],
+                    ids[*child],
+                    *child,
+                )));
+            }
+        }
+    }
+    let mut remainder: Vec<usize> = emitted
+        .iter()
+        .enumerate()
+        .filter_map(|(index, emitted)| (!emitted).then_some(index))
+        .collect();
+    remainder.sort_by(|a, b| {
+        (timestamps[*a], depths[*a], ids[*a]).cmp(&(timestamps[*b], depths[*b], ids[*b]))
+    });
+    ordered.extend(remainder);
+    ordered
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
