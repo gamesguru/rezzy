@@ -241,7 +241,7 @@ impl Fixture {
         }
         fs::write(dir.join("base.jsonl"), lines.join("\n") + "\n").unwrap();
         fs::write(dir.join("key.plain"), format!("{KEY_LINE}\n")).unwrap();
-        let encrypted = ENCRYPTED_KEY.get_or_init(fast_encrypted_key);
+        let encrypted = ENCRYPTED_KEY.get_or_init(encrypted_key);
         fs::write(dir.join("key.enc"), encrypted).unwrap();
         Self { dir }
     }
@@ -1313,10 +1313,9 @@ fn state_diff_rejects_a_room_without_the_sigil_before_any_request() {
     assert_rejects_room_without_sigil(&out, &a);
 }
 
-/// Seals the test key through the real `keyfile` code with minimal Argon2 cost,
-/// so the many short-lived CLI processes here skip the production 64 MiB KDF.
-/// `open` accepts any cost within its bounds; the shipped `encrypt-key` path
-/// always uses the production cost.
-fn fast_encrypted_key() -> Vec<u8> {
-    rezzy_cli::keyfile::seal_with(format!("{KEY_LINE}\n").as_bytes(), b"test", (8, 1, 1)).unwrap()
+/// Seals the test key once through the production `keyfile::seal` path. The
+/// result is cached, so the 64 MiB KDF runs once per test binary rather than
+/// once per fixture.
+fn encrypted_key() -> Vec<u8> {
+    rezzy_cli::keyfile::seal(format!("{KEY_LINE}\n").as_bytes(), b"test").unwrap()
 }

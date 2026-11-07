@@ -31,8 +31,6 @@ tls = [
     "getrandom/std",
 ]
 logging = ["rezzy/logging"]
-# Exposes `keyfile::seal_with` (low-cost key files). Tests only; never enable in shipped builds.
-insecure-test-kdf = ["tls"]
 
 [dependencies]
 argon2 = { workspace = true, optional = true }
@@ -47,9 +45,6 @@ rezzy = { workspace = true, default-features = false, features = ["cli"] }
 rpassword = { workspace = true, optional = true }
 sha2.workspace = true
 ureq.workspace = true
-
-[dev-dependencies]
-rezzy-cli = { path = ".", features = ["insecure-test-kdf"] }
 
 [lints]
 workspace = true

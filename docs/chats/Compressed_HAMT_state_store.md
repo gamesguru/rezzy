@@ -166,7 +166,7 @@ That places each event type under a stable 2-level prefix. A filtered read for
 one type then costs O(d + r), at the price of about one extra level for
 `m.room.member` and lumpy fanout near the root.
 
-> ¹ Holds only absent colliding types; see the correction below.
+> ¹ Holds only when no colliding event types are present; see the correction below.
 >
 > **Correction (2026-11-05):** the O(d + r) bound above assumes no prefix
 > collisions. A permitted sender can grind event types that collide on the
