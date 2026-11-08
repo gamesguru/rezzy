@@ -5,9 +5,44 @@
 //! - `codec`: dense on-disk encoding for persisted internal nodes
 //! - `delta`: subtree differencing for set isolation
 //! - `audit`: multi-root reachability audit for storage GC
+//! - `reader`: lazy, verified reads of persisted nodes
+//! - `state_hamt`: the flat Matrix state-HAMT root record and leaf-key codec
 //! - `gc`: experimental incremental refcount bookkeeping for integrations
 //!   with a strictly linear root history (behind `unstable-refcount-gc`)
 //! - `tests`: regression coverage for the generic HAMT core
+//!
+//! # Read-path design notes
+//!
+//! [`PersistedHamtReader`] and [`state_hamt`] are the supported read side for
+//! flat Matrix state HAMTs. Two adjacent changes are deliberately deferred.
+//!
+//! ## Lazy resolver entry point
+//!
+//! State-resolution entry points (`resolve_state_maps_cached`,
+//! `resolve_iterative_sort*`) take `&HashMap<Id, LeanEvent>`. An importer that
+//! walks only the new events of a batch therefore cannot resolve a merge whose
+//! auth closure reaches outside that batch: it reports an incomplete
+//! resolution and falls back to the first-parent rule. The enabling change is
+//! a resolver variant that takes a source/callback instead of a map, so the
+//! caller materializes an auth-context event on first read and still reports a
+//! missing id as incomplete. That is a separate, correctness-sensitive change;
+//! it should be driven by a profile showing merges dominate.
+//!
+//! ## Why not typed roots
+//!
+//! The flat `MTHR`/`MTHN` encoding is the portable on-disk format (Synapse and
+//! sithnapse write it), and it is what existing stores contain. Typed roots
+//! change node identity and therefore storage keys: adopting them needs a
+//! dual-read window, a migration, and write-side coordination. They also
+//! target the wrong cost. A seed read materializes one state set per external
+//! parent, while the direct-import hot path is dominated by auth judging,
+//! redaction and content hashing, `LeanEvent` construction, and callers
+//! cloning their own state maps. [`PersistedHamtReader`] is generic over `K`
+//! and `V`, so a typed node codec can plug in later without changing this API.
+//!
+//! For the same reason the `LtHash` identity (`BLAKE3(lattice)`) and the
+//! resolution algorithms are not changed here: cross-server state-group
+//! identity and every stored group depend on them.
 //!
 //! # Release notes
 //!
@@ -33,6 +68,8 @@ pub mod delta;
 #[cfg(any(test, feature = "unstable-refcount-gc"))]
 pub mod gc;
 pub mod hash;
+pub mod reader;
+pub mod state_hamt;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -55,6 +92,12 @@ pub use gc::{LinearRootChain, RefcountTable, RefcountUnderflow};
 pub use hash::{
     state_group_id_from_lthash, RootHandle, StateGroupId, StructuralHash, HAMT_CODEC_VERSION,
     HAMT_ROUTING_VERSION,
+};
+pub use reader::{HamtReadError, PersistedHamtReader};
+pub use state_hamt::{
+    decode_state_hamt_leaf_key, decode_state_hamt_root, encode_state_hamt_root,
+    state_hamt_leaf_key, StateHamtLeafKeyError, StateHamtRoot, StateHamtRootError,
+    STATE_HAMT_LATTICE_BYTES, STATE_HAMT_ROOT_VERSION,
 };
 
 /// 256-bit routing path hash for a key in the HAMT.
