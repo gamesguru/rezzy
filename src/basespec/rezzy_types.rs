@@ -3029,6 +3029,18 @@ fn room_version_is_v11_or_later(room_version: &str) -> bool {
 /// Delegates to [`RoomVersionFormat::requires_strict_canonical_numbers`] for
 /// the authoritative capability check, falling back to `false` for
 /// unparsable version strings.
+/// Returns `true` when events in `room_version` must use Matrix canonical JSON
+/// numbers (integers within ±(2^53 − 1), no floats or exponents), which room
+/// version 6 and later enforce. Pre-v6 events may legitimately carry floats, and
+/// unrecognised versions return `false`.
+///
+/// Persist or hash pre-v6 events with the permissive writer; use the strict
+/// canonical writer when this returns `true`.
+#[must_use]
+pub fn requires_strict_canonical_numbers(room_version: &str) -> bool {
+    room_version_is_v6_or_later(room_version)
+}
+
 fn room_version_is_v6_or_later(room_version: &str) -> bool {
     RoomVersionFormat::parse(room_version)
         .is_some_and(RoomVersionFormat::requires_strict_canonical_numbers)
@@ -4429,6 +4441,17 @@ mod canonical_parity_tests {
     /// Negative zero (-0.0) is caught by the fractional-number check:
     /// The writer serialises it as "-0.0" which contains '.', so the
     /// fractional branch rejects it.
+    #[test]
+    fn strict_canonical_numbers_start_at_room_version_6() {
+        for v in ["1", "2", "3", "4", "5"] {
+            assert!(!requires_strict_canonical_numbers(v), "v{v}");
+        }
+        for v in ["6", "10", "11", "12"] {
+            assert!(requires_strict_canonical_numbers(v), "v{v}");
+        }
+        assert!(!requires_strict_canonical_numbers("not-a-version"));
+    }
+
     #[test]
     fn validate_canonical_number_rejects_integers_wider_than_u64() {
         use super::validate_canonical_number;
