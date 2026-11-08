@@ -472,3 +472,32 @@ fn compressed_causal_proofs_round_trip() {
         verify_causal_non_inclusion_compressed(&absent, depth, &compressed, root, count).unwrap()
     );
 }
+
+#[test]
+fn canonical_json_matches_rezzy_json_strict_writer() {
+    for text in [
+        r#"{"b":[1,{"z":null,"a":"\u0000\u001f\u007f\"\\\n"}],"a":-9007199254740991,"é":"\u2028"}"#,
+        "0",
+        "9007199254740991",
+    ] {
+        let value = rezzy::json::Value::parse(text).unwrap();
+        assert_eq!(
+            merkle::canonical_json(&value).unwrap(),
+            rezzy::json::to_canonical_bytes(&value).unwrap(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn canonical_json_rejects_wide_integers_and_negative_zero() {
+    for text in ["18446744073709551616", "9007199254740992", "-0"] {
+        let value = rezzy::json::Value::parse(text).unwrap();
+        assert!(merkle::canonical_json(&value).is_err(), "accepted {text}");
+    }
+    let value = rezzy::json::Value::parse("1.5").unwrap();
+    assert_eq!(
+        merkle::canonical_json(&value),
+        Err(merkle::MerkleError::UnsupportedNumber)
+    );
+}

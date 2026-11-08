@@ -1174,15 +1174,11 @@ fn validate_canonical_number(n: &crate::json::Number) -> Result<(), Canonicaliza
     if s.contains('.') || s.contains('e') || s.contains('E') {
         return Err(CanonicalizationError::FractionalOrExponentNumber);
     }
-    // Range check: must fit within ±(2^53 − 1).
-    if let Some(v) = n.as_i64() {
-        if v.unsigned_abs() > (1_u64 << 53) - 1 {
-            return Err(CanonicalizationError::OutOfRangeNumber);
-        }
-    } else if let Some(v) = n.as_u64() {
-        if v > (1_u64 << 53) - 1 {
-            return Err(CanonicalizationError::OutOfRangeNumber);
-        }
+    // Everything else must be a canonical integer within ±(2^53 − 1). This
+    // also rejects integers wider than 64 bits, which `as_i64`/`as_u64` can't
+    // represent, and non-canonical spellings such as `-0`.
+    if !n.is_canonical_integer() {
+        return Err(CanonicalizationError::OutOfRangeNumber);
     }
     Ok(())
 }
@@ -4433,6 +4429,24 @@ mod canonical_parity_tests {
     /// Negative zero (-0.0) is caught by the fractional-number check:
     /// The writer serialises it as "-0.0" which contains '.', so the
     /// fractional branch rejects it.
+    #[test]
+    fn validate_canonical_number_rejects_integers_wider_than_u64() {
+        use super::validate_canonical_number;
+        for text in [
+            "18446744073709551616",
+            "-9223372036854775809",
+            "9007199254740992",
+        ] {
+            let n = crate::json::Value::parse(text).unwrap();
+            let crate::json::Value::Number(n) = n else {
+                panic!("not a number")
+            };
+            assert!(validate_canonical_number(&n).is_err(), "accepted {text}");
+        }
+        let ok = crate::json::Number::from(9_007_199_254_740_991_u64);
+        assert!(validate_canonical_number(&ok).is_ok());
+    }
+
     #[test]
     fn validate_canonical_number_rejects_negative_zero_f64() {
         use super::validate_canonical_number;

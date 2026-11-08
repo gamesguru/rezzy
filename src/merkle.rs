@@ -1,10 +1,6 @@
 //! MSC4511 Merkleized event-metadata primitives.
 
-use alloc::{
-    format,
-    string::{String, ToString},
-    vec::Vec,
-};
+use alloc::{format, string::String, vec::Vec};
 use core::fmt;
 
 use crate::json::Value;
@@ -14,13 +10,9 @@ use sha2::{Digest, Sha256};
 /// SHA-256 digest size used by the local MSC4511 variant.
 pub const HASH_SIZE: usize = 32;
 
-const MAX_CANONICAL_INT: i64 = (1_i64 << 53) - 1;
-const MIN_CANONICAL_INT: i64 = -MAX_CANONICAL_INT;
-
 const LEAF_DST: &[u8] = b"msc4511:leaf:sha256:v1";
 const NODE_DST: &[u8] = b"msc4511:node:sha256:v1";
 const ROOT_DST: &[u8] = b"msc4511:root:sha256:v1";
-const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
 /// A SHA-256 digest.
 pub type Hash = [u8; HASH_SIZE];
@@ -167,9 +159,10 @@ struct Leaf {
 /// exactly representable range, or [`MerkleError::UnsupportedNumber`] for
 /// non-integer JSON numbers.
 pub fn canonical_json(value: &Value) -> Result<Vec<u8>, MerkleError> {
-    let mut out = Vec::new();
-    append_canonical_value(&mut out, value)?;
-    Ok(out)
+    crate::json::to_canonical_bytes(value).map_err(|error| match error {
+        crate::json::CanonicalError::IntegerOutOfRange => MerkleError::IntegerRange,
+        crate::json::CanonicalError::NonIntegerNumber => MerkleError::UnsupportedNumber,
+    })
 }
 
 /// Computes SHA-256("msc4511:leaf:sha256:v1" || `field_name` || "\x00" ||
@@ -528,83 +521,6 @@ fn validate_field_name_bytes(field_name: &[u8]) -> Result<(), MerkleError> {
 
 fn leaf_hash_unchecked(field_name: &[u8], canonical_value: &[u8]) -> Hash {
     hash_parts(&[LEAF_DST, field_name, &[0], canonical_value])
-}
-
-fn append_canonical_value(out: &mut Vec<u8>, value: &Value) -> Result<(), MerkleError> {
-    match value {
-        Value::Null => out.extend_from_slice(b"null"),
-        Value::Bool(true) => out.extend_from_slice(b"true"),
-        Value::Bool(false) => out.extend_from_slice(b"false"),
-        Value::Number(number) => append_number(out, number)?,
-        Value::String(string) => append_string(out, string),
-        Value::Array(items) => {
-            out.push(b'[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                append_canonical_value(out, item)?;
-            }
-            out.push(b']');
-        }
-        Value::Object(object) => {
-            let mut keys = object.keys().collect::<Vec<_>>();
-            keys.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-            out.push(b'{');
-            for (index, key) in keys.iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                append_string(out, key);
-                out.push(b':');
-                append_canonical_value(out, &object[*key])?;
-            }
-            out.push(b'}');
-        }
-    }
-    Ok(())
-}
-
-fn append_number(out: &mut Vec<u8>, number: &crate::json::Number) -> Result<(), MerkleError> {
-    if let Some(n) = number.as_i64() {
-        if !(MIN_CANONICAL_INT..=MAX_CANONICAL_INT).contains(&n) {
-            return Err(MerkleError::IntegerRange);
-        }
-        out.extend_from_slice(n.to_string().as_bytes());
-        return Ok(());
-    }
-
-    if number.as_u64().is_some() {
-        return Err(MerkleError::IntegerRange);
-    }
-
-    Err(MerkleError::UnsupportedNumber)
-}
-
-fn append_string(out: &mut Vec<u8>, string: &str) {
-    out.push(b'"');
-    for ch in string.chars() {
-        match ch {
-            '"' => out.extend_from_slice(br#"\""#),
-            '\\' => out.extend_from_slice(br"\\"),
-            '\u{08}' => out.extend_from_slice(br"\b"),
-            '\u{0c}' => out.extend_from_slice(br"\f"),
-            '\n' => out.extend_from_slice(br"\n"),
-            '\r' => out.extend_from_slice(br"\r"),
-            '\t' => out.extend_from_slice(br"\t"),
-            '\u{00}'..='\u{1f}' => {
-                let code = ch as usize;
-                out.extend_from_slice(b"\\u00");
-                out.push(HEX_LOWER[(code >> 4) & 0x0f]);
-                out.push(HEX_LOWER[code & 0x0f]);
-            }
-            _ => {
-                let mut buf = [0; 4];
-                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-            }
-        }
-    }
-    out.push(b'"');
 }
 
 pub(crate) fn hash_parts(parts: &[&[u8]]) -> Hash {

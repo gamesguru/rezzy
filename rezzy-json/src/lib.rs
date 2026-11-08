@@ -433,6 +433,17 @@ impl Value {
     pub fn parse_bytes(input: &[u8]) -> Result<Self, Error> {
         Self::parse_scalar(input)
     }
+
+    /// Like [`Self::parse_bytes`], but rejects objects containing duplicate keys.
+    ///
+    /// Use this at trust boundaries (for example PDU ingress) so that
+    /// `{"a":1,"a":2}` cannot be read, and then signed, as `{"a":2}`.
+    ///
+    /// # Errors
+    /// Returns [`Error::DuplicateKey`] on a repeated key, otherwise as [`Self::parse_bytes`].
+    pub fn parse_bytes_strict(input: &[u8]) -> Result<Self, Error> {
+        Self::parse_scalar_with(input, true).map_err(|e| e.kind)
+    }
 }
 
 impl Index<&str> for Value {
@@ -766,6 +777,15 @@ fn write_value_into(out: &mut String, value: &Value) {
     }
 }
 
+/// Appends `value` to `out` as a quoted, escaped JSON string.
+///
+/// This is the single string-literal encoder behind every writer in this
+/// crate. It is public so callers that assemble JSON without building a
+/// [`Value`] (for example report or log output) do not reimplement escaping.
+pub fn write_json_string(out: &mut String, value: &str) {
+    write_string_into(out, value);
+}
+
 /// Writes `value` as compact canonical JSON.
 ///
 /// # Errors
@@ -957,8 +977,9 @@ struct RawEmitter<'a, F> {
 
 impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
     /// Appends one JSON value, excluding matching object keys at every depth.
-    /// Strict mode accepts only Matrix canonical integers; permissive mode
-    /// normalizes number spellings. Duplicate object keys use the last value.
+    /// Strict mode accepts only Matrix canonical integers and rejects duplicate
+    /// object keys; permissive mode normalizes number spellings and lets the
+    /// last duplicate key win.
     ///
     /// # Errors
     /// Returns parsing or numeric-validation errors; output may be partially
@@ -979,11 +1000,13 @@ impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
         }
     }
 
-    /// Appends an object with decoded keys sorted and duplicate keys resolved
-    /// to their last value, omitting keys selected by `exclude`.
+    /// Appends an object with decoded keys sorted, omitting keys selected by
+    /// `exclude`. Duplicate keys resolve to their last value in permissive
+    /// mode and are rejected in strict mode, whether or not they are excluded.
     ///
     /// # Errors
-    /// Returns [`Error::InvalidToken`] for object-tokenization errors,
+    /// Returns [`Error::DuplicateKey`] for a repeated key in strict mode,
+    /// [`Error::InvalidToken`] for object-tokenization errors,
     /// [`Error::TrailingCharacters`] for trailing input, or a propagated
     /// value-emission error. Output may be partially appended.
     fn emit_object(&mut self, tokenizer: &mut Tokenizer<'_>, raw: &[u8]) -> Result<(), Error> {
@@ -992,6 +1015,13 @@ impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
             .map_err(|_| Error::InvalidToken)?;
         finish(tokenizer, raw)?;
         members.sort_by(|a, b| a.key.as_ref().cmp(b.key.as_ref()));
+        if self.strict
+            && members
+                .windows(2)
+                .any(|pair| pair[0].key.as_ref() == pair[1].key.as_ref())
+        {
+            return Err(Error::DuplicateKey);
+        }
         self.out.push('{');
         let mut first = true;
         for index in 0..members.len() {
@@ -1056,7 +1086,7 @@ impl<F: FnMut(&str) -> bool> RawEmitter<'_, F> {
 }
 
 /// Appends filtered JSON with [`RawEmitter::emit_raw`]'s numeric rules and
-/// last-value handling for duplicate object keys.
+/// duplicate-key handling (last value wins unless strict).
 ///
 /// # Errors
 /// Propagates emission errors, potentially leaving a partial value in `out`.
@@ -1157,9 +1187,13 @@ where
 /// — which is what makes this the signing path. Store 64-bit identifiers as
 /// JSON strings.
 ///
+/// Duplicate object keys are rejected, so ambiguous input cannot be signed as
+/// one of its readings.
+///
 /// # Errors
-/// Returns [`Error::InvalidNumber`] when a number violates those rules, or a
-/// parsing error for malformed JSON.
+/// Returns [`Error::InvalidNumber`] when a number violates those rules,
+/// [`Error::DuplicateKey`] for a repeated object key, or a parsing error for
+/// malformed JSON.
 pub fn write_raw_canonical_filtered_strict<F>(input: &[u8], exclude: F) -> Result<String, Error>
 where
     F: FnMut(&str) -> bool,
@@ -2570,6 +2604,60 @@ fn valid_number(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn strict_raw_writer_rejects_duplicate_keys_but_permissive_keeps_last() {
+        let input = br#"{"a":1,"a":2}"#;
+        assert_eq!(
+            crate::write_raw_canonical_filtered_strict(input, |_| false),
+            Err(crate::Error::DuplicateKey)
+        );
+        // Also when the duplicated key would be excluded, and when nested.
+        assert_eq!(
+            crate::write_raw_canonical_filtered_strict(input, |k| k == "a"),
+            Err(crate::Error::DuplicateKey)
+        );
+        assert_eq!(
+            crate::write_raw_canonical_filtered_strict(br#"{"x":{"b":1,"b":1}}"#, |_| false),
+            Err(crate::Error::DuplicateKey)
+        );
+        assert_eq!(
+            crate::write_raw_canonical_filtered_strict(br#"{"b":1,"a":2}"#, |_| false).unwrap(),
+            r#"{"a":2,"b":1}"#
+        );
+    }
+
+    #[test]
+    fn parse_bytes_strict_rejects_duplicate_keys() {
+        assert_eq!(
+            crate::Value::parse_bytes_strict(br#"{"a":1,"a":2}"#),
+            Err(crate::Error::DuplicateKey)
+        );
+        assert_eq!(
+            crate::Value::parse_bytes(br#"{"a":1,"a":2}"#).unwrap()["a"],
+            crate::Value::parse("2").unwrap()
+        );
+        assert!(crate::Value::parse_bytes_strict(br#"{"a":1,"b":2}"#).is_ok());
+    }
+
+    #[test]
+    fn public_string_encoder_matches_value_writer() {
+        for text in [
+            "plain",
+            "quote\" backslash\\",
+            "line\nfeed\r\tend",
+            "\u{0}\u{8}\u{c}\u{1f}\u{7f}",
+            "unicode é 😀 \u{2028}",
+        ] {
+            let mut encoded = String::new();
+            crate::write_json_string(&mut encoded, text);
+            assert_eq!(
+                encoded,
+                crate::write_string_value(&crate::Value::String(text.into())).unwrap(),
+                "{text:?}"
+            );
+        }
+    }
+
     use super::{
         to_canonical_bytes, to_canonical_string, to_canonical_string_filtered, CanonicalError,
         Value,
