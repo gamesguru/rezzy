@@ -2365,15 +2365,24 @@ fn auth_types_for_event_core<'a>(
     auth_types
 }
 
+/// Borrowed counterpart to [`auth_types_for_event`].
+///
+/// Runs the same selection algorithm but returns the event types as
+/// `&'static str` and the state keys borrowed from the caller's inputs. Use
+/// this on hot paths that only compare, hash, or look up the pairs (for
+/// example, selecting the auth entries an event needs out of a state set)
+/// instead of allocating two `String`s per entry.
+///
+/// The lifetime is the shortest of `sender`, `state_key`, and `content`.
 #[must_use]
-pub fn auth_types_for_event(
+pub fn auth_types_for_event_ref<'a>(
     event_type: &str,
-    sender: &str,
-    state_key: Option<&str>,
-    content: &crate::json::Value,
+    sender: &'a str,
+    state_key: Option<&'a str>,
+    content: &'a crate::json::Value,
     version: StateResVersion,
     room_version: &str,
-) -> Vec<(String, String)> {
+) -> Vec<(&'static str, &'a str)> {
     let membership = content.get(FIELD_MEMBERSHIP).and_then(|v| v.as_str());
 
     let third_party_invite_token = content
@@ -2393,6 +2402,29 @@ pub fn auth_types_for_event(
         membership,
         third_party_invite_token,
         join_authorised_via_users_server,
+        version,
+        room_version,
+    )
+}
+
+/// The `(event_type, state_key)` pairs an event requires in its `auth_events`.
+///
+/// This is the allocating wrapper over [`auth_types_for_event_ref`]; prefer
+/// the borrowed form when the caller only inspects the pairs.
+#[must_use]
+pub fn auth_types_for_event(
+    event_type: &str,
+    sender: &str,
+    state_key: Option<&str>,
+    content: &crate::json::Value,
+    version: StateResVersion,
+    room_version: &str,
+) -> Vec<(String, String)> {
+    auth_types_for_event_ref(
+        event_type,
+        sender,
+        state_key,
+        content,
         version,
         room_version,
     )
@@ -2427,6 +2459,63 @@ mod tests {
     use crate::basespec::event_types::M_ROOM_ALIASES;
     use crate::json;
     use alloc::vec;
+
+    /// The borrowed selector must select exactly the same pairs as the
+    /// allocating wrapper, including the membership-only keys and the
+    /// version-sensitive create/authorising-member rules.
+    #[test]
+    fn borrowed_auth_types_match_owned() {
+        let cases = [
+            (
+                "m.room.member",
+                Some("@target:example.org"),
+                json!({
+                    "membership": "invite",
+                    "third_party_invite": { "signed": { "token": "token" } },
+                    "join_authorised_via_users_server": "@auth:example.org",
+                }),
+            ),
+            ("m.room.member", None, json!({ "membership": "join" })),
+            ("m.room.message", None, json!({})),
+            ("m.room.create", Some(""), json!({ "room_version": "11" })),
+        ];
+        for (event_type, state_key, content) in &cases {
+            for version in [
+                StateResVersion::V1,
+                StateResVersion::V2,
+                StateResVersion::V2_1,
+            ] {
+                for room_version in ["1", "7", "11"] {
+                    let owned = auth_types_for_event(
+                        event_type,
+                        "@sender:example.org",
+                        *state_key,
+                        content,
+                        version,
+                        room_version,
+                    );
+                    let borrowed = auth_types_for_event_ref(
+                        event_type,
+                        "@sender:example.org",
+                        *state_key,
+                        content,
+                        version,
+                        room_version,
+                    );
+                    let borrowed_owned: Vec<(String, String)> = borrowed
+                        .into_iter()
+                        .map(|(event_type, state_key)| {
+                            (event_type.to_string(), state_key.to_string())
+                        })
+                        .collect();
+                    assert_eq!(
+                        owned, borrowed_owned,
+                        "selection drifted for {event_type} {state_key:?} {version:?} v{room_version}"
+                    );
+                }
+            }
+        }
+    }
 
     fn make_test_event(
         id: &str,
