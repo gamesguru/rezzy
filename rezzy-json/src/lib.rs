@@ -839,6 +839,98 @@ where
     Ok(out)
 }
 
+/// Why a parsed [`Value`] cannot be written as Matrix canonical JSON.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanonicalError {
+    /// A number that is not an integer: a float (`1.0`, `1e2`, `-0`) is never
+    /// canonical.
+    NonIntegerNumber,
+    /// An integer outside `[MIN_SAFE_INTEGER, MAX_SAFE_INTEGER]` (±(2^53 - 1)),
+    /// or one with a non-canonical spelling such as a leading zero.
+    IntegerOutOfRange,
+}
+
+impl fmt::Display for CanonicalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonIntegerNumber => f.write_str("canonical JSON forbids floating-point values"),
+            Self::IntegerOutOfRange => {
+                f.write_str("integer exceeds canonical JSON safe range (+/-(2^53-1))")
+            }
+        }
+    }
+}
+
+impl core::error::Error for CanonicalError {}
+
+fn check_canonical<F>(value: &Value, exclude: &mut F) -> Result<(), CanonicalError>
+where
+    F: FnMut(&str) -> bool,
+{
+    match value {
+        Value::Number(n) if n.is_canonical_integer() => Ok(()),
+        Value::Number(n) => {
+            if n.as_str().bytes().any(|b| matches!(b, b'.' | b'e' | b'E')) {
+                Err(CanonicalError::NonIntegerNumber)
+            } else {
+                Err(CanonicalError::IntegerOutOfRange)
+            }
+        }
+        Value::Array(items) => items.iter().try_for_each(|i| check_canonical(i, exclude)),
+        Value::Object(object) => {
+            for (key, item) in object {
+                if !exclude(key) {
+                    check_canonical(item, exclude)?;
+                }
+            }
+            Ok(())
+        }
+        Value::Null | Value::Bool(_) | Value::String(_) => Ok(()),
+    }
+}
+
+/// Writes `value` as **strict** Matrix canonical JSON: compact, keys sorted,
+/// and every number a canonical integer within ±(2^53 - 1).
+///
+/// This is the function to use for any bytes that are hashed or signed.
+/// [`write_string_value`] is the permissive counterpart: it preserves number
+/// spelling, so it will happily emit floats and out-of-range integers that
+/// other implementations reject.
+///
+/// # Errors
+/// Returns [`CanonicalError`] if any number is a float or outside the safe
+/// integer range.
+pub fn to_canonical_string(value: &Value) -> Result<String, CanonicalError> {
+    to_canonical_string_filtered(value, |_| false)
+}
+
+/// Like [`to_canonical_string`], omitting object fields selected by
+/// `exclude` (applied to keys at every depth). Omitted subtrees are not
+/// validated.
+///
+/// # Errors
+/// Returns [`CanonicalError`] if any retained number is a float or outside
+/// the safe integer range.
+pub fn to_canonical_string_filtered<F>(
+    value: &Value,
+    mut exclude: F,
+) -> Result<String, CanonicalError>
+where
+    F: FnMut(&str) -> bool,
+{
+    check_canonical(value, &mut exclude)?;
+    // Validation succeeded, and the permissive writer is infallible.
+    Ok(write_string_value_filtered(value, exclude).unwrap_or_default())
+}
+
+/// Same as [`to_canonical_string`], returning bytes.
+///
+/// # Errors
+/// See [`to_canonical_string`].
+pub fn to_canonical_bytes(value: &Value) -> Result<Vec<u8>, CanonicalError> {
+    to_canonical_string(value).map(String::into_bytes)
+}
+
 /// Canonicalizes JSON from validated raw spans, sorting decoded keys and
 /// applying last-wins duplicate semantics while omitting selected fields.
 ///
@@ -2478,6 +2570,57 @@ fn valid_number(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        to_canonical_bytes, to_canonical_string, to_canonical_string_filtered, CanonicalError,
+        Value,
+    };
+
+    fn canon(src: &str) -> Result<alloc::string::String, CanonicalError> {
+        to_canonical_string(&Value::parse(src).unwrap())
+    }
+
+    #[test]
+    fn strict_value_writer_sorts_and_compacts() {
+        assert_eq!(
+            canon(r#"{ "z": {"b":2,"a":1}, "a": [0, -5] }"#).unwrap(),
+            r#"{"a":[0,-5],"z":{"a":1,"b":2}}"#
+        );
+    }
+
+    #[test]
+    fn strict_value_writer_rejects_floats() {
+        for src in ["1.0", "1e2", "-0", "[1.5]", r#"{"a":{"b":0.1}}"#] {
+            assert_eq!(canon(src), Err(CanonicalError::NonIntegerNumber), "{src}");
+        }
+    }
+
+    #[test]
+    fn strict_value_writer_enforces_safe_range() {
+        assert!(canon("9007199254740991").is_ok());
+        assert!(canon("-9007199254740991").is_ok());
+        for src in [
+            "9007199254740992",
+            "-9007199254740992",
+            "18446744073709551615",
+            "99999999999999999999",
+        ] {
+            assert_eq!(canon(src), Err(CanonicalError::IntegerOutOfRange), "{src}");
+        }
+    }
+
+    #[test]
+    fn strict_value_writer_filter_skips_excluded_subtrees() {
+        let v = Value::parse(r#"{"keep":1,"unsigned":{"f":1.5}}"#).unwrap();
+        assert!(to_canonical_string(&v).is_err());
+        assert_eq!(
+            to_canonical_string_filtered(&v, |k| k == "unsigned").unwrap(),
+            r#"{"keep":1}"#
+        );
+        assert_eq!(
+            to_canonical_bytes(&Value::parse("[1]").unwrap()).unwrap(),
+            b"[1]"
+        );
+    }
     #[test]
     fn small_integer_from_impls() {
         use crate::Value;
@@ -2601,7 +2744,7 @@ mod tests {
 
     use super::{
         write_raw_canonical_filtered, write_raw_canonical_filtered_strict, write_string_pretty,
-        write_string_value, write_string_value_filtered, Error, Value,
+        write_string_value, write_string_value_filtered, Error,
     };
     use crate::{FieldMask, ValueRef};
     use alloc::{
