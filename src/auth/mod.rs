@@ -607,7 +607,11 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
         // Rule 1.2: Check sender MXID validity for m.room.create. Historical
         // localparts (including uppercase) must remain acceptable for events
         // that already exist.
-        if !is_acceptable_historical_mxid(event.sender()) {
+        let principal_ids = event
+            .content()
+            .get_room_version()
+            .is_some_and(crate::basespec::rezzy_types::uses_principal_identifiers);
+        if !principal_ids && !is_acceptable_historical_mxid(event.sender()) {
             return Err(AuthError::InvalidSyntax(
                 "m.room.create sender must be a valid MXID".into(),
             ));
@@ -693,6 +697,9 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
             M_ROOM_JOIN_RULES,
             M_ROOM_THIRD_PARTY_INVITE,
         ];
+        let cygnus_overlay = crate::basespec::rezzy_types::uses_principal_identifiers(
+            room_version_str_or_v1(state)?,
+        );
 
         // Rule 2.4 (V1–V11): auth_events must contain m.room.create
         if !version.is_v2_1_plus() {
@@ -737,7 +744,10 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
                 ));
             }
 
-            if !VALID_AUTH_TYPES.contains(&auth_type.as_ref()) {
+            let allowed_auth_type = VALID_AUTH_TYPES.contains(&auth_type.as_ref())
+                || (cygnus_overlay
+                    && crate::basespec::rezzy_types::is_cygnus_auth_event_type(&auth_type));
+            if !allowed_auth_type {
                 return Err(AuthError::InvalidSyntax(alloc::format!(
                     "unexpected event type in auth_events: {auth_type}"
                 )));
@@ -2458,6 +2468,7 @@ mod tests {
     use super::*;
     use crate::basespec::event_types::M_ROOM_ALIASES;
     use crate::json;
+    use alloc::format;
     use alloc::vec;
 
     /// The borrowed selector must select exactly the same pairs as the
@@ -3033,6 +3044,35 @@ mod tests {
             result.is_ok(),
             "historical uppercase localparts must be accepted on create: {result:?}"
         );
+    }
+
+    #[test]
+    fn test_cygnus_create_accepts_principal_sender() {
+        let principal = format!("@{}", "A".repeat(43));
+        let create = make_test_event(
+            "$create",
+            M_ROOM_CREATE,
+            &principal,
+            json!({ "room_version": "tk.nutra.cygnus.1" }),
+        );
+        let result = check_auth(&create, &RoomState::new(), StateResVersion::V2_1, None);
+        assert!(
+            result.is_ok(),
+            "Cygnus principals are not MXIDs but are valid senders: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_v12_create_rejects_principal_sender() {
+        let principal = format!("@{}", "A".repeat(43));
+        let create = make_test_event(
+            "$create",
+            M_ROOM_CREATE,
+            &principal,
+            json!({ "room_version": "12" }),
+        );
+        let result = check_auth(&create, &RoomState::new(), StateResVersion::V2_1, None);
+        assert!(result.is_err(), "v12 requires an MXID sender: {result:?}");
     }
 
     #[test]

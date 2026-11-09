@@ -379,6 +379,13 @@ impl RoomVersionFormat {
             || matches!(self, Self::Msc4242 | Self::NutraCdo | Self::Cygnus)
     }
 
+    /// Returns `true` for room versions that identify users by opaque
+    /// principal identifiers rather than MXIDs.
+    #[must_use]
+    const fn uses_principal_identifiers(self) -> bool {
+        matches!(self, Self::Cygnus)
+    }
+
     /// Returns `true` for room versions that use v12 create-event rules (v12+,
     /// where `m.room.create` drops `room_id` from the redacted form), MSC4242,
     /// and `NutraCdo` (a v12-derived format).
@@ -394,6 +401,25 @@ impl RoomVersionFormat {
     const fn uses_reference_hash_event_ids(self) -> bool {
         !matches!(self, Self::Numeric(1 | 2))
     }
+}
+
+/// Returns `true` for MSC00FC auth-event types that participate in the
+/// Cygnus overlay but are not part of the base v12 auth-event whitelist.
+#[must_use]
+pub fn is_cygnus_auth_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "m.room.user_epoch" | "m.room.server_epoch" | "m.room.server_seal" | "m.room.server_acl"
+    )
+}
+
+/// Returns `true` for room versions that identify users by opaque principal
+/// identifiers rather than MXIDs. MSC00FC "Cygnus" replaces user IDs with
+/// `@<base64url>` principals, so MXID syntax checks do not apply.
+#[must_use]
+pub fn uses_principal_identifiers(room_version: &str) -> bool {
+    RoomVersionFormat::parse(room_version)
+        .is_some_and(RoomVersionFormat::uses_principal_identifiers)
 }
 
 /// Error type for canonical JSON number validation failures.
