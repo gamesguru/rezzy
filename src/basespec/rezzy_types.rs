@@ -187,7 +187,7 @@ impl StateResVersion {
             RoomVersionFormat::Numeric(1) => Self::V1,
             RoomVersionFormat::Numeric(2..=11) | RoomVersionFormat::Msc3389 => Self::V2,
             RoomVersionFormat::Numeric(12) if ver == "12.1" => Self::V2_1_1,
-            RoomVersionFormat::Numeric(12) => Self::V2_1,
+            RoomVersionFormat::Numeric(12) | RoomVersionFormat::Cygnus => Self::V2_1,
             RoomVersionFormat::Msc4242 => Self::V2_2,
             RoomVersionFormat::NutraCdo => Self::V3,
             // Numeric(12) is the only other numeric variant; covered above.
@@ -318,6 +318,13 @@ enum RoomVersionFormat {
     Msc3389,
     /// Rezzy's experimental certified-causal-governance room version.
     NutraCdo,
+    /// MSC00FC "Cygnus" (`"tk.nutra.cygnus.1"`): room v12 plus
+    /// self-certifying link-chain identities. Base auth and state resolution
+    /// are exactly v12 (`V2_1`); the Cygnus rules are an overlay supplied by
+    /// the caller. Rezzy's redaction table knows only the v12 keys, so Cygnus
+    /// events must be hashed and redacted by the Cygnus verifier, which also
+    /// preserves epoch content and `device_certificate`.
+    Cygnus,
 }
 
 impl RoomVersionFormat {
@@ -343,6 +350,7 @@ impl RoomVersionFormat {
             "org.matrix.msc4242.12" => Some(Self::Msc4242),
             "org.matrix.msc3389.10" => Some(Self::Msc3389),
             "tk.nutra.cdo.12" => Some(Self::NutraCdo),
+            "tk.nutra.cygnus.1" => Some(Self::Cygnus),
             _ => None,
         }
     }
@@ -356,7 +364,10 @@ impl RoomVersionFormat {
     #[must_use]
     const fn requires_strict_canonical_numbers(self) -> bool {
         matches!(self, Self::Numeric(v) if v >= 6)
-            || matches!(self, Self::Msc4242 | Self::Msc3389 | Self::NutraCdo)
+            || matches!(
+                self,
+                Self::Msc4242 | Self::Msc3389 | Self::NutraCdo | Self::Cygnus
+            )
     }
 
     /// Returns `true` for room versions that use v11 redaction rules (v11+),
@@ -365,7 +376,7 @@ impl RoomVersionFormat {
     #[must_use]
     const fn uses_v11_redaction_rules(self) -> bool {
         matches!(self, Self::Numeric(v) if v >= 11)
-            || matches!(self, Self::Msc4242 | Self::NutraCdo)
+            || matches!(self, Self::Msc4242 | Self::NutraCdo | Self::Cygnus)
     }
 
     /// Returns `true` for room versions that use v12 create-event rules (v12+,
@@ -374,7 +385,7 @@ impl RoomVersionFormat {
     #[must_use]
     const fn uses_v12_create_rules(self) -> bool {
         matches!(self, Self::Numeric(v) if v >= 12)
-            || matches!(self, Self::Msc4242 | Self::NutraCdo)
+            || matches!(self, Self::Msc4242 | Self::NutraCdo | Self::Cygnus)
     }
 
     /// Returns `true` when event IDs are reference hashes computed by the
@@ -441,6 +452,7 @@ mod room_version_format_tests {
             ("12.1", RoomVersionFormat::Numeric(12)),
             ("org.matrix.msc4242.12", RoomVersionFormat::Msc4242),
             ("org.matrix.msc3389.10", RoomVersionFormat::Msc3389),
+            ("tk.nutra.cygnus.1", RoomVersionFormat::Cygnus),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -449,6 +461,18 @@ mod room_version_format_tests {
                 "parse({input:?}) should be Some({expected:?})"
             );
         }
+    }
+
+    #[test]
+    fn cygnus_room_version_resolves_with_v2_1() {
+        assert_eq!(
+            super::StateResVersion::from_room_version("tk.nutra.cygnus.1"),
+            Some(super::StateResVersion::V2_1)
+        );
+        assert_eq!(
+            super::StateResVersion::from_room_version("tk.nutra.cygnus.2"),
+            None
+        );
     }
 
     #[test]
@@ -582,7 +606,7 @@ pub fn redaction_preserved_keys(event_type: &str, room_version: &str) -> Redacti
         // Handled by the early return above; v10 is the nearest numeric rule set.
         RoomVersionFormat::Msc3389 => 10,
         // MSC4242 inherits v11's redaction rules verbatim.
-        RoomVersionFormat::Msc4242 | RoomVersionFormat::NutraCdo => 11,
+        RoomVersionFormat::Msc4242 | RoomVersionFormat::NutraCdo | RoomVersionFormat::Cygnus => 11,
     };
     match event_type {
         crate::basespec::event_types::M_ROOM_CREATE => {
