@@ -226,6 +226,21 @@ impl HamtCodec for Vec<u8> {
     }
 }
 
+/// Fixed-width byte arrays are stored raw: `N` is part of the type, so no
+/// length prefix is needed. This is the value codec for raw 32-byte event
+/// reference hashes.
+impl<const N: usize> HamtCodec for [u8; N] {
+    #[inline]
+    fn encode_hamt(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(self);
+    }
+
+    #[inline]
+    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
+        read_fixed::<N>(input, cursor)
+    }
+}
+
 impl<A: HamtCodec, B: HamtCodec> HamtCodec for (A, B) {
     fn encode_hamt(&self, out: &mut Vec<u8>) {
         self.0.encode_hamt(out);

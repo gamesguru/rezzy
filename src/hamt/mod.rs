@@ -38,10 +38,28 @@
 //! hashing, `LeanEvent` construction, and callers cloning their own state
 //! maps, so typed roots should be driven by measured type-scoped read demand.
 //! [`PersistedHamtReader`] is generic over `K` and `V`, and can read each
-//! per-type subtree without changing its generic interface. The flat layout is
-//! the current choice, not a retained compatibility contract. Leaves are a
-//! single interned `(event_type, state_key)` id, which carries no type, so a
-//! typed layout would key its directory by the interned event type instead.
+//! per-type subtree without changing its generic interface. For portable node
+//! hashes, leaf keys and values must also have canonical, cross-server
+//! encodings; homeserver-local short IDs are suitable for local indexes but
+//! make node bytes server-specific. A flat portable state tree can use
+//! `(EventType, String)` keys and fixed-width event-reference digests as values.
+//! A typed layout would put a canonical event-type key in its directory and
+//! keep state-key strings inside each subtree. Portable node hashes also
+//! require every server to use the same room-scoped structural key and the
+//! same deterministic routing hash over canonical key bytes; the default
+//! caller-provided routing and namespace settings do not guarantee that.
+//!
+//! Public routing does not make prefix grinding unbounded. With 32-way nodes a
+//! shared path of `d` levels costs an attacker about `2^(5d)` attempts per key
+//! (four levels is instant, ten is impractical at scale), each ground key still
+//! needs a state event subject to power-level and rate limits, and every extra
+//! level adds only one node to the targeted path. A depth cap bounds the worst
+//! case, and an epoch-rotated routing key invalidates precomputed collisions at
+//! the cost of rebuilding the tree. Servers that only compare state groups do
+//! not need any of this: keep local routing and use the portable `state_group_id`.
+//! If subtree exchange is a requirement, use canonical
+//! `(EventType, String)` leaves with public routing, plus a depth cap and
+//! preferably epoch rotation.
 //!
 //! Independently, the `LtHash` identity (`BLAKE3(lattice)`) and the resolution
 //! algorithms do not change with the root layout: cross-server state-group
@@ -98,8 +116,8 @@ pub use hash::{
 };
 pub use reader::{HamtReadError, PersistedHamtReader};
 pub use state_hamt::{
-    decode_state_hamt_root, encode_state_hamt_root, StateHamtRoot, StateHamtRootError,
-    STATE_HAMT_LATTICE_BYTES, STATE_HAMT_ROOT_VERSION,
+    decode_state_hamt_root, encode_state_hamt_root, StateHamtEventId, StateHamtKey, StateHamtRoot,
+    StateHamtRootError, STATE_HAMT_LATTICE_BYTES, STATE_HAMT_ROOT_VERSION,
 };
 
 /// 256-bit routing path hash for a key in the HAMT.

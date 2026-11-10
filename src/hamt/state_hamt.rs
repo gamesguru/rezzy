@@ -4,17 +4,25 @@
 //! internal nodes are the generic [`MTHN`](crate::hamt::HAMT_NODE_MAGIC)
 //! records built by [`build_hamt_root_handle`](crate::hamt::build_hamt_root_handle).
 //!
-//! Leaves are interned integers, not strings: the homeserver maps
-//! `(event_type, state_key)` to a `u64` short state key and the event id to a
-//! `u64` short event id, and the nodes are `HamtNode<u64, u64>`. The id
-//! assignment is the homeserver's, so node bytes and structural hashes are
-//! local storage, meaningful only alongside that server's id tables.
+//! Leaves are self-describing: the key is `(EventType, String)`, encoded by the
+//! dense [`HamtCodec`](crate::hamt::HamtCodec) as length-prefixed event-type and
+//! state-key bytes, and the value is the raw 32-byte event-id reference hash.
+//! For room versions 3 and later an event id is `$` followed by the unpadded
+//! base64url encoding of those 32 bytes, so every server holds the same bytes.
+//! No interning table, digest, or collision handling is involved. Room versions
+//! 1 and 2 use opaque event ids, so a caller persisting those needs a value
+//! type that carries the id string instead.
 //!
 //! The state-group id is the unkeyed `LtHash` digest of the logical
 //! `(event_type, state_key, event_id)` strings, so it is the only portable
-//! identity of a state set. The retained 2048-byte lattice carries that
-//! identity without rebuilding the state; checking it against the leaves
-//! requires resolving the short ids back to strings.
+//! identity of a state set. Keeping the leaf key as strings also lets a reader
+//! check the retained lattice against the leaves and serve type-scoped reads
+//! without a reverse index.
+//!
+//! Whether node bytes and structural hashes match across servers depends on the
+//! caller's structural key: one derived from the room id alone gives identical
+//! trees for identical states, while one keyed by a per-server secret makes
+//! them local to that server.
 //!
 //! The current flat layout is:
 //!
@@ -44,6 +52,18 @@ pub const STATE_HAMT_ROOT_VERSION: u8 = 0x01;
 
 /// Byte length of the retained 1024-lane state lattice.
 pub const STATE_HAMT_LATTICE_BYTES: usize = 2048;
+
+/// Canonical state-HAMT leaf key: event type plus state key.
+///
+/// The dense codec writes both as length-prefixed UTF-8, so the key is
+/// self-describing and byte-identical across servers.
+pub type StateHamtKey = (crate::basespec::event_types::EventType, String);
+
+/// Raw 32-byte reference hash carried in a room-v3+ event id.
+///
+/// An event id is `$` followed by the unpadded base64url encoding of these
+/// bytes; storing the bytes avoids re-encoding the id on every lookup.
+pub type StateHamtEventId = [u8; 32];
 
 /// A decoded `MTHR` root record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,6 +290,57 @@ mod tests {
             decode_state_hamt_root(&trailing),
             Err(StateHamtRootError::InvalidLattice)
         );
+    }
+
+    #[test]
+    fn leaf_key_and_event_id_codec_round_trip() {
+        use crate::basespec::event_types::EventType;
+        use crate::hamt::HamtCodec;
+
+        let event_type = "m.room.member";
+        let state_key = "@alice:example.org";
+        let key: StateHamtKey = (EventType::from(event_type), state_key.to_string());
+        let value: StateHamtEventId = [7_u8; 32];
+
+        let mut encoded = Vec::new();
+        key.encode_hamt(&mut encoded);
+        value.encode_hamt(&mut encoded);
+
+        let mut cursor = 0;
+        let decoded_key = <(EventType, String)>::decode_hamt(&encoded, &mut cursor).unwrap();
+        let decoded_value = <[u8; 32]>::decode_hamt(&encoded, &mut cursor).unwrap();
+
+        assert_eq!(decoded_key, key);
+        assert_eq!(decoded_value, value);
+        assert_eq!(cursor, encoded.len());
+        // Length-prefixed binary, not JSON.
+        assert_eq!(
+            &encoded[..4],
+            &u32::try_from(event_type.len()).unwrap().to_le_bytes()
+        );
+        assert_eq!(
+            encoded.len(),
+            4 + event_type.len() + 4 + state_key.len() + 32
+        );
+    }
+
+    #[test]
+    fn state_leaf_shape_builds_and_looks_up() {
+        use crate::basespec::event_types::EventType;
+
+        let key: StateHamtKey = (
+            EventType::from("m.room.member"),
+            "@alice:example.org".to_string(),
+        );
+        let value: StateHamtEventId = [3_u8; 32];
+        let (_, root) = crate::hamt::build_hamt_root_handle(
+            b"!room:example.org",
+            &LtHash::ZERO,
+            vec![(key.clone(), value)],
+        )
+        .expect("build");
+
+        assert_eq!(root.get(b"!room:example.org", &key), Some(&value));
     }
 
     #[test]
