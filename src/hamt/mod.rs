@@ -6,7 +6,7 @@
 //! - `delta`: subtree differencing for set isolation
 //! - `audit`: multi-root reachability audit for storage GC
 //! - `reader`: lazy, verified reads of persisted nodes
-//! - `state_hamt`: the flat Matrix state-HAMT root record and leaf-key codec
+//! - `state_hamt`: the flat Matrix state-HAMT root record
 //! - `gc`: experimental incremental refcount bookkeeping for integrations
 //!   with a strictly linear root history (behind `unstable-refcount-gc`)
 //! - `tests`: regression coverage for the generic HAMT core
@@ -28,21 +28,24 @@
 //! missing id as incomplete. That is a separate, correctness-sensitive change;
 //! it should be driven by a profile showing merges dominate.
 //!
-//! ## Why not typed roots
+//! ## Typed state roots
 //!
-//! The flat `MTHR`/`MTHN` encoding is the portable on-disk format (Synapse and
-//! sithnapse write it), and it is what existing stores contain. Typed roots
-//! change node identity and therefore storage keys: adopting them needs a
-//! dual-read window, a migration, and write-side coordination. They also
-//! target the wrong cost. A seed read materializes one state set per external
-//! parent, while the direct-import hot path is dominated by auth judging,
-//! redaction and content hashing, `LeanEvent` construction, and callers
-//! cloning their own state maps. [`PersistedHamtReader`] is generic over `K`
-//! and `V`, so a typed node codec can plug in later without changing this API.
+//! The state-root codec currently uses a flat layout. A typed layout could
+//! support type-scoped reads, but adds a directory lookup to point reads,
+//! rewrites the directory when a subtree changes, and grows root records.
+//! Full-state reads and bulk imports do not benefit from that layout. The
+//! direct-import hot path is dominated by auth judging, redaction and content
+//! hashing, `LeanEvent` construction, and callers cloning their own state
+//! maps, so typed roots should be driven by measured type-scoped read demand.
+//! [`PersistedHamtReader`] is generic over `K` and `V`, and can read each
+//! per-type subtree without changing its generic interface. The flat layout is
+//! the current choice, not a retained compatibility contract. Leaves are a
+//! single interned `(event_type, state_key)` id, which carries no type, so a
+//! typed layout would key its directory by the interned event type instead.
 //!
-//! For the same reason the `LtHash` identity (`BLAKE3(lattice)`) and the
-//! resolution algorithms are not changed here: cross-server state-group
-//! identity and every stored group depend on them.
+//! Independently, the `LtHash` identity (`BLAKE3(lattice)`) and the resolution
+//! algorithms do not change with the root layout: cross-server state-group
+//! identity and every stored group depend on the `LtHash` of the logical entries.
 //!
 //! # Release notes
 //!
@@ -95,8 +98,7 @@ pub use hash::{
 };
 pub use reader::{HamtReadError, PersistedHamtReader};
 pub use state_hamt::{
-    decode_state_hamt_leaf_key, decode_state_hamt_root, encode_state_hamt_root,
-    state_hamt_leaf_key, StateHamtLeafKeyError, StateHamtRoot, StateHamtRootError,
+    decode_state_hamt_root, encode_state_hamt_root, StateHamtRoot, StateHamtRootError,
     STATE_HAMT_LATTICE_BYTES, STATE_HAMT_ROOT_VERSION,
 };
 

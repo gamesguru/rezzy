@@ -1,14 +1,22 @@
-//! Flat Matrix state-HAMT root record and leaf-key codec.
+//! Flat Matrix state-HAMT root record.
 //!
 //! Every distinct room state set is persisted as an `MTHR` root record whose
 //! internal nodes are the generic [`MTHN`](crate::hamt::HAMT_NODE_MAGIC)
 //! records built by [`build_hamt_root_handle`](crate::hamt::build_hamt_root_handle).
-//! The state-group id is the unkeyed `LtHash` digest of the logical
-//! `(event_type, state_key, event_id)` entries, and the retained 2048-byte
-//! lattice lets a reader verify a root without rebuilding the state.
 //!
-//! The layout is byte-compatible with Synapse's `_encode_state_hamt_root` and
-//! its sithnapse mirror:
+//! Leaves are interned integers, not strings: the homeserver maps
+//! `(event_type, state_key)` to a `u64` short state key and the event id to a
+//! `u64` short event id, and the nodes are `HamtNode<u64, u64>`. The id
+//! assignment is the homeserver's, so node bytes and structural hashes are
+//! local storage, meaningful only alongside that server's id tables.
+//!
+//! The state-group id is the unkeyed `LtHash` digest of the logical
+//! `(event_type, state_key, event_id)` strings, so it is the only portable
+//! identity of a state set. The retained 2048-byte lattice carries that
+//! identity without rebuilding the state; checking it against the leaves
+//! requires resolving the short ids back to strings.
+//!
+//! The current flat layout is:
 //!
 //! ```text
 //! "MTHR" (4)
@@ -21,15 +29,11 @@
 //! lattice (2048 bytes: 1024 u16 lanes, little-endian)
 //! ```
 //!
-//! Leaf keys are the JSON encoding of `(event_type, state_key)` — for example
-//! `["m.room.member","@alice:example.org"]` — matching the `serde_json`
-//! encoding Synapse writes.
-//!
 //! See [`crate::hamt`] for the deferred lazy-resolver and typed-root notes.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::fmt::{self, Write as _};
+use core::fmt;
 
 use crate::incremental::LtHash;
 
@@ -200,86 +204,6 @@ fn read_u16_prefixed<'a>(
     Ok(value)
 }
 
-/// Why a state-HAMT leaf key could not be decoded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StateHamtLeafKeyError {
-    /// The key is not valid JSON.
-    InvalidJson,
-    /// The key is not a JSON array.
-    NotArray,
-    /// The key does not have exactly two elements.
-    WrongArity,
-    /// One or both elements are not strings.
-    NonString,
-}
-
-impl fmt::Display for StateHamtLeafKeyError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidJson => f.write_str("state HAMT leaf key is not valid JSON"),
-            Self::NotArray => f.write_str("state HAMT leaf key is not a JSON array"),
-            Self::WrongArity => f.write_str("state HAMT leaf key is not a two-element array"),
-            Self::NonString => f.write_str("state HAMT leaf key elements must be strings"),
-        }
-    }
-}
-
-impl core::error::Error for StateHamtLeafKeyError {}
-
-/// Encode the logical `(event_type, state_key)` as a state-HAMT leaf key.
-///
-/// This emits the `serde_json` tuple encoding Synapse uses, including its
-/// control-character escapes, so the bytes are portable across implementations.
-#[must_use]
-pub fn state_hamt_leaf_key(event_type: &str, state_key: &str) -> String {
-    let mut out = String::new();
-    out.push('[');
-    push_json_string(&mut out, event_type);
-    out.push(',');
-    push_json_string(&mut out, state_key);
-    out.push(']');
-    out
-}
-
-/// Decode a state-HAMT leaf key into `(event_type, state_key)`.
-///
-/// # Errors
-/// Returns [`StateHamtLeafKeyError`] when the key is not a two-string JSON
-/// array.
-pub fn decode_state_hamt_leaf_key(key: &str) -> Result<(String, String), StateHamtLeafKeyError> {
-    let value = crate::json::Value::parse(key).map_err(|_| StateHamtLeafKeyError::InvalidJson)?;
-    let crate::json::Value::Array(elements) = value else {
-        return Err(StateHamtLeafKeyError::NotArray);
-    };
-    let [event_type, state_key] = elements.as_slice() else {
-        return Err(StateHamtLeafKeyError::WrongArity);
-    };
-    let (Some(event_type), Some(state_key)) = (event_type.as_str(), state_key.as_str()) else {
-        return Err(StateHamtLeafKeyError::NonString);
-    };
-    Ok((event_type.to_string(), state_key.to_string()))
-}
-
-fn push_json_string(out: &mut String, value: &str) {
-    out.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            control if u32::from(control) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", u32::from(control));
-            }
-            other => out.push(other),
-        }
-    }
-    out.push('"');
-}
-
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -345,40 +269,6 @@ mod tests {
         assert_eq!(
             decode_state_hamt_root(&trailing),
             Err(StateHamtRootError::InvalidLattice)
-        );
-    }
-
-    #[test]
-    fn leaf_keys_match_the_tuple_encoding() {
-        assert_eq!(
-            state_hamt_leaf_key("m.room.member", "@alice:example.org"),
-            r#"["m.room.member","@alice:example.org"]"#
-        );
-        let awkward = "a\"b\\c\nd\te\u{01}é";
-        let key = state_hamt_leaf_key(awkward, awkward);
-        assert_eq!(
-            decode_state_hamt_leaf_key(&key).expect("decode"),
-            (awkward.to_string(), awkward.to_string())
-        );
-    }
-
-    #[test]
-    fn leaf_key_decoder_reports_shape_errors() {
-        assert_eq!(
-            decode_state_hamt_leaf_key("not json"),
-            Err(StateHamtLeafKeyError::InvalidJson)
-        );
-        assert_eq!(
-            decode_state_hamt_leaf_key(r#"{"a":1}"#),
-            Err(StateHamtLeafKeyError::NotArray)
-        );
-        assert_eq!(
-            decode_state_hamt_leaf_key(r"[1,2]"),
-            Err(StateHamtLeafKeyError::NonString)
-        );
-        assert_eq!(
-            decode_state_hamt_leaf_key(r#"["only"]"#),
-            Err(StateHamtLeafKeyError::WrongArity)
         );
     }
 
