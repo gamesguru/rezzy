@@ -318,7 +318,7 @@ enum RoomVersionFormat {
     Msc3389,
     /// Rezzy's experimental certified-causal-governance room version.
     NutraCdo,
-    /// MSC00FC "Cygnus" (`"tk.nutra.cygnus.1"`): room v12 plus
+    /// MSC00FC "Cygnus" (`"tk.nutra.cygnus.12"`): room v12 plus
     /// self-certifying link-chain identities. Base auth and state resolution
     /// are exactly v12 (`V2_1`); the Cygnus rules are an overlay supplied by
     /// the caller. Rezzy's redaction table knows only the v12 keys, so Cygnus
@@ -350,7 +350,7 @@ impl RoomVersionFormat {
             "org.matrix.msc4242.12" => Some(Self::Msc4242),
             "org.matrix.msc3389.10" => Some(Self::Msc3389),
             "tk.nutra.cdo.12" => Some(Self::NutraCdo),
-            "tk.nutra.cygnus.1" => Some(Self::Cygnus),
+            "tk.nutra.cygnus.12" => Some(Self::Cygnus),
             _ => None,
         }
     }
@@ -478,7 +478,7 @@ mod room_version_format_tests {
             ("12.1", RoomVersionFormat::Numeric(12)),
             ("org.matrix.msc4242.12", RoomVersionFormat::Msc4242),
             ("org.matrix.msc3389.10", RoomVersionFormat::Msc3389),
-            ("tk.nutra.cygnus.1", RoomVersionFormat::Cygnus),
+            ("tk.nutra.cygnus.12", RoomVersionFormat::Cygnus),
         ];
         for (input, expected) in cases {
             assert_eq!(
@@ -492,11 +492,16 @@ mod room_version_format_tests {
     #[test]
     fn cygnus_room_version_resolves_with_v2_1() {
         assert_eq!(
-            super::StateResVersion::from_room_version("tk.nutra.cygnus.1"),
+            super::StateResVersion::from_room_version("tk.nutra.cygnus.12"),
             Some(super::StateResVersion::V2_1)
         );
         assert_eq!(
             super::StateResVersion::from_room_version("tk.nutra.cygnus.2"),
+            None
+        );
+        // The pre-rename identifier is not an alias.
+        assert_eq!(
+            super::StateResVersion::from_room_version("tk.nutra.cygnus.1"),
             None
         );
     }

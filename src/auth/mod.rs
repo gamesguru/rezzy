@@ -3053,7 +3053,7 @@ mod tests {
             "$create",
             M_ROOM_CREATE,
             &principal,
-            json!({ "room_version": "tk.nutra.cygnus.1" }),
+            json!({ "room_version": "tk.nutra.cygnus.12" }),
         );
         let result = check_auth(&create, &RoomState::new(), StateResVersion::V2_1, None);
         assert!(
