@@ -227,6 +227,26 @@ pub(crate) fn auth_difference<Id, K>(
     unconflicted_state: &SharedState<Id, K>,
     state_maps: &[SharedState<Id, K>],
     conflicted_ids: &[Id],
+    event_auth: impl FnMut(&Id, bool) -> Option<(u64, Vec<Id>)>,
+) -> Result<Vec<Id>, Id>
+where
+    Id: EventId,
+    K: Ord + Clone,
+{
+    let diff = auth_difference_inner(unconflicted_state, state_maps, conflicted_ids, event_auth);
+    rezzy_log::debug!(
+        conflicted = conflicted_ids.len(),
+        states = state_maps.len(),
+        diff = diff.as_ref().map_or(0, Vec::len),
+        "auth_difference"
+    );
+    diff
+}
+
+pub(crate) fn auth_difference_inner<Id, K>(
+    unconflicted_state: &SharedState<Id, K>,
+    state_maps: &[SharedState<Id, K>],
+    conflicted_ids: &[Id],
     mut event_auth: impl FnMut(&Id, bool) -> Option<(u64, Vec<Id>)>,
 ) -> Result<Vec<Id>, Id>
 where
