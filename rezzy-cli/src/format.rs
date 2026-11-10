@@ -24,7 +24,7 @@ use rezzy::auth::{apply_authorized_redactions_with_state_at, RedactionReport, Ro
 use rezzy::basespec::event_types::EventType;
 use rezzy::{resolved_state_entries, LeanEvent, StateResVersion};
 use std::borrow::Borrow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1525,15 +1525,45 @@ pub fn format_cli_output(ctx: &FormattingContext<'_>) -> rezzy::JsonValue {
             })
         }
         OutputFormat::Hamt => format_hamt_output(ctx),
-        OutputFormat::Default => rezzy::json!({
-            "status": "success",
-            "version": ctx.version,
-            "duration_ms": ctx.duration.as_millis(),
-            "resolved_state_size": ctx.resolved_state_list.len(),
-            "auth_chain_size": ctx.auth_chain_ids.len(),
-            "state_event_ids": ctx.resolved_state_list
-        }),
+        OutputFormat::Default => {
+            let (membership, other_state_keys) = membership_counts(ctx);
+            rezzy::json!({
+                "status": "success",
+                "version": ctx.version,
+                "duration_ms": ctx.duration.as_millis(),
+                "resolved_state_size": ctx.resolved_state_list.len(),
+                "joined_members": membership.get("join").copied().unwrap_or(0),
+                "membership": membership
+                    .iter()
+                    .map(|(k, v)| (k.clone(), rezzy::json!(*v)))
+                    .collect::<BTreeMap<String, rezzy::JsonValue>>(),
+                "other_state_keys": other_state_keys,
+                "auth_chain_size": ctx.auth_chain_ids.len(),
+                "state_event_ids": ctx.resolved_state_list
+            })
+        }
     }
+}
+
+/// Count resolved `m.room.member` keys by membership, plus the non-member keys.
+fn membership_counts(ctx: &FormattingContext<'_>) -> (BTreeMap<String, usize>, usize) {
+    let mut membership: BTreeMap<String, usize> = BTreeMap::new();
+    let mut other = 0usize;
+    for ((typ, _), eid) in ctx.final_state_map {
+        if typ.as_str() == "m.room.member" {
+            let m = ctx
+                .events_map
+                .get(eid)
+                .and_then(|e| e.content.get("membership"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown");
+            let n = membership.entry(m.to_string()).or_default();
+            *n = n.saturating_add(1);
+        } else {
+            other = other.saturating_add(1);
+        }
+    }
+    (membership, other)
 }
 
 #[cfg(test)]
