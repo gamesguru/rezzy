@@ -918,7 +918,7 @@ fn redact_top_level(value: &Value, room_version: &str) -> crate::json::Object {
 /// are unpadded. Mirrors Synapse's Rust (`ROOM_V3 -> STANDARD`, else
 /// `URL_SAFE`) and its `unpaddedbase64.encode_base64` (default STANDARD).
 #[must_use]
-fn hash_base64_engine(room_version: &str) -> base64::engine::GeneralPurpose {
+pub(crate) fn hash_base64_engine(room_version: &str) -> base64::engine::GeneralPurpose {
     use base64::engine::{general_purpose::NO_PAD, GeneralPurpose};
     let is_v3 = room_version
         .split('.')

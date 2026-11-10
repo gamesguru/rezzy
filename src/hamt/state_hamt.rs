@@ -6,12 +6,14 @@
 //!
 //! Leaves are self-describing: the key is `(EventType, String)`, encoded by the
 //! dense [`HamtCodec`](crate::hamt::HamtCodec) as length-prefixed event-type and
-//! state-key bytes, and the value is the raw 32-byte event-id reference hash.
-//! For room versions 3 and later an event id is `$` followed by the unpadded
-//! base64url encoding of those 32 bytes, so every server holds the same bytes.
-//! No interning table, digest, or collision handling is involved. Room versions
-//! 1 and 2 use opaque event ids, so a caller persisting those needs a value
-//! type that carries the id string instead.
+//! state-key bytes, and the value is a 32-byte event hash (see
+//! [`state_hamt_event_id`]). In room versions 3 and later an event id already
+//! is a hash, `$` followed by the unpadded base64 encoding of 32 bytes, and the
+//! value is those bytes. Room versions 1 and 2 use opaque event ids, so the
+//! value is a domain-separated BLAKE3 hash of the id string. Either way every
+//! server holds the same bytes, with no interning table or collision handling.
+//! Only the v3+ form can be turned back into an id; a caller storing v1/v2
+//! leaves keeps its own hash-to-id index.
 //!
 //! The state-group id is the unkeyed `LtHash` digest of the logical
 //! `(event_type, state_key, event_id)` strings, so it is the only portable
@@ -59,11 +61,95 @@ pub const STATE_HAMT_LATTICE_BYTES: usize = 2048;
 /// self-describing and byte-identical across servers.
 pub type StateHamtKey = (crate::basespec::event_types::EventType, String);
 
-/// Raw 32-byte reference hash carried in a room-v3+ event id.
+/// A state-HAMT leaf value: the 32-byte hash that identifies an event.
 ///
-/// An event id is `$` followed by the unpadded base64url encoding of these
-/// bytes; storing the bytes avoids re-encoding the id on every lookup.
+/// Built by [`state_hamt_event_id`]: the reference hash a room-v3+ event id
+/// encodes, or a hash of the opaque id string in room versions 1 and 2.
 pub type StateHamtEventId = [u8; 32];
+
+/// BLAKE3 key-derivation context for hashing opaque (room v1/v2) event ids.
+///
+/// The domain separation keeps these hashes apart from v3+ reference hashes,
+/// which are SHA-256 digests of redacted events.
+const OPAQUE_EVENT_ID_CONTEXT: &str = "rezzy state-hamt opaque event id";
+
+/// Why an event id has no state-HAMT leaf value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateHamtEventIdError {
+    /// The room version's event ids are hashes, but this id is not `$`
+    /// followed by the canonical unpadded base64 of 32 bytes.
+    NotAHashId,
+}
+
+impl fmt::Display for StateHamtEventIdError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotAHashId => {
+                f.write_str("event id is not the base64 hash its room version requires")
+            }
+        }
+    }
+}
+
+impl core::error::Error for StateHamtEventIdError {}
+
+/// The state-HAMT leaf value for `event_id` in a room of `room_version`.
+///
+/// Room versions 1 and 2 hash the opaque id string. Later versions decode the
+/// reference hash the id carries, with the room version's alphabet (standard
+/// for v3, URL-safe after). Decoding is strict, so each hash has exactly one
+/// id, and an id that does not decode is an error, never hashed instead: its
+/// leaf could not be turned back into an id.
+///
+/// # Errors
+/// Returns [`StateHamtEventIdError::NotAHashId`] when a v3+ id does not decode
+/// to 32 bytes.
+pub fn state_hamt_event_id(
+    event_id: &str,
+    room_version: &str,
+) -> Result<StateHamtEventId, StateHamtEventIdError> {
+    use base64::Engine as _;
+
+    if crate::has_opaque_event_ids(room_version) {
+        return Ok(blake3::derive_key(
+            OPAQUE_EVENT_ID_CONTEXT,
+            event_id.as_bytes(),
+        ));
+    }
+    let encoded = event_id
+        .strip_prefix('$')
+        .filter(|encoded| encoded.len() == 43)
+        .ok_or(StateHamtEventIdError::NotAHashId)?;
+    // 43 characters estimate to 33 bytes; a 32-byte hash fills all but one.
+    let mut decoded = [0_u8; 33];
+    let length = crate::basespec::rezzy_types::hash_base64_engine(room_version)
+        .decode_slice(encoded, &mut decoded)
+        .map_err(|_| StateHamtEventIdError::NotAHashId)?;
+    decoded
+        .get(..length)
+        .and_then(|bytes| StateHamtEventId::try_from(bytes).ok())
+        .ok_or(StateHamtEventIdError::NotAHashId)
+}
+
+/// The event id a state-HAMT leaf value stands for, when it can be recovered.
+///
+/// Returns `None` in room versions 1 and 2, whose values are one-way hashes.
+#[must_use]
+pub fn state_hamt_event_id_string(value: &StateHamtEventId, room_version: &str) -> Option<String> {
+    use base64::Engine as _;
+
+    if crate::has_opaque_event_ids(room_version) {
+        return None;
+    }
+    let mut encoded = [0_u8; 43];
+    let length = crate::basespec::rezzy_types::hash_base64_engine(room_version)
+        .encode_slice(value, &mut encoded)
+        .ok()?;
+    let mut event_id = String::with_capacity(44);
+    event_id.push('$');
+    event_id.push_str(core::str::from_utf8(encoded.get(..length)?).ok()?);
+    Some(event_id)
+}
 
 /// A decoded `MTHR` root record.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,6 +427,57 @@ mod tests {
         .expect("build");
 
         assert_eq!(root.get(b"!room:example.org", &key), Some(&value));
+    }
+
+    #[test]
+    fn hash_event_ids_round_trip_with_their_room_version_alphabet() {
+        // Bytes whose encoding uses both alphabet-specific characters.
+        let mut bytes = [0_u8; 32];
+        bytes[0] = 0xfb;
+        bytes[1] = 0xff;
+        bytes[2] = 0xbf;
+
+        for (room_version, id) in [
+            ("3", "$+/+/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            ("10", "$-_-_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+        ] {
+            assert_eq!(state_hamt_event_id(id, room_version), Ok(bytes));
+            assert_eq!(
+                state_hamt_event_id_string(&bytes, room_version).as_deref(),
+                Some(id)
+            );
+        }
+        // The other version's alphabet is not a hash id here.
+        assert_eq!(
+            state_hamt_event_id("$-_-_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "3"),
+            Err(StateHamtEventIdError::NotAHashId)
+        );
+    }
+
+    #[test]
+    fn malformed_hash_event_ids_are_rejected() {
+        for id in [
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "$AAAA",
+            "$abc:example.org",
+            // Non-zero trailing bits: a second spelling of the same bytes.
+            "$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+        ] {
+            assert_eq!(
+                state_hamt_event_id(id, "10"),
+                Err(StateHamtEventIdError::NotAHashId),
+                "{id}"
+            );
+        }
+    }
+
+    #[test]
+    fn opaque_event_ids_hash_one_way() {
+        let id = "$abc123:example.org";
+        let value = state_hamt_event_id(id, "1").unwrap();
+        assert_eq!(state_hamt_event_id(id, "2"), Ok(value));
+        assert_ne!(state_hamt_event_id("$abc124:example.org", "1"), Ok(value));
+        assert_eq!(state_hamt_event_id_string(&value, "1"), None);
     }
 
     #[test]
