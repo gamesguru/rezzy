@@ -2047,6 +2047,132 @@ mod tests {
         );
     }
 
+    /// `n` topic events in JSONL, each authorized by 1-3 earlier ones.
+    fn random_auth_dag_jsonl(n: u64, next: &mut impl FnMut(u64) -> u64) -> alloc::string::String {
+        use core::fmt::Write as _;
+        let mut lines = alloc::string::String::new();
+        for i in 0..n {
+            let mut auth = Vec::new();
+            if i > 0 {
+                for _ in 0..=next(2) {
+                    let p = alloc::format!("\"$e{}\"", next(i));
+                    if !auth.contains(&p) {
+                        auth.push(p);
+                    }
+                }
+            }
+            writeln!(
+                lines,
+                "{{\"event_id\":\"$e{i}\",\"type\":\"m.room.topic\",\"state_key\":\"k{i}\",\"sender\":\"@a:x\",\"auth_events\":[{}],\"depth\":{i},\"content\":{{}}}}",
+                auth.join(",")
+            )
+            .expect("writing to a String cannot fail");
+        }
+        lines
+    }
+
+    // The bitmap difference (union minus intersection of whole-state auth
+    // closures) must agree with the resolver's walk on everything but the
+    // conflicted state events themselves, which the resolver already holds.
+    // Compare the two on random DAGs, then compare full resolutions.
+    #[test]
+    fn test_bitmap_auth_difference_matches_the_walk_on_random_dags() {
+        let mut seed = 0xD1B5_4A32_D192_ED03_u64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        let mut nonempty = 0_u32;
+        for case in 0..1500_u32 {
+            let n = 4 + next(40);
+            let lines = random_auth_dag_jsonl(n, &mut next);
+            let events = parse_jsonl_map(&lines);
+            let graph = crate::auth::roaring::AuthGraph::try_build(&events)
+                .expect("generated auth graph is complete");
+            assert!(graph.is_complete());
+
+            let shared: Vec<(&str, alloc::string::String, alloc::string::String)> = (0..next(4))
+                .map(|k| {
+                    (
+                        "m.room.topic",
+                        alloc::format!("u{k}"),
+                        alloc::format!("$e{}", next(n)),
+                    )
+                })
+                .collect();
+            let mut states = Vec::new();
+            for f in 0..2 + next(2) {
+                let mut rows = shared.clone();
+                for k in 0..=next(3) {
+                    rows.push((
+                        "m.room.topic",
+                        alloc::format!("c{f}_{k}"),
+                        alloc::format!("$e{}", next(n)),
+                    ));
+                }
+                let borrowed: Vec<(&str, &str, &str)> = rows
+                    .iter()
+                    .map(|(t, k, i)| (*t, k.as_str(), i.as_str()))
+                    .collect();
+                states.push(fork(&borrowed));
+            }
+            let (unconflicted, conflicted_ids) =
+                partition_state_maps(states.iter().map(AsRef::as_ref), states.len());
+
+            let walked = auth_difference_inner(&unconflicted, &states, &conflicted_ids, |id, _| {
+                events.get(id).map(|ev| (ev.depth, ev.auth_events.clone()))
+            })
+            .expect("complete context");
+            let bitmap = graph.state_auth_difference(&states);
+            nonempty += u32::from(!walked.is_empty());
+
+            let mut with_conflicted_walk: Vec<_> = walked
+                .iter()
+                .chain(conflicted_ids.iter())
+                .cloned()
+                .collect();
+            with_conflicted_walk.sort();
+            with_conflicted_walk.dedup();
+            let mut with_conflicted_bitmap: Vec<_> = bitmap
+                .iter()
+                .chain(conflicted_ids.iter())
+                .cloned()
+                .collect();
+            with_conflicted_bitmap.sort();
+            with_conflicted_bitmap.dedup();
+            assert_eq!(
+                with_conflicted_walk, with_conflicted_bitmap,
+                "case {case}: walk {walked:?} bitmap {bitmap:?} conflicted {conflicted_ids:?}"
+            );
+
+            let reachability = RangePrefilterReachability::build(&events);
+            let expected = resolve_state_maps_with_reachability(
+                &states,
+                &events,
+                StateResVersion::V2,
+                &reachability,
+            );
+            let mut caches = ForkResolveCaches::new(StateResVersion::V2);
+            let actual = resolve_state_maps_cached_with_auth_diff(
+                &states,
+                &events,
+                StateResVersion::V2,
+                &reachability,
+                &mut caches,
+                &bitmap,
+            );
+            assert_eq!(actual, expected, "case {case}: resolutions differ");
+        }
+        // Guard against a vacuous comparison: most cases must exercise a real
+        // difference.
+        assert!(
+            nonempty > 300,
+            "only {nonempty} cases had an auth difference"
+        );
+    }
+
     #[test]
     fn test_cached_resolver_accepts_precomputed_bitmap_auth_diff() {
         let events = parse_jsonl_map(
