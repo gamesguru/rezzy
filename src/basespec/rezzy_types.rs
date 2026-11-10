@@ -3076,7 +3076,7 @@ fn room_version_is_v11_or_later(room_version: &str) -> bool {
 
 /// Returns `true` if the room version requires strict canonical JSON numbers.
 ///
-/// Delegates to [`RoomVersionFormat::requires_strict_canonical_numbers`] for
+/// Delegates to `RoomVersionFormat::requires_strict_canonical_numbers` for
 /// the authoritative capability check, falling back to `false` for
 /// unparsable version strings.
 /// Returns `true` when events in `room_version` must use Matrix canonical JSON
