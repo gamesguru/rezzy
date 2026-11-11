@@ -712,6 +712,26 @@ fn test_create_event_no_prev_events() {
 }
 
 #[test]
+fn test_cygnus_create_sender_must_be_principal_identifier() {
+    let state: RoomState = RoomState::new();
+    let version = rezzy::basespec::rezzy_types::StateResVersion::V2_1;
+
+    let mxid_sender = make_create(
+        "$create",
+        "@alice:example.com",
+        json!({"room_version": "tk.nutra.cygnus.12"}),
+    );
+    assert!(check_auth(&mxid_sender, &state, version, None).is_err());
+
+    let principal_sender = make_create(
+        "$create",
+        "@alice",
+        json!({"room_version": "tk.nutra.cygnus.12"}),
+    );
+    assert!(check_auth(&principal_sender, &state, version, None).is_ok());
+}
+
+#[test]
 fn test_create_event_with_prev_events() {
     let mut create = make_create("$create", "@alice:example.com", json!({}));
     create.prev_events = vec!["$other".into()];

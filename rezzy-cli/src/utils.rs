@@ -486,6 +486,10 @@ pub fn parse_and_extract_heads(
     }
 }
 
+/// Upper bound on the dense head-bitset matrix in
+/// [`partition_state_maps_fast`]; larger graphs use the per-head pipeline.
+const MAX_HEAD_BITS_BYTES: usize = 64 * 1024 * 1024;
+
 /// Partition the per-head state maps directly from the DAG.
 ///
 /// This is equivalent to building one full state map per head and passing them
@@ -532,7 +536,18 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
     // preserves each head's resolved state. Multi-parent merges and cycles can
     // violate that assumption, so use the state-at-event pipeline for those
     // graphs. This keeps the optimized path for simple acyclic chains/forks.
-    if order.len() != n || parents.iter().any(|event_parents| event_parents.len() > 1) {
+    //
+    // The bitset pass is O(events × heads). Many independent events (roughly
+    // one head each) would otherwise allocate a dense `n × words` array that
+    // can reach gigabytes even when almost no event carries state, so bound it
+    // and let the (sparse) state-at-event pipeline handle that case.
+    let head_bits_bytes = n
+        .saturating_mul(words)
+        .saturating_mul(core::mem::size_of::<u64>());
+    if order.len() != n
+        || parents.iter().any(|event_parents| event_parents.len() > 1)
+        || head_bits_bytes > MAX_HEAD_BITS_BYTES
+    {
         let states: Vec<_> = heads
             .iter()
             .filter_map(|head| rezzy::compute_state_at(head, events_map, version, &String::new()))
@@ -541,7 +556,7 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
             rezzy::partition_state_maps(states.iter().map(|state| state.iter()), states.len());
         if debug {
             eprintln!(
-                "[DEBUG] Used state-at-event partitioning for a cyclic or multi-parent graph"
+                "[DEBUG] Used state-at-event partitioning for a cyclic, multi-parent, or very large graph"
             );
         }
         return (unconflicted, conflicted);

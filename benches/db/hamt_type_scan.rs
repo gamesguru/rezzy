@@ -171,8 +171,8 @@ where
 
 #[derive(Clone, Copy, Default)]
 struct Cost {
-    fetches: usize,
-    bytes: usize,
+    fetches: f64,
+    bytes: f64,
     matched: usize,
     ns: f64,
 }
@@ -232,8 +232,8 @@ where
         }
         black_box(matched);
         cost = Cost {
-            fetches: fetched.nodes.get(),
-            bytes: fetched.bytes.get(),
+            fetches: fetched.nodes.get() as f64,
+            bytes: fetched.bytes.get() as f64,
             matched,
             ns: 0.0,
         };
@@ -280,8 +280,8 @@ fn cold_point_reads(
     }
     let reads = (keys.len() as u32 * reps) as usize;
     Cost {
-        fetches: fetched.nodes.get() / reads,
-        bytes: fetched.bytes.get() / reads,
+        fetches: fetched.nodes.get() as f64 / reads as f64,
+        bytes: fetched.bytes.get() as f64 / reads as f64,
         matched: keys.len(),
         ns: start.elapsed().as_nanos() as f64 / reads as f64,
     }
@@ -323,8 +323,8 @@ fn shared_reader_point_reads(
     let warm_fetches = fetched.nodes.get() - cold_fetches;
     (
         Cost {
-            fetches: cold_fetches,
-            bytes: cold_bytes,
+            fetches: cold_fetches as f64,
+            bytes: cold_bytes as f64,
             matched: keys.len(),
             ns: cold_elapsed.as_nanos() as f64 / keys.len() as f64,
         },
@@ -355,13 +355,13 @@ where
     total as f64 / count as f64
 }
 
-fn ratio(flat: usize, lane: usize) -> f64 {
-    flat as f64 / lane.max(1) as f64
+fn ratio(flat: f64, lane: f64) -> f64 {
+    flat / lane.max(1.0)
 }
 
 fn print_scan(label: &str, cost: Cost) {
     println!(
-        "    {label:<34} matched {:>7}  fetches {:>6}  bytes {:>10}  {:>10.1} us",
+        "    {label:<34} matched {:>7}  fetches {:>6.2}  bytes {:>10.1}  {:>10.1} us",
         cost.matched,
         cost.fetches,
         cost.bytes,
@@ -488,14 +488,14 @@ fn bench(shape: &Shape, n: usize) {
         warm_set(&flat, levels, &mut warm);
         let cold = cold_point_reads(&flat_store, flat.structural_hash, &warm, &auth_keys, reps);
         println!(
-            "    flat, fresh reader, top {levels} warm:     fetches {:>3}  bytes {:>6}  {:>8.0} ns/read",
+            "    flat, fresh reader, top {levels} warm:     fetches {:>5.1}  bytes {:>7.1}  {:>8.0} ns/read",
             cold.fetches, cold.bytes, cold.ns
         );
     }
     let (shared, warm_fetches, warm_ns) =
         shared_reader_point_reads(&flat_store, flat.structural_hash, &auth_keys);
     println!(
-        "    flat, shared reader first batch:   fetches {:>3}  bytes {:>6}  {:>8.0} ns/read",
+        "    flat, shared reader first batch:   fetches {:>5.1}  bytes {:>7.1}  {:>8.0} ns/read",
         shared.fetches, shared.bytes, shared.ns
     );
     println!(

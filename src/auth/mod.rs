@@ -33,8 +33,9 @@ use crate::basespec::event_types::{
     RULE_KNOCK_RESTRICTED, RULE_PUBLIC, RULE_RESTRICTED,
 };
 use crate::basespec::rezzy_types::{
-    apply_redaction, domain_matches, is_acceptable_historical_mxid, EventContent, EventId,
-    EventLike, EventProvider, EventVerifier, LeanEvent, StateKey, StateResVersion,
+    apply_redaction, domain_matches, is_acceptable_historical_mxid, is_valid_principal_identifier,
+    EventContent, EventId, EventLike, EventProvider, EventVerifier, LeanEvent, StateKey,
+    StateResVersion,
 };
 
 /// An error indicating why an event failed authorization.
@@ -611,7 +612,15 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
             .content()
             .get_room_version()
             .is_some_and(crate::basespec::rezzy_types::uses_principal_identifiers);
-        if !principal_ids && !is_acceptable_historical_mxid(event.sender()) {
+        if principal_ids {
+            // Cygnus and later principal-identifier rooms use opaque creators;
+            // an MXID-shaped sender is not a valid principal identifier.
+            if !is_valid_principal_identifier(event.sender()) {
+                return Err(AuthError::InvalidSyntax(
+                    "m.room.create sender must be a valid principal identifier".into(),
+                ));
+            }
+        } else if !is_acceptable_historical_mxid(event.sender()) {
             return Err(AuthError::InvalidSyntax(
                 "m.room.create sender must be a valid MXID".into(),
             ));

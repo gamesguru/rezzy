@@ -22,7 +22,23 @@ use core::fmt;
 use core::hash::Hash;
 
 use super::codec::PersistedInternalNode;
+use super::hash::StructuralHashBuilder;
 use super::{HamtCodec, HamtNode, NodeRef, StructuralHash, HAMT_MAX_DEPTH};
+
+/// Index into a compressed bitmap array for `slot`.
+fn slot_index(bitmap: u32, slot: usize) -> usize {
+    let lower_mask = (1_u32 << slot).wrapping_sub(1);
+    (bitmap & lower_mask).count_ones() as usize
+}
+
+/// The pre-encoding routing hash, used only to read roots persisted by earlier
+/// builds. It hashes the key's Rust `Hash` stream, which differs from its
+/// canonical encoding for types such as `String`.
+fn legacy_key_path_hash<K: Hash + ?Sized>(structural_key: &[u8], key: &K) -> StructuralHash {
+    let mut hasher = StructuralHashBuilder::new(structural_key);
+    key.hash(&mut hasher);
+    hasher.finalize()
+}
 
 /// Why a persisted HAMT could not be read.
 #[derive(Debug)]
@@ -124,6 +140,11 @@ where
     /// For trees built with a custom routing hash use
     /// [`Self::get_with_key_hash`].
     ///
+    /// Roots persisted before routing moved to key encodings were laid out by
+    /// the key's Rust `Hash` stream, and the root metadata cannot distinguish
+    /// the two layouts. A miss on the canonical route is therefore retried
+    /// with the legacy route, so old roots stay readable.
+    ///
     /// `root` is the structural hash of the root node, not the state-group id
     /// from the root record. Callers that hold a root record should pass its
     /// [`StateHamtRoot::root_hash`](crate::state::hamt_root::StateHamtRoot::root_hash).
@@ -135,13 +156,20 @@ where
     where
         K: Eq + Borrow<Q>,
         V: Clone,
-        Q: super::HamtRoutingKey + Eq + ?Sized,
+        Q: super::HamtRoutingKey + Eq + Hash + ?Sized,
     {
         let root_node = self.node(&root)?;
         // Copy the reference before the resolver closure borrows `self`.
         let structural_key = self.structural_key;
         let mut resolver = |hash: &StructuralHash| self.node(hash);
-        root_node.search(structural_key, key, &mut resolver)
+        if let Some(value) = root_node.search(structural_key, key, &mut resolver)? {
+            return Ok(Some(value));
+        }
+        root_node.search_with_key_hash(
+            key,
+            |key| legacy_key_path_hash(structural_key, key),
+            &mut resolver,
+        )
     }
 
     /// Look up one key under `root` in a tree built with a custom routing hash
@@ -201,22 +229,44 @@ where
     where
         F: FnMut(&K, &V),
     {
+        enum Pending<K, V> {
+            Node(Arc<HamtNode<K, V>>, usize),
+            Entry(Arc<HamtNode<K, V>>, usize, usize),
+        }
+
         // Iterative walk with an explicit depth bound, so a malformed chain of
-        // persisted nodes errors instead of overflowing the stack.
-        let mut stack = vec![(self.node(&root)?, 0_usize)];
-        while let Some((node, depth)) = stack.pop() {
-            if depth >= HAMT_MAX_DEPTH {
-                return Err(HamtReadError::Decode("HAMT exceeds maximum depth"));
-            }
-            for (key, value) in &node.leaves {
-                visit(key, value);
-            }
-            for child in &node.children {
-                let child = match child {
-                    NodeRef::Resolved(child) => Arc::clone(child),
-                    NodeRef::Lazy(hash) => self.node(hash)?,
-                };
-                stack.push((child, depth.saturating_add(1)));
+        // persisted nodes errors instead of overflowing the stack. Pending
+        // entries are pushed in descending slot order, so popping interleaves
+        // leaves and child subtrees in the node's actual trie-slot order.
+        let mut stack = vec![Pending::Node(self.node(&root)?, 0_usize)];
+        while let Some(pending) = stack.pop() {
+            match pending {
+                Pending::Node(node, depth) => {
+                    if depth >= HAMT_MAX_DEPTH {
+                        return Err(HamtReadError::Decode("HAMT exceeds maximum depth"));
+                    }
+                    for slot in (0..super::HAMT_BRANCH_FACTOR).rev() {
+                        let bit = 1_u32 << slot;
+                        if (node.datamap | node.nodemap) & bit != 0 {
+                            stack.push(Pending::Entry(Arc::clone(&node), depth, slot));
+                        }
+                    }
+                }
+                Pending::Entry(node, depth, slot) => {
+                    let bit = 1_u32 << slot;
+                    if node.datamap & bit != 0 {
+                        let index = slot_index(node.datamap, slot);
+                        let (key, value) = &node.leaves[index];
+                        visit(key, value);
+                    } else {
+                        let index = slot_index(node.nodemap, slot);
+                        let child = match &node.children[index] {
+                            NodeRef::Resolved(child) => Arc::clone(child),
+                            NodeRef::Lazy(hash) => self.node(hash)?,
+                        };
+                        stack.push(Pending::Node(child, depth.saturating_add(1)));
+                    }
+                }
             }
         }
         Ok(())
@@ -243,7 +293,7 @@ where
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::hamt::{build_hamt_root_handle, NodeRef};
+    use crate::hamt::{build_hamt_root_handle, build_hamt_with_key_hash, NodeRef};
     use crate::incremental::LtHash;
     use alloc::string::{String, ToString};
     use alloc::vec;
@@ -320,6 +370,75 @@ mod tests {
                 ("beta".to_string(), "2".to_string()),
                 ("gamma".to_string(), "3".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn entries_are_visited_in_trie_slot_order() {
+        // A hand-built root with leaves in slots 0 and 4 and a child subtree in
+        // slot 2. A leaves-then-children walk would visit both leaves first.
+        let child = Arc::new(HamtNode {
+            datamap: 1,
+            nodemap: 0,
+            leaves: vec![("child".to_string(), "c".to_string())],
+            children: Vec::new(),
+            structural_hash: HamtNode::compute_structural_hash(
+                KEY,
+                1,
+                0,
+                &[("child".to_string(), "c".to_string())],
+                &[],
+            ),
+        });
+        let children = vec![NodeRef::Resolved(Arc::clone(&child))];
+        let leaves = vec![
+            ("first".to_string(), "1".to_string()),
+            ("last".to_string(), "2".to_string()),
+        ];
+        let root_node = Arc::new(HamtNode {
+            datamap: (1 << 0) | (1 << 4),
+            nodemap: 1 << 2,
+            leaves,
+            children,
+            structural_hash: HamtNode::compute_structural_hash(
+                KEY,
+                (1 << 0) | (1 << 4),
+                1 << 2,
+                &[
+                    ("first".to_string(), "1".to_string()),
+                    ("last".to_string(), "2".to_string()),
+                ],
+                &[NodeRef::Resolved(child)],
+            ),
+        });
+
+        let mut records = BTreeMap::new();
+        collect(&root_node, &mut records);
+        let mut reader = reader_for(&records, KEY);
+        let mut order = Vec::new();
+        reader
+            .for_each_entry(root_node.structural_hash, |key, _| {
+                order.push(key.clone());
+            })
+            .unwrap();
+        assert_eq!(order, ["first", "child", "last"]);
+    }
+
+    #[test]
+    fn legacy_hash_routed_roots_remain_readable() {
+        let entries = vec![("alpha".to_string(), "1".to_string())];
+        let root = build_hamt_with_key_hash(KEY, entries, |key| legacy_key_path_hash(KEY, key))
+            .expect("build legacy fixture");
+        let mut records = BTreeMap::new();
+        collect(&root, &mut records);
+
+        let mut reader = reader_for(&records, KEY);
+        assert_eq!(
+            reader
+                .get(root.structural_hash, "alpha")
+                .unwrap()
+                .as_deref(),
+            Some("1")
         );
     }
 

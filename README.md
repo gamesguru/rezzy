@@ -45,7 +45,7 @@ Design notes live in the `docs` submodule. A default clone leaves it empty; to
 populate it, run:
 
 ```sh
-git submodule update --init docs
+git submodule update --init --checkout docs
 ```
 
 Then see [`docs/design_notes.md`](docs/design_notes.md) for the API overview and

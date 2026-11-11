@@ -154,6 +154,14 @@ pub enum SummaryError<E> {
         /// `delta.base`.
         base: StateGroupId,
     },
+    /// The parent counts were derived with a different summary version.
+    ///
+    /// The delta cannot update counts whose semantics changed, so rebuild with
+    /// [`derive_membership`].
+    ParentVersionMismatch {
+        /// `parent.version`.
+        found: u16,
+    },
     /// A change whose two sides are equal (both absent, or the same event).
     EmptyChange {
         /// Event type of the change.
@@ -194,6 +202,10 @@ impl<E: fmt::Display> fmt::Display for SummaryError<E> {
             Self::ParentMismatch { .. } => {
                 f.write_str("parent counts do not describe the delta's base state group")
             }
+            Self::ParentVersionMismatch { found } => write!(
+                f,
+                "parent counts use summary version {found}, expected {ROOM_SUMMARY_VERSION}"
+            ),
             Self::EmptyChange {
                 event_type,
                 state_key,
@@ -316,9 +328,10 @@ where
 /// reads per changed member key.
 ///
 /// # Errors
-/// [`SummaryError::ParentMismatch`], [`SummaryError::EmptyChange`],
-/// [`SummaryError::DuplicateKey`], or [`SummaryError::DeltaMismatch`] for a
-/// delta that does not fit; the caller rebuilds with [`derive_membership`].
+/// [`SummaryError::ParentMismatch`], [`SummaryError::ParentVersionMismatch`],
+/// [`SummaryError::EmptyChange`], [`SummaryError::DuplicateKey`], or
+/// [`SummaryError::DeltaMismatch`] for a delta that does not fit; the caller
+/// rebuilds with [`derive_membership`].
 /// [`SummaryError::CountUnderflow`] when `parent` was wrong for `base`, and
 /// [`SummaryError::Source`] when a read fails.
 pub fn update_membership<Id, C, S>(
@@ -331,6 +344,11 @@ where
     C: EventContent,
     S: SummarySource<Id, C>,
 {
+    if parent.version != ROOM_SUMMARY_VERSION {
+        return Err(SummaryError::ParentVersionMismatch {
+            found: parent.version,
+        });
+    }
     if parent.state_group_id != delta.base {
         return Err(SummaryError::ParentMismatch {
             parent: parent.state_group_id,
@@ -786,6 +804,15 @@ mod tests {
         assert!(matches!(
             update_membership(&stranger, &delta, &mut src),
             Err(SummaryError::ParentMismatch { .. })
+        ));
+
+        let stale = MembershipCounts {
+            version: ROOM_SUMMARY_VERSION + 1,
+            ..counts
+        };
+        assert!(matches!(
+            update_membership(&stale, &delta, &mut src),
+            Err(SummaryError::ParentVersionMismatch { .. })
         ));
     }
 
