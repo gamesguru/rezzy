@@ -597,7 +597,8 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
         }
 
         let mut assigned = 0_usize;
-        let mut winners: Vec<(&str, usize)> = Vec::new();
+        // Each event appears once per key, so winners are distinct.
+        let mut winners: Vec<&str> = Vec::new();
         for event_index in event_indices {
             let base = event_index.saturating_mul(words);
             let mut here_count = 0_usize;
@@ -611,17 +612,7 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
 
             if here_count > 0 {
                 assigned = assigned.saturating_add(here_count);
-                let event = events_map
-                    .get(ids[event_index])
-                    .expect("ids came from events_map");
-                if let Some(slot) = winners
-                    .iter_mut()
-                    .find(|(id, _)| *id == event.event_id.as_str())
-                {
-                    slot.1 = slot.1.saturating_add(here_count);
-                } else {
-                    winners.push((event.event_id.as_str(), here_count));
-                }
+                winners.push(ids[event_index]);
             }
 
             if assigned == head_count {
@@ -631,12 +622,9 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
 
         let absent = head_count.saturating_sub(assigned);
         if winners.len() == 1 && absent == 0 {
-            let (id, _) = winners[0];
-            unconflicted_state.insert(key, id.to_owned());
-        } else if winners.len() > 1 {
-            conflicted_ids.extend(winners.into_iter().map(|(id, _)| id.to_owned()));
-        } else if let Some((id, _)) = winners.first() {
-            conflicted_ids.push((*id).to_owned());
+            unconflicted_state.insert(key, winners[0].to_owned());
+        } else {
+            conflicted_ids.extend(winners.into_iter().map(str::to_owned));
         }
     }
 

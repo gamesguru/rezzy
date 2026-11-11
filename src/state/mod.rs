@@ -14,8 +14,8 @@ pub use dag::*;
 pub use delta::*;
 pub use diff::*;
 pub use lthash::{
-    compute_state_hash, DigestAgreement, PduLtHash, RedactionOverlay, ResolutionInputRecord,
-    ResolutionInputs, StateDigest, StateDigestTransition,
+    compute_state_hash, DigestAgreement, FromState, PduLtHash, RedactionOverlay,
+    ResolutionInputRecord, ResolutionInputs, StateDigest, StateDigestTransition,
 };
 pub use merkle::*;
 pub use persistent_ord_map::{DiffItem, PersistentOrdMap};

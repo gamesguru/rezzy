@@ -14,6 +14,10 @@ Build the shared and static libraries from the repository root:
 cargo build -p rezzy-ffi
 ```
 
+The examples live in the
+[repository](https://github.com/gamesguru/rezzy/tree/master/rezzy-ffi/examples)
+and are not part of the published crate; run them from a checkout.
+
 The Go example uses cgo and links the debug shared library. From the repository
 root, run:
 

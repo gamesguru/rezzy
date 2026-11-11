@@ -62,6 +62,9 @@ pub enum ErrorCode {
     AggregateConflict,
     /// Signing key configuration or parsing failure.
     SigningKey,
+    /// Events were given but none is a head: every event is some other
+    /// event's `prev_event`, so the `prev_events` graph has a cycle.
+    NoHeads,
 }
 
 impl ErrorCode {
@@ -88,6 +91,7 @@ impl ErrorCode {
             Self::AggregateStale => "E015_AGGREGATE_STALE",
             Self::AggregateConflict => "E016_AGGREGATE_CONFLICT",
             Self::SigningKey => "E017_SIGNING_KEY",
+            Self::NoHeads => "E019_NO_HEADS",
         }
     }
 }

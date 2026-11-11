@@ -476,6 +476,12 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
             .cloned()
             .collect();
         auto_heads.sort_unstable();
+        if auto_heads.is_empty() && !events_map.is_empty() {
+            return Err(error::AppError::new(
+                error::ErrorCode::NoHeads,
+                "no head events: every event is referenced as a prev_event, so the prev_events graph has a cycle",
+            ));
+        }
         if args.debug {
             eprintln!(
                 "[DEBUG] Auto-computed {} heads: {:?}",
@@ -555,6 +561,9 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
         }
     }
 
+    // Resolution time includes partitioning the state maps, as it did when
+    // partitioning happened inside the resolver.
+    let resolve_start = Instant::now();
     let (unconflicted_state, conflicted_state_set) = {
         if !args.quiet {
             eprintln!("[progress] building state maps...");
@@ -595,7 +604,7 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
             &auth_graph,
             &unconflicted_state,
             &conflicted_state_set,
-            Instant::now(),
+            resolve_start,
         );
         if !args.quiet {
             eprintln!(
@@ -851,6 +860,22 @@ mod tests {
             run_cli(&args_for_input(fixture.path.clone())).expect_err("malformed input fails");
 
         assert_eq!(error.code(), ErrorCode::MalformedJson);
+    }
+
+    #[test]
+    fn cyclic_prev_events_graph_is_rejected_instead_of_resolving_empty() {
+        let fixture = write_fixture(
+            r#"{"events":[
+                {"event_id":"$a","type":"m.room.create","state_key":"","sender":"@x:x","depth":1,"content":{"room_version":"10","creator":"@x:x"},"prev_events":["$b"],"auth_events":[]},
+                {"event_id":"$b","type":"m.room.message","sender":"@x:x","depth":2,"prev_events":["$a"],"auth_events":["$a"]}
+            ]}"#,
+        );
+
+        let mut args = args_for_input(fixture.path.clone());
+        args.check = false;
+        let error = run_cli(&args).expect_err("cyclic input fails");
+
+        assert_eq!(error.code(), ErrorCode::NoHeads);
     }
 
     #[test]
