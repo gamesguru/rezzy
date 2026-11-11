@@ -1243,4 +1243,178 @@ mod tests {
         .expect("HAMT build")
         .structural_hash
     }
+    /// Deterministic DAG fixture for the partition tests: event `i` has one to
+    /// `max_prevs` parents among earlier events, every third event is a state
+    /// event over a small key space, and `depth` is the longest parent path
+    /// plus one, or a copy of a parent's depth to create `(depth, id)` ties.
+    #[allow(
+        clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation,
+        clippy::format_push_string
+    )]
+    fn random_dag(seed: u64, events: usize, max_prevs: u64) -> HashMap<String, LeanEvent> {
+        let mut state = seed;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        let mut depths: Vec<u64> = Vec::with_capacity(events);
+        let mut jsonl = String::new();
+        for index in 0..events {
+            let id = format!("$e{index:04}");
+            let mut prevs: Vec<usize> = Vec::new();
+            if index > 0 {
+                for _ in 0..=next(max_prevs) {
+                    let parent = next(index as u64) as usize;
+                    if !prevs.contains(&parent) {
+                        prevs.push(parent);
+                    }
+                }
+            }
+            let parent_max = prevs.iter().map(|&p| depths[p]).max().unwrap_or(0);
+            let depth = if prevs.is_empty() || next(5) != 0 {
+                parent_max + 1
+            } else {
+                parent_max
+            };
+            depths.push(depth);
+            let prev_ids: Vec<String> = prevs.iter().map(|p| format!("\"$e{p:04}\"")).collect();
+            let state = if index == 0 {
+                String::from(r#""type":"m.room.create","state_key":"","#)
+            } else if index % 3 == 0 {
+                format!(r#""type":"m.test.{}","state_key":"k{}","#, next(3), next(4))
+            } else {
+                String::from(r#""type":"m.room.message","#)
+            };
+            jsonl.push_str(&format!(
+                r#"{{"event_id":"{id}",{state}"sender":"@x:x","depth":{depth},"content":{{}},"prev_events":[{}],"auth_events":[]}}"#,
+                prev_ids.join(",")
+            ));
+            jsonl.push('\n');
+        }
+        map_from_jsonl(&jsonl)
+    }
+
+    /// The per-head reference the fast partition replaced: each head's state
+    /// map takes, for every key, the ancestor with the greatest
+    /// `(depth, event_id)`; the maps are then partitioned by
+    /// `rezzy::partition_state_maps`.
+    #[allow(clippy::type_complexity)]
+    fn partition_by_per_head_maps(
+        heads: &[String],
+        events: &HashMap<String, LeanEvent>,
+    ) -> (Vec<((EventType, String), String)>, Vec<String>) {
+        let maps: Vec<ResolvedState> = heads
+            .iter()
+            .map(|head| {
+                let mut best: HashMap<(EventType, String), (u64, &str)> = HashMap::new();
+                let mut seen = std::collections::HashSet::new();
+                let mut stack = vec![head.as_str()];
+                while let Some(id) = stack.pop() {
+                    if !seen.insert(id) {
+                        continue;
+                    }
+                    let Some(event) = events.get(id) else {
+                        continue;
+                    };
+                    stack.extend(event.prev_events.iter().map(String::as_str));
+                    if let Some(state_key) = &event.state_key {
+                        let key = (EventType::from(event.event_type.clone()), state_key.clone());
+                        let rank = (event.depth, event.event_id.as_str());
+                        let slot = best.entry(key).or_insert(rank);
+                        if rank > *slot {
+                            *slot = rank;
+                        }
+                    }
+                }
+                let mut map = ResolvedState::new();
+                for (key, (_, id)) in best {
+                    map.insert(key, id.to_owned());
+                }
+                map
+            })
+            .collect();
+        let (unconflicted, mut conflicted) = rezzy::partition_state_maps(&maps, maps.len());
+        conflicted.sort_unstable();
+        conflicted.dedup();
+        let unconflicted = unconflicted
+            .iter()
+            .map(|(key, id)| (key.clone(), id.clone()))
+            .collect();
+        (unconflicted, conflicted)
+    }
+
+    fn auto_heads(events: &HashMap<String, LeanEvent>) -> Vec<String> {
+        let referenced: std::collections::HashSet<&str> = events
+            .values()
+            .flat_map(|event| event.prev_events.iter().map(String::as_str))
+            .collect();
+        let mut heads: Vec<String> = events
+            .keys()
+            .filter(|id| !referenced.contains(id.as_str()))
+            .cloned()
+            .collect();
+        heads.sort_unstable();
+        heads
+    }
+
+    /// The bitset partition must give exactly the per-head result, including
+    /// keys some heads lack, `(depth, id)` ties, and more than 64 heads.
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn partition_state_maps_fast_matches_per_head_maps() {
+        let mut max_heads = 0;
+        for seed in 0..24_u64 {
+            // Low fan-in leaves many unreferenced events, so some runs cross
+            // the 64-head word boundary.
+            let max_prevs = if seed % 2 == 0 { 1 } else { 3 };
+            let events = random_dag(seed, 40 + (seed as usize) * 20, max_prevs);
+            let heads = auto_heads(&events);
+            max_heads = max_heads.max(heads.len());
+
+            // Every head, and a few smaller subsets, as an explicit head list.
+            for subset in [
+                heads.clone(),
+                heads.iter().step_by(3).cloned().collect(),
+                heads[..1].to_vec(),
+            ] {
+                let (fast_unconflicted, mut fast_conflicted) =
+                    partition_state_maps_fast(&subset, &events, false);
+                fast_conflicted.sort_unstable();
+                let fast_unconflicted: Vec<_> = fast_unconflicted
+                    .iter()
+                    .map(|(key, id)| (key.clone(), id.clone()))
+                    .collect();
+                let (expected_unconflicted, expected_conflicted) =
+                    partition_by_per_head_maps(&subset, &events);
+
+                assert_eq!(
+                    fast_unconflicted,
+                    expected_unconflicted,
+                    "seed {seed}, {} heads",
+                    subset.len()
+                );
+                assert_eq!(
+                    fast_conflicted,
+                    expected_conflicted,
+                    "seed {seed}, {} heads",
+                    subset.len()
+                );
+            }
+        }
+        assert!(
+            max_heads > 64,
+            "fixtures must cross the 64-head word boundary, max {max_heads}"
+        );
+    }
+
+    #[test]
+    fn partition_state_maps_fast_with_no_heads_is_empty() {
+        let events = random_dag(1, 10, 2);
+        let (unconflicted, conflicted) = partition_state_maps_fast(&[], &events, false);
+        assert_eq!(unconflicted.iter().count(), 0);
+        assert!(conflicted.is_empty());
+    }
 }
