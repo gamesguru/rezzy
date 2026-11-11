@@ -37,6 +37,8 @@
 //! direct-import hot path is dominated by auth judging, redaction and content
 //! hashing, `LeanEvent` construction, and callers cloning their own state
 //! maps, so typed roots should be driven by measured type-scoped read demand.
+//! The decision record and constraints for a future typed layout are in
+//! `docs/2026-11-11-typed-hamt-roots.md`.
 //! [`PersistedHamtReader`] is generic over `K` and `V`, and can read each
 //! per-type subtree without changing its generic interface. For portable node
 //! hashes, leaf keys and values must also have canonical, cross-server
