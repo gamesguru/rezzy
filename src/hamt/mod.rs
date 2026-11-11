@@ -42,7 +42,7 @@
 //! hashes, leaf keys and values must also have canonical, cross-server
 //! encodings; homeserver-local short IDs are suitable for local indexes but
 //! make node bytes server-specific. A flat portable state tree can use
-//! `(EventType, String)` keys and 32-byte event hashes as values.
+//! `(EventType, String)` keys and event ID strings as values.
 //! A typed layout would put a canonical event-type key in its directory and
 //! keep state-key strings inside each subtree. Portable node hashes also
 //! require every server to use the same room-scoped structural key and the
@@ -118,9 +118,8 @@ pub use hash::{
 };
 pub use reader::{HamtReadError, PersistedHamtReader};
 pub use state_hamt::{
-    decode_state_hamt_root, encode_state_hamt_root, state_hamt_event_id,
-    state_hamt_event_id_string, StateHamtEventId, StateHamtEventIdError, StateHamtKey,
-    StateHamtRoot, StateHamtRootError, STATE_HAMT_LATTICE_BYTES, STATE_HAMT_ROOT_VERSION,
+    decode_state_hamt_root, encode_state_hamt_root, StateHamtKey, StateHamtRoot,
+    StateHamtRootError, STATE_HAMT_LATTICE_BYTES, STATE_HAMT_ROOT_VERSION,
 };
 
 /// 256-bit routing path hash for a key in the HAMT.
