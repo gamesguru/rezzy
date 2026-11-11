@@ -2688,6 +2688,15 @@ pub trait EventContent: Clone + core::fmt::Debug + Default {
     fn get_redacts(&self) -> Option<&str> {
         None
     }
+    /// Returns a top-level string field of the content, if present.
+    ///
+    /// Used for display projections (`name`, `topic`, `url`, `alias`,
+    /// `algorithm`) that auth never reads. Defaults to `None` for content
+    /// types that don't expose raw fields.
+    fn get_str_field(&self, key: &str) -> Option<&str> {
+        let _ = key;
+        None
+    }
     /// Specific to V12+ rooms.
     fn has_additional_creator(&self, sender: &str) -> bool;
     /// Returns `true` if `additional_creators` is absent, or present as an
@@ -2877,6 +2886,10 @@ impl EventContent for Value {
     fn get_membership(&self) -> Option<&str> {
         self.get(crate::basespec::event_types::FIELD_MEMBERSHIP)?
             .as_str()
+    }
+
+    fn get_str_field(&self, key: &str) -> Option<&str> {
+        self.get(key)?.as_str()
     }
 
     fn get_cdo_active_member(&self) -> Option<&str> {

@@ -8,6 +8,7 @@ pub mod diff;
 pub mod lthash;
 pub mod merkle;
 pub mod persistent_ord_map;
+pub mod room_summary;
 
 pub use at::*;
 pub use dag::*;
