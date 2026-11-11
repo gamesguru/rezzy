@@ -226,8 +226,8 @@ impl<T: HamtCodec> HamtRoutingKey for T {
     }
 }
 
-/// A `u32` length, then the UTF-8 bytes. `String` and `EventType` encode
-/// through this, so their owned and borrowed forms always route alike.
+/// A `u32` length, then the UTF-8 bytes. Every [`HamtStrCodec`] type encodes
+/// through this, so owned and borrowed forms always route alike.
 impl HamtRoutingKey for str {
     fn encode_routing(&self, out: &mut Vec<u8>) {
         write_len_prefixed(self.as_bytes(), out, "string too long for HAMT codec");
@@ -241,26 +241,52 @@ fn write_len_prefixed(bytes: &[u8], out: &mut Vec<u8>, too_long: &str) {
     out.extend_from_slice(bytes);
 }
 
-/// Implements `HamtCodec` for a type that encodes through its `&str` form, so
-/// owned and borrowed lookups always route alike.
-macro_rules! impl_str_hamt_codec {
-    ($ty:ty, |$input:ident, $cursor:ident| $decode:expr) => {
-        impl HamtCodec for $ty {
-            fn encode_hamt(&self, out: &mut Vec<u8>) {
-                self.as_str().encode_routing(out);
-            }
+/// A key or value stored as a length-prefixed UTF-8 string.
+///
+/// Every implementor encodes through `str`, so it is byte-identical to the same
+/// text as a `String` and a `&str` lookup routes exactly like it.
+pub trait HamtStrCodec: Sized {
+    /// The text this value encodes as.
+    fn as_codec_str(&self) -> &str;
 
-            fn decode_hamt($input: &[u8], $cursor: &mut usize) -> Result<Self, &'static str> {
-                $decode
-            }
-        }
-    };
+    /// Rebuilds the value from decoded text.
+    ///
+    /// # Errors
+    /// Returns an error if the text is not a valid value of this type.
+    fn from_codec_string(text: String) -> Result<Self, &'static str>;
 }
 
-impl_str_hamt_codec!(String, |input, cursor| {
-    String::from_utf8(read_len_prefixed(input, cursor)?.to_vec())
-        .map_err(|_| "HAMT codec invalid UTF-8")
-});
+impl<T: HamtStrCodec> HamtCodec for T {
+    fn encode_hamt(&self, out: &mut Vec<u8>) {
+        self.as_codec_str().encode_routing(out);
+    }
+
+    fn decode_hamt(input: &[u8], cursor: &mut usize) -> Result<Self, &'static str> {
+        let text = String::from_utf8(read_len_prefixed(input, cursor)?.to_vec())
+            .map_err(|_| "HAMT codec invalid UTF-8")?;
+        Self::from_codec_string(text)
+    }
+}
+
+impl HamtStrCodec for String {
+    fn as_codec_str(&self) -> &str {
+        self
+    }
+
+    fn from_codec_string(text: String) -> Result<Self, &'static str> {
+        Ok(text)
+    }
+}
+
+impl HamtStrCodec for crate::basespec::event_types::EventType {
+    fn as_codec_str(&self) -> &str {
+        self.as_str()
+    }
+
+    fn from_codec_string(text: String) -> Result<Self, &'static str> {
+        Ok(Self::from(text))
+    }
+}
 
 impl HamtCodec for Vec<u8> {
     fn encode_hamt(&self, out: &mut Vec<u8>) {
@@ -299,12 +325,6 @@ impl<A: HamtCodec, B: HamtCodec> HamtCodec for (A, B) {
         Ok((a, b))
     }
 }
-
-// Encodes through `str`, byte-identical to the event type as a `String`.
-impl_str_hamt_codec!(crate::basespec::event_types::EventType, |input, cursor| {
-    let s = String::decode_hamt(input, cursor)?;
-    Ok(crate::basespec::event_types::EventType::from(s))
-});
 
 /// A representation of an internal node that is safe to persist to disk.
 ///

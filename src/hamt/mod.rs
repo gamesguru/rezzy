@@ -64,8 +64,8 @@ pub use audit::{
     UniverseTooLarge,
 };
 pub use codec::{
-    HamtCodec, HamtRoutingKey, PersistedInternalNode, HAMT_NODE_MAGIC, HAMT_ROOT_MAGIC,
-    HAMT_WIRE_VERSION,
+    HamtCodec, HamtRoutingKey, HamtStrCodec, PersistedInternalNode, HAMT_NODE_MAGIC,
+    HAMT_ROOT_MAGIC, HAMT_WIRE_VERSION,
 };
 pub use delta::{
     diff_hamt_nodes, diff_node_hashes, isolate_delta, reachable_node_hashes,
