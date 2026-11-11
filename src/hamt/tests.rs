@@ -333,6 +333,28 @@ fn test_structural_hash_commits_to_canonical_persisted_bytes() {
 }
 
 #[test]
+fn test_canonical_key_path_hash_is_stable() {
+    use alloc::string::{String, ToString};
+    use core::fmt::Write as _;
+
+    let key: StateHamtKey = (
+        crate::basespec::event_types::EventType::from("m.room.member"),
+        "@alice:example.org".to_string(),
+    );
+    let hash = canonical_key_path_hash(b"!room:example.org", &key);
+    let mut hex = String::with_capacity(64);
+    for byte in hash {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    // Pinned so a Rust `Hash` change or an accidental codec change cannot move
+    // routing and node identity without a test failure.
+    assert_eq!(
+        hex,
+        "0cb2aa2f2ab4408a3353cd968b0c1b8d822a12aa2f76cedaf8ed589f0b2a929e"
+    );
+}
+
+#[test]
 fn test_verified_decode_rejects_shape_valid_node_under_wrong_storage_hash() {
     let structural_key = b"verified_decode_key";
     let root = build_hamt(structural_key, [(1_u32, 10_u64)]).expect("build root");

@@ -48,6 +48,8 @@
 //! require every server to use the same room-scoped structural key and the
 //! same deterministic routing hash over canonical key bytes; the default
 //! caller-provided routing and namespace settings do not guarantee that.
+//! [`canonical_key_path_hash`] hashes the persisted key encoding rather than
+//! the key's in-memory `Hash` stream for exactly this case.
 //!
 //! Public routing does not make prefix grinding unbounded. With 32-way nodes a
 //! shared path of `d` levels costs an attacker about `2^(5d)` attempts per key
@@ -649,6 +651,24 @@ impl core::error::Error for HamtBuildError {}
 fn key_path_hash<K: Hash + ?Sized>(structural_key: &[u8], key: &K) -> StructuralHash {
     let mut hasher = StructuralHashBuilder::new(structural_key);
     key.hash(&mut hasher);
+    hasher.finalize()
+}
+
+/// Computes a routing hash from a key's canonical persisted encoding.
+///
+/// [`key_path_hash`] hashes `K: Hash`, whose byte stream is an in-memory
+/// implementation detail that neither Rust nor this crate promises to keep
+/// stable across versions or architectures. This variant hashes
+/// [`HamtCodec::encode_hamt`] instead, so identical logical keys route
+/// identically on every server. Use it with [`build_hamt_with_key_hash`],
+/// [`persist_mutation_with_key_hash`], or [`HamtMutator::new`] when node
+/// identity must be portable.
+#[must_use]
+pub fn canonical_key_path_hash<K: HamtCodec>(structural_key: &[u8], key: &K) -> StructuralHash {
+    let mut encoded = Vec::new();
+    key.encode_hamt(&mut encoded);
+    let mut hasher = StructuralHashBuilder::new(structural_key);
+    hasher.write(&encoded);
     hasher.finalize()
 }
 
