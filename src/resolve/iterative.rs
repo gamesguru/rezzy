@@ -133,6 +133,7 @@ where
 // `Id` only) instead of re-deriving it — a real (if narrow) restructure, not
 // attempted here since it's a constant-factor cost bounded by the conflicted
 // set size, not the full event set.
+/// Returns the `(type, state_key)` keys of every conflicted event.
 pub(crate) fn derive_all_conflicted_keys<Id, C, S, K>(
     conflicted_events: &HashMap<Id, LeanEvent<Id, C, K>, S>,
     empty_key: &K,
@@ -385,6 +386,7 @@ where
     }
 }
 
+/// Merges unconflicted power events into `resolved` for V2.1+.
 pub(crate) fn merge_unconflicted_power_events<Id, K>(
     version: StateResVersion,
     unconflicted_state: &SharedState<Id, K>,
@@ -1087,6 +1089,7 @@ pub type ResolvedWithDeltas<Id, K> = (
 #[must_use]
 #[allow(clippy::type_complexity, clippy::too_many_lines)]
 #[allow(clippy::implicit_hasher)]
+/// Resolves state and returns the per-step resolution deltas.
 pub fn resolve_iterative_sort_with_deltas<
     Id: EventId,
     C: EventContent + Clone,

@@ -814,7 +814,10 @@ pub fn check_auth_with_context<Id: EventId, C: EventContent, E: EventLike<Id = I
                     "m.room.aliases event must have a state_key".into(),
                 ));
             };
-            if !crate::basespec::rezzy_types::domain_matches(state_key, event.sender()) {
+            // The state_key is itself the domain (including any port), so
+            // compare it with the sender's domain, not a domain extracted from it.
+            let sender_domain = event.sender().split_once(':').map(|(_, d)| d);
+            if !sender_domain.is_some_and(|d| !d.is_empty() && d.eq_ignore_ascii_case(state_key)) {
                 return Err(AuthError::InvalidSyntax(
                     "m.room.aliases state_key domain must match sender domain".into(),
                 ));
@@ -1313,10 +1316,12 @@ impl<Id> Default for RedactionReport<Id> {
     }
 }
 
+/// Borrows string-backed event IDs and formats any other ID type.
 #[inline]
 pub(crate) fn event_id_to_wire_cow<Id: core::fmt::Display + 'static>(
     id: &Id,
 ) -> alloc::borrow::Cow<'_, str> {
+    // Borrow common string-backed event ID types instead of formatting them.
     let any: &dyn core::any::Any = id;
     if let Some(s) = any.downcast_ref::<alloc::string::String>() {
         return alloc::borrow::Cow::Borrowed(s.as_str());
@@ -1984,6 +1989,7 @@ pub(crate) fn get_invite_power_level<Id, C: EventContent, E: EventLike<Id = Id, 
     pl_field_or_default(state, EventLike::get_invite, DEFAULT_PL_INVITE)
 }
 
+/// Returns the room's `ban` power level, falling back to the spec default.
 pub(crate) fn get_ban_power_level<Id, C: EventContent, E: EventLike<Id = Id, Content = C>>(
     state: &impl StateProvider<Id, C, E>,
 ) -> i64 {
@@ -2549,7 +2555,7 @@ mod tests {
         LeanEvent {
             event_id: "$aliases".into(),
             event_type: M_ROOM_ALIASES.into(),
-            state_key: Some("#test:example.com".into()),
+            state_key: Some("example.com".into()),
             sender: "@alice:example.com".into(),
             content: json!({}),
             ..Default::default()

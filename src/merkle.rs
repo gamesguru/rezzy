@@ -100,6 +100,7 @@ pub struct Field {
 }
 
 impl Field {
+    /// Creates a named field from its name and JSON value.
     #[must_use]
     pub fn new(name: impl Into<String>, value: Value) -> Self {
         Self {
@@ -523,6 +524,7 @@ fn leaf_hash_unchecked(field_name: &[u8], canonical_value: &[u8]) -> Hash {
     hash_parts(&[LEAF_DST, field_name, &[0], canonical_value])
 }
 
+/// Concatenates `parts` and returns their SHA-256 digest.
 pub(crate) fn hash_parts(parts: &[&[u8]]) -> Hash {
     let mut hasher = Sha256::new();
     for part in parts {

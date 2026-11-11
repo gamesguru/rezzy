@@ -422,6 +422,19 @@ pub fn uses_principal_identifiers(room_version: &str) -> bool {
         .is_some_and(RoomVersionFormat::uses_principal_identifiers)
 }
 
+/// Returns `true` if `id` is an opaque principal identifier: `@` followed by a
+/// non-empty base64url string (`A-Z`, `a-z`, `0-9`, `-`, `_`). Principals carry
+/// no `:` domain part, so they are not MXIDs.
+#[must_use]
+pub fn is_valid_principal_identifier(id: &str) -> bool {
+    id.strip_prefix('@').is_some_and(|body| {
+        !body.is_empty()
+            && body
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    })
+}
+
 /// Returns `true` for room versions that redact with the v11 rules (v11 and
 /// later, including v12 and the v12-derived experimental formats). Returns
 /// `false` for older and unrecognised versions.
@@ -1059,6 +1072,14 @@ fn reference_hash_digest(
         ));
     }
 
+    // The Cygnus verifier owns the redaction whitelist for reference hashes;
+    // applying the base v11 table here would omit Cygnus epoch fields.
+    if RoomVersionFormat::parse(room_version) == Some(RoomVersionFormat::Cygnus) {
+        return Err(alloc::format!(
+            "no base reference hash for room version {room_version}: Cygnus events must be hashed by the Cygnus verifier, which preserves epoch content and device_certificate"
+        ));
+    }
+
     if StateResVersion::from_room_version(room_version).is_none() {
         return Err(alloc::format!(
             "no reference hash for unsupported room version {room_version}: its event ID hash rules are undefined"
@@ -1657,7 +1678,7 @@ pub trait DagNode {
     }
 
     /// State-predecessor edges at the given room version.
-    ///
+    /// Validates the event ID, sender identity, and create-event identifiers.
     /// For V2.2 (MSC4242): identical to `prev_state_events()`.
     /// For V1–V2.1.1: falls back to `prev_events()`, matching the
     /// MSC4500 `state_predecessors` definition where the general DAG
@@ -2673,7 +2694,12 @@ pub trait EventContent: Clone + core::fmt::Debug + Default {
     /// array of strings each passing the same MXID grammar as `sender`
     /// (rule 1.4, V12+). Defaults to permissive (`true`) for content types
     /// that don't expose the raw array.
-    fn additional_creators_are_valid(&self) -> bool {
+    ///
+    /// With `principals` set (room versions that use opaque principal
+    /// identifiers, e.g. Cygnus), entries are checked against
+    /// [`is_valid_principal_identifier`] instead.
+    fn additional_creators_are_valid(&self, principals: bool) -> bool {
+        let _ = principals;
         true
     }
     /// Returns the `join_authorised_via_users_server` field, if present.
@@ -2940,12 +2966,19 @@ impl EventContent for Value {
             .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(sender)))
     }
 
-    fn additional_creators_are_valid(&self) -> bool {
+    fn additional_creators_are_valid(&self, principals: bool) -> bool {
         match self.get(crate::basespec::event_types::FIELD_ADDITIONAL_CREATORS) {
             None => true,
             Some(v) => v.as_array().is_some_and(|arr| {
-                arr.iter()
-                    .all(|entry| entry.as_str().is_some_and(is_acceptable_historical_mxid))
+                arr.iter().all(|entry| {
+                    entry.as_str().is_some_and(|id| {
+                        if principals {
+                            is_valid_principal_identifier(id)
+                        } else {
+                            is_acceptable_historical_mxid(id)
+                        }
+                    })
+                })
             }),
         }
     }
@@ -3320,6 +3353,11 @@ impl<Id, C, K> LeanEvent<Id, C, K> {
         Ok(())
     }
 
+    ///
+    /// Cygnus senders use principal identifiers; other room versions retain
+    /// Validates the event ID, sender identity, and create-event identifiers.
+    /// Cygnus senders use principal identifiers; other room versions retain
+    /// MXID syntax and historical-ID compatibility handling.
     fn validate_identifiers(
         &self,
         room_version: &str,
@@ -3333,10 +3371,18 @@ impl<Id, C, K> LeanEvent<Id, C, K> {
         if event_id.is_empty() || !event_id.starts_with('$') {
             return Err("event_id must start with '$'");
         }
-        self.validate_mxid(&self.sender, MxidField::Sender, warnings)?;
+        if uses_principal_identifiers(room_version) {
+            if !is_valid_principal_identifier(&self.sender) {
+                return Err("sender must be a valid principal identifier: '@' followed by base64url characters");
+            }
+        } else {
+            self.validate_mxid(&self.sender, MxidField::Sender, warnings)?;
+        }
         self.validate_create_identifiers(room_version, warnings)
     }
 
+    /// Validates an MXID and records a compatibility warning for historical
+    /// MXIDs that the room version accepts.
     fn validate_mxid(
         &self,
         mxid: &str,
@@ -3380,7 +3426,7 @@ impl<Id, C, K> LeanEvent<Id, C, K> {
         if StateResVersion::from_room_version(room_version).is_some_and(|v| v.is_v2_1_plus()) {
             return self
                 .content
-                .additional_creators_are_valid()
+                .additional_creators_are_valid(uses_principal_identifiers(room_version))
                 .then_some(())
                 .ok_or(
                 "m.room.create content.additional_creators must be an array of valid MXID strings",

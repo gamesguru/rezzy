@@ -34,6 +34,7 @@ fn allocation_should_fail() -> bool {
     false
 }
 
+/// Tests can force allocation failures to exercise the fallible paths.
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 pub(crate) fn set_force_allocation_failure(value: bool) {

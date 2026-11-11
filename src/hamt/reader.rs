@@ -15,13 +15,14 @@
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::fmt;
 use core::hash::Hash;
 
 use super::codec::PersistedInternalNode;
-use super::{HamtCodec, HamtNode, StructuralHash};
+use super::{HamtCodec, HamtNode, NodeRef, StructuralHash, HAMT_MAX_DEPTH};
 
 /// Why a persisted HAMT could not be read.
 #[derive(Debug)]
@@ -118,6 +119,10 @@ where
     }
 
     /// Look up one key under `root`.
+    /// Look up one key under `root`, routing with the default key hash.
+    ///
+    /// For trees built with a custom routing hash use
+    /// [`Self::get_with_key_hash`].
     ///
     /// `root` is the structural hash of the root node, not the state-group id
     /// from the root record. Callers that hold a root record should pass its
@@ -137,6 +142,31 @@ where
         let structural_key = self.structural_key;
         let mut resolver = |hash: &StructuralHash| self.node(hash);
         root_node.search(structural_key, key, &mut resolver)
+    }
+
+    /// Look up one key under `root` in a tree built with a custom routing hash
+    /// (see [`build_hamt_with_key_hash`](super::build_hamt_with_key_hash)).
+    ///
+    /// `key_hash` must be the exact function the tree was built with, e.g.
+    /// [`canonical_key_path_hash`](super::canonical_key_path_hash).
+    ///
+    /// # Errors
+    /// or fails structural-hash verification.
+    pub fn get_with_key_hash<Q, H>(
+        &mut self,
+        root: StructuralHash,
+        key: &Q,
+        key_hash: H,
+    ) -> Result<Option<V>, HamtReadError<E>>
+    where
+        K: Eq + Borrow<Q>,
+        V: Clone,
+        Q: Eq + ?Sized,
+        H: FnMut(&Q) -> StructuralHash,
+    {
+        let root_node = self.node(&root)?;
+        let mut resolver = |hash: &StructuralHash| self.node(hash);
+        root_node.search_with_key_hash(key, key_hash, &mut resolver)
     }
 
     /// Look up each key under `root`, in order.
@@ -171,13 +201,25 @@ where
     where
         F: FnMut(&K, &V),
     {
-        let root_node = self.node(&root)?;
-        let mut resolver = |hash: &StructuralHash| self.node(hash);
-        let mut visitor = |key: &K, value: &V| -> Result<(), HamtReadError<E>> {
-            visit(key, value);
-            Ok(())
-        };
-        root_node.visit_entries(&mut resolver, &mut visitor)
+        // Iterative walk with an explicit depth bound, so a malformed chain of
+        // persisted nodes errors instead of overflowing the stack.
+        let mut stack = vec![(self.node(&root)?, 0_usize)];
+        while let Some((node, depth)) = stack.pop() {
+            if depth >= HAMT_MAX_DEPTH {
+                return Err(HamtReadError::Decode("HAMT exceeds maximum depth"));
+            }
+            for (key, value) in &node.leaves {
+                visit(key, value);
+            }
+            for child in &node.children {
+                let child = match child {
+                    NodeRef::Resolved(child) => Arc::clone(child),
+                    NodeRef::Lazy(hash) => self.node(hash)?,
+                };
+                stack.push((child, depth.saturating_add(1)));
+            }
+        }
+        Ok(())
     }
 
     /// Collect every key/value pair under `root`.
@@ -223,6 +265,22 @@ mod tests {
         (records, handle.structural_hash)
     }
 
+    /// Build a reader over `records` with the given structural key, so tests
+    /// do not repeat the same loader closure.
+    #[allow(clippy::type_complexity)]
+    fn reader_for<'a>(
+        records: &'a BTreeMap<StructuralHash, Vec<u8>>,
+        structural_key: &'a [u8],
+    ) -> PersistedHamtReader<
+        'a,
+        String,
+        String,
+        (),
+        impl FnMut(&StructuralHash) -> Result<Option<Vec<u8>>, ()> + 'a,
+    > {
+        PersistedHamtReader::new(structural_key, move |hash| Ok(records.get(hash).cloned()))
+    }
+
     fn collect(
         node: &Arc<HamtNode<String, String>>,
         records: &mut BTreeMap<StructuralHash, Vec<u8>>,
@@ -242,9 +300,7 @@ mod tests {
     #[test]
     fn gets_and_collects_from_persisted_nodes() {
         let (records, root) = fixture();
-        let mut reader = PersistedHamtReader::<String, String, _, _>::new(KEY, |hash| {
-            Ok::<_, ()>(records.get(hash).cloned())
-        });
+        let mut reader = reader_for(&records, KEY);
 
         assert_eq!(reader.get(root, "beta").unwrap().as_deref(), Some("2"));
         assert_eq!(reader.get(root, "absent").unwrap(), None);
@@ -270,9 +326,7 @@ mod tests {
     #[test]
     fn a_missing_node_is_reported_not_skipped() {
         let (records, _root) = fixture();
-        let mut reader = PersistedHamtReader::<String, String, _, _>::new(KEY, |hash| {
-            Ok::<_, ()>(records.get(hash).cloned())
-        });
+        let mut reader = reader_for(&records, KEY);
         let missing = [0xAA; 32];
         match reader.get(missing, "alpha") {
             Err(HamtReadError::Missing(hash)) => assert_eq!(hash, missing),
@@ -284,9 +338,7 @@ mod tests {
     fn corrupt_or_miskeyed_nodes_fail_verification() {
         let (mut records, root) = fixture();
         records.insert(root, vec![0_u8; 12]);
-        let mut reader = PersistedHamtReader::<String, String, _, _>::new(KEY, |hash| {
-            Ok::<_, ()>(records.get(hash).cloned())
-        });
+        let mut reader = reader_for(&records, KEY);
         assert!(matches!(
             reader.get(root, "alpha"),
             Err(HamtReadError::Decode(_))
@@ -295,9 +347,7 @@ mod tests {
         // The same bytes under a different structural key do not reproduce
         // the hash that selected them.
         let (records, root) = fixture();
-        let mut reader = PersistedHamtReader::<String, String, _, _>::new(b"wrong-room", |hash| {
-            Ok::<_, ()>(records.get(hash).cloned())
-        });
+        let mut reader = reader_for(&records, b"wrong-room");
         assert!(matches!(
             reader.get(root, "alpha"),
             Err(HamtReadError::Decode(_))

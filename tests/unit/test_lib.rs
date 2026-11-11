@@ -5884,7 +5884,7 @@ fn test_event_content_default_trait_methods() {
     assert!(!c.has_non_integer_users_pl(false));
     assert!(!c.has_user_in_users("@someone:x"));
     assert!(
-        c.additional_creators_are_valid(),
+        c.additional_creators_are_valid(false),
         "default impl is permissive for content types that don't expose the raw array"
     );
 }
@@ -7756,4 +7756,35 @@ fn test_soft_fail_and_rejected_state_events_on_linear_chain() {
         saw_name_b,
         "optimized streaming must include the soft-failed name event"
     );
+}
+
+#[test]
+fn cygnus_validate_syntactic_accepts_principals_and_rejects_base_reference_hash() {
+    use rezzy::basespec::rezzy_types::{is_valid_principal_identifier, reference_hash};
+    let principal = format!("@{}", "A".repeat(43));
+    assert!(is_valid_principal_identifier(&principal));
+    assert!(!is_valid_principal_identifier("@alice:example.com"));
+    assert!(!is_valid_principal_identifier("@"));
+
+    let create = rezzy::json!({
+        "type": "m.room.create", "state_key": "", "sender": principal.clone(),
+        "content": {"room_version": "tk.nutra.cygnus.12", "additional_creators": [principal]},
+        "origin_server_ts": 1, "depth": 1, "prev_events": [], "auth_events": []
+    });
+    let mut event: LeanEvent = LeanEvent {
+        event_id: "$cygnus".into(),
+        event_type: "m.room.create".into(),
+        sender: create["sender"].as_str().unwrap().into(),
+        content: create["content"].clone(),
+        ..Default::default()
+    };
+    assert!(event.validate_syntactic("tk.nutra.cygnus.12").is_ok());
+
+    event.content = rezzy::json!({
+        "room_version": "tk.nutra.cygnus.12", "additional_creators": ["@alice:example.com"]
+    });
+    assert!(event.validate_syntactic("tk.nutra.cygnus.12").is_err());
+    event.sender = "@alice:example.com".into();
+    assert!(event.validate_syntactic("tk.nutra.cygnus.12").is_err());
+    assert!(reference_hash(&create, "tk.nutra.cygnus.12").is_err());
 }

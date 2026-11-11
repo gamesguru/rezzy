@@ -37,6 +37,7 @@ impl<'a> H64Index<'a> {
         Self { sorted_h64 }
     }
 
+    /// Returns the h64 trie range selected by `request`.
     pub(crate) fn bounds_unchecked(request: &BucketRequest) -> core::ops::Range<u128> {
         let depth = u32::from(request.depth);
         let shift = u32::from(H64_TRIE_WIDTH).saturating_sub(depth);

@@ -259,6 +259,7 @@ where
     }
 }
 
+/// Builds the mainline ordering of `resolved` under the auth context.
 pub(crate) fn build_mainline<Id, C, E, K>(
     resolved: &SharedState<Id, K>,
     auth_context: &impl EventProvider<Id, C, E>,

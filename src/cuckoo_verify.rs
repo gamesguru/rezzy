@@ -44,6 +44,7 @@ pub enum VerifyError {
 }
 
 impl VerifyError {
+    /// Returns the stable human-readable description of this error.
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {
@@ -66,11 +67,13 @@ pub struct CuckooVerifier {
 }
 
 impl CuckooVerifier {
+    /// Builds a verifier for the graph derived from the key, server, and nonce.
     #[must_use]
     pub fn new(public_key: &str, server_name: &str, nonce: u64) -> Self {
         Self::from_graph_seed(graph_seed(public_key, server_name, nonce))
     }
 
+    /// Builds a verifier for a precomputed graph seed.
     #[must_use]
     pub fn from_graph_seed(seed: [u8; 32]) -> Self {
         Self {
@@ -132,6 +135,7 @@ fn verify_short_key_id(
     }
 }
 
+/// Derives the 32-byte graph seed from the key, server, and nonce.
 #[must_use]
 pub fn graph_seed(public_key: &str, server_name: &str, nonce: u64) -> [u8; 32] {
     let mut graph_object = String::new();
@@ -184,6 +188,7 @@ pub fn minting_key_id(
     Ok(sha256(minting_object.as_bytes()))
 }
 
+/// Returns the first 20 base64url characters of `key_id`.
 #[must_use]
 pub fn short_key_id(key_id: &[u8; 32]) -> String {
     base64url_no_pad(key_id)

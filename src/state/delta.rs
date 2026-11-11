@@ -180,6 +180,10 @@ fn decode_hex_32(s: &str) -> Result<[u8; 32], &'static str> {
 /// would reach this length, [`compute_compacted_delta_chain_from_resolved`]
 /// inserts a full base snapshot instead of another delta, bounding
 /// reconstruction cost to at most this many hops.
+/// reconstruction cost to at most this many hops. The larger limit reduces
+/// snapshot storage and write work, at the cost of allowing up to five times
+/// as many delta reads during worst-case reconstruction compared with a limit
+/// of 100; choose a lower value when read latency matters more than storage.
 pub const MAX_DELTA_CHAIN_HOPS: usize = 500;
 
 /// A checkpoint that may be either a delta from a parent or a full snapshot.

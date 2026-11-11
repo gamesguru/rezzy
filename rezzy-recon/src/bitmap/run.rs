@@ -16,6 +16,7 @@ pub(super) struct Run {
 }
 
 impl Run {
+    /// Returns the number of values in this run.
     pub(super) fn len(self) -> usize {
         usize::from(self.len_minus_one)
             .checked_add(1)
@@ -30,6 +31,7 @@ impl Run {
     }
 }
 
+/// Counts runs in sorted, deduplicated values.
 pub(super) fn count_runs(values: &[u16]) -> usize {
     let mut runs = usize::from(!values.is_empty());
     for pair in values.windows(2) {
@@ -55,6 +57,7 @@ pub(super) fn count_runs_words(words: &[u64; WORDS]) -> usize {
     runs
 }
 
+/// Builds runs from sorted, deduplicated values.
 pub(super) fn runs_from_values(values: &[u16]) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     for &value in values {
@@ -63,6 +66,7 @@ pub(super) fn runs_from_values(values: &[u16]) -> Vec<Run> {
     runs
 }
 
+/// Builds runs from a dense wordset.
 pub(super) fn runs_from_words(words: &[u64; WORDS]) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     for (index, &word) in words.iter().enumerate() {
@@ -79,6 +83,7 @@ pub(super) fn runs_from_words(words: &[u64; WORDS]) -> Vec<Run> {
     runs
 }
 
+/// Expands runs into a sorted value vector.
 pub(super) fn values_from_runs(runs: &[Run]) -> Vec<u16> {
     let total = runs.iter().map(|run| run.len()).sum();
     let mut out = Vec::with_capacity(total);
@@ -93,6 +98,7 @@ pub(super) fn values_from_runs(runs: &[Run]) -> Vec<u16> {
     out
 }
 
+/// Builds a dense wordset from runs.
 pub(super) fn words_from_runs(runs: &[Run]) -> Words {
     const WORD_BITS: usize = 64;
     let mut words = empty_words();
@@ -134,6 +140,7 @@ pub(super) fn words_from_runs(runs: &[Run]) -> Words {
     words
 }
 
+/// Appends `value`, extending the last run when it is adjacent.
 pub(super) fn push_run_value(runs: &mut Vec<Run>, value: u16) {
     match runs.last_mut() {
         Some(run) if run.end() == u32::from(value) => {

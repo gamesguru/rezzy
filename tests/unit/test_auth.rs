@@ -4316,3 +4316,25 @@ fn test_v2_2_auth_context_skips_auth_events_selection_rules() {
          classic auth_events selection algorithm: {result:?}"
     );
 }
+
+#[test]
+fn test_rule_4_aliases_state_key_must_be_the_sender_domain_itself() {
+    let mut state = RoomState::new();
+    let create_ev = make_create("$c", "@alice:example.com", json!({"room_version": "1"}));
+    insert_event(&mut state, M_ROOM_CREATE, "", create_ev);
+
+    // A state_key that merely *contains* the sender's domain after a colon
+    // is not the domain.
+    let ev = make_event(
+        "$alias",
+        "m.room.aliases",
+        Some("#test:example.com"),
+        "@alice:example.com",
+        json!({"aliases": []}),
+    );
+    let res = check_auth(&ev, &state, StateResVersion::V1, None);
+    assert!(
+        matches!(res, Err(AuthError::InvalidSyntax(ref msg)) if msg.contains("m.room.aliases state_key domain must match")),
+        "got {res:?}"
+    );
+}

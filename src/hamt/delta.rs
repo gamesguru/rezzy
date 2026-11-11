@@ -86,6 +86,7 @@ where
     collect_delta(root_a, root_b, resolver)
 }
 
+/// Rejects a traversal that reached the HAMT maximum depth.
 pub(super) fn check_depth<E>(depth: usize) -> Result<(), HamtTraversalError<E>> {
     if depth >= HAMT_MAX_DEPTH {
         return Err(HamtTraversalError::MaxDepthExceeded { depth });
@@ -338,6 +339,7 @@ fn diff_leaf_subtree<K: DeltaElem, V: DeltaElem, E>(
     Ok(())
 }
 
+/// Resolves a lazy node reference through `resolver`, cloning resolved nodes.
 pub(super) fn resolve_node<K, V, F, E>(
     node_ref: &NodeRef<K, V>,
     resolver: &mut F,

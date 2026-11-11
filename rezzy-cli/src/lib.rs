@@ -361,8 +361,12 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
     let syntactic_room_version =
         utils::detect_room_version_string(&raw_events).unwrap_or_else(|| "1".to_string());
 
-    let mut raw_map: HashMap<String, rezzy::JsonValue> = HashMap::with_capacity(event_count);
     let needs_raw_events = format::needs_raw_events(args);
+    let mut raw_map: HashMap<String, rezzy::JsonValue> = if needs_raw_events {
+        HashMap::with_capacity(event_count)
+    } else {
+        HashMap::new()
+    };
     let mut events_map = HashMap::with_capacity(event_count);
     let mut creator_user_id = String::new();
     let mut syntactically_rejected: usize = 0;
@@ -569,7 +573,7 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
             eprintln!("[progress] building state maps...");
         }
         let t = Instant::now();
-        let m = partition_state_maps_fast(&heads, &events_map, args.debug);
+        let m = partition_state_maps_fast(&heads, &events_map, version, args.debug);
         if !args.quiet {
             eprintln!("[progress] state maps built in {:.2?}", t.elapsed());
         }

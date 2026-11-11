@@ -384,6 +384,7 @@ impl Gf256Decoder {
 }
 
 #[cfg(feature = "std")]
+/// Returns the process-wide cached quadratic solver for GF(2^256).
 pub(crate) fn cached_quadratic_solver() -> &'static QuadraticSolver<Gf256> {
     use std::sync::OnceLock;
 
@@ -479,6 +480,7 @@ fn clmul128(a: [u64; 2], b: [u64; 2]) -> [u64; 4] {
 }
 
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
+/// Reduces eight 64-bit limbs modulo the field polynomial.
 pub(crate) fn reduce_limbs(limbs: [u64; 8]) -> Gf256 {
     Gf256(reduce(Wide(limbs)))
 }

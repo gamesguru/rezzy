@@ -18,7 +18,8 @@ impl core::fmt::Write for HashWriter<'_> {
 /// Valid Matrix events are capped at 64KiB total, so real event types and state keys
 /// can never reach this limit. Truncation only applies to malformed/adversarial input.
 #[inline]
-pub(crate) fn truncate_to_u16_limit(s: &str) -> (&str, u16) {
+#[must_use]
+pub fn truncate_to_u16_limit(s: &str) -> (&str, u16) {
     let limit = usize::from(u16::MAX);
     let s_len = s.len();
     if s_len > limit {
@@ -26,9 +27,9 @@ pub(crate) fn truncate_to_u16_limit(s: &str) -> (&str, u16) {
         while !s.is_char_boundary(end) {
             end = end.saturating_sub(1);
         }
-        (&s[..end], u16::try_from(end).unwrap())
+        (&s[..end], u16::try_from(end).unwrap_or(u16::MAX))
     } else {
-        (s, u16::try_from(s_len).unwrap())
+        (s, u16::try_from(s_len).unwrap_or(u16::MAX))
     }
 }
 

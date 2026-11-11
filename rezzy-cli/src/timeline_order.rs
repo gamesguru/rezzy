@@ -189,16 +189,31 @@ pub fn kahn_order_by(
     parents: &[Vec<String>],
     keys: &[Vec<KeyValue>],
 ) -> Vec<usize> {
-    let mut indices = HashMap::with_capacity(ids.len());
-    for (index, id) in ids.iter().enumerate() {
-        indices.insert(id.as_str(), index);
+    let id_at = |index: usize| ids[index].as_str();
+    let parents_at = |index: usize| parents[index].as_slice();
+    kahn_core(ids.len(), id_at, parents_at, |index| {
+        (&keys[index], ids[index].as_str())
+    })
+}
+
+/// Shared Kahn sort. `key(i)` orders the ready set and the cyclic remainder;
+/// ties fall back to the index, so the order never depends on heap internals.
+fn kahn_core<'a, Key: Ord>(
+    len: usize,
+    id_at: impl Fn(usize) -> &'a str,
+    parents_at: impl Fn(usize) -> &'a [String],
+    key: impl Fn(usize) -> Key,
+) -> Vec<usize> {
+    let mut indices = HashMap::with_capacity(len);
+    for index in 0..len {
+        indices.insert(id_at(index), index);
     }
-    let mut indegree = vec![0_usize; ids.len()];
-    let mut children = vec![Vec::new(); ids.len()];
-    for (child, event_parents) in parents.iter().enumerate() {
-        for parent in event_parents {
+    let mut indegree = vec![0_usize; len];
+    let mut children = vec![Vec::new(); len];
+    for (child, degree) in indegree.iter_mut().enumerate() {
+        for parent in parents_at(child) {
             if let Some(&parent_index) = indices.get(parent.as_str()) {
-                indegree[child] = indegree[child].saturating_add(1);
+                *degree = degree.saturating_add(1);
                 children[parent_index].push(child);
             }
         }
@@ -206,12 +221,12 @@ pub fn kahn_order_by(
     let mut ready = BinaryHeap::new();
     for (index, degree) in indegree.iter().enumerate() {
         if *degree == 0 {
-            ready.push(Reverse((&keys[index], &ids[index], index)));
+            ready.push(Reverse((key(index), index)));
         }
     }
-    let mut emitted = vec![false; ids.len()];
-    let mut ordered = Vec::with_capacity(ids.len());
-    while let Some(Reverse((_, _, index))) = ready.pop() {
+    let mut emitted = vec![false; len];
+    let mut ordered = Vec::with_capacity(len);
+    while let Some(Reverse((_, index))) = ready.pop() {
         if emitted[index] {
             continue;
         }
@@ -220,7 +235,7 @@ pub fn kahn_order_by(
         for child in &children[index] {
             indegree[*child] = indegree[*child].saturating_sub(1);
             if indegree[*child] == 0 {
-                ready.push(Reverse((&keys[*child], &ids[*child], *child)));
+                ready.push(Reverse((key(*child), *child)));
             }
         }
     }
@@ -229,7 +244,7 @@ pub fn kahn_order_by(
         .enumerate()
         .filter_map(|(index, emitted)| (!emitted).then_some(index))
         .collect();
-    remainder.sort_by(|a, b| keys[*a].cmp(&keys[*b]).then_with(|| ids[*a].cmp(&ids[*b])));
+    remainder.sort_by_key(|index| key(*index));
     ordered.extend(remainder);
     ordered
 }
@@ -246,61 +261,12 @@ pub fn kahn_order_borrowed(
     timestamps: &[u64],
     depths: &[u64],
 ) -> Vec<usize> {
-    let mut indices = HashMap::with_capacity(ids.len());
-    for (index, id) in ids.iter().enumerate() {
-        indices.insert(*id, index);
-    }
-    let mut indegree = vec![0_usize; ids.len()];
-    let mut children = vec![Vec::new(); ids.len()];
-    for (child, event_parents) in parents.iter().enumerate() {
-        for parent in *event_parents {
-            if let Some(&parent_index) = indices.get(parent.as_str()) {
-                indegree[child] = indegree[child].saturating_add(1);
-                children[parent_index].push(child);
-            }
-        }
-    }
-    let mut ready = BinaryHeap::new();
-    for (index, degree) in indegree.iter().enumerate() {
-        if *degree == 0 {
-            ready.push(Reverse((
-                timestamps[index],
-                depths[index],
-                ids[index],
-                index,
-            )));
-        }
-    }
-    let mut emitted = vec![false; ids.len()];
-    let mut ordered = Vec::with_capacity(ids.len());
-    while let Some(Reverse((_, _, _, index))) = ready.pop() {
-        if emitted[index] {
-            continue;
-        }
-        emitted[index] = true;
-        ordered.push(index);
-        for child in &children[index] {
-            indegree[*child] = indegree[*child].saturating_sub(1);
-            if indegree[*child] == 0 {
-                ready.push(Reverse((
-                    timestamps[*child],
-                    depths[*child],
-                    ids[*child],
-                    *child,
-                )));
-            }
-        }
-    }
-    let mut remainder: Vec<usize> = emitted
-        .iter()
-        .enumerate()
-        .filter_map(|(index, emitted)| (!emitted).then_some(index))
-        .collect();
-    remainder.sort_by(|a, b| {
-        (timestamps[*a], depths[*a], ids[*a]).cmp(&(timestamps[*b], depths[*b], ids[*b]))
-    });
-    ordered.extend(remainder);
-    ordered
+    kahn_core(
+        ids.len(),
+        |index| ids[index],
+        |index| parents[index],
+        |index| (timestamps[index], depths[index], ids[index]),
+    )
 }
 
 #[cfg(test)]

@@ -536,6 +536,7 @@ pub struct SyndromeSketch {
 }
 
 impl SyndromeSketch {
+    /// Builds a sketch from odd syndrome coordinates, enforcing the capacity.
     pub(crate) fn from_coordinates(coordinates: Vec<u64>) -> Result<Self, AlgebraicError> {
         Self::from_coordinates_checked(coordinates, MAX_SKETCH_CAPACITY)
     }

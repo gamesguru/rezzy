@@ -301,10 +301,14 @@ pub fn load_file(input_path: &PathBuf) -> Result<Vec<rezzy::JsonValue>, AppError
         // Read the whole stream once and split on newlines. `BufRead::lines`
         // allocates a fresh `String` per event; a large export has enough
         // lines that the parser should get byte slices directly.
-        let mut content = Vec::new();
-        reader.read_to_end(&mut content)?;
+        let mut buffer = Vec::new();
         let mut values = Vec::new();
-        for raw_line in content.split(|byte| *byte == b'\n') {
+        loop {
+            buffer.clear();
+            if reader.read_until(b'\n', &mut buffer)? == 0 {
+                break;
+            }
+            let raw_line = buffer.strip_suffix(b"\n").unwrap_or(&buffer);
             let line = raw_line.strip_suffix(b"\r").unwrap_or(raw_line);
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
@@ -500,6 +504,7 @@ pub fn parse_and_extract_heads(
 pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
     heads: &[String],
     events_map: &HashMap<String, LeanEvent, S1>,
+    version: StateResVersion,
     debug: bool,
 ) -> (ResolvedState, Vec<String>) {
     let start = Instant::now();
@@ -523,6 +528,24 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
     }
 
     let order = crate::timeline_order::kahn_order_borrowed(&ids, &parents, &timestamps, &depths);
+    // The fast reverse pass is valid only when one global event ordering also
+    // preserves each head's resolved state. Multi-parent merges and cycles can
+    // violate that assumption, so use the state-at-event pipeline for those
+    // graphs. This keeps the optimized path for simple acyclic chains/forks.
+    if order.len() != n || parents.iter().any(|event_parents| event_parents.len() > 1) {
+        let states: Vec<_> = heads
+            .iter()
+            .filter_map(|head| rezzy::compute_state_at(head, events_map, version, &String::new()))
+            .collect();
+        let (unconflicted, conflicted) =
+            rezzy::partition_state_maps(states.iter().map(|state| state.iter()), states.len());
+        if debug {
+            eprintln!(
+                "[DEBUG] Used state-at-event partitioning for a cyclic or multi-parent graph"
+            );
+        }
+        return (unconflicted, conflicted);
+    }
     let mut index_of: HashMap<&str, usize> = HashMap::with_capacity(n);
     for (index, id) in ids.iter().enumerate() {
         index_of.insert(*id, index);
@@ -565,7 +588,7 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
     let mut by_key: HashMap<(EventType, String), Vec<usize>> = HashMap::new();
     for (index, id) in ids.iter().enumerate() {
         let event = events_map.get(*id).expect("ids came from events_map");
-        if let Some(state_key) = &event.state_key {
+        if let Some(state_key) = event.accepted_state_key() {
             let key = (EventType::from(event.event_type.clone()), state_key.clone());
             by_key.entry(key).or_default().push(index);
         }
@@ -1369,7 +1392,9 @@ mod tests {
         for seed in 0..24_u64 {
             // Low fan-in leaves many unreferenced events, so some runs cross
             // the 64-head word boundary.
-            let max_prevs = if seed % 2 == 0 { 1 } else { 3 };
+            // Single-parent graphs only: merges take the state-at-event
+            // fallback, which is not comparable to the depth-only reference.
+            let max_prevs = 1;
             let events = random_dag(seed, 40 + (seed as usize) * 20, max_prevs);
             let heads = auto_heads(&events);
             max_heads = max_heads.max(heads.len());
@@ -1381,7 +1406,7 @@ mod tests {
                 heads[..1].to_vec(),
             ] {
                 let (fast_unconflicted, mut fast_conflicted) =
-                    partition_state_maps_fast(&subset, &events, false);
+                    partition_state_maps_fast(&subset, &events, StateResVersion::V2_1, false);
                 fast_conflicted.sort_unstable();
                 let fast_unconflicted: Vec<_> = fast_unconflicted
                     .iter()
@@ -1413,7 +1438,8 @@ mod tests {
     #[test]
     fn partition_state_maps_fast_with_no_heads_is_empty() {
         let events = random_dag(1, 10, 2);
-        let (unconflicted, conflicted) = partition_state_maps_fast(&[], &events, false);
+        let (unconflicted, conflicted) =
+            partition_state_maps_fast(&[], &events, StateResVersion::V2_1, false);
         assert_eq!(unconflicted.iter().count(), 0);
         assert!(conflicted.is_empty());
     }

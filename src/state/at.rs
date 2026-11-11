@@ -1160,6 +1160,7 @@ pub(crate) struct PipelineBookkeeping<Id, C, K, T> {
     pub(crate) state_after_map: Vec<Option<T>>,
 }
 
+/// Allocates bookkeeping sized for `len` events under `version`.
 pub(crate) fn pipeline_bookkeeping<Id, C, K, T>(
     len: usize,
     version: StateResVersion,

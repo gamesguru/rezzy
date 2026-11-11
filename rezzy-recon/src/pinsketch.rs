@@ -103,6 +103,7 @@ impl WorkModel {
         max_factor_work: MAX_FACTOR_WORK_GF256,
     };
 
+    /// Returns the maximum factor-work budget used for calibration.
     pub(crate) const fn max_factor_work(self) -> usize {
         self.max_factor_work
     }
@@ -171,6 +172,7 @@ impl WorkModel {
     }
 }
 
+/// Decodes a sketch from its odd syndromes within the element budget.
 pub(crate) fn decode(
     odd_syndromes: &[u64],
     max_elements: usize,
@@ -687,6 +689,7 @@ pub(crate) struct QuadraticSolver<F> {
 }
 
 impl<F: BinaryField> QuadraticSolver<F> {
+    /// Creates an empty sketch accumulator.
     pub(crate) fn new() -> Option<Self> {
         // Reduce the GF(2)-linear map z -> z^2 + z once. `transform` records
         // the row operations, so each later solve only applies the reduced

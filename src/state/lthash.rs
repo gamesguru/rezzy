@@ -9,6 +9,7 @@
 
 use alloc::vec::Vec;
 
+use crate::incremental::lthash::truncate_to_u16_limit;
 use crate::incremental::{LtHash, LtLattice};
 
 /// Full-state construction for [`LtLattice`].
@@ -36,20 +37,6 @@ impl<const LANES: usize> FromState for LtLattice<LANES> {
             hash.add_seed(&s);
         }
         hash
-    }
-}
-
-/// Truncate a string to fit within a `u16` length prefix (65535 bytes).
-fn truncate_to_u16_limit(s: &str) -> (&str, u16) {
-    let limit = usize::from(u16::MAX);
-    if s.len() > limit {
-        let mut end = limit;
-        while !s.is_char_boundary(end) {
-            end = end.saturating_sub(1);
-        }
-        (&s[..end], u16::try_from(end).unwrap())
-    } else {
-        (s, u16::try_from(s.len()).unwrap())
     }
 }
 
@@ -83,6 +70,7 @@ impl RedactionOverlay {
     // own domain-separation tag. The event ID is appended raw, matching the
     // primary MSC4500 element encoding: it is self-delimiting under Matrix
     // event-ID syntax and must not acquire a second length prefix.
+    /// Builds the overlay element for one selected, effectively redacted event.
     #[must_use]
     pub fn seed(
         event_type: &str,

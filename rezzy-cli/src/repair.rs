@@ -398,6 +398,7 @@ fn refs_for(event: &JsonValue, kind: ReferenceKind) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Returns the event's non-empty `event_id`, if present.
 pub(crate) fn event_id_of(event: &JsonValue) -> Option<String> {
     event
         .get("event_id")

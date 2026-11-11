@@ -43,6 +43,7 @@ impl Default for Interner {
 }
 
 impl Interner {
+    /// Creates an interner pre-populated with the empty string at id 0.
     #[must_use]
     pub fn new() -> Self {
         let empty: Rc<str> = Rc::from("");
@@ -186,11 +187,13 @@ impl<'a> InternId<'a> {
         Self { idx, interner }
     }
 
+    /// Returns the numeric id of this interned string.
     #[must_use]
     pub fn index(self) -> u32 {
         self.idx
     }
 
+    /// Returns the interner this id was allocated from.
     #[must_use]
     pub fn interner(self) -> &'a Interner {
         self.interner

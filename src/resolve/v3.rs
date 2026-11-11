@@ -219,21 +219,25 @@ impl<Id, K: Ord> V3Admission<Id, K> {
 }
 
 impl<Id, K: Ord> CertifiedPromotionGrant<Id, K> {
+    /// Returns the authorization-grant event ID.
     #[must_use]
     pub const fn grant_id(&self) -> &Id {
         &self.grant_id
     }
 
+    /// Returns the state key this grant targets.
     #[must_use]
     pub const fn target(&self) -> &K {
         &self.target
     }
 
+    /// Returns the power level granted to the target.
     #[must_use]
     pub const fn target_power_level(&self) -> i64 {
         self.target_power_level
     }
 
+    /// Returns the active member that issued the grant.
     #[must_use]
     pub const fn active_member(&self) -> &Id {
         &self.active_member

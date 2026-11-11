@@ -207,6 +207,7 @@ impl RootHandle {
 pub(crate) struct StructuralHashBuilder(blake3::Hasher);
 
 impl StructuralHashBuilder {
+    /// Starts a hasher domain-separated by the length-prefixed structural key.
     pub(crate) fn new(key: &[u8]) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(&(key.len() as u64).to_le_bytes());
@@ -214,6 +215,7 @@ impl StructuralHashBuilder {
         Self(hasher)
     }
 
+    /// Finishes the hash and returns the 32-byte structural hash.
     pub(crate) fn finalize(self) -> StructuralHash {
         *self.0.finalize().as_bytes()
     }

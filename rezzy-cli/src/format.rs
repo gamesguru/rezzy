@@ -855,13 +855,8 @@ pub fn needs_stream_order(args: &Args) -> bool {
 /// raw event only costs memory and time.
 #[must_use]
 pub fn needs_raw_events(args: &Args) -> bool {
-    matches!(
-        args.format,
-        OutputFormat::Events
-            | OutputFormat::Federation
-            | OutputFormat::Timeline
-            | OutputFormat::TimelineChronological
-    ) || needs_stream_order(args)
+    matches!(args.format, OutputFormat::Events | OutputFormat::Federation)
+        || needs_stream_order(args)
 }
 
 /// Load and validate the stream-order index for `--timeline-order synapse`.

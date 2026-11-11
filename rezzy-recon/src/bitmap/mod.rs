@@ -741,6 +741,7 @@ pub(super) mod tests {
     pub(in crate::bitmap) struct Rng(pub(in crate::bitmap) u64);
 
     impl Rng {
+        /// Advances the benchmark PRNG.
         pub(in crate::bitmap) fn next(&mut self) -> u64 {
             self.0 ^= self.0 << 13;
             self.0 ^= self.0 >> 7;

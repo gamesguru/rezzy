@@ -77,6 +77,7 @@ fn array_neighbours(values: &[u16], lo: u16) -> (bool, bool) {
     (left, right)
 }
 
+/// Returns whether the values immediately below and above `lo` are set.
 pub(super) fn dense_neighbours(words: &[u64; WORDS], lo: u16) -> (bool, bool) {
     let left = lo > 0 && test_bit(words, lo.checked_sub(1).expect("lo is nonzero"));
     let right = lo < u16::MAX && test_bit(words, lo.checked_add(1).expect("lo is below u16::MAX"));
@@ -94,12 +95,14 @@ pub(super) const fn neighbour_run_delta(left: bool, right: bool, inserting: bool
     }
 }
 
+/// Applies a signed run-count delta, panicking if the count leaves its range.
 pub(super) const fn adjust_count(value: u32, delta: i32) -> u32 {
     value
         .checked_add_signed(delta)
         .expect("cached count stays in range")
 }
 
+/// Applies `op` word-wise to two dense wordsets.
 pub(super) fn zip_words(a: &Words, b: &Words, op: impl Fn(u64, u64) -> u64) -> Words {
     let mut out = empty_words();
     for ((slot, x), y) in out.iter_mut().zip(a.iter()).zip(b.iter()) {
@@ -108,6 +111,7 @@ pub(super) fn zip_words(a: &Words, b: &Words, op: impl Fn(u64, u64) -> u64) -> W
     out
 }
 
+/// Inserts `lo` into sorted `values`; returns `false` if already present.
 pub(super) fn insert_array(values: &mut Vec<u16>, lo: u16) -> bool {
     if values.last().is_none_or(|&last| last < lo) {
         values.push(lo);
@@ -122,6 +126,7 @@ pub(super) fn insert_array(values: &mut Vec<u16>, lo: u16) -> bool {
     }
 }
 
+/// Inserts `lo` into runs and returns the new run count, or `None` if present.
 pub(super) fn insert_run(runs: &mut Vec<Run>, lo: u16) -> Option<u32> {
     let position = runs.partition_point(|run| u32::from(run.start) < u32::from(lo));
     if position != 0 {
@@ -173,6 +178,7 @@ pub(super) fn insert_run(runs: &mut Vec<Run>, lo: u16) -> Option<u32> {
     Some(u32::try_from(runs.len()).expect("run count fits u32"))
 }
 
+/// Removes `lo` from sorted `values`, returning the run-count delta if present.
 pub(super) fn remove_array(values: &mut Vec<u16>, lo: u16) -> Option<i32> {
     let position = values.binary_search(&lo).ok()?;
     let (left, right) = array_neighbours(values, lo);
@@ -180,6 +186,7 @@ pub(super) fn remove_array(values: &mut Vec<u16>, lo: u16) -> Option<i32> {
     Some(neighbour_run_delta(left, right, false))
 }
 
+/// Removes `lo` from a dense wordset, returning the run-count delta if present.
 pub(super) fn remove_dense(words: &mut Words, lo: u16) -> Option<i32> {
     let (left, right) = dense_neighbours(words, lo);
     if !clear_bit(words, lo) {
@@ -188,6 +195,7 @@ pub(super) fn remove_dense(words: &mut Words, lo: u16) -> Option<i32> {
     Some(neighbour_run_delta(left, right, false))
 }
 
+/// Removes `lo` from runs and returns the new run count, or `None` if absent.
 pub(super) fn remove_run(runs: &mut Vec<Run>, lo: u16) -> Option<u32> {
     let position = runs.partition_point(|run| u32::from(run.start) <= u32::from(lo));
     let index = position.checked_sub(1)?;
@@ -235,6 +243,7 @@ pub(super) fn remove_run(runs: &mut Vec<Run>, lo: u16) -> Option<u32> {
 }
 
 impl Chunk {
+    /// Builds a chunk from sorted values, choosing a representation that fits.
     pub(super) fn from_array(key: u16, values: Vec<u16>) -> Option<Self> {
         if values.is_empty() {
             return None;
@@ -314,6 +323,7 @@ impl Chunk {
         };
     }
 
+    /// Returns the chunk's values as a sorted vector.
     pub(super) fn values(&self) -> Vec<u16> {
         match &self.store {
             Store::Array(values) => values.clone(),
@@ -322,6 +332,7 @@ impl Chunk {
         }
     }
 
+    /// Returns the chunk as a dense 65,536-bit wordset.
     pub(super) fn words(&self) -> Words {
         match &self.store {
             Store::Array(values) => array_to_words(values),
@@ -330,6 +341,7 @@ impl Chunk {
         }
     }
 
+    /// Returns the chunk's values as runs.
     pub(super) fn runs_vec(&self) -> Vec<Run> {
         match &self.store {
             Store::Array(values) => runs_from_values(values),
@@ -338,6 +350,7 @@ impl Chunk {
         }
     }
 
+    /// Returns whether `lo` is in the chunk.
     pub(super) fn contains(&self, lo: u16) -> bool {
         match &self.store {
             Store::Array(v) => v.binary_search(&lo).is_ok(),
@@ -350,6 +363,7 @@ impl Chunk {
         }
     }
 
+    /// Inserts `lo`, returning `false` if it was already present.
     pub(super) fn insert(&mut self, lo: u16) -> bool {
         let new_runs = match &mut self.store {
             Store::Array(values) => {
@@ -377,6 +391,7 @@ impl Chunk {
         true
     }
 
+    /// Removes `lo`, returning `false` if it was absent.
     pub(super) fn remove(&mut self, lo: u16) -> bool {
         let new_runs = match &mut self.store {
             Store::Array(values) => match remove_array(values, lo) {
@@ -398,6 +413,7 @@ impl Chunk {
         true
     }
 
+    /// Returns whether every value in `self` is also in `other`.
     pub(super) fn is_subset(&self, other: &Self) -> bool {
         if matches!(self.store, Store::Run(_)) || matches!(other.store, Store::Run(_)) {
             let a = self.words();
@@ -420,6 +436,7 @@ impl Chunk {
         }
     }
 
+    /// Returns whether `self` and `other` share no values.
     pub(super) fn is_disjoint(&self, other: &Self) -> bool {
         if matches!(self.store, Store::Run(_)) || matches!(other.store, Store::Run(_)) {
             let a = self.words();
@@ -450,11 +467,13 @@ impl Chunk {
         }
     }
 
+    /// Applies a word-wise bit operation, returning `None` when empty.
     pub(super) fn words_op(&self, other: &Self, op: impl Fn(u64, u64) -> u64) -> Option<Self> {
         let words = zip_words(&self.words(), &other.words(), op);
         Self::from_words(self.key, words)
     }
 
+    /// Returns the union of two chunks.
     pub(super) fn union(&self, other: &Self) -> Self {
         let key = self.key;
         if matches!(self.store, Store::Run(_)) || matches!(other.store, Store::Run(_)) {
@@ -561,6 +580,7 @@ impl Chunk {
         self.runs = u32::try_from(count_runs_store(&self.store)).expect("run count fits u32");
     }
 
+    /// Returns the intersection of two chunks, or `None` when empty.
     pub(super) fn intersection(&self, other: &Self) -> Option<Self> {
         let key = self.key;
         if matches!(self.store, Store::Run(_)) || matches!(other.store, Store::Run(_)) {
@@ -599,6 +619,7 @@ impl Chunk {
         }
     }
 
+    /// Returns the values in `self` that are absent from `other`.
     pub(super) fn difference(&self, other: &Self) -> Option<Self> {
         let key = self.key;
         if matches!(self.store, Store::Run(_)) || matches!(other.store, Store::Run(_)) {
@@ -637,6 +658,7 @@ impl Chunk {
     }
 }
 
+/// Counts runs in any store representation.
 pub(super) fn count_runs_store(store: &Store) -> usize {
     match store {
         Store::Array(values) => count_runs(values),

@@ -75,4 +75,5 @@ mod lattice;
 #[cfg(test)]
 mod tests;
 
+pub use self::encoding::truncate_to_u16_limit;
 pub use self::lattice::{LtHash, LtLattice, WrongLatticeLength};
