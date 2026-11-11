@@ -177,6 +177,31 @@ struct Cost {
     ns: f64,
 }
 
+/// Node fetches and bytes a [`counting_loader`] has served.
+#[derive(Default)]
+struct Fetched {
+    nodes: Cell<usize>,
+    bytes: Cell<usize>,
+}
+
+/// A loader over `store` that counts every fetch of a node outside `resident`.
+fn counting_loader<'a>(
+    store: &'a Store,
+    resident: &'a HashSet<StructuralHash>,
+    fetched: &'a Fetched,
+) -> impl FnMut(&StructuralHash) -> Result<Option<Vec<u8>>, Infallible> + 'a {
+    move |hash| {
+        let record = store.get(hash).cloned();
+        if let Some(record) = &record {
+            if !resident.contains(hash) {
+                fetched.nodes.set(fetched.nodes.get() + 1);
+                fetched.bytes.set(fetched.bytes.get() + record.len());
+            }
+        }
+        Ok(record)
+    }
+}
+
 /// Cold scan: a fresh reader per rep, so every node is fetched and verified.
 fn cold_scan<K, V>(
     store: &Store,
@@ -191,18 +216,11 @@ where
     let mut cost = Cost::default();
     let start = Instant::now();
     for _ in 0..reps {
-        let (mut fetches, mut bytes, mut matched) = (0, 0, 0);
+        let (fetched, resident, mut matched) = (Fetched::default(), HashSet::new(), 0);
         {
             let mut reader = PersistedHamtReader::<K, V, Infallible, _>::new(
                 STRUCTURAL_KEY,
-                |hash: &StructuralHash| {
-                    let record = store.get(hash).cloned();
-                    if let Some(record) = &record {
-                        fetches += 1;
-                        bytes += record.len();
-                    }
-                    Ok(record)
-                },
+                counting_loader(store, &resident, &fetched),
             );
             reader
                 .for_each_entry(root, |key, _| {
@@ -214,8 +232,8 @@ where
         }
         black_box(matched);
         cost = Cost {
-            fetches,
-            bytes,
+            fetches: fetched.nodes.get(),
+            bytes: fetched.bytes.get(),
             matched,
             ns: 0.0,
         };
@@ -247,22 +265,13 @@ fn cold_point_reads(
     keys: &[Key],
     reps: u32,
 ) -> Cost {
-    let (mut fetches, mut bytes) = (0, 0);
+    let fetched = Fetched::default();
     let start = Instant::now();
     for _ in 0..reps {
         for key in keys {
             let mut reader = PersistedHamtReader::<Key, Value, Infallible, _>::new(
                 STRUCTURAL_KEY,
-                |hash: &StructuralHash| {
-                    let record = store.get(hash).cloned();
-                    if let Some(record) = &record {
-                        if !warm.contains(hash) {
-                            fetches += 1;
-                            bytes += record.len();
-                        }
-                    }
-                    Ok(record)
-                },
+                counting_loader(store, warm, &fetched),
             );
             let value = reader.get(root, key).expect("bench store holds every node");
             assert!(value.is_some(), "auth singleton must be present");
@@ -271,8 +280,8 @@ fn cold_point_reads(
     }
     let reads = (keys.len() as u32 * reps) as usize;
     Cost {
-        fetches: fetches / reads,
-        bytes: bytes / reads,
+        fetches: fetched.nodes.get() / reads,
+        bytes: fetched.bytes.get() / reads,
         matched: keys.len(),
         ns: start.elapsed().as_nanos() as f64 / reads as f64,
     }
@@ -285,17 +294,10 @@ fn shared_reader_point_reads(
     root: StructuralHash,
     keys: &[Key],
 ) -> (Cost, usize, f64) {
-    let (fetches, bytes) = (Cell::new(0_usize), Cell::new(0_usize));
+    let (fetched, resident) = (Fetched::default(), HashSet::new());
     let mut reader = PersistedHamtReader::<Key, Value, Infallible, _>::new(
         STRUCTURAL_KEY,
-        |hash: &StructuralHash| {
-            let record = store.get(hash).cloned();
-            if let Some(record) = &record {
-                fetches.set(fetches.get() + 1);
-                bytes.set(bytes.get() + record.len());
-            }
-            Ok(record)
-        },
+        counting_loader(store, &resident, &fetched),
     );
     let cold_start = Instant::now();
     for key in keys {
@@ -304,7 +306,7 @@ fn shared_reader_point_reads(
         black_box(value);
     }
     let cold_elapsed = cold_start.elapsed();
-    let (cold_fetches, cold_bytes) = (fetches.get(), bytes.get());
+    let (cold_fetches, cold_bytes) = (fetched.nodes.get(), fetched.bytes.get());
 
     let warm_reps = 1000_u32;
     let warm_start = Instant::now();
@@ -318,7 +320,7 @@ fn shared_reader_point_reads(
         }
     }
     let warm_ns = warm_start.elapsed().as_nanos() as f64 / f64::from(warm_reps) / keys.len() as f64;
-    let warm_fetches = fetches.get() - cold_fetches;
+    let warm_fetches = fetched.nodes.get() - cold_fetches;
     (
         Cost {
             fetches: cold_fetches,

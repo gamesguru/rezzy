@@ -1,7 +1,7 @@
 //! Cold-storage reader for persisted HAMT nodes.
 //!
 //! A persisted CHAMP is a content-addressed tree of `MTHN` records plus a root
-//! identity (see [`crate::hamt::state_hamt`] for the Matrix state-HAMT root
+//! identity (see [`crate::state::hamt_root`] for the Matrix state-HAMT root
 //! record). This reader resolves only the nodes a traversal touches, verifies
 //! each decoded node against the structural hash that selected it, and caches
 //! resolved nodes for the duration of the read.
@@ -126,7 +126,7 @@ where
     ///
     /// `root` is the structural hash of the root node, not the state-group id
     /// from the root record. Callers that hold a root record should pass its
-    /// [`StateHamtRoot::root_hash`](super::state_hamt::StateHamtRoot::root_hash).
+    /// [`StateHamtRoot::root_hash`](crate::state::hamt_root::StateHamtRoot::root_hash).
     ///
     /// # Errors
     /// Returns [`HamtReadError`] when a touched node is missing, unreadable,
@@ -135,7 +135,7 @@ where
     where
         K: Eq + Borrow<Q>,
         V: Clone,
-        Q: Hash + Eq + ?Sized,
+        Q: super::HamtRoutingKey + Eq + ?Sized,
     {
         let root_node = self.node(&root)?;
         // Copy the reference before the resolver closure borrows `self`.

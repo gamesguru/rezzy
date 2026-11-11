@@ -5,6 +5,7 @@ pub mod cache;
 pub mod dag;
 pub mod delta;
 pub mod diff;
+pub mod hamt_root;
 pub mod lthash;
 pub mod merkle;
 pub mod persistent_ord_map;

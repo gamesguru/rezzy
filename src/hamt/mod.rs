@@ -1,73 +1,32 @@
-//! Generic HAMT primitives used by higher-level state handling.
+//! Content-addressed persistent HAMT (CHAMP), generic over key and value types.
+//!
+//! Keys and values are any types with a [`HamtCodec`] encoding. Nodes are
+//! immutable records addressed by a keyed BLAKE3 structural hash, writes
+//! path-copy and share every unchanged subtree, and nothing here knows what a
+//! key or value means. The Matrix room-state root record built on it lives in
+//! [`crate::state::hamt_root`].
 //!
 //! Layout:
 //! - `hash`: keyed structural hashing for subtree identity
-//! - `codec`: dense on-disk encoding for persisted internal nodes
+//! - `codec`: dense on-disk encoding for persisted internal nodes, and the
+//!   routing bytes of a key
 //! - `delta`: subtree differencing for set isolation
 //! - `audit`: multi-root reachability audit for storage GC
 //! - `reader`: lazy, verified reads of persisted nodes
-//! - `state_hamt`: the flat Matrix state-HAMT root record
 //! - `gc`: experimental incremental refcount bookkeeping for integrations
 //!   with a strictly linear root history (behind `unstable-refcount-gc`)
 //! - `tests`: regression coverage for the generic HAMT core
 //!
-//! # Read-path design notes
+//! # Routing
 //!
-//! [`PersistedHamtReader`] and [`state_hamt`] are the supported read side for
-//! flat Matrix state HAMTs. Two adjacent changes are deliberately deferred.
-//!
-//! ## Lazy resolver entry point
-//!
-//! State-resolution entry points (`resolve_state_maps_cached`,
-//! `resolve_iterative_sort*`) take `&HashMap<Id, LeanEvent>`. An importer that
-//! walks only the new events of a batch therefore cannot resolve a merge whose
-//! auth closure reaches outside that batch: it reports an incomplete
-//! resolution and falls back to the first-parent rule. The enabling change is
-//! a resolver variant that takes a source/callback instead of a map, so the
-//! caller materializes an auth-context event on first read and still reports a
-//! missing id as incomplete. That is a separate, correctness-sensitive change;
-//! it should be driven by a profile showing merges dominate.
-//!
-//! ## Typed state roots
-//!
-//! The state-root codec currently uses a flat layout. A typed layout could
-//! support type-scoped reads, but adds a directory lookup to point reads,
-//! rewrites the directory when a subtree changes, and grows root records.
-//! Full-state reads and bulk imports do not benefit from that layout. The
-//! direct-import hot path is dominated by auth judging, redaction and content
-//! hashing, `LeanEvent` construction, and callers cloning their own state
-//! maps, so typed roots should be driven by measured type-scoped read demand.
-//! The decision record and constraints for a future typed layout are in
-//! `docs/2026-11-11-typed-hamt-roots.md`.
-//! [`PersistedHamtReader`] is generic over `K` and `V`, and can read each
-//! per-type subtree without changing its generic interface. For portable node
-//! hashes, leaf keys and values must also have canonical, cross-server
-//! encodings; homeserver-local short IDs are suitable for local indexes but
-//! make node bytes server-specific. A flat portable state tree can use
-//! `(EventType, String)` keys and event ID strings as values.
-//! A typed layout would put a canonical event-type key in its directory and
-//! keep state-key strings inside each subtree. Portable node hashes also
-//! require every server to use the same room-scoped structural key and the
-//! same deterministic routing hash over canonical key bytes; the default
-//! caller-provided routing and namespace settings do not guarantee that.
-//! [`canonical_key_path_hash`] hashes the persisted key encoding rather than
-//! the key's in-memory `Hash` stream for exactly this case.
-//!
-//! Public routing does not make prefix grinding unbounded. With 32-way nodes a
-//! shared path of `d` levels costs an attacker about `2^(5d)` attempts per key
-//! (four levels is instant, ten is impractical at scale), each ground key still
-//! needs a state event subject to power-level and rate limits, and every extra
-//! level adds only one node to the targeted path. A depth cap bounds the worst
-//! case, and an epoch-rotated routing key invalidates precomputed collisions at
-//! the cost of rebuilding the tree. Servers that only compare state groups do
-//! not need any of this: keep local routing and use the portable `state_group_id`.
-//! If subtree exchange is a requirement, use canonical
-//! `(EventType, String)` leaves with public routing, plus a depth cap and
-//! preferably epoch rotation.
-//!
-//! Independently, the `LtHash` identity (`BLAKE3(lattice)`) and the resolution
-//! algorithms do not change with the root layout: cross-server state-group
-//! identity and every stored group depend on the `LtHash` of the logical entries.
+//! Every default-routed operation hashes a key's [`HamtRoutingKey`] bytes,
+//! which for a [`HamtCodec`] type are its persisted encoding ([`key_path_hash`]).
+//! A tree's shape therefore depends only on the encoded keys and the structural
+//! key, never on a Rust `Hash` implementation, so the same entries give
+//! byte-identical nodes in every process, version and architecture, and a
+//! persisted tree can be read by anything that knows its codec. Lookups may
+//! pass a borrowed key (`&str` for `String`) whose routing bytes match its
+//! owned form. The `*_with_key_hash` entry points remain for custom routing.
 //!
 //! # Release notes
 //!
@@ -94,7 +53,6 @@ pub mod delta;
 pub mod gc;
 pub mod hash;
 pub mod reader;
-pub mod state_hamt;
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -106,7 +64,8 @@ pub use audit::{
     UniverseTooLarge,
 };
 pub use codec::{
-    HamtCodec, PersistedInternalNode, HAMT_NODE_MAGIC, HAMT_ROOT_MAGIC, HAMT_WIRE_VERSION,
+    HamtCodec, HamtRoutingKey, PersistedInternalNode, HAMT_NODE_MAGIC, HAMT_ROOT_MAGIC,
+    HAMT_WIRE_VERSION,
 };
 pub use delta::{
     diff_hamt_nodes, diff_node_hashes, isolate_delta, reachable_node_hashes,
@@ -119,10 +78,6 @@ pub use hash::{
     HAMT_ROUTING_VERSION,
 };
 pub use reader::{HamtReadError, PersistedHamtReader};
-pub use state_hamt::{
-    decode_state_hamt_root, encode_state_hamt_root, StateHamtKey, StateHamtRoot,
-    StateHamtRootError, STATE_HAMT_LATTICE_BYTES, STATE_HAMT_ROOT_VERSION,
-};
 
 /// 256-bit routing path hash for a key in the HAMT.
 pub type KeyPathHash = StructuralHash;
@@ -292,8 +247,8 @@ impl<K, V> HamtNode<K, V> {
     #[must_use]
     pub fn get<Q>(&self, structural_key: &[u8], key: &Q) -> Option<&V>
     where
-        K: Hash + Eq + Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
+        K: Eq + Borrow<Q>,
+        Q: HamtRoutingKey + Eq + ?Sized,
     {
         let path_hash = key_path_hash(structural_key, key);
         self.get_by_path_hash(key, &path_hash)
@@ -350,9 +305,9 @@ impl<K, V> HamtNode<K, V> {
         resolver: &mut F,
     ) -> Result<Option<V>, E>
     where
-        K: Hash + Eq + Borrow<Q>,
+        K: Eq + Borrow<Q>,
         V: Clone,
-        Q: Hash + Eq + ?Sized,
+        Q: HamtRoutingKey + Eq + ?Sized,
         F: NodeResolver<K, V, E>,
     {
         let path_hash = key_path_hash(structural_key, key);
@@ -649,28 +604,26 @@ impl fmt::Display for HamtBuildError {
 
 impl core::error::Error for HamtBuildError {}
 
-fn key_path_hash<K: Hash + ?Sized>(structural_key: &[u8], key: &K) -> StructuralHash {
-    let mut hasher = StructuralHashBuilder::new(structural_key);
-    key.hash(&mut hasher);
-    hasher.finalize()
-}
-
-/// Computes a routing hash from a key's canonical persisted encoding.
+/// The routing hash of `key`: a keyed hash of its [`HamtRoutingKey`] bytes.
 ///
-/// [`key_path_hash`] hashes `K: Hash`, whose byte stream is an in-memory
-/// implementation detail that neither Rust nor this crate promises to keep
-/// stable across versions or architectures. This variant hashes
-/// [`HamtCodec::encode_hamt`] instead, so identical logical keys route
-/// identically on every server. Use it with [`build_hamt_with_key_hash`],
-/// [`persist_mutation_with_key_hash`], or [`HamtMutator::new`] when node
-/// identity must be portable.
+/// Every default-routed operation (`build_hamt`, `insert`, `remove`,
+/// `persist_mutation(s)`, `get`, `search`, and the persisted reader) uses this,
+/// so a tree routes by the persisted encoding of its keys and is byte-identical
+/// across processes, versions and architectures.
 #[must_use]
-pub fn canonical_key_path_hash<K: HamtCodec>(structural_key: &[u8], key: &K) -> StructuralHash {
+pub fn key_path_hash<K: HamtRoutingKey + ?Sized>(structural_key: &[u8], key: &K) -> StructuralHash {
     let mut encoded = Vec::new();
-    key.encode_hamt(&mut encoded);
+    key.encode_routing(&mut encoded);
     let mut hasher = StructuralHashBuilder::new(structural_key);
     hasher.write(&encoded);
     hasher.finalize()
+}
+
+/// The default routing hash, kept by name for callers that pass it to the
+/// `*_with_key_hash` entry points explicitly. Equal to [`key_path_hash`].
+#[must_use]
+pub fn canonical_key_path_hash<K: HamtCodec>(structural_key: &[u8], key: &K) -> StructuralHash {
+    key_path_hash(structural_key, key)
 }
 
 fn map_index(bitmap: u32, slot: usize) -> usize {
@@ -1600,7 +1553,7 @@ pub fn remove<K, V, Q, F, E>(
 where
     K: Hash + Eq + Borrow<Q> + Clone + HamtCodec,
     V: HamtValue,
-    Q: Hash + Eq + ?Sized,
+    Q: HamtRoutingKey + Eq + ?Sized,
     F: NodeResolver<K, V, E>,
 {
     let path_hash = key_path_hash(structural_key, key);

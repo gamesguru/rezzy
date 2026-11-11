@@ -1,4 +1,4 @@
-//! Flat Matrix state-HAMT root record.
+//! Flat Matrix state-HAMT root record, built on the generic [`crate::hamt`].
 //!
 //! Every distinct room state set is persisted as an `MTHR` root record whose
 //! internal nodes are the generic [`MTHN`](crate::hamt::HAMT_NODE_MAGIC)
@@ -33,7 +33,50 @@
 //! lattice (2048 bytes: 1024 u16 lanes, little-endian)
 //! ```
 //!
-//! See [`crate::hamt`] for the deferred lazy-resolver and typed-root notes.
+//! # Read-path design notes
+//!
+//! [`PersistedHamtReader`](crate::hamt::PersistedHamtReader) and this module
+//! are the supported read side for flat Matrix state HAMTs. Two adjacent
+//! changes are deliberately deferred.
+//!
+//! ## Lazy resolver entry point
+//!
+//! State-resolution entry points (`resolve_state_maps_cached`,
+//! `resolve_iterative_sort*`) take `&HashMap<Id, LeanEvent>`. An importer that
+//! walks only the new events of a batch therefore cannot resolve a merge whose
+//! auth closure reaches outside that batch: it reports an incomplete
+//! resolution and falls back to the first-parent rule. The enabling change is
+//! a resolver variant that takes a source/callback instead of a map, so the
+//! caller materializes an auth-context event on first read and still reports a
+//! missing id as incomplete. That is a separate, correctness-sensitive change;
+//! it should be driven by a profile showing merges dominate.
+//!
+//! ## Typed state roots
+//!
+//! The state-root codec uses a flat layout. A typed layout could support
+//! type-scoped reads, but adds a directory lookup to point reads, rewrites the
+//! directory when a subtree changes, and grows root records. Full-state reads
+//! and bulk imports do not benefit from it, so typed roots should be driven by
+//! measured type-scoped read demand. The decision record and constraints are in
+//! `docs/2026-11-11-typed-hamt-roots.md`.
+//!
+//! Portable node hashes need canonical, cross-server leaf encodings (the
+//! `(EventType, String)` key and event-ID strings here qualify; homeserver-local
+//! short IDs do not) and the same room-scoped structural key on every server.
+//! Routing is already canonical: the HAMT routes by encoded key bytes.
+//!
+//! Public routing does not make prefix grinding unbounded. With 32-way nodes a
+//! shared path of `d` levels costs an attacker about `2^(5d)` attempts per key
+//! (four levels is instant, ten is impractical at scale), each ground key still
+//! needs a state event subject to power-level and rate limits, and every extra
+//! level adds only one node to the targeted path. A depth cap bounds the worst
+//! case, and an epoch-rotated structural key invalidates precomputed collisions
+//! at the cost of rebuilding the tree. Servers that only compare state groups
+//! can keep a per-server structural key and use the portable `state_group_id`.
+//!
+//! Independently, the `LtHash` identity (`BLAKE3(lattice)`) and the resolution
+//! algorithms do not change with the root layout: cross-server state-group
+//! identity and every stored group depend on the `LtHash` of the logical entries.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -41,7 +84,7 @@ use core::fmt;
 
 use crate::incremental::LtHash;
 
-use super::{state_group_id_from_lthash, StateGroupId, StructuralHash, HAMT_ROOT_MAGIC};
+use crate::hamt::{state_group_id_from_lthash, StateGroupId, StructuralHash, HAMT_ROOT_MAGIC};
 
 /// Wire version of the flat `MTHR` root record.
 pub const STATE_HAMT_ROOT_VERSION: u8 = 0x01;

@@ -36,7 +36,7 @@ pub const ROOM_SUMMARY_VERSION: u16 = 1;
 ///
 /// `get` and `for_each_member` read the state group being summarized.
 /// `event` resolves any event id; `lattice` returns the retained `LtHash`
-/// lattice of any state group (for `MTHR` roots, `StateHamtRoot::lattice`).
+/// lattice of any state group (for `MTHR` roots, [`hamt_root::StateHamtRoot::lattice`](crate::state::hamt_root::StateHamtRoot::lattice)).
 pub trait SummarySource<Id, C> {
     /// The caller's storage error.
     type Error;
@@ -622,6 +622,24 @@ mod tests {
         }
     }
 
+    /// `@c:x` accepts its invite.
+    fn c_joins() -> Change<'static> {
+        (
+            "m.room.member",
+            "@c:x",
+            Some(("$c2", crate::json!({ "membership": "join" }))),
+        )
+    }
+
+    /// The test room, its counts, and the delta applying `changes` to it.
+    fn counted_step(changes: &[Change<'_>]) -> (MemSource, MembershipCounts, StateDelta<String>) {
+        let mut src = room();
+        let base = src.snapshot();
+        let counts = derive_membership(base, &mut src).unwrap();
+        let delta = step(&mut src, base, changes);
+        (src, counts, delta)
+    }
+
     #[test]
     fn singletons_resolve_display_fields_without_member_reads() {
         let mut src = room();
@@ -667,11 +685,7 @@ mod tests {
         let steps: Vec<Vec<Change<'_>>> = vec![
             // invite -> join, plus an unrelated topic change
             vec![
-                (
-                    "m.room.member",
-                    "@c:x",
-                    Some(("$c2", crate::json!({ "membership": "join" }))),
-                ),
+                c_joins(),
                 (
                     "m.room.topic",
                     "",
@@ -719,25 +733,14 @@ mod tests {
 
     #[test]
     fn incomplete_or_wrong_deltas_are_rejected_before_reading_events() {
-        let mut src = room();
-        let base = src.snapshot();
-        let counts = derive_membership(base, &mut src).unwrap();
-        let delta = step(
-            &mut src,
-            base,
-            &[
-                (
-                    "m.room.member",
-                    "@c:x",
-                    Some(("$c2", crate::json!({ "membership": "join" }))),
-                ),
-                (
-                    "m.room.name",
-                    "",
-                    Some(("$name2", crate::json!({ "name": "New" }))),
-                ),
-            ],
-        );
+        let (mut src, counts, delta) = counted_step(&[
+            c_joins(),
+            (
+                "m.room.name",
+                "",
+                Some(("$name2", crate::json!({ "name": "New" }))),
+            ),
+        ]);
 
         // Members-only: drops the name change.
         let mut members_only = delta.clone();
@@ -760,18 +763,7 @@ mod tests {
 
     #[test]
     fn non_canonical_deltas_and_wrong_parents_are_rejected() {
-        let mut src = room();
-        let base = src.snapshot();
-        let counts = derive_membership(base, &mut src).unwrap();
-        let delta = step(
-            &mut src,
-            base,
-            &[(
-                "m.room.member",
-                "@c:x",
-                Some(("$c2", crate::json!({ "membership": "join" }))),
-            )],
-        );
+        let (mut src, counts, delta) = counted_step(&[c_joins()]);
 
         let mut duplicated = delta.clone();
         duplicated.changes.push(delta.changes[0].clone());
