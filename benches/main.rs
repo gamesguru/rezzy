@@ -119,6 +119,13 @@ const BENCHMARKS: &[BenchmarkEntry] = &[
     },
     BenchmarkEntry {
         domain: "db",
+        name: "hamt_type_scan",
+        description:
+            "Cold type-scoped scans: flat vs per-type lane, with PersistentOrdMap baseline",
+        run_fn: db::hamt_type_scan::run,
+    },
+    BenchmarkEntry {
+        domain: "db",
         name: "cumulative_rebuild",
         description: "Step-by-step state rebuild simulation (HAMT vs sorted vs XOR-fold)",
         run_fn: db::cumulative_rebuild::run,
