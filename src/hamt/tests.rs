@@ -3610,6 +3610,8 @@ fn test_bucket_index_zero_extends_past_the_last_hash_byte() {
 }
 
 #[test]
+// A universe past `u32::MAX` items needs a 64-bit `usize`.
+#[cfg(target_pointer_width = "64")]
 fn test_universe_too_large_from_index_too_large_preserves_distinct_count() {
     // The overflow-counting logic itself ("keep counting distinct items past
     // the bound") belongs to, and is already tested directly on,
@@ -3630,6 +3632,8 @@ fn test_universe_too_large_from_index_too_large_preserves_distinct_count() {
 }
 
 #[test]
+// A universe past `u32::MAX` items needs a 64-bit `usize`.
+#[cfg(target_pointer_width = "64")]
 fn test_universe_too_large_display() {
     use alloc::string::ToString;
 
@@ -3644,6 +3648,8 @@ fn test_universe_too_large_display() {
 }
 
 #[test]
+// A universe past `u32::MAX` items needs a 64-bit `usize`.
+#[cfg(target_pointer_width = "64")]
 fn test_universe_too_large_display_allocation_failed() {
     use alloc::string::ToString;
 
