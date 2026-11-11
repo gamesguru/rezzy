@@ -41,16 +41,12 @@ use rezzy::*; // resolve_iterative_sort, LeanEvent, SharedState, StateResVersion
 
 ## Documentation
 
-Design notes live in the `docs` submodule, a separate private repository. A
-default clone leaves it empty and no code depends on it. With access to that
-repository, fetch it with:
+Design notes live in the `docs` submodule. A default clone leaves it empty; to
+populate it, run:
 
 ```sh
-git submodule update --init --checkout docs
+git submodule update --init docs
 ```
-
-`--checkout` is required because `.gitmodules` marks the submodule optional, so
-a plain `git submodule update --init docs` skips it.
 
 Then see [`docs/design_notes.md`](docs/design_notes.md) for the API overview and
 [`docs/architecture.md`](docs/architecture.md) for the design. Source comments
