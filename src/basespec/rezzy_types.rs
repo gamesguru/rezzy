@@ -4113,10 +4113,12 @@ pub fn coerce_json_integer_parts(
         .or_else(|| {
             float.and_then(|f| {
                 // `Number::from_f64(...).as_i64()` can't be used here: the JSON
-                // returns `None` for float-backed numbers. Truncate the f64 and
-                // range-check before casting instead.
-                let t = f.trunc();
-                (t >= i64::MIN as f64 && t <= i64::MAX as f64).then_some(t as i64)
+                // returns `None` for float-backed numbers. `as` truncates toward
+                // zero (so no `f64::trunc`, which needs `std`); range-check first.
+                // Checking `f` instead of `trunc(f)` gives the same result: at
+                // ±2^63 adjacent f64s are 2048 apart, so truncation cannot move a
+                // value across either bound. NaN and infinities fail the check.
+                (f >= i64::MIN as f64 && f <= i64::MAX as f64).then_some(f as i64)
             })
         })
         .or_else(|| string.and_then(|s| s.parse::<i64>().ok()));
@@ -4167,6 +4169,39 @@ impl<
 {
     fn get_event(&self, id: &Id) -> Option<&E> {
         self.primary.get(id).or_else(|| self.secondary.get(id))
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod coerce_json_integer_parts_tests {
+    use super::{coerce_json_integer_parts, MAX_POWER_LEVEL_JSON};
+
+    fn float(f: f64) -> Option<i64> {
+        coerce_json_integer_parts(None, None, Some(f), None)
+    }
+
+    #[test]
+    fn floats_truncate_toward_zero() {
+        assert_eq!(float(50.0), Some(50));
+        assert_eq!(float(50.9), Some(50));
+        assert_eq!(float(-50.9), Some(-50));
+        assert_eq!(float(-0.5), Some(0));
+    }
+
+    #[test]
+    fn non_finite_floats_are_rejected() {
+        assert_eq!(float(f64::NAN), None);
+        assert_eq!(float(f64::INFINITY), None);
+        assert_eq!(float(f64::NEG_INFINITY), None);
+    }
+
+    #[test]
+    fn out_of_range_floats_are_rejected_and_large_ones_clamped() {
+        assert_eq!(float(1e300), None);
+        assert_eq!(float(-1e300), None);
+        assert_eq!(float(9.0e18), Some(MAX_POWER_LEVEL_JSON));
+        assert_eq!(float(-9.0e18), Some(-MAX_POWER_LEVEL_JSON));
     }
 }
 
