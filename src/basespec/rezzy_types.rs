@@ -422,6 +422,22 @@ pub fn uses_principal_identifiers(room_version: &str) -> bool {
         .is_some_and(RoomVersionFormat::uses_principal_identifiers)
 }
 
+/// Returns `true` for room versions that redact with the v11 rules (v11 and
+/// later, including v12 and the v12-derived experimental formats). Returns
+/// `false` for older and unrecognised versions.
+#[must_use]
+pub fn uses_v11_redaction_rules(room_version: &str) -> bool {
+    RoomVersionFormat::parse(room_version).is_some_and(RoomVersionFormat::uses_v11_redaction_rules)
+}
+
+/// Returns `true` for room versions that apply the v12 create-event rules (v12
+/// and the v12-derived experimental formats). Returns `false` for older and
+/// unrecognised versions.
+#[must_use]
+pub fn uses_v12_create_rules(room_version: &str) -> bool {
+    RoomVersionFormat::parse(room_version).is_some_and(RoomVersionFormat::uses_v12_create_rules)
+}
+
 /// Error type for canonical JSON number validation failures.
 ///
 /// Distinguishes between invalid number values and writer failures so callers
@@ -458,6 +474,23 @@ impl From<core::fmt::Error> for CanonicalizationError {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod room_version_format_tests {
+    #[test]
+    fn public_capability_wrappers_follow_the_version_boundaries() {
+        use super::{uses_v11_redaction_rules, uses_v12_create_rules};
+        for v in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"] {
+            assert!(!uses_v11_redaction_rules(v), "{v}");
+            assert!(!uses_v12_create_rules(v), "{v}");
+        }
+        assert!(uses_v11_redaction_rules("11"));
+        assert!(!uses_v12_create_rules("11"));
+        for v in ["12", "12.1", "tk.nutra.cygnus.12"] {
+            assert!(uses_v11_redaction_rules(v), "{v}");
+            assert!(uses_v12_create_rules(v), "{v}");
+        }
+        assert!(!uses_v11_redaction_rules("not-a-version"));
+        assert!(!uses_v12_create_rules(""));
+    }
+
     use super::RoomVersionFormat;
 
     #[test]
