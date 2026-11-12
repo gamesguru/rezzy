@@ -526,3 +526,58 @@ pub fn custom_msc_key(
         format!("key{idx}"),
     )
 }
+
+/// Allocation counting for benchmarks that report heap traffic.
+///
+/// Counting is gated by an atomic flag so the other benches pay only a
+/// predictable branch per allocation, and `measure` resets the counters around
+/// exactly the closure it reports.
+pub mod alloc_probe {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+    static BYTES: AtomicU64 = AtomicU64::new(0);
+
+    struct CountingAllocator;
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if ENABLED.load(Ordering::Relaxed) {
+                ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+                BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+            }
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            if ENABLED.load(Ordering::Relaxed) {
+                ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+                BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
+            }
+            unsafe { System.alloc_zeroed(layout) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: CountingAllocator = CountingAllocator;
+
+    /// Runs `f` with counting enabled and reports `(allocations, bytes)`.
+    pub fn measure<R>(f: impl FnOnce() -> R) -> (u64, u64) {
+        ALLOCATIONS.store(0, Ordering::Relaxed);
+        BYTES.store(0, Ordering::Relaxed);
+        ENABLED.store(true, Ordering::Relaxed);
+        let result = f();
+        ENABLED.store(false, Ordering::Relaxed);
+        drop(result);
+        (
+            ALLOCATIONS.load(Ordering::Relaxed),
+            BYTES.load(Ordering::Relaxed),
+        )
+    }
+}

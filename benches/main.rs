@@ -58,6 +58,12 @@ const BENCHMARKS: &[BenchmarkEntry] = &[
     },
     BenchmarkEntry {
         domain: "state",
+        name: "auth_sharing",
+        description: "AuthGraph build with repeated auth tuples; shared vs independent bitmap difference",
+        run_fn: state::auth_sharing::run,
+    },
+    BenchmarkEntry {
+        domain: "state",
         name: "resolve",
         description: "State resolution v1, v2, v2.1 benchmark matrix",
         run_fn: state::resolve::run,
