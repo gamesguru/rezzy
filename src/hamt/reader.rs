@@ -134,7 +134,6 @@ where
         Ok(node)
     }
 
-    /// Look up one key under `root`.
     /// Look up one key under `root`, routing with the default key hash.
     ///
     /// For trees built with a custom routing hash use
