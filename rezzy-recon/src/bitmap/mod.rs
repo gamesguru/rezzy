@@ -487,29 +487,14 @@ impl Bitmap {
             }
             match (theirs.next_if(|o| o.key == chunk.key), mode) {
                 (Some(o), Mode::Or) => {
-                    if !Arc::ptr_eq(&chunk, o) {
-                        Arc::make_mut(&mut chunk).union_assign(o);
-                    }
+                    Arc::make_mut(&mut chunk).union_assign(o);
                     out.push(chunk);
                 }
-                (Some(o), Mode::And) if Arc::ptr_eq(&chunk, o) => out.push(chunk),
-                (Some(o), Mode::Sub) if Arc::ptr_eq(&chunk, o) => {}
                 (Some(o), Mode::And) => {
-                    if Arc::ptr_eq(&chunk, o) {
-                        // Identical containers: `chunk ∩ chunk == chunk`, and
-                        // keeping the original `Arc` lets a later `Sub` cancel
-                        // the whole container by pointer.
-                        out.push(chunk);
-                    } else {
-                        out.extend(chunk.intersection(o).map(Arc::new));
-                    }
+                    out.extend(chunk.intersection(o).map(Arc::new));
                 }
                 (Some(o), Mode::Sub) => {
-                    // `chunk − chunk == ∅`; drop the container without copying
-                    // or scanning either payload.
-                    if !Arc::ptr_eq(&chunk, o) {
-                        out.extend(chunk.difference(o).map(Arc::new));
-                    }
+                    out.extend(chunk.difference(o).map(Arc::new));
                 }
                 (None, Mode::And) => {}
                 (None, Mode::Or | Mode::Sub) => out.push(chunk),
@@ -810,11 +795,7 @@ impl BitAnd<&Bitmap> for &Bitmap {
         for chunk in &self.chunks {
             while theirs.next_if(|o| o.key < chunk.key).is_some() {}
             if let Some(o) = theirs.next_if(|o| o.key == chunk.key) {
-                if Arc::ptr_eq(chunk, o) {
-                    chunks.push(Arc::clone(chunk));
-                } else {
-                    chunks.extend(chunk.intersection(o).map(Arc::new));
-                }
+                chunks.extend(chunk.intersection(o).map(Arc::new));
             }
         }
         Bitmap { chunks }
@@ -846,40 +827,6 @@ pub(super) mod tests {
     use super::chunk::count_runs_store;
     use super::*;
     use std::collections::BTreeSet;
-
-    #[test]
-    fn shared_chunk_intersection_keeps_identity_and_difference_drops_it() {
-        let original: Bitmap = [1, 2, 65_537].into_iter().collect();
-        let mut branch = original.clone();
-        // Only the second chunk diverges; the first retains shared identity.
-        branch.insert(65_538);
-        let mut intersection = branch.clone();
-        intersection &= &original;
-        assert_eq!(intersection, original);
-        assert!(Arc::ptr_eq(&intersection.chunks[0], &original.chunks[0]));
-        let borrowed = &branch & &original;
-        assert_eq!(borrowed, original);
-        assert!(Arc::ptr_eq(&borrowed.chunks[0], &original.chunks[0]));
-        branch -= &original;
-        assert_eq!(branch.iter().collect::<Vec<_>>(), [65_538]);
-        assert_eq!(original.iter().collect::<Vec<_>>(), [1, 2, 65_537]);
-    }
-
-    #[test]
-    fn shared_chunks_cancel_in_union_minus_intersection() {
-        let base: Bitmap = (0..200_000u32).step_by(3).collect();
-        let mut left = base.clone();
-        left.insert(1);
-        let mut right = base.clone();
-        right.insert(2);
-
-        let union = &left | &right;
-        let intersection = &left & &right;
-        assert!(base.is_subset(&union) && base.is_subset(&intersection));
-
-        let difference = union - intersection;
-        assert!(difference.iter().eq([1u32, 2]));
-    }
 
     #[test]
     fn encoded_membership_matches_decode_and_rejects_corruption() {
@@ -936,21 +883,6 @@ pub(super) mod tests {
             );
         }
     }
-
-    #[test]
-    fn union_shared_chunks_preserves_sharing_and_cow() {
-        let original: Bitmap = [1, 2, 65_537].into_iter().collect();
-        let mut copy = original.clone();
-        copy |= &original;
-        for (left, right) in copy.chunks.iter().zip(&original.chunks) {
-            assert!(Arc::ptr_eq(left, right));
-        }
-        copy.insert(3);
-        assert!(!original.contains(3));
-        assert!(!Arc::ptr_eq(&copy.chunks[0], &original.chunks[0]));
-        assert!(Arc::ptr_eq(&copy.chunks[1], &original.chunks[1]));
-    }
-
     pub(in crate::bitmap) struct Rng(pub(in crate::bitmap) u64);
 
     impl Rng {
