@@ -131,6 +131,33 @@ pub struct AuthGraph<Id = String> {
     complete: bool,
 }
 
+/// One entry in the auth-tuple cache.
+///
+/// A tuple seen once is stored as `Seen` with no owned key: most tuples are
+/// unique, so retaining a `Vec` per event costs an allocation and a map slot
+/// for no reuse. The second occurrence promotes the entry to `Repeated`, which
+/// keeps the canonical parents so later hits compare without re-deriving them.
+enum TupleCacheEntry {
+    Seen(usize),
+    Repeated(usize, Vec<u32>),
+}
+
+/// Hash of a canonical (sorted, deduplicated) parent index set.
+///
+/// A hash match is only a cache candidate; callers compare the parent sets
+/// exactly before sharing a bitmap, so collisions cost a rebuild, not
+/// correctness.
+fn parent_hash(parents: &[u32]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &parent in parents {
+        for byte in parent.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    hash
+}
+
 impl<Id> AuthGraph<Id>
 where
     Id: crate::basespec::rezzy_types::EventId,
@@ -190,22 +217,57 @@ where
             .expect("auth graph event count fits in a u32 index");
 
         let mut auth_bitmaps = vec![Bitmap::new(); sorted.len()];
-        // Cache an existing event index rather than another bitmap directory.
-        // Cloning that event's bitmap shares its immutable chunk payloads.
-        let mut tuple_cache: FastMap<Vec<u32>, usize> = FastMap::default();
+        // Canonical parent sets repeat heavily in real rooms, so cache the
+        // completed closure by set. Unique tuples keep only a hash entry; a
+        // tuple is promoted to an exact key on its second occurrence. Every
+        // hit is checked against the exact parent set first.
+        let mut tuple_cache: FastMap<u64, TupleCacheEntry> = FastMap::default();
+        let mut parents: Vec<u32> = Vec::new();
+        let mut cached_parents: Vec<u32> = Vec::new();
         for (idx, &id) in sorted.iter().enumerate() {
-            let mut parents: Vec<u32> = sort_context
-                .get(id)
-                .into_iter()
-                .flat_map(|ev| &ev.auth_events)
-                .filter_map(|auth_id| index.index_of(auth_id))
-                .collect();
+            parents.clear();
+            if let Some(ev) = sort_context.get(id) {
+                parents.extend(
+                    ev.auth_events
+                        .iter()
+                        .filter_map(|auth_id| index.index_of(auth_id)),
+                );
+            }
             parents.sort_unstable();
             parents.dedup();
             if parents.is_empty() {
                 continue;
             }
-            if let Some(&cached_idx) = tuple_cache.get(&parents) {
+            let hash = parent_hash(&parents);
+            let mut cached_match = None;
+            let mut promote = false;
+            match tuple_cache.get(&hash) {
+                Some(TupleCacheEntry::Repeated(cached_idx, key)) if key == &parents => {
+                    cached_match = Some(*cached_idx);
+                }
+                Some(TupleCacheEntry::Seen(cached_idx)) => {
+                    cached_parents.clear();
+                    if let Some(ev) = sort_context.get(sorted[*cached_idx]) {
+                        cached_parents.extend(
+                            ev.auth_events
+                                .iter()
+                                .filter_map(|auth_id| index.index_of(auth_id)),
+                        );
+                    }
+                    cached_parents.sort_unstable();
+                    cached_parents.dedup();
+                    if cached_parents == parents {
+                        cached_match = Some(*cached_idx);
+                        promote = true;
+                    }
+                }
+                _ => {}
+            }
+            if let Some(cached_idx) = cached_match {
+                if promote {
+                    tuple_cache
+                        .insert(hash, TupleCacheEntry::Repeated(cached_idx, parents.clone()));
+                }
                 auth_bitmaps[idx] = auth_bitmaps[cached_idx].clone();
                 continue;
             }
@@ -215,7 +277,7 @@ where
                 bitmap.insert(p_idx);
             }
             auth_bitmaps[idx] = bitmap;
-            tuple_cache.insert(parents, idx);
+            tuple_cache.insert(hash, TupleCacheEntry::Seen(idx));
         }
 
         let complete = !skipped_auth && sorted.len() == sort_context.len();
