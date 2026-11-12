@@ -390,15 +390,15 @@ where
         let mut intersection: Option<Bitmap> = None;
         for state in state_maps {
             let mut chain = Bitmap::new();
-            let mut self_bits = Bitmap::new();
             for id in state.values() {
                 if let Some(idx) = self.index.index_of(id) {
+                    // Insert the self index while the chain is still local: an
+                    // untouched chain shares its chunks with `auth_bitmaps`, so
+                    // deferring this makes every parent union copy-on-write.
                     chain |= &self.auth_bitmaps[idx as usize];
-                    self_bits.insert(idx);
+                    chain.insert(idx);
                 }
             }
-            // Preserve shared ancestor chunks throughout the parent unions.
-            chain |= &self_bits;
             union |= &chain;
             match &mut intersection {
                 Some(both) => *both &= &chain,
