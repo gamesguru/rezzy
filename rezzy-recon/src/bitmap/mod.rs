@@ -322,6 +322,96 @@ impl Bitmap {
         Ok(Self { chunks })
     }
 
+    /// Tests membership without allocating containers, validating the complete encoding.
+    ///
+    /// # Errors
+    /// As [`Self::contains_encoded_validated`].
+    pub fn contains_encoded(bytes: &[u8], value: u32) -> Result<bool, BitmapDecodeError> {
+        Self::contains_encoded_validated(bytes, value)
+    }
+
+    /// Tests membership in an encoded bitmap without allocating containers.
+    ///
+    /// Validates the complete encoding, including ordering, cardinalities and
+    /// trailing bytes, just as [`Self::decode`] does. Chunk headers and payloads
+    /// are interleaved on the wire, so this scans the encoding rather than
+    /// binary-searching a directory. In-memory run chunks have no wire kind.
+    ///
+    /// # Errors
+    /// Returns [`BitmapDecodeError`] for malformed or unsupported input.
+    pub fn contains_encoded_validated(bytes: &[u8], value: u32) -> Result<bool, BitmapDecodeError> {
+        if bytes.len() < 9 {
+            return Err(BitmapDecodeError::Truncated);
+        }
+        if bytes[..4] != BITMAP_MAGIC {
+            return Err(BitmapDecodeError::InvalidMagic);
+        }
+        if bytes[4] != BITMAP_FORMAT_VERSION {
+            return Err(BitmapDecodeError::UnsupportedVersion(bytes[4]));
+        }
+        let mut input = &bytes[5..];
+        let count = read_u32(&mut input)?;
+        let (wanted_key, lo) = split(value);
+        let mut previous = None;
+        let mut found = false;
+        for _ in 0..count {
+            let key = read_u16(&mut input)?;
+            if previous.is_some_and(|previous| key <= previous) {
+                return Err(BitmapDecodeError::NonCanonical);
+            }
+            previous = Some(key);
+            let kind = read_byte(&mut input)?;
+            let len = read_u32(&mut input)?;
+            match kind {
+                0 => {
+                    let len = usize::try_from(len).map_err(|_| BitmapDecodeError::NonCanonical)?;
+                    if len == 0 || len > ARRAY_MAX {
+                        return Err(BitmapDecodeError::NonCanonical);
+                    }
+                    let raw = take(&mut input, len.saturating_mul(2))?;
+                    let mut previous_value = None;
+                    for pair in raw.chunks_exact(2) {
+                        let item = u16::from_le_bytes([pair[0], pair[1]]);
+                        if previous_value.is_some_and(|previous| item <= previous) {
+                            return Err(BitmapDecodeError::NonCanonical);
+                        }
+                        previous_value = Some(item);
+                        found |= key == wanted_key && item == lo;
+                    }
+                }
+                1 => {
+                    if usize::try_from(len).map_err(|_| BitmapDecodeError::NonCanonical)?
+                        <= ARRAY_MAX
+                    {
+                        return Err(BitmapDecodeError::NonCanonical);
+                    }
+                    let raw = take(&mut input, WORDS * 8)?;
+                    let cardinality: u32 = raw
+                        .chunks_exact(8)
+                        .map(|word| {
+                            u64::from_le_bytes([
+                                word[0], word[1], word[2], word[3], word[4], word[5], word[6],
+                                word[7],
+                            ])
+                            .count_ones()
+                        })
+                        .sum();
+                    if cardinality != len {
+                        return Err(BitmapDecodeError::NonCanonical);
+                    }
+                    if key == wanted_key {
+                        found = raw[usize::from(lo) >> 3] & (1 << (lo & 7)) != 0;
+                    }
+                }
+                other => return Err(BitmapDecodeError::InvalidChunkKind(other)),
+            }
+        }
+        if !input.is_empty() {
+            return Err(BitmapDecodeError::TrailingBytes);
+        }
+        Ok(found)
+    }
+
     /// Adds `value`, returning `true` if it was not already present.
     ///
     /// # Panics
@@ -397,14 +487,29 @@ impl Bitmap {
             }
             match (theirs.next_if(|o| o.key == chunk.key), mode) {
                 (Some(o), Mode::Or) => {
-                    Arc::make_mut(&mut chunk).union_assign(o);
+                    if !Arc::ptr_eq(&chunk, o) {
+                        Arc::make_mut(&mut chunk).union_assign(o);
+                    }
                     out.push(chunk);
                 }
+                (Some(o), Mode::And) if Arc::ptr_eq(&chunk, o) => out.push(chunk),
+                (Some(o), Mode::Sub) if Arc::ptr_eq(&chunk, o) => {}
                 (Some(o), Mode::And) => {
-                    out.extend(chunk.intersection(o).map(Arc::new));
+                    if Arc::ptr_eq(&chunk, o) {
+                        // Identical containers: `chunk ∩ chunk == chunk`, and
+                        // keeping the original `Arc` lets a later `Sub` cancel
+                        // the whole container by pointer.
+                        out.push(chunk);
+                    } else {
+                        out.extend(chunk.intersection(o).map(Arc::new));
+                    }
                 }
                 (Some(o), Mode::Sub) => {
-                    out.extend(chunk.difference(o).map(Arc::new));
+                    // `chunk − chunk == ∅`; drop the container without copying
+                    // or scanning either payload.
+                    if !Arc::ptr_eq(&chunk, o) {
+                        out.extend(chunk.difference(o).map(Arc::new));
+                    }
                 }
                 (None, Mode::And) => {}
                 (None, Mode::Or | Mode::Sub) => out.push(chunk),
@@ -705,7 +810,11 @@ impl BitAnd<&Bitmap> for &Bitmap {
         for chunk in &self.chunks {
             while theirs.next_if(|o| o.key < chunk.key).is_some() {}
             if let Some(o) = theirs.next_if(|o| o.key == chunk.key) {
-                chunks.extend(chunk.intersection(o).map(Arc::new));
+                if Arc::ptr_eq(chunk, o) {
+                    chunks.push(Arc::clone(chunk));
+                } else {
+                    chunks.extend(chunk.intersection(o).map(Arc::new));
+                }
             }
         }
         Bitmap { chunks }
@@ -737,6 +846,110 @@ pub(super) mod tests {
     use super::chunk::count_runs_store;
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn shared_chunk_intersection_keeps_identity_and_difference_drops_it() {
+        let original: Bitmap = [1, 2, 65_537].into_iter().collect();
+        let mut branch = original.clone();
+        // Only the second chunk diverges; the first retains shared identity.
+        branch.insert(65_538);
+        let mut intersection = branch.clone();
+        intersection &= &original;
+        assert_eq!(intersection, original);
+        assert!(Arc::ptr_eq(&intersection.chunks[0], &original.chunks[0]));
+        let borrowed = &branch & &original;
+        assert_eq!(borrowed, original);
+        assert!(Arc::ptr_eq(&borrowed.chunks[0], &original.chunks[0]));
+        branch -= &original;
+        assert_eq!(branch.iter().collect::<Vec<_>>(), [65_538]);
+        assert_eq!(original.iter().collect::<Vec<_>>(), [1, 2, 65_537]);
+    }
+
+    #[test]
+    fn shared_chunks_cancel_in_union_minus_intersection() {
+        let base: Bitmap = (0..200_000u32).step_by(3).collect();
+        let mut left = base.clone();
+        left.insert(1);
+        let mut right = base.clone();
+        right.insert(2);
+
+        let union = &left | &right;
+        let intersection = &left & &right;
+        assert!(base.is_subset(&union) && base.is_subset(&intersection));
+
+        let difference = union - intersection;
+        assert!(difference.iter().eq([1u32, 2]));
+    }
+
+    #[test]
+    fn encoded_membership_matches_decode_and_rejects_corruption() {
+        let cases = [
+            Bitmap::new(),
+            [0, 255, 256, 65_535, 65_536, u32::MAX]
+                .into_iter()
+                .collect(),
+            (0..20_000).step_by(2).collect(),
+            (60_000..80_000).collect(),
+        ];
+        for bitmap in cases {
+            let bytes = bitmap.encode();
+            for value in [
+                0,
+                1,
+                255,
+                256,
+                19_998,
+                19_999,
+                60_000,
+                65_535,
+                65_536,
+                79_999,
+                80_000,
+                u32::MAX,
+            ] {
+                assert_eq!(
+                    Bitmap::contains_encoded_validated(&bytes, value),
+                    Ok(bitmap.contains(value))
+                );
+            }
+            // Check malformed inputs even when the requested key is absent.
+            for length in [0, 4, 8, bytes.len().saturating_sub(1)] {
+                let truncated = &bytes[..length.min(bytes.len())];
+                assert_eq!(
+                    Bitmap::contains_encoded_validated(truncated, 123_456).err(),
+                    Bitmap::decode(truncated).err()
+                );
+            }
+            for offset in 0..bytes.len().min(32) {
+                let mut malformed = bytes.clone();
+                malformed[offset] ^= 0xff;
+                assert_eq!(
+                    Bitmap::contains_encoded_validated(&malformed, 123_456).err(),
+                    Bitmap::decode(&malformed).err()
+                );
+            }
+            let mut trailing = bytes;
+            trailing.push(0);
+            assert_eq!(
+                Bitmap::contains_encoded_validated(&trailing, 0).err(),
+                Bitmap::decode(&trailing).err()
+            );
+        }
+    }
+
+    #[test]
+    fn union_shared_chunks_preserves_sharing_and_cow() {
+        let original: Bitmap = [1, 2, 65_537].into_iter().collect();
+        let mut copy = original.clone();
+        copy |= &original;
+        for (left, right) in copy.chunks.iter().zip(&original.chunks) {
+            assert!(Arc::ptr_eq(left, right));
+        }
+        copy.insert(3);
+        assert!(!original.contains(3));
+        assert!(!Arc::ptr_eq(&copy.chunks[0], &original.chunks[0]));
+        assert!(Arc::ptr_eq(&copy.chunks[1], &original.chunks[1]));
+    }
 
     pub(in crate::bitmap) struct Rng(pub(in crate::bitmap) u64);
 

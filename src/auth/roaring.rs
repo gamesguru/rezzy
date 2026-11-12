@@ -190,17 +190,32 @@ where
             .expect("auth graph event count fits in a u32 index");
 
         let mut auth_bitmaps = vec![Bitmap::new(); sorted.len()];
+        // Cache an existing event index rather than another bitmap directory.
+        // Cloning that event's bitmap shares its immutable chunk payloads.
+        let mut tuple_cache: FastMap<Vec<u32>, usize> = FastMap::default();
         for (idx, &id) in sorted.iter().enumerate() {
+            let mut parents: Vec<u32> = sort_context
+                .get(id)
+                .into_iter()
+                .flat_map(|ev| &ev.auth_events)
+                .filter_map(|auth_id| index.index_of(auth_id))
+                .collect();
+            parents.sort_unstable();
+            parents.dedup();
+            if parents.is_empty() {
+                continue;
+            }
+            if let Some(&cached_idx) = tuple_cache.get(&parents) {
+                auth_bitmaps[idx] = auth_bitmaps[cached_idx].clone();
+                continue;
+            }
             let mut bitmap = Bitmap::new();
-            if let Some(ev) = sort_context.get(id) {
-                for auth_id in &ev.auth_events {
-                    if let Some(p_idx) = index.index_of(auth_id) {
-                        bitmap |= &auth_bitmaps[p_idx as usize];
-                        bitmap.insert(p_idx);
-                    }
-                }
+            for &p_idx in &parents {
+                bitmap |= &auth_bitmaps[p_idx as usize];
+                bitmap.insert(p_idx);
             }
             auth_bitmaps[idx] = bitmap;
+            tuple_cache.insert(parents, idx);
         }
 
         let complete = !skipped_auth && sorted.len() == sort_context.len();
@@ -375,12 +390,15 @@ where
         let mut intersection: Option<Bitmap> = None;
         for state in state_maps {
             let mut chain = Bitmap::new();
+            let mut self_bits = Bitmap::new();
             for id in state.values() {
                 if let Some(idx) = self.index.index_of(id) {
                     chain |= &self.auth_bitmaps[idx as usize];
-                    chain.insert(idx);
+                    self_bits.insert(idx);
                 }
             }
+            // Preserve shared ancestor chunks throughout the parent unions.
+            chain |= &self_bits;
             union |= &chain;
             match &mut intersection {
                 Some(both) => *both &= &chain,
