@@ -10,9 +10,11 @@ extern "C" {
 #endif
 
 /* Status codes. */
-#define REZZY_OK 0
-#define REZZY_ERR 1     /* operation failed; *out holds a UTF-8 message */
-#define REZZY_BAD_ARG 2 /* null pointer or non-UTF-8 room version; *out is NULL */
+enum {
+  REZZY_OK = 0,
+  REZZY_ERR = 1,     /* operation failed; *out holds a UTF-8 message */
+  REZZY_BAD_ARG = 2, /* null pointer or non-UTF-8 room version; *out is NULL */
+};
 
 /*
  * On REZZY_OK, writes the event ID ("$" + unpadded base64 reference hash) of
