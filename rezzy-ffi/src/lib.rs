@@ -365,7 +365,7 @@ pub unsafe extern "C" fn rezzy_recon_gf256_difference(
                 return ERR;
             }
         };
-        let Some(decoder) = Gf256Decoder::build() else {
+        let Some(decoder) = Gf256Decoder::cached() else {
             hand_over(
                 b"could not initialize GF(2^256) decoder".to_vec(),
                 out,
@@ -373,7 +373,7 @@ pub unsafe extern "C" fn rezzy_recon_gf256_difference(
             );
             return ERR;
         };
-        match Gf256Sketch::extract_symmetric_difference(&left, &right, max_elements, &decoder) {
+        match Gf256Sketch::extract_symmetric_difference(&left, &right, max_elements, decoder) {
             Ok(elements) => {
                 hand_over(elements.into_iter().flatten().collect(), out, out_len);
                 OK
@@ -723,13 +723,13 @@ fn recon_response(request: &JsonValue) -> Result<JsonValue, String> {
                     .map_err(|error| std::format!("{error:?}"))?;
                 local_by_digest.insert(element.digest(), id.clone());
             }
-            let decoder = Gf256Decoder::build()
+            let decoder = Gf256Decoder::cached()
                 .ok_or_else(|| String::from("could not initialize GF(2^256) decoder"))?;
             let difference = Gf256Sketch::extract_symmetric_difference(
                 &local_sketch,
                 &remote,
                 capacity,
-                &decoder,
+                decoder,
             )
             .map_err(|error| std::format!("{error:?}"))?;
             let mut local_only = Vec::new();

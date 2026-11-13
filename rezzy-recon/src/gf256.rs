@@ -362,6 +362,18 @@ impl Gf256Decoder {
         })
     }
 
+    /// Returns a process-wide decoder, building it at most once.
+    ///
+    /// The quadratic solver is field-wide and immutable, so the build cost
+    /// (a full 256x256 elimination) only needs paying once. This mirrors the
+    /// cached GF(2^64) solver used by the root-finding path.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn cached() -> Option<&'static Self> {
+        static DECODER: std::sync::OnceLock<Option<Gf256Decoder>> = std::sync::OnceLock::new();
+        DECODER.get_or_init(Self::build).as_ref()
+    }
+
     /// Decodes odd-power syndromes (`s1`, `s3`, ...) into sorted, nonzero elements.
     /// `max_elements` limits the degree of the recovered locator polynomial.
     /// Uses this decoder's cached quadratic solver.
