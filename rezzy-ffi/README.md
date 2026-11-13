@@ -23,9 +23,9 @@ releases use `rezzy-ffi/vX.Y.Z` tags.
 The Go example imports the package:
 
 ```sh
-go run ./go/examples/hash event-id 12 event.json
-go run ./go/examples/hash verify-content-hash 12 event.json
-go run ./go/examples/hash hash-events 12 events.jsonl
+PKG_CONFIG_PATH="$(pwd)/../target/pkgconfig" go run ./go/examples/hash event-id 12 event.json
+PKG_CONFIG_PATH="$(pwd)/../target/pkgconfig" go run ./go/examples/hash verify-content-hash 12 event.json
+PKG_CONFIG_PATH="$(pwd)/../target/pkgconfig" go run ./go/examples/hash hash-events 12 events.jsonl
 ```
 
 Python uses `ctypes` and loads the debug library from the workspace:

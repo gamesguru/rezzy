@@ -169,7 +169,7 @@ rust/install: ##H Install rezzy binary to cargo bin, and the C ABI lib + header 
 	printf 'prefix=$(PREFIX)\nlibdir=$(LIBDIR)\nincludedir=$(INCLUDEDIR)\n\nName: rezzy\nDescription: C ABI for rezzy event hashing\nVersion: %s\nLibs: -L$${libdir} -lrezzy_ffi\nCflags: -I$${includedir}\n' \
 		"$$($(CARGO) metadata --no-deps --format-version 1 | $(PYTHON) -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="rezzy-ffi"))')" \
 		> $(DESTDIR)$(LIBDIR)/pkgconfig/rezzy.pc
-	printf 'prefix=$(PREFIX)\nlibdir=$(LIBDIR)\nincludedir=$(INCLUDEDIR)\n\nName: rezzy-ffi\nDescription: Rezzy static C ABI for cgo\nVersion: %s\nLibs: $${libdir}/librezzy_ffi.a -lpthread -lm\nCflags: -I$${includedir}\n' \
+	printf 'prefix=$(PREFIX)\nlibdir=$(LIBDIR)\nincludedir=$(INCLUDEDIR)\n\nName: rezzy-ffi\nDescription: Rezzy static C ABI for cgo\nVersion: %s\nLibs: $${libdir}/librezzy_ffi.a -lpthread -ldl -lm\nCflags: -I$${includedir}\n' \
 		"$$($(CARGO) metadata --no-deps --format-version 1 | $(PYTHON) -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="rezzy-ffi"))')" \
 		> $(DESTDIR)$(LIBDIR)/pkgconfig/rezzy-ffi.pc
 	@echo "Installed to $(PREFIX); for pkg-config: export PKG_CONFIG_PATH=$(LIBDIR)/pkgconfig:\$$PKG_CONFIG_PATH"

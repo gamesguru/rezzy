@@ -5,17 +5,16 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define REZZY_ABI_VERSION 1
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Returns the ABI version declared by REZZY_ABI_VERSION. */
+/* Returns the ABI version declared by the REZZY_ABI_VERSION enum value. */
 uint32_t rezzy_abi_version(void);
 
 /* Status codes. */
 enum {
+  REZZY_ABI_VERSION = 1,
   REZZY_OK = 0,
   REZZY_ERR = 1,     /* operation failed; *out holds a UTF-8 message */
   REZZY_BAD_ARG = 2, /* null pointer or non-UTF-8 room version; *out is NULL */
