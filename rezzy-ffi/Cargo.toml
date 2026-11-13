@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "C ABI for rezzy event hashing, for cgo, ctypes and other FFI callers."
+description = "Native C ABI for rezzy event hashing, state HAMTs, and reconciliation."
 keywords = ["matrix", "state-resolution", "ffi", "c-abi"]
 categories = ["api-bindings", "development-tools::ffi"]
 
@@ -17,6 +17,7 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 rezzy = { workspace = true, default-features = false, features = ["std"] }
+rezzy-recon = { workspace = true, default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

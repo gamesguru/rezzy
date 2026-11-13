@@ -1,7 +1,21 @@
 # Rezzy Go bindings
 
 Import `github.com/gamesguru/rezzy/rezzy-ffi/go/rezzy` and call `EventID`,
-`VerifyContentHash`, or `HashEventsJSONL`.
+`VerifyContentHash`, `HashEventsJSONL`, `StateHAMTRoot`, `StateHAMTLookup`,
+`StateHAMTDiff`, `ReconDigest`, `ReconSketch`, or `ReconDiff`.
+
+The new HAMT and reconciliation APIs use the same static library and pkg-config
+setup as the hashing API:
+
+```go
+rootHash, stateGroupID, err := rezzy.StateHAMTRoot(roomID, entries)
+value, found, err := rezzy.StateHAMTLookup(roomID, entries, eventType, stateKey)
+added, removed, err := rezzy.StateHAMTDiff(roomID, before, after)
+
+digest, count, err := rezzy.ReconDigest(eventIDs)
+sketch, err := rezzy.ReconSketch(remoteEventIDs, 4)
+localOnly, remoteOnly, err := rezzy.ReconDiff(localEventIDs, sketch, 4)
+```
 
 The package currently supports Linux with cgo and statically links the native
 archive. Install the matching archive, header, and `rezzy-ffi.pc` before

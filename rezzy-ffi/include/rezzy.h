@@ -1,4 +1,4 @@
-/* C ABI for rezzy event hashing. Keep in sync with src/lib.rs. */
+/* Native C ABI for rezzy. Keep in sync with src/lib.rs. */
 #ifndef REZZY_H
 #define REZZY_H
 
@@ -47,6 +47,59 @@ int rezzy_verify_content_hash(const char *room_version,
  */
 int rezzy_hash_events(const char *room_version, const uint8_t *jsonl,
                       size_t jsonl_len, uint8_t **out, size_t *out_len);
+
+/*
+ * Builds an MSC4521 GF(2^256) sketch from contiguous 32-byte digest values.
+ * `elements_len` must equal `element_count * 32`; `capacity` is 1..256.
+ * On success, *out is the serialized sketch (capacity * 32 bytes).
+ */
+int rezzy_recon_gf256_sketch(const uint8_t *elements, size_t elements_len,
+                             size_t element_count, size_t capacity,
+                             uint8_t **out, size_t *out_len);
+
+/*
+ * Decodes the symmetric difference of two serialized GF(2^256) sketches.
+ * Each sketch must be exactly `capacity * 32` bytes. On success, *out is
+ * zero or more contiguous 32-byte digest values, limited by `max_elements`.
+ */
+int rezzy_recon_gf256_difference(const uint8_t *left, size_t left_len,
+                                 const uint8_t *right, size_t right_len,
+                                 size_t capacity, size_t max_elements,
+                                 uint8_t **out, size_t *out_len);
+
+/*
+ * HAMT and reconciliation entry points. Both take one UTF-8 JSON request and
+ * return one UTF-8 JSON response, so new operations do not need new symbols.
+ * On REZZY_ERR, *out holds an error message. Free any non-NULL *out with
+ * rezzy_free. Output is not NUL-terminated.
+ *
+ * rezzy_state_hamt(room_id, request):
+ *   {"op":"root","entries":[["event_type","state_key","event_id"], ...]}
+ *     -> {"root_hash":"<hex>","state_group_id":"<hex>"}
+ *   {"op":"lookup","entries":[...],"event_type":"...","state_key":"..."}
+ *     -> {"value":"<event_id>"} or {"value":null}
+ *   {"op":"diff","a":[...],"b":[...]}
+ *     -> {"added":[[type,key,id],...],"removed":[...]}
+ *   Each entries array must contain at most one row per (event_type,
+ *   state_key); repeated keys cannot be separated and fail the build.
+ *
+ * rezzy_recon(request):
+ *   {"op":"digest","event_ids":["$...", ...]}
+ *     -> {"digest":"<base64url>","count":N}
+ *     Pass each event ID once: digest is a 128-bit XOR, so a duplicate
+ *     cancels itself while `count` still increases.
+ *   {"op":"sketch","event_ids":[...],"capacity":N}
+ *     -> {"sketch":"<hex>","capacity":N}
+ *   {"op":"diff","local_event_ids":[...],"remote_sketch":"<hex>",
+ *    "capacity":N}
+ *     -> {"local_only":["$...",...],"remote_only":["<hex digest>",...],
+ *         "count":N}
+ */
+int rezzy_state_hamt(const char *room_id, const uint8_t *request_json,
+                     size_t request_len, uint8_t **out, size_t *out_len);
+
+int rezzy_recon(const uint8_t *request_json, size_t request_len, uint8_t **out,
+                size_t *out_len);
 
 /*
  * Releases a buffer returned through *out. Pass the exact out_len that came

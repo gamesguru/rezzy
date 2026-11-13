@@ -1,9 +1,25 @@
 # rezzy FFI
 
-`rezzy-ffi` exposes event ID calculation, content-hash verification, and JSONL
-event reports through a C ABI. The C declarations are in
+`rezzy-ffi` exposes event hashing, state HAMT operations, and reconciliation
+through a native C ABI. The C declarations are in
 [`include/rezzy.h`](include/rezzy.h). Returned buffers are owned by the library;
 release them with `rezzy_free`.
+
+The ABI can be used directly from C or C++, or by other native callers that link
+the static or shared library. HAMT and reconciliation requests use UTF-8 JSON
+buffers and return UTF-8 JSON buffers; the low-level GF(2^256) sketch functions
+use flat binary buffers. These entry points do not require the Go package.
+
+Supported JSON operations:
+
+- `rezzy_state_hamt`: build a room state root identity, look up an entry in a
+  supplied state set, or diff two state sets.
+- `rezzy_recon`: calculate an event ID digest, build a sketch, or decode the
+  difference between local event IDs and a remote sketch.
+
+The state HAMT calls build from entries supplied in each request. They return
+root and state-group identities or entry differences; they do not yet provide
+storage callbacks for loading and saving persisted HAMT nodes.
 
 The Go package lives at `github.com/gamesguru/rezzy/rezzy-ffi/go/rezzy`. It uses
 cgo and statically links `librezzy_ffi.a` through `pkg-config`. `go get`

@@ -1,6 +1,7 @@
 //go:build linux && cgo
 
-// Package rezzy exposes rezzy's event hashing C ABI to Go applications.
+// Package rezzy exposes rezzy's event hashing, state HAMT, and reconciliation
+// C ABI to Go applications.
 //
 // The Linux package uses cgo and statically links librezzy_ffi.a. Install the
 // native library and rezzy-ffi.pc with `make rust/install`, or use the
@@ -15,6 +16,8 @@ package rezzy
 import "C"
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"unsafe"
 )
@@ -61,6 +64,165 @@ func HashEventsJSONL(roomVersion string, jsonl []byte) ([]byte, error) {
 	return call(roomVersion, jsonl, hashEventsOperation)
 }
 
+// HAMTEntry is one state-HAMT leaf: event type, state key, and event ID.
+type HAMTEntry [3]string
+
+// StateHAMTRoot returns the structural root hash and portable state-group ID
+// for a room state map.
+func StateHAMTRoot(roomID string, entries []HAMTEntry) (rootHash string, stateGroupID string, err error) {
+	payload, err := json.Marshal(map[string]any{
+		"op":      "root",
+		"entries": entries,
+	})
+	if err != nil {
+		return "", "", err
+	}
+	response, err := callStateHAMT(roomID, payload)
+	if err != nil {
+		return "", "", err
+	}
+	var parsed struct {
+		RootHash     string `json:"root_hash"`
+		StateGroupID string `json:"state_group_id"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return "", "", fmt.Errorf("rezzy: decode state HAMT root: %w", err)
+	}
+	return parsed.RootHash, parsed.StateGroupID, nil
+}
+
+// StateHAMTLookup returns the event ID for one (event type, state key) pair.
+// The boolean is false when the entry is absent.
+func StateHAMTLookup(roomID string, entries []HAMTEntry, eventType, stateKey string) (string, bool, error) {
+	payload, err := json.Marshal(map[string]any{
+		"op":         "lookup",
+		"entries":    entries,
+		"event_type": eventType,
+		"state_key":  stateKey,
+	})
+	if err != nil {
+		return "", false, err
+	}
+	response, err := callStateHAMT(roomID, payload)
+	if err != nil {
+		return "", false, err
+	}
+	var parsed struct {
+		Value *string `json:"value"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return "", false, fmt.Errorf("rezzy: decode state HAMT lookup: %w", err)
+	}
+	if parsed.Value == nil {
+		return "", false, nil
+	}
+	return *parsed.Value, true, nil
+}
+
+// StateHAMTDiff returns the entries added in b and removed from a.
+func StateHAMTDiff(roomID string, a, b []HAMTEntry) (added []HAMTEntry, removed []HAMTEntry, err error) {
+	payload, err := json.Marshal(map[string]any{
+		"op": "diff",
+		"a":  a,
+		"b":  b,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	response, err := callStateHAMT(roomID, payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	var parsed struct {
+		Added   []HAMTEntry `json:"added"`
+		Removed []HAMTEntry `json:"removed"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, nil, fmt.Errorf("rezzy: decode state HAMT diff: %w", err)
+	}
+	return parsed.Added, parsed.Removed, nil
+}
+
+// ReconDigest returns the MSC4521 frame digest and event count for a set of
+// reference-hash event IDs.
+func ReconDigest(eventIDs []string) (digest string, count uint64, err error) {
+	response, err := callRecon(map[string]any{
+		"op":        "digest",
+		"event_ids": eventIDs,
+	})
+	if err != nil {
+		return "", 0, err
+	}
+	var parsed struct {
+		Digest string `json:"digest"`
+		Count  uint64 `json:"count"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return "", 0, fmt.Errorf("rezzy: decode reconciliation digest: %w", err)
+	}
+	return parsed.Digest, parsed.Count, nil
+}
+
+// ReconSketch returns a GF(2^256) reconciliation sketch for a set of event IDs.
+func ReconSketch(eventIDs []string, capacity int) ([]byte, error) {
+	response, err := callRecon(map[string]any{
+		"op":        "sketch",
+		"event_ids": eventIDs,
+		"capacity":  capacity,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Sketch string `json:"sketch"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, fmt.Errorf("rezzy: decode reconciliation sketch: %w", err)
+	}
+	sketch, err := hex.DecodeString(parsed.Sketch)
+	if err != nil {
+		return nil, fmt.Errorf("rezzy: decode sketch hex: %w", err)
+	}
+	return sketch, nil
+}
+
+// ReconDiff decodes the symmetric difference between the local event set and a
+// remote sketch. localOnly contains local event IDs. remoteOnly contains the
+// 32-byte digest values that are only present in the remote set; map those
+// back to IDs with the remote side's event data.
+func ReconDiff(localEventIDs []string, remoteSketch []byte, capacity int) (localOnly []string, remoteOnly [][32]byte, err error) {
+	response, err := callRecon(map[string]any{
+		"op":              "diff",
+		"local_event_ids": localEventIDs,
+		"remote_sketch":   hex.EncodeToString(remoteSketch),
+		"capacity":        capacity,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	var parsed struct {
+		LocalOnly  []string `json:"local_only"`
+		RemoteOnly []string `json:"remote_only"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, nil, fmt.Errorf("rezzy: decode reconciliation diff: %w", err)
+	}
+	remoteOnly = make([][32]byte, 0, len(parsed.RemoteOnly))
+	for _, encoded := range parsed.RemoteOnly {
+		raw, err := hex.DecodeString(encoded)
+		if err != nil {
+			return nil, nil, fmt.Errorf("rezzy: decode remote digest hex: %w", err)
+		}
+		if len(raw) != 32 {
+			return nil, nil, fmt.Errorf("rezzy: remote digest is %d bytes, want 32", len(raw))
+		}
+		var digest [32]byte
+		copy(digest[:], raw)
+		remoteOnly = append(remoteOnly, digest)
+	}
+	return parsed.LocalOnly, remoteOnly, nil
+}
+
 func call(roomVersion string, input []byte, operation int) ([]byte, error) {
 	if abiVersionErr != nil {
 		return nil, abiVersionErr
@@ -83,6 +245,47 @@ func call(roomVersion string, input []byte, operation int) ([]byte, error) {
 	default:
 		status = C.rezzy_event_id(version, first, C.size_t(len(input)), &out, &outLen)
 	}
+	return finish(status, out, outLen)
+}
+
+func callStateHAMT(roomID string, payload []byte) ([]byte, error) {
+	if abiVersionErr != nil {
+		return nil, abiVersionErr
+	}
+	version := C.CString(roomID)
+	defer C.free(unsafe.Pointer(version))
+	var out *C.uint8_t
+	var outLen C.size_t
+	status := C.rezzy_state_hamt(
+		version,
+		(*C.uint8_t)(unsafe.Pointer(&payload[0])),
+		C.size_t(len(payload)),
+		&out,
+		&outLen,
+	)
+	return finish(status, out, outLen)
+}
+
+func callRecon(payload map[string]any) ([]byte, error) {
+	if abiVersionErr != nil {
+		return nil, abiVersionErr
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	var out *C.uint8_t
+	var outLen C.size_t
+	status := C.rezzy_recon(
+		(*C.uint8_t)(unsafe.Pointer(&encoded[0])),
+		C.size_t(len(encoded)),
+		&out,
+		&outLen,
+	)
+	return finish(status, out, outLen)
+}
+
+func finish(status C.int, out *C.uint8_t, outLen C.size_t) ([]byte, error) {
 	var result []byte
 	if out != nil {
 		if uint64(outLen) > uint64(^uint32(0)>>1) {

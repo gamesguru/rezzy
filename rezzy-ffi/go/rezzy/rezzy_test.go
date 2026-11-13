@@ -56,3 +56,74 @@ func TestABIVersionMismatchIsReported(t *testing.T) {
 		t.Fatalf("ABI version error = %v, want header/library mismatch", err)
 	}
 }
+
+func TestStateHAMT(t *testing.T) {
+	entries := []HAMTEntry{
+		{"m.room.create", "", "$create:example.org"},
+		{"m.room.member", "@alice:example.org", "$member:example.org"},
+	}
+	rootHash, stateGroupID, err := StateHAMTRoot("!room:example.org", entries)
+	if err != nil {
+		t.Fatalf("StateHAMTRoot: %v", err)
+	}
+	if len(rootHash) != 64 || len(stateGroupID) != 64 {
+		t.Fatalf("root = %q, state group = %q, want two 64-character hex strings", rootHash, stateGroupID)
+	}
+
+	value, found, err := StateHAMTLookup("!room:example.org", entries, "m.room.member", "@alice:example.org")
+	if err != nil {
+		t.Fatalf("StateHAMTLookup: %v", err)
+	}
+	if !found || value != "$member:example.org" {
+		t.Fatalf("lookup = %q, %v, want $member:example.org, true", value, found)
+	}
+
+	changed := []HAMTEntry{
+		{"m.room.create", "", "$create:example.org"},
+		{"m.room.member", "@alice:example.org", "$member2:example.org"},
+	}
+	added, removed, err := StateHAMTDiff("!room:example.org", entries, changed)
+	if err != nil {
+		t.Fatalf("StateHAMTDiff: %v", err)
+	}
+	if len(added) != 1 || added[0][2] != "$member2:example.org" {
+		t.Fatalf("added = %v, want the changed member event", added)
+	}
+	if len(removed) != 1 || removed[0][2] != "$member:example.org" {
+		t.Fatalf("removed = %v, want the old member event", removed)
+	}
+}
+
+func TestReconciliation(t *testing.T) {
+	const (
+		idV3      = "$RrGxF28UrHLmoASHndYb9Jb/1SFww2ptmtur9INS438"
+		idV12     = "$IYh3j5DDlpXmmErAivzq4d1PVT0DxegxvvKtlWVDoFE"
+		idV3Other = "$EmwNBlHoSOVmCZ1cM//yv/OvxB6r4OFEIGSJea7+Amk"
+	)
+	digest, count, err := ReconDigest([]string{idV3, idV12})
+	if err != nil {
+		t.Fatalf("ReconDigest: %v", err)
+	}
+	if len(digest) != 22 || count != 2 {
+		t.Fatalf("digest = %q, count = %d, want a 22-character digest and count 2", digest, count)
+	}
+
+	sketch, err := ReconSketch([]string{idV12, idV3Other}, 4)
+	if err != nil {
+		t.Fatalf("ReconSketch: %v", err)
+	}
+	if len(sketch) != 4*32 {
+		t.Fatalf("sketch is %d bytes, want %d", len(sketch), 4*32)
+	}
+
+	localOnly, remoteOnly, err := ReconDiff([]string{idV3, idV12}, sketch, 4)
+	if err != nil {
+		t.Fatalf("ReconDiff: %v", err)
+	}
+	if len(localOnly) != 1 || localOnly[0] != idV3 {
+		t.Fatalf("localOnly = %v, want [%s]", localOnly, idV3)
+	}
+	if len(remoteOnly) != 1 {
+		t.Fatalf("remoteOnly = %v, want one digest", remoteOnly)
+	}
+}
