@@ -49,3 +49,10 @@ func TestErrorsCarryMessages(t *testing.T) {
 		t.Fatal("EventID accepted opaque-ID room version 1")
 	}
 }
+
+func TestABIVersionMismatchIsReported(t *testing.T) {
+	err := checkABIVersion(1, 2)
+	if err == nil || !strings.Contains(err.Error(), "header 1, library 2") {
+		t.Fatalf("ABI version error = %v, want header/library mismatch", err)
+	}
+}

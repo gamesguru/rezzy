@@ -2,18 +2,23 @@
 
 `rezzy-ffi` exposes event ID calculation, content-hash verification, and JSONL
 event reports through a C ABI. The C declarations are in
-[`include/rezzy.h`](include/rezzy.h). Returned buffers are owned by the
-library; release them with `rezzy_free`.
+[`include/rezzy.h`](include/rezzy.h). Returned buffers are owned by the library;
+release them with `rezzy_free`.
 
-The Go package is importable as
-`github.com/gamesguru/rezzy/rezzy-ffi/go/rezzy`. It uses cgo and statically
-links `librezzy_ffi.a`, so Go builds need cgo enabled, a C toolchain, and a
-matching Linux Rust static library. From this directory, build and check the
-binding and Go example with:
+The Go package lives at `github.com/gamesguru/rezzy/rezzy-ffi/go/rezzy`. It uses
+cgo and statically links `librezzy_ffi.a` through `pkg-config`. `go get`
+installs only Go source; the matching native library, header, and `rezzy-ffi.pc`
+must also be installed for Linux before building an importer. From this
+directory, build and check the binding and Go example with:
 
 ```sh
 make format lint tidy test build
 ```
+
+For local consumers, `make rust/install PREFIX="$HOME/.local"` from the
+repository root installs the native artifacts; set
+`PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig"` when building Go code. Go module
+releases use `rezzy-ffi/vX.Y.Z` tags.
 
 The Go example imports the package:
 

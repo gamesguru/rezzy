@@ -14,6 +14,16 @@ use std::ptr;
 const OK: i32 = 0;
 const ERR: i32 = 1;
 const BAD_ARG: i32 = 2;
+const ABI_VERSION: u32 = 1;
+
+/// Returns the version of the public `rezzy-ffi` C ABI.
+///
+/// Consumers should compare this with `REZZY_ABI_VERSION` from `rezzy.h`
+/// before calling any other exported function.
+#[no_mangle]
+pub extern "C" fn rezzy_abi_version() -> u32 {
+    ABI_VERSION
+}
 
 /// Moves `bytes` to a heap buffer owned by the caller until [`rezzy_free`].
 fn hand_over(bytes: Vec<u8>, out: *mut *mut u8, out_len: *mut usize) {

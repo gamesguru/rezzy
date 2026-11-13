@@ -5,9 +5,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#define REZZY_ABI_VERSION 1
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Returns the ABI version declared by REZZY_ABI_VERSION. */
+uint32_t rezzy_abi_version(void);
 
 /* Status codes. */
 enum {

@@ -2,14 +2,13 @@
 
 // Package rezzy exposes rezzy's event hashing C ABI to Go applications.
 //
-// The Linux package uses cgo and statically links librezzy_ffi.a. Build that
-// archive for the target architecture and install it in /usr/local/lib, or
-// leave it in this repository's target/{debug,release} directory.
+// The Linux package uses cgo and statically links librezzy_ffi.a. Install the
+// native library and rezzy-ffi.pc with `make rust/install`, or use the
+// repository's `make -C rezzy-ffi native` development target.
 package rezzy
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../include
-#cgo linux LDFLAGS: -L${SRCDIR}/../../../target/release -L${SRCDIR}/../../../target/debug -L/usr/local/lib -l:librezzy_ffi.a -lpthread -ldl -lm
+#cgo pkg-config: rezzy-ffi
 #include <stdlib.h>
 #include "rezzy.h"
 */
@@ -25,6 +24,18 @@ const (
 	verifyContentHashOperation
 	hashEventsOperation
 )
+
+var abiVersionErr = checkABIVersion(
+	uint32(C.REZZY_ABI_VERSION),
+	uint32(C.rezzy_abi_version()),
+)
+
+func checkABIVersion(expected, actual uint32) error {
+	if actual != expected {
+		return fmt.Errorf("rezzy: C ABI version mismatch: header %d, library %d", expected, actual)
+	}
+	return nil
+}
 
 // EventID returns the reference-hash event ID of a JSON event under
 // roomVersion. Parsing and hashing failures, including opaque-ID versions,
@@ -51,6 +62,9 @@ func HashEventsJSONL(roomVersion string, jsonl []byte) ([]byte, error) {
 }
 
 func call(roomVersion string, input []byte, operation int) ([]byte, error) {
+	if abiVersionErr != nil {
+		return nil, abiVersionErr
+	}
 	version := C.CString(roomVersion)
 	defer C.free(unsafe.Pointer(version))
 	var out *C.uint8_t

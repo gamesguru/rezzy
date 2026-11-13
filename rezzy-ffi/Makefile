@@ -6,6 +6,7 @@ CARGO ?= cargo
 STATICCHECK ?= staticcheck
 GOLANGCI_LINT ?= golangci-lint
 PKGS ?= ./go/...
+export PKG_CONFIG_PATH := $(abspath ../target/pkgconfig):$(PKG_CONFIG_PATH)
 
 .PHONY: help format native vet staticcheck golangci lint tidy test build
 
@@ -18,6 +19,11 @@ format: ## Format Go sources
 
 native: ## Build the Rust static library for the current target
 	cd .. && $(CARGO) build --release -p rezzy-ffi
+	@mkdir -p ../target/pkgconfig
+	@printf 'prefix=%s\nlibdir=%s\nincludedir=%s\n\nName: rezzy-ffi\nDescription: Rezzy static C ABI\nVersion: 0.0.0\nLibs: %s/librezzy_ffi.a -lpthread -lm\nCflags: -I%s\n' \
+		"$(abspath ..)" "$(abspath ../target/release)" "$(abspath include)" \
+		"$(abspath ../target/release)" "$(abspath include)" \
+		> ../target/pkgconfig/rezzy-ffi.pc
 
 vet: native ## Run go vet
 	$(GO) vet $(PKGS)

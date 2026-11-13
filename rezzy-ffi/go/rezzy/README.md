@@ -4,7 +4,8 @@ Import `github.com/gamesguru/rezzy/rezzy-ffi/go/rezzy` and call `EventID`,
 `VerifyContentHash`, or `HashEventsJSONL`.
 
 The package currently supports Linux with cgo and statically links the native
-archive. From the Rezzy checkout, run the module's checks with:
+archive. Install the matching archive, header, and `rezzy-ffi.pc` before
+building an importing Go project. From the Rezzy checkout, run:
 
 ```sh
 make -C rezzy-ffi format lint tidy test build
@@ -13,12 +14,12 @@ make -C rezzy-ffi format lint tidy test build
 `rezzy-ffi/go/examples/hash` is a small CLI in the same module that imports the
 binding directly.
 
-After this module is pushed, other Go projects can add it with `go get`; they
-must also provide the native archive, because cgo cannot build the Rust library
-from Go source alone.
+After a `rezzy-ffi/vX.Y.Z` module tag is published, other Go projects can add
+the Go dependency with `go get`. The native install remains a separate
+per-platform step; `go get` does not build or install Rust archives.
 
-For a Docker image, build `librezzy_ffi.a` for the image's target architecture
-and install it under `/usr/local/lib` before compiling the Go binary. The
-image also needs a C linker and the platform's cgo toolchain (`CGO_ENABLED=1`).
-Use a separate Rust target and matching C cross-compiler for each target
-architecture. Go builds with cgo disabled are unsupported.
+For a local install, run `make rust/install PREFIX="$HOME/.local"` from the
+repository root, then set `PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig"`. For a
+Docker image, install a `librezzy_ffi.a` and `rezzy-ffi.pc` built for the
+image's target architecture. The image also needs a C linker and the matching
+cgo toolchain (`CGO_ENABLED=1`). Go builds with cgo disabled are unsupported.
