@@ -1,40 +1,37 @@
 # rezzy FFI
 
-`rezzy-ffi` exposes event ID calculation and content-hash verification through a
-small C ABI. The C declarations are in [`include/rezzy.h`](include/rezzy.h).
-`rezzy_hash_events` takes a whole JSONL buffer and returns the same report
-object as `rezzy hash events`, in one call. It uses the shared library-level
-report builder, so the CLI and FFI apply the same hashing and redaction rules.
-Returned messages and IDs are UTF-8 byte buffers owned by the library; release
-them with `rezzy_free`.
+`rezzy-ffi` exposes event ID calculation, content-hash verification, and JSONL
+event reports through a C ABI. The C declarations are in
+[`include/rezzy.h`](include/rezzy.h). Returned buffers are owned by the
+library; release them with `rezzy_free`.
 
-Build the shared and static libraries from the repository root:
-
-```sh
-cargo build -p rezzy-ffi
-```
-
-The examples live in the
-[repository](https://github.com/gamesguru/rezzy/tree/master/rezzy-ffi/examples)
-and are not part of the published crate; run them from a checkout.
-
-The Go example uses cgo and links the debug shared library. From the repository
-root, run:
+The Go package is importable as
+`github.com/gamesguru/rezzy/rezzy-ffi/go/rezzy`. It uses cgo and statically
+links `librezzy_ffi.a`, so Go builds need cgo enabled, a C toolchain, and a
+matching Linux Rust static library. From this directory, build and check the
+binding and Go example with:
 
 ```sh
-cd rezzy-ffi/examples/go
-go run . event-id 12 event.json
-go run . verify-content-hash 12 event.json
-go run . hash-events 12 events.jsonl
+make format lint tidy test build
 ```
 
-Python uses `ctypes` and loads the built library automatically:
+The Go example imports the package:
 
 ```sh
-python3 rezzy-ffi/examples/event_id.py event-id 12 event.json
-python3 rezzy-ffi/examples/event_id.py verify-content-hash 12 event.json
-python3 rezzy-ffi/examples/event_id.py hash-events 12 events.jsonl
+go run ./go/examples/hash event-id 12 event.json
+go run ./go/examples/hash verify-content-hash 12 event.json
+go run ./go/examples/hash hash-events 12 events.jsonl
 ```
 
-Both examples require a built `librezzy_ffi` in the workspace's `target/debug`
-directory. The Go example also requires Go with cgo enabled and a C toolchain.
+Python uses `ctypes` and loads the debug library from the workspace:
+
+```sh
+python3 examples/event_id.py event-id 12 event.json
+python3 examples/event_id.py verify-content-hash 12 event.json
+python3 examples/event_id.py hash-events 12 events.jsonl
+```
+
+The Python example requires `../target/debug/librezzy_ffi.so`. The Go package
+statically links `../target/release/librezzy_ffi.a`; Docker images need that
+archive built for their target architecture plus the matching cgo toolchain
+(`CGO_ENABLED=1`). Go builds with cgo disabled are unsupported.
