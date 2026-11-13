@@ -20,6 +20,7 @@ const OK: i32 = 0;
 const ERR: i32 = 1;
 const BAD_ARG: i32 = 2;
 const ABI_VERSION: u32 = 1;
+const MAX_RECON_CAPACITY: usize = 256;
 
 /// Returns the version of the public `rezzy-ffi` C ABI.
 ///
@@ -655,7 +656,14 @@ fn request_capacity(request: &JsonValue) -> Result<usize, String> {
         .get("capacity")
         .and_then(JsonValue::as_u64)
         .ok_or_else(|| String::from("`capacity` must be a non-negative integer"))?;
-    usize::try_from(capacity).map_err(|_| String::from("`capacity` is too large"))
+    let capacity =
+        usize::try_from(capacity).map_err(|_| String::from("`capacity` is too large"))?;
+    if !(1..=MAX_RECON_CAPACITY).contains(&capacity) {
+        return Err(std::format!(
+            "`capacity` must be between 1 and {MAX_RECON_CAPACITY}"
+        ));
+    }
+    Ok(capacity)
 }
 
 fn recon_response(request: &JsonValue) -> Result<JsonValue, String> {
@@ -695,6 +703,14 @@ fn recon_response(request: &JsonValue) -> Result<JsonValue, String> {
             let elements = event_elements(&ids)?;
             let capacity = request_capacity(request)?;
             let remote_hex = require_str(request, "remote_sketch")?;
+            let expected_hex_len = capacity
+                .checked_mul(64)
+                .ok_or_else(|| String::from("sketch length overflows usize"))?;
+            if remote_hex.len() != expected_hex_len {
+                return Err(std::format!(
+                    "remote sketch hex must be exactly {expected_hex_len} characters"
+                ));
+            }
             let remote_bytes = hex_decode(remote_hex)?;
             let remote = Gf256Sketch::from_bytes(capacity, &remote_bytes)
                 .map_err(|error| std::format!("{error:?}"))?;
@@ -744,7 +760,13 @@ fn hex_encode(bytes: &[u8]) -> String {
     out
 }
 
+/// Longest hex string `hex_decode` accepts: one maximum-capacity sketch.
+const MAX_HEX_LEN: usize = MAX_RECON_CAPACITY * 32 * 2;
+
 fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
+    if text.len() > MAX_HEX_LEN {
+        return Err(std::format!("hex string exceeds {MAX_HEX_LEN} characters"));
+    }
     if !text.len().is_multiple_of(2) {
         return Err(String::from("hex string must have an even length"));
     }
