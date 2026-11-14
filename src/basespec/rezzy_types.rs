@@ -344,16 +344,15 @@ impl RoomVersionFormat {
             "7" => Some(Self::Numeric(7)),
             "8" => Some(Self::Numeric(8)),
             "9" => Some(Self::Numeric(9)),
-            "10" => Some(Self::Numeric(10)),
-            "11" => Some(Self::Numeric(11)),
-            "12" | "12.1" => Some(Self::Numeric(12)),
-            "org.matrix.msc4242.12" => Some(Self::Msc4242),
-            "org.matrix.msc3389.10" => Some(Self::Msc3389),
             // MSC4014 (pseudonymous IDs) changes the identity fields
             // (`sender`, `state_key`) but not the hashing, redaction,
             // canonical JSON or state resolution rules, which are room v10's.
             // Aliased on purpose: revisit if the MSC adds its own rules.
-            "org.matrix.msc4014" => Some(Self::Numeric(10)),
+            "10" | "org.matrix.msc4014" => Some(Self::Numeric(10)),
+            "11" => Some(Self::Numeric(11)),
+            "12" | "12.1" => Some(Self::Numeric(12)),
+            "org.matrix.msc4242.12" => Some(Self::Msc4242),
+            "org.matrix.msc3389.10" => Some(Self::Msc3389),
             "tk.nutra.cdo.12" => Some(Self::NutraCdo),
             "tk.nutra.cygnus.12" => Some(Self::Cygnus),
             _ => None,
