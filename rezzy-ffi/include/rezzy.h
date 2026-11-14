@@ -142,6 +142,32 @@ int rezzy_kernel_from_bytes(const uint8_t *bytes, size_t bytes_len,
                             size_t *out_len);
 
 /*
+ * Requester-side reconciliation policy. Create it from a snapshot of a kernel;
+ * then call rezzy_client_step with JSON messages and use the returned action
+ * to perform host-side federation I/O. Handles are not thread-safe.
+ *
+ * First step:
+ *   {"op":"start","digest":"<base64url>","known_event_count":N,
+ *    "strata":["<base64url>",...],"frame_matches":true,
+ *    "has_unknown_extremity":false,"concurrency_headroom":N}
+ * Next steps:
+ *   {"op":"advance","roots":[...],"failed_buckets":[[depth,prefix],...]}
+ * `roots` contains decoded local-missing short IDs; failed buckets are the
+ * requested buckets whose response could not be decoded. All remaining
+ * requested buckets are treated as successful. Responses are JSON actions
+ * (`synchronized`, `extremity_diff`, `bucket_sketches`, `resolve_roots`, or
+ * `round_limit`). The caller performs network requests and feeds each result
+ * back into the same handle.
+ */
+typedef struct RezzyClient RezzyClient;
+
+/* Returns NULL for a NULL kernel; release the result with rezzy_client_free. */
+RezzyClient *rezzy_client_new(const RezzyKernel *kernel);
+void rezzy_client_free(RezzyClient *client);
+int rezzy_client_step(RezzyClient *client, const uint8_t *request_json,
+                      size_t request_len, uint8_t **out, size_t *out_len);
+
+/*
  * Releases a buffer returned through *out. Pass the exact out_len that came
  * back with it, and free each buffer once; a wrong length or a second free is
  * undefined behaviour. Accepts NULL.

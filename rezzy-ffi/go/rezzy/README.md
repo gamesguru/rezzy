@@ -2,7 +2,8 @@
 
 Import `github.com/gamesguru/rezzy/rezzy-ffi/go/rezzy` and call `EventID`,
 `VerifyContentHash`, `HashEventsJSONL`, `StateHAMTRoot`, `StateHAMTLookup`,
-`StateHAMTDiff`, `ReconDigest`, `ReconSketch`, or `ReconDiff`.
+`StateHAMTDiff`, `ReconDigest`, `ReconSketch`, `ReconDiff`, `Kernel`, and
+`Client`.
 
 The new HAMT and reconciliation APIs use the same static library and pkg-config
 setup as the hashing API:
@@ -17,9 +18,10 @@ sketch, err := rezzy.ReconSketch(remoteEventIDs, 4)
 localOnly, remoteOnly, err := rezzy.ReconDiff(localEventIDs, sketch, 4)
 ```
 
-The package currently supports Linux with cgo and statically links the native
-archive. Install the matching archive, header, and `rezzy-ffi.pc` before
-building an importing Go project. From the Rezzy checkout, run:
+Native operations currently support Linux with cgo and statically link the
+native archive. Install the matching archive, header, and `rezzy-ffi.pc` before
+using them. On builds without Linux+cgo, the package still compiles and native
+calls return `rezzy.ErrUnavailable`. From the Rezzy checkout, run:
 
 ```sh
 make -C rezzy-ffi format lint tidy test build
@@ -36,4 +38,13 @@ For a local install, run `make rust/install PREFIX="$HOME/.local"` from the
 repository root, then set `PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig"`. For a
 Docker image, install a `librezzy_ffi.a` and `rezzy-ffi.pc` built for the
 image's target architecture. The image also needs a C linker and the matching
-cgo toolchain (`CGO_ENABLED=1`). Go builds with cgo disabled are unsupported.
+cgo toolchain (`CGO_ENABLED=1`) to run native operations.
+
+## Requester loop
+
+`Kernel` tracks one room's `algebraic_v1` digest and strata. Persist it with
+`Bytes` and restore it with `KernelFromBytes`. `NewClient` snapshots a kernel;
+feed its first remote digest and each decoded bucket response to `Step` as JSON.
+The result is the next action as JSON. The host remains responsible for
+federation requests and event handling. See the `rezzy_client_step` contract in
+`include/rezzy.h` for the input and output shapes.

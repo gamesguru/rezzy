@@ -220,6 +220,55 @@ func ReconDiff(localEventIDs []string, remoteSketch []byte, capacity int) (local
 	return parsed.LocalOnly, remoteOnly, nil
 }
 
+// Client drives the requester-side reconciliation policy. It snapshots the
+// kernel at creation and expects each decoded room-diff result through Step.
+type Client struct {
+	ptr *C.RezzyClient
+}
+
+// NewClient creates a requester using a snapshot of kernel.
+func NewClient(kernel *Kernel) (*Client, error) {
+	if abiVersionErr != nil {
+		return nil, abiVersionErr
+	}
+	if kernel == nil || kernel.handle == nil {
+		return nil, fmt.Errorf("rezzy: kernel is nil or closed")
+	}
+	ptr := C.rezzy_client_new(kernel.handle)
+	if ptr == nil {
+		return nil, fmt.Errorf("rezzy: create client failed")
+	}
+	return &Client{ptr: ptr}, nil
+}
+
+// Close releases the native client handle. It is safe to call more than once.
+func (c *Client) Close() {
+	if c != nil && c.ptr != nil {
+		C.rezzy_client_free(c.ptr)
+		c.ptr = nil
+	}
+}
+
+// Step accepts a JSON start/advance request and returns the next action as
+// JSON. The caller performs network I/O between steps.
+func (c *Client) Step(input []byte) ([]byte, error) {
+	if abiVersionErr != nil {
+		return nil, abiVersionErr
+	}
+	if c == nil || c.ptr == nil {
+		return nil, fmt.Errorf("rezzy: client is closed")
+	}
+	var empty C.uint8_t
+	first := &empty
+	if len(input) > 0 {
+		first = (*C.uint8_t)(unsafe.Pointer(&input[0]))
+	}
+	var out *C.uint8_t
+	var outLen C.size_t
+	status := C.rezzy_client_step(c.ptr, first, C.size_t(len(input)), &out, &outLen)
+	return finish(status, out, outLen)
+}
+
 func call(roomVersion string, input []byte, operation int) ([]byte, error) {
 	if abiVersionErr != nil {
 		return nil, abiVersionErr

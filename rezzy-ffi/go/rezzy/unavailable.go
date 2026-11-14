@@ -79,3 +79,15 @@ func (k *Kernel) Bytes() ([]byte, error) { return nil, ErrUnavailable }
 func (k *Kernel) Digest() (digest string, count uint64, err error) {
 	return "", 0, ErrUnavailable
 }
+
+// Client is unavailable in this build; every method returns ErrUnavailable.
+type Client struct{}
+
+// NewClient is unavailable in this build.
+func NewClient(kernel *Kernel) (*Client, error) { return nil, ErrUnavailable }
+
+// Close does nothing in this build.
+func (c *Client) Close() {}
+
+// Step is unavailable in this build.
+func (c *Client) Step(input []byte) ([]byte, error) { return nil, ErrUnavailable }

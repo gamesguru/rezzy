@@ -13,7 +13,9 @@ use rezzy::state::hamt_root::StateHamtKey;
 use rezzy::JsonValue;
 use rezzy_recon::resident::ResidentKernel;
 use rezzy_recon::{
-    ElementHash, FixedWindowElementHash, Gf256, Gf256Decoder, Gf256Sketch, RoomAccumulator,
+    BucketDecodeBatch, BucketDecodeSuccess, BucketRequest, ClientAction, ElementHash,
+    FixedWindowElementHash, Gf256, Gf256Decoder, Gf256Sketch, ReconciliationClient, RemoteDigest,
+    RoomAccumulator, MAX_BUCKETED_SKETCH_CAPACITY, MAX_RECONCILIATION_ROUNDS,
 };
 use std::ffi::{c_char, CStr};
 use std::ptr;
@@ -652,6 +654,327 @@ pub unsafe extern "C" fn rezzy_kernel_from_bytes(
                 ERR
             }
         }
+    })
+}
+
+/// Stateful requester-side policy handle. The host owns network I/O and feeds
+/// each decoded room-diff response back through `rezzy_client_step`.
+pub struct RezzyClient {
+    local: ResidentKernel,
+    policy: ReconciliationClient,
+    requests: Vec<BucketRequest>,
+    accumulated_roots: Vec<u64>,
+    rounds: usize,
+    started: bool,
+    finished: bool,
+}
+
+/// Creates a requester using a snapshot of `kernel` and the default policy.
+/// Returns null if `kernel` is null. Release the handle with
+/// [`rezzy_client_free`].
+///
+/// # Safety
+/// `kernel` must be null or a live kernel handle. The handle must not be
+/// mutated concurrently while this function copies it.
+#[no_mangle]
+pub unsafe extern "C" fn rezzy_client_new(kernel: *const RezzyKernel) -> *mut RezzyClient {
+    if kernel.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: guaranteed by this function's contract.
+    let local = unsafe { &*kernel }.inner.clone();
+    Box::into_raw(Box::new(RezzyClient {
+        local,
+        policy: ReconciliationClient::default(),
+        requests: Vec::new(),
+        accumulated_roots: Vec::new(),
+        rounds: 0,
+        started: false,
+        finished: false,
+    }))
+}
+
+/// Releases a requester handle. Accepts null; free each handle once.
+///
+/// # Safety
+/// `client` must be null or a pointer returned by [`rezzy_client_new`] that
+/// has not been freed.
+#[no_mangle]
+pub unsafe extern "C" fn rezzy_client_free(client: *mut RezzyClient) {
+    if !client.is_null() {
+        // SAFETY: allocated by `Box::new` in this crate, freed once per contract.
+        drop(unsafe { Box::from_raw(client) });
+    }
+}
+
+/// Advances one requester exchange step from a JSON message.
+///
+/// Start with `{"op":"start","digest":"...","known_event_count":N,
+/// "strata":[...],"frame_matches":true,"has_unknown_extremity":false}`.
+/// Subsequent calls use `{"op":"advance","roots":[...],
+/// "failed_buckets":[[depth,prefix],...]}`. Every requested bucket must be
+/// represented as either successful (implicit in `roots`) or failed. The
+/// response is a JSON action: `synchronized`, `extremity_diff`,
+/// `bucket_sketches`, `resolve_roots`, or `round_limit`.
+///
+/// # Safety
+/// `client` must be a live handle used by one thread at a time. The request
+/// buffer must be readable for `request_len` bytes; non-null output pointers
+/// must point to writable storage. Free output with [`rezzy_free`].
+#[no_mangle]
+pub unsafe extern "C" fn rezzy_client_step(
+    client: *mut RezzyClient,
+    request_json: *const u8,
+    request_len: usize,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    guard(out, out_len, || unsafe {
+        if client.is_null() {
+            // SAFETY: non-null output slots are writable per the function contract.
+            reset_outputs(out, out_len);
+            return BAD_ARG;
+        }
+        let bytes = match unpack_json_args(request_json, request_len, out, out_len) {
+            Ok(bytes) => bytes,
+            Err(status) => return status,
+        };
+        let request = match JsonValue::parse_bytes(bytes) {
+            Ok(request) => request,
+            Err(error) => {
+                hand_over(error.to_string().into_bytes(), out, out_len);
+                return ERR;
+            }
+        };
+        // SAFETY: live handle and serialized access are required by contract.
+        match client_step_inner(&mut *client, &request) {
+            Ok(response) => write_json_response(&response, out, out_len),
+            Err(error) => {
+                hand_over(error.into_bytes(), out, out_len);
+                ERR
+            }
+        }
+    })
+}
+
+fn client_step_inner(client: &mut RezzyClient, request: &JsonValue) -> Result<JsonValue, String> {
+    match require_str(request, "op")? {
+        "start" => {
+            if client.started {
+                return Err(String::from("client exchange has already started"));
+            }
+            let digest = require_str(request, "digest")?;
+            let known_event_count = request
+                .get("known_event_count")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| String::from("`known_event_count` must be an unsigned integer"))?;
+            let encoded_strata = request
+                .get("strata")
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| String::from("`strata` must be an array of strings"))?;
+            let strata_strings = encoded_strata
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| String::from("`strata` entries must be strings"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let strata = rezzy_recon::decode_strata(&strata_strings)
+                .map_err(|error| std::format!("invalid strata: {error:?}"))?;
+            let frame_matches = request
+                .get("frame_matches")
+                .and_then(JsonValue::as_bool)
+                .ok_or_else(|| String::from("`frame_matches` must be a boolean"))?;
+            let has_unknown_extremity = request
+                .get("has_unknown_extremity")
+                .and_then(JsonValue::as_bool)
+                .ok_or_else(|| String::from("`has_unknown_extremity` must be a boolean"))?;
+            let headroom = request
+                .get("concurrency_headroom")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(0);
+            let headroom = usize::try_from(headroom)
+                .map_err(|_| String::from("`concurrency_headroom` is too large"))?;
+            let remote = RemoteDigest {
+                digest: RoomAccumulator::decode_digest(digest)
+                    .map_err(|error| std::format!("invalid digest: {error:?}"))?,
+                known_event_count,
+                strata,
+                frame_matches,
+                has_unknown_extremity,
+            };
+            client.started = true;
+            let action = client.policy.select_action(&client.local, remote, headroom);
+            Ok(client_action_response(client, action))
+        }
+        "advance" => {
+            if !client.started || client.finished || client.requests.is_empty() {
+                return Err(String::from("client is not waiting for a bucket response"));
+            }
+            let roots = parse_u64_array(request, "roots")?;
+            let failed = parse_failed_buckets(request)?;
+            let failed_set = failed
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            if failed_set.len() != failed.len() {
+                return Err(String::from("`failed_buckets` contains duplicates"));
+            }
+            for node in &failed {
+                if !client
+                    .requests
+                    .iter()
+                    .any(|bucket| (bucket.depth, bucket.prefix) == *node)
+                {
+                    return Err(String::from(
+                        "`failed_buckets` contains an unrequested bucket",
+                    ));
+                }
+            }
+            for root in &roots {
+                let matched = client
+                    .requests
+                    .iter()
+                    .filter(|bucket| {
+                        rezzy_recon::bucket_prefix(*root, bucket.depth) == bucket.prefix
+                    })
+                    .collect::<Vec<_>>();
+                if matched.len() != 1 || failed_set.contains(&(matched[0].depth, matched[0].prefix))
+                {
+                    return Err(String::from(
+                        "`roots` contains a value outside the requested buckets",
+                    ));
+                }
+            }
+            let successful_buckets = client
+                .requests
+                .iter()
+                .filter(|bucket| !failed_set.contains(&(bucket.depth, bucket.prefix)))
+                .map(|bucket| BucketDecodeSuccess {
+                    depth: bucket.depth,
+                    prefix: bucket.prefix,
+                    roots: roots
+                        .iter()
+                        .copied()
+                        .filter(|root| {
+                            rezzy_recon::bucket_prefix(*root, bucket.depth) == bucket.prefix
+                        })
+                        .collect(),
+                })
+                .collect();
+            let batch = BucketDecodeBatch {
+                successful_buckets,
+                failed_buckets: failed,
+            };
+            let requests = std::mem::take(&mut client.requests);
+            let accumulated_roots = std::mem::take(&mut client.accumulated_roots);
+            let global_estimate = request.get("global_estimate").and_then(JsonValue::as_u64);
+            let action = ReconciliationClient::transition_bucket_batch(
+                batch,
+                &requests,
+                accumulated_roots,
+                global_estimate,
+                MAX_BUCKETED_SKETCH_CAPACITY,
+            );
+            Ok(client_action_response(client, action))
+        }
+        other => Err(std::format!("unknown client step `{other}`")),
+    }
+}
+
+fn parse_u64_array(request: &JsonValue, field: &str) -> Result<Vec<u64>, String> {
+    request
+        .get(field)
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| std::format!("`{field}` must be an array"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value
+                .as_u64()
+                .ok_or_else(|| std::format!("`{field}` entry {index} must be an unsigned integer"))
+        })
+        .collect()
+}
+
+fn parse_failed_buckets(request: &JsonValue) -> Result<Vec<(u8, u64)>, String> {
+    request
+        .get("failed_buckets")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| String::from("`failed_buckets` must be an array"))?
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let pair = value
+                .as_array()
+                .filter(|pair| pair.len() == 2)
+                .ok_or_else(|| {
+                    std::format!("`failed_buckets` entry {index} must be [depth,prefix]")
+                })?;
+            let depth = pair[0]
+                .as_u64()
+                .and_then(|depth| u8::try_from(depth).ok())
+                .ok_or_else(|| std::format!("`failed_buckets` entry {index} has invalid depth"))?;
+            let prefix = pair[1]
+                .as_u64()
+                .ok_or_else(|| std::format!("`failed_buckets` entry {index} has invalid prefix"))?;
+            Ok((depth, prefix))
+        })
+        .collect()
+}
+
+fn client_action_response(client: &mut RezzyClient, action: ClientAction) -> JsonValue {
+    match action {
+        ClientAction::Synchronized => {
+            client.finished = true;
+            client.requests.clear();
+            rezzy::json!({"action":"synchronized"})
+        }
+        ClientAction::ExtremityDiff => {
+            client.finished = true;
+            client.requests.clear();
+            rezzy::json!({"action":"extremity_diff"})
+        }
+        ClientAction::BucketSketches {
+            requests,
+            accumulated_roots,
+        } => {
+            if client.rounds >= MAX_RECONCILIATION_ROUNDS {
+                client.finished = true;
+                client.requests.clear();
+                return rezzy::json!({"action":"round_limit"});
+            }
+            client.rounds = client.rounds.saturating_add(1);
+            client.requests.clone_from(&requests);
+            client.accumulated_roots.clone_from(&accumulated_roots);
+            rezzy::json!({
+                "action":"bucket_sketches",
+                "requests": JsonValue::Array(requests.iter().map(bucket_request_json).collect()),
+                "accumulated_roots": JsonValue::Array(accumulated_roots.into_iter().map(JsonValue::from).collect()),
+            })
+        }
+        ClientAction::ResolveRoots {
+            roots,
+            ladder_failed,
+        } => {
+            client.finished = true;
+            client.requests.clear();
+            rezzy::json!({
+                "action":"resolve_roots",
+                "roots": JsonValue::Array(roots.into_iter().map(JsonValue::from).collect()),
+                "ladder_failed": JsonValue::Array(ladder_failed.into_iter().map(|(depth, prefix)| rezzy::json!([depth, prefix])).collect()),
+            })
+        }
+    }
+}
+
+fn bucket_request_json(request: &BucketRequest) -> JsonValue {
+    rezzy::json!({
+        "depth": request.depth,
+        "prefix": request.prefix,
+        "capacity": request.capacity,
+        "overflow": request.overflow,
     })
 }
 
