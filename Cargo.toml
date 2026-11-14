@@ -275,3 +275,9 @@ debug = 0
 strip = "debuginfo"
 incremental = true
 codegen-units = 256
+
+# Optimize only the Argon2 dependency; the code under test stays at opt-level 0.
+# Tests seal and open with low-cost parameters, so this mainly speeds up the
+# rare run at the production costs (64 MiB, 3 passes).
+[profile.dev.package.argon2]
+opt-level = 3
