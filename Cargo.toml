@@ -65,7 +65,14 @@ ignored = ["zeroize"]
 
 [workspace]
 resolver = "2"
-members = ["rezzy-cli", "rezzy-ffi", "rezzy-json", "rezzy-log", "rezzy-recon"]
+members = [
+    "rezzy-cli",
+    "rezzy-ffi",
+    "rezzy-json",
+    "rezzy-keyfile",
+    "rezzy-log",
+    "rezzy-recon",
+]
 
 [workspace.package]
 version = "0.6.0-rc.1"
@@ -78,6 +85,7 @@ repository = "https://github.com/gamesguru/rezzy"
 [workspace.dependencies]
 rezzy = { path = ".", version = "0.6.0-rc.1", default-features = false }
 rezzy-json = { path = "rezzy-json", version = "0.6.0-rc.1" }
+rezzy-keyfile = { path = "rezzy-keyfile", version = "0.6.0-rc.1" }
 rezzy-log = { path = "rezzy-log", version = "0.6.0-rc.1", default-features = false }
 rezzy-recon = { path = "rezzy-recon", version = "0.6.0-rc.1", default-features = false }
 

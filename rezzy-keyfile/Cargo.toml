@@ -1,0 +1,21 @@
+[package]
+name = "rezzy-keyfile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../README.md"
+description = "Passphrase-encrypted signing-key files and the multi-key bundle format shared by rezzy and homeservers."
+keywords = ["matrix", "signing-key", "encryption", "federation"]
+categories = ["cryptography"]
+
+[dependencies]
+argon2.workspace = true
+chacha20poly1305.workspace = true
+ed25519-zebra = { workspace = true, features = ["std"] }
+getrandom = { workspace = true, features = ["std"] }
+
+[lints]
+workspace = true

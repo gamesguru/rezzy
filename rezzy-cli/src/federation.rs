@@ -273,6 +273,17 @@ fn encrypt_key_command() -> Command {
     Command::new("encrypt-key")
         .about("Encrypt a plaintext signing key into a passphrase-protected file")
         .arg(
+            Arg::new("bundle")
+                .long("bundle")
+                .action(ArgAction::SetTrue)
+                .requires("origin")
+                .help(
+                    "Read one key per line and write a multi-key bundle bound to --origin. A \
+                     line is a normal key form, optionally followed by created=<ms> and \
+                     retired=<ms>. Exactly one line must be active (no retired=).",
+                ),
+        )
+        .arg(
             Arg::new("origin")
                 .long("origin")
                 .env("MATRIX_ORIGIN")
@@ -437,6 +448,7 @@ pub fn run_from_matches(matches: &ArgMatches) -> Result<JsonValue, AppError> {
                 m.get_one::<PathBuf>("input").expect("required"),
                 out,
                 m.get_one::<String>("origin").map(String::as_str),
+                m.get_flag("bundle"),
             )?;
             Ok(rezzy::json!({ "written": out.display().to_string() }))
         }
@@ -475,6 +487,14 @@ pub struct SigningKeySpec {
     pub key_id: String,
     /// The parsed signing key.
     pub key: SigningKey,
+}
+
+/// The Matrix server name of an origin: scheme and path removed, port kept.
+fn server_name(origin: &str) -> &str {
+    let name = origin
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    name.split('/').next().unwrap_or(name)
 }
 
 fn domain_env_suffix(domain: &str) -> String {
@@ -563,9 +583,29 @@ pub fn load_signing_key(origin: &str, explicit: Option<&Path>) -> Result<Signing
     };
     let file = fs::read(&path).map_err(|e| err(e.to_string()))?;
     let passphrase = read_passphrase(&path, Some(origin))?;
-    let plain = crate::keyfile::open(&file, passphrase.as_bytes()).map_err(err)?;
-    let text = String::from_utf8(plain).map_err(|_| err("decrypted key is not UTF-8".into()))?;
-    let spec = parse_signing_key(&text).map_err(err)?;
+    let mut plain = rezzy_keyfile::open(&file, passphrase.as_bytes()).map_err(err)?;
+    let spec = if rezzy_keyfile::KeyBundle::is_bundle(&plain) {
+        let bundle = rezzy_keyfile::KeyBundle::decode(&plain);
+        plain.fill(0);
+        let bundle = bundle.map_err(err)?;
+        // A bundle is bound to one server name; refuse to sign as another.
+        if bundle.origin() != server_name(origin) {
+            return Err(err(format!(
+                "key bundle is for {:?}, not {:?}",
+                bundle.origin(),
+                server_name(origin)
+            )));
+        }
+        let active = bundle.active();
+        SigningKeySpec {
+            key_id: active.key_id().to_owned(),
+            key: *active.signing_key(),
+        }
+    } else {
+        let text =
+            String::from_utf8(plain).map_err(|_| err("decrypted key is not UTF-8".into()))?;
+        parse_signing_key(&text).map_err(err)?
+    };
     if let Ok(mut cache) = signing_key_cache().lock() {
         cache.insert(cache_key, spec.clone());
     }
@@ -579,7 +619,7 @@ pub fn load_signing_key(origin: &str, explicit: Option<&Path>) -> Result<Signing
 /// # Errors
 /// Returns an error on I/O failure, mismatched passphrases, or an invalid key.
 pub fn encrypt_key_file(input: &Path, output: &Path) -> Result<(), AppError> {
-    encrypt_key_file_with_origin(input, output, None)
+    encrypt_key_file_with_origin(input, output, None, false)
 }
 
 /// Encrypts a validated plaintext signing key, replacing `output`. Uses the
@@ -590,10 +630,23 @@ fn encrypt_key_file_with_origin(
     input: &Path,
     output: &Path,
     origin: Option<&str>,
+    bundle: bool,
 ) -> Result<(), AppError> {
     let err = |m: String| AppError::new(ErrorCode::SigningKey, m);
     let plain = fs::read_to_string(input)?;
-    parse_signing_key(&plain).map_err(|m| err(format!("{}: {m}", input.display())))?;
+    // A bundle is sealed from its parsed form; a single key keeps its text.
+    let key_bundle = if bundle {
+        let origin = origin.ok_or_else(|| {
+            err("--bundle needs --origin: a bundle is bound to one server".into())
+        })?;
+        Some(
+            parse_key_bundle(server_name(origin), &plain)
+                .map_err(|m| err(format!("{}: {m}", input.display())))?,
+        )
+    } else {
+        parse_signing_key(&plain).map_err(|m| err(format!("{}: {m}", input.display())))?;
+        None
+    };
     let pw = if let Some(pw) = configured_passphrase(origin) {
         pw
     } else {
@@ -607,7 +660,13 @@ fn encrypt_key_file_with_origin(
     if pw.is_empty() {
         return Err(err("empty passphrase".into()));
     }
-    let sealed = crate::keyfile::seal(plain.as_bytes(), pw.as_bytes()).map_err(err)?;
+    let sealed = key_bundle
+        .as_ref()
+        .map_or_else(
+            || rezzy_keyfile::seal(plain.as_bytes(), pw.as_bytes()),
+            |key_bundle| key_bundle.seal(pw.as_bytes()),
+        )
+        .map_err(err)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -659,6 +718,47 @@ fn parse_signing_key(text: &str) -> Result<SigningKeySpec, String> {
         key_id,
         key: SigningKey::from(bytes),
     })
+}
+
+/// Parses `--bundle` input: one key per line, each a normal key form followed
+/// by optional `created=<ms>` and `retired=<ms>` fields. `#` lines and blank
+/// lines are skipped.
+fn parse_key_bundle(origin: &str, text: &str) -> Result<rezzy_keyfile::KeyBundle, String> {
+    let mut keys = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line_no = index.saturating_add(1);
+        let (mut created_ms, mut retired_ms) = (0_u64, None);
+        let mut key_fields = Vec::new();
+        for token in line.split_whitespace() {
+            if let Some(value) = token.strip_prefix("created=") {
+                created_ms = value
+                    .parse()
+                    .map_err(|_| format!("line {line_no}: bad created= value"))?;
+            } else if let Some(value) = token.strip_prefix("retired=") {
+                retired_ms = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| format!("line {line_no}: bad retired= value"))?,
+                );
+            } else {
+                key_fields.push(token);
+            }
+        }
+        let spec = parse_signing_key(&key_fields.join(" "))
+            .map_err(|message| format!("line {line_no}: {message}"))?;
+        let seed = <[u8; 32]>::from(spec.key);
+        keys.push(match retired_ms {
+            Some(retired) => {
+                rezzy_keyfile::KeyEntry::retired(spec.key_id, seed, created_ms, retired)
+            }
+            None => rezzy_keyfile::KeyEntry::active(spec.key_id, seed, created_ms),
+        });
+    }
+    rezzy_keyfile::KeyBundle::new(origin, keys)
 }
 
 /// The 16 bytes that precede the seed in a PKCS#8 v2 Ed25519 private key.
@@ -2652,6 +2752,104 @@ mod tests {
         super::write_frontier_checkpoint(&path, &["$only".to_string()]).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "$only\n");
         assert!(!dir.join("frontier.jsonl.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A throwaway seed as base64, for key lines. Never a real key.
+    fn throwaway_seed(byte: u8) -> String {
+        <base64::engine::GeneralPurpose as base64::Engine>::encode(
+            &base64::engine::general_purpose::STANDARD_NO_PAD,
+            [byte; 32],
+        )
+    }
+
+    #[test]
+    fn bundle_input_parses_one_active_and_retired_keys() {
+        let text = format!(
+            "# comment\ned25519:old {} created=10 retired=20\n\ned25519:new {} created=30\n",
+            throwaway_seed(1),
+            throwaway_seed(2),
+        );
+        let bundle = super::parse_key_bundle("minimat.example", &text).unwrap();
+        assert_eq!(bundle.origin(), "minimat.example");
+        assert_eq!(bundle.active().key_id(), "ed25519:new");
+        let old = &bundle.keys()[0];
+        assert_eq!((old.created_ms(), old.retired_ms()), (10, Some(20)));
+    }
+
+    #[test]
+    fn bundle_input_errors_name_the_line() {
+        let error = super::parse_key_bundle("o.example", "not a key\n").unwrap_err();
+        assert!(error.starts_with("line 1:"), "{error}");
+        let two_active = format!(
+            "ed25519:a {}\ned25519:b {}\n",
+            throwaway_seed(1),
+            throwaway_seed(2)
+        );
+        assert!(super::parse_key_bundle("o.example", &two_active)
+            .unwrap_err()
+            .contains("exactly one active"));
+        let bad = format!("ed25519:a {} retired=soon\n", throwaway_seed(1));
+        assert!(super::parse_key_bundle("o.example", &bad)
+            .unwrap_err()
+            .contains("bad retired="));
+    }
+
+    /// `encrypt-key --bundle` then `load_signing_key`: the active key is the
+    /// one used, a bundle for another origin is refused, and an old single-key
+    /// file still loads.
+    #[test]
+    fn a_sealed_bundle_loads_for_its_origin_only_and_single_keys_still_work() {
+        let dir = std::env::temp_dir().join(format!("rezzy-bundle-load-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Origin-scoped, so no other test or the user's environment is read.
+        std::env::set_var("REZZY_KEY_PASSPHRASE_BUNDLE_LOAD_EXAMPLE", "throwaway");
+
+        let input = dir.join("keys.txt");
+        std::fs::write(
+            &input,
+            format!(
+                "ed25519:old {} retired=20\ned25519:new {}\n",
+                throwaway_seed(1),
+                throwaway_seed(2)
+            ),
+        )
+        .unwrap();
+        let sealed = dir.join("bundle.enc");
+        super::encrypt_key_file_with_origin(&input, &sealed, Some("bundle-load.example"), true)
+            .unwrap();
+        let spec = super::load_signing_key("bundle-load.example", Some(&sealed)).unwrap();
+        assert_eq!(spec.key_id, "ed25519:new");
+        assert_eq!(
+            <[u8; 32]>::from(spec.key),
+            [2; 32],
+            "the active key's seed is the one signing"
+        );
+        // The scheme and path of an origin are not part of its server name.
+        assert!(super::load_signing_key("https://bundle-load.example/", Some(&sealed)).is_ok());
+        let other = super::load_signing_key("bundle-load.example:8448", Some(&sealed));
+        assert!(
+            other.unwrap_err().to_string().contains("is for"),
+            "a different server name must be refused"
+        );
+
+        // `--bundle` without an origin is refused rather than guessed.
+        assert!(super::encrypt_key_file_with_origin(&input, &sealed, None, true).is_err());
+
+        // A single-key file made the old way keeps loading.
+        let single_in = dir.join("single.txt");
+        std::fs::write(&single_in, format!("ed25519:solo {}\n", throwaway_seed(3))).unwrap();
+        let single = dir.join("single.enc");
+        super::encrypt_key_file_with_origin(
+            &single_in,
+            &single,
+            Some("bundle-load.example"),
+            false,
+        )
+        .unwrap();
+        let spec = super::load_signing_key("bundle-load.example", Some(&single)).unwrap();
+        assert_eq!(spec.key_id, "ed25519:solo");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

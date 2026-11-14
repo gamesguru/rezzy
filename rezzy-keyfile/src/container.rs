@@ -1,4 +1,4 @@
-//! Passphrase-encrypted signing-key files.
+//! The passphrase-encrypted `REZKEY` container.
 //!
 //! Layout: `MAGIC(8) | m_cost KiB (u32 BE) | t_cost (u32 BE) | lanes (u32 BE) |
 //! salt(16) | nonce(24) | ciphertext+tag`. The key is derived with Argon2id and
@@ -44,7 +44,7 @@ fn derive(passphrase: &[u8], salt: &[u8], m: u32, t: u32, p: u32) -> Result<[u8;
 /// # Errors
 /// Returns an error if the costs are out of bounds, or the RNG, KDF, or cipher fails.
 #[cfg(test)]
-fn seal_with(
+pub(crate) fn seal_with(
     plaintext: &[u8],
     passphrase: &[u8],
     (m, t, p): (u32, u32, u32),
