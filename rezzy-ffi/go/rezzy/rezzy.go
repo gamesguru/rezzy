@@ -3,7 +3,7 @@
 // Package rezzy exposes rezzy's event hashing, state HAMT, and reconciliation
 // C ABI to Go applications.
 //
-// The Linux package uses cgo and statically links librezzy_ffi.a. Install the
+// The Linux package uses cgo and statically links librezzy.a. Install the
 // native library and rezzy-ffi.pc with `make rust/install`, or use the
 // repository's `make -C rezzy-ffi native` development target.
 package rezzy

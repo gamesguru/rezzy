@@ -22,10 +22,10 @@ root and state-group identities or entry differences; they do not yet provide
 storage callbacks for loading and saving persisted HAMT nodes.
 
 The Go package lives at `github.com/gamesguru/rezzy/rezzy-ffi/go/rezzy`. It uses
-cgo and statically links `librezzy_ffi.a` through `pkg-config`. `go get`
-installs only Go source; the matching native library, header, and `rezzy-ffi.pc`
-must also be installed for Linux before building an importer. From this
-directory, build and check the binding and Go example with:
+cgo and statically links `librezzy.a` through `pkg-config`. `go get` installs
+only Go source; the matching native library, header, and `rezzy-ffi.pc` must
+also be installed for Linux before building an importer. From this directory,
+build and check the binding and Go example with:
 
 ```sh
 make format lint tidy test build
@@ -44,7 +44,7 @@ PKG_CONFIG_PATH="$(pwd)/../target/pkgconfig" go run ./go/examples/hash verify-co
 PKG_CONFIG_PATH="$(pwd)/../target/pkgconfig" go run ./go/examples/hash hash-events 12 events.jsonl
 ```
 
-Python uses `ctypes` and loads the debug library from the workspace:
+Python uses `ctypes` and loads the release shared library from the workspace:
 
 ```sh
 python3 examples/event_id.py event-id 12 event.json
@@ -52,7 +52,13 @@ python3 examples/event_id.py verify-content-hash 12 event.json
 python3 examples/event_id.py hash-events 12 events.jsonl
 ```
 
-The Python example requires `../target/debug/librezzy_ffi.so`. The Go package
-statically links `../target/release/librezzy_ffi.a`; Docker images need that
-archive built for their target architecture plus the matching cgo toolchain
-(`CGO_ENABLED=1`). Go builds with cgo disabled are unsupported.
+Build the release shared library before using the Python example:
+
+```sh
+make rust/so
+```
+
+It loads `../target/release/librezzy.so`. The Go package statically links
+`../target/release/librezzy.a`; Docker images need that archive built for their
+target architecture plus the matching cgo toolchain (`CGO_ENABLED=1`). Go builds
+with cgo disabled are unsupported.

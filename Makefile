@@ -111,12 +111,15 @@ all: format lint check doc test
 .PHONY: rust/build
 rust/build: ##H Compile Rust binary and the C ABI library (release)
 	$(CARGO) build --locked --release --timings -p rezzy-cli -p rezzy-ffi
-	@echo "Built: target/release/librezzy_ffi.$(DYLIB_EXT) and target/release/librezzy_ffi.a (header: rezzy-ffi/include/rezzy.h)"
+	cp target/release/librezzy_ffi.a target/release/librezzy.a
+	cp target/release/librezzy_ffi.$(DYLIB_EXT) target/release/librezzy.$(DYLIB_EXT)
+	@echo "Built: target/release/librezzy.$(DYLIB_EXT) and target/release/librezzy.a (header: rezzy-ffi/include/rezzy.h)"
 
 .PHONY: rust/so
-rust/so: ##H Compile shared object (librezzy.so) from the library
-	$(CARGO) rustc --locked --release --lib --crate-type cdylib $(CARGO_FEATURE_ARGS)
-	@echo "Built: target/release/librezzy.so"
+rust/so: ##H Compile the C ABI shared library (librezzy.so)
+	$(CARGO) build --locked --release -p rezzy-ffi
+	cp target/release/librezzy_ffi.$(DYLIB_EXT) target/release/librezzy.$(DYLIB_EXT)
+	@echo "Built: target/release/librezzy.$(DYLIB_EXT)"
 
 .PHONY: rust/test
 rust/test: ##H Run Rust tests (set "p" for a specific integration-test target, and "a" for test binary args)
@@ -162,17 +165,16 @@ rust/clean: ##H Remove Rust build artifacts
 	rm -rf .coverage/
 
 .PHONY: rust/install
-rust/install: ##H Install rezzy binary to cargo bin, and the C ABI lib + header + rezzy.pc under PREFIX
+rust/install: ##H Install rezzy binary to cargo bin, and the C ABI lib + header + rezzy-ffi.pc under PREFIX
 	$(CARGO) install --timings --locked --path rezzy-cli --bin rezzy --features tls,logging
 	$(CARGO) build --locked --release -p rezzy-ffi
 	install -d $(DESTDIR)$(LIBDIR)/pkgconfig $(DESTDIR)$(INCLUDEDIR)
-	install -m755 target/release/librezzy_ffi.$(DYLIB_EXT) $(DESTDIR)$(LIBDIR)/
-	install -m644 target/release/librezzy_ffi.a $(DESTDIR)$(LIBDIR)/
+	install -m755 target/release/librezzy_ffi.$(DYLIB_EXT) $(DESTDIR)$(LIBDIR)/librezzy.$(DYLIB_EXT)
+	install -m644 target/release/librezzy_ffi.a $(DESTDIR)$(LIBDIR)/librezzy.a
 	install -m644 rezzy-ffi/include/rezzy.h $(DESTDIR)$(INCLUDEDIR)/
-	printf 'prefix=$(PREFIX)\nlibdir=$(LIBDIR)\nincludedir=$(INCLUDEDIR)\n\nName: rezzy\nDescription: C ABI for rezzy event hashing\nVersion: %s\nLibs: -L$${libdir} -lrezzy_ffi\nCflags: -I$${includedir}\n' \
-		"$$($(CARGO) metadata --no-deps --format-version 1 | $(PYTHON) -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="rezzy-ffi"))')" \
-		> $(DESTDIR)$(LIBDIR)/pkgconfig/rezzy.pc
-	printf 'prefix=$(PREFIX)\nlibdir=$(LIBDIR)\nincludedir=$(INCLUDEDIR)\n\nName: rezzy-ffi\nDescription: Rezzy static C ABI for cgo\nVersion: %s\nLibs: $${libdir}/librezzy_ffi.a -lpthread -ldl -lm\nCflags: -I$${includedir}\n' \
+	# One module, named rezzy-ffi, describing the static archive that cgo links.
+	# The version comes from the crate so it cannot drift from the release.
+	printf 'prefix=$(PREFIX)\nlibdir=$(LIBDIR)\nincludedir=$(INCLUDEDIR)\n\nName: rezzy-ffi\nDescription: Rezzy static C ABI for cgo\nVersion: %s\nLibs: $${libdir}/librezzy.a -lpthread -ldl -lm\nCflags: -I$${includedir}\n' \
 		"$$($(CARGO) metadata --no-deps --format-version 1 | $(PYTHON) -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="rezzy-ffi"))')" \
 		> $(DESTDIR)$(LIBDIR)/pkgconfig/rezzy-ffi.pc
 	@echo "Installed to $(PREFIX); for pkg-config: export PKG_CONFIG_PATH=$(LIBDIR)/pkgconfig:\$$PKG_CONFIG_PATH"
@@ -180,8 +182,8 @@ rust/install: ##H Install rezzy binary to cargo bin, and the C ABI lib + header 
 .PHONY: rust/uninstall
 rust/uninstall: ##H Uninstall rezzy binary and the C ABI files
 	-$(CARGO) uninstall rezzy-cli
-	rm -f $(DESTDIR)$(LIBDIR)/librezzy_ffi.$(DYLIB_EXT) $(DESTDIR)$(LIBDIR)/librezzy_ffi.a \
-		$(DESTDIR)$(LIBDIR)/pkgconfig/rezzy.pc $(DESTDIR)$(LIBDIR)/pkgconfig/rezzy-ffi.pc \
+	rm -f $(DESTDIR)$(LIBDIR)/librezzy.$(DYLIB_EXT) $(DESTDIR)$(LIBDIR)/librezzy.a \
+		$(DESTDIR)$(LIBDIR)/pkgconfig/rezzy-ffi.pc \
 		$(DESTDIR)$(INCLUDEDIR)/rezzy.h
 
 .PHONY: rust/e2e

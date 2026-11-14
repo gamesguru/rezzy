@@ -1,6 +1,6 @@
 """Compute an event ID through the C ABI with ctypes.
 
-cargo build -p rezzy-ffi
+make rust/so
 python3 rezzy-ffi/examples/event_id.py event-id 12 event.json
 """
 
@@ -14,24 +14,24 @@ REZZY_OK = 0
 def load(path=None):
     """Load the FFI library and configure its ctypes signatures.
 
-    With no path, look in target/debug for the platform library. Raise
+    With no path, look in target/release for the platform library. Raise
     SystemExit if loading fails; missing exported symbols raise AttributeError.
     """
     if path is None:
-        target = pathlib.Path(__file__).resolve().parents[2] / "target" / "debug"
+        target = pathlib.Path(__file__).resolve().parents[2] / "target" / "release"
         names = {
-            "win32": ("rezzy_ffi.dll",),
-            "darwin": ("librezzy_ffi.dylib",),
-        }.get(sys.platform, ("librezzy_ffi.so",))
+            "win32": ("rezzy.dll",),
+            "darwin": ("librezzy.dylib",),
+        }.get(sys.platform, ("librezzy.so",))
         path = next(
             (target / name for name in names if (target / name).exists()),
-            target / "rezzy_ffi.dll",
+            target / "rezzy.dll",
         )
     try:
         lib = ctypes.CDLL(str(path))
     except OSError as error:
         raise SystemExit(
-            f"could not load {path}; build the library with `cargo build -p rezzy-ffi`: {error}"
+            f"could not load {path}; build it with `make rust/so`: {error}"
         ) from error
     for name in ("rezzy_event_id", "rezzy_verify_content_hash", "rezzy_hash_events"):
         fn = getattr(lib, name)

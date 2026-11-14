@@ -17,11 +17,13 @@ help: ## Show available targets
 format: ## Format Go sources
 	$(GO) fmt $(PKGS)
 
-native: ## Build the Rust static library for the current target
+native: ## Build librezzy.a and the rezzy-ffi.pc file for the current target
 	cd .. && $(CARGO) build --release -p rezzy-ffi
+	cp ../target/release/librezzy_ffi.a ../target/release/librezzy.a
 	@mkdir -p ../target/pkgconfig
-	@printf 'prefix=%s\nlibdir=%s\nincludedir=%s\n\nName: rezzy-ffi\nDescription: Rezzy static C ABI\nVersion: 0.0.0\nLibs: %s/librezzy_ffi.a -lpthread -ldl -lm\nCflags: -I%s\n' \
+	@printf 'prefix=%s\nlibdir=%s\nincludedir=%s\n\nName: rezzy-ffi\nDescription: Rezzy static C ABI\nVersion: %s\nLibs: %s/librezzy.a -lpthread -ldl -lm\nCflags: -I%s\n' \
 		"$(abspath ..)" "$(abspath ../target/release)" "$(abspath include)" \
+		"$$($(CARGO) metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="rezzy-ffi"))')" \
 		"$(abspath ../target/release)" "$(abspath include)" \
 		> ../target/pkgconfig/rezzy-ffi.pc
 

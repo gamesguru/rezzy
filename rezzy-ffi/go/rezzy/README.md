@@ -36,9 +36,9 @@ per-platform step; `go get` does not build or install Rust archives.
 
 For a local install, run `make rust/install PREFIX="$HOME/.local"` from the
 repository root, then set `PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig"`. For a
-Docker image, install a `librezzy_ffi.a` and `rezzy-ffi.pc` built for the
-image's target architecture. The image also needs a C linker and the matching
-cgo toolchain (`CGO_ENABLED=1`) to run native operations.
+Docker image, install a `librezzy.a` and `rezzy-ffi.pc` built for the image's
+target architecture. The image also needs a C linker and the matching cgo
+toolchain (`CGO_ENABLED=1`) to run native operations.
 
 ## Requester loop
 
