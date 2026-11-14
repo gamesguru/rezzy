@@ -349,6 +349,11 @@ impl RoomVersionFormat {
             "12" | "12.1" => Some(Self::Numeric(12)),
             "org.matrix.msc4242.12" => Some(Self::Msc4242),
             "org.matrix.msc3389.10" => Some(Self::Msc3389),
+            // MSC4014 (pseudonymous IDs) changes the identity fields
+            // (`sender`, `state_key`) but not the hashing, redaction,
+            // canonical JSON or state resolution rules, which are room v10's.
+            // Aliased on purpose: revisit if the MSC adds its own rules.
+            "org.matrix.msc4014" => Some(Self::Numeric(10)),
             "tk.nutra.cdo.12" => Some(Self::NutraCdo),
             "tk.nutra.cygnus.12" => Some(Self::Cygnus),
             _ => None,
@@ -524,6 +529,7 @@ mod room_version_format_tests {
             ("12.1", RoomVersionFormat::Numeric(12)),
             ("org.matrix.msc4242.12", RoomVersionFormat::Msc4242),
             ("org.matrix.msc3389.10", RoomVersionFormat::Msc3389),
+            ("org.matrix.msc4014", RoomVersionFormat::Numeric(10)),
             ("tk.nutra.cygnus.12", RoomVersionFormat::Cygnus),
         ];
         for (input, expected) in cases {
@@ -4782,6 +4788,34 @@ mod canonical_parity_tests {
         assert!(
             try_canonical_redacted_json(&fractional, "org.matrix.msc4242.12").is_err(),
             "try_canonical_redacted_json MSC4242"
+        );
+    }
+
+    /// MSC4014 (pseudonymous IDs) hashes and redacts exactly like room v10.
+    #[test]
+    fn msc4014_hashes_like_v10() {
+        let event = json!({
+            "type": "m.room.member",
+            "room_id": "!r:example.org",
+            "sender": "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+            "state_key": "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG",
+            "content": {"membership": "join", "displayname": "x"},
+            "origin_server_ts": 1,
+            "depth": 1,
+            "prev_events": [],
+            "auth_events": [],
+            "signatures": {"example.org": {"ed25519:a": "sig"}},
+        });
+        let v = "org.matrix.msc4014";
+        assert_eq!(reference_hash(&event, v), reference_hash(&event, "10"));
+        assert!(reference_hash(&event, v).is_ok());
+        assert_eq!(
+            compute_content_hash(&event, v),
+            compute_content_hash(&event, "10")
+        );
+        assert_eq!(
+            try_canonical_redacted_json(&event, v),
+            try_canonical_redacted_json(&event, "10")
         );
     }
 
