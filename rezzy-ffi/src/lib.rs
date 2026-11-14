@@ -1716,21 +1716,23 @@ mod tests {
         }
         let (status, digest) = kernel_text(rezzy_kernel_digest, kernel);
         assert_eq!(status, OK);
+        let parsed = JsonValue::parse(std::str::from_utf8(&digest).unwrap()).unwrap();
+        assert_eq!(parsed.get("count").and_then(JsonValue::as_u64), Some(2));
+        assert!(parsed.get("digest").and_then(JsonValue::as_str).is_some());
         let (status, strata) = kernel_text(rezzy_kernel_strata, kernel);
         assert_eq!(status, OK);
         let strata = JsonValue::parse(std::str::from_utf8(&strata).unwrap()).unwrap();
-        assert_eq!(
-            strata
-                .get("strata")
-                .and_then(JsonValue::as_array)
-                .unwrap()
-                .len(),
-            32
-        );
+        let actual_strata = strata.get("strata").and_then(JsonValue::as_array).unwrap();
+        // SAFETY: `kernel` is a live handle created above.
+        let expected_strata = encode_strata(unsafe { &*kernel }.inner.strata());
+        assert_eq!(actual_strata.len(), expected_strata.len());
+        for (actual, expected) in actual_strata.iter().zip(expected_strata) {
+            assert_eq!(actual.as_str(), Some(expected.as_str()));
+        }
         let (_, expected) = call_recon(&format!(
             r#"{{"op":"digest","event_ids":["{ID_V12}","{ID_V3}"]}}"#
         ));
-        assert_eq!(String::from_utf8(digest).unwrap(), expected);
+        assert_eq!(parsed, JsonValue::parse(&expected).unwrap());
 
         // Persist, rebuild, and confirm the same digest.
         let (status, record) = kernel_text(rezzy_kernel_to_bytes, kernel);
