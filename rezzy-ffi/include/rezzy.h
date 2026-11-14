@@ -12,6 +12,11 @@ extern "C" {
 /* Returns the ABI version declared by the REZZY_ABI_VERSION enum value. */
 uint32_t rezzy_abi_version(void);
 
+/* Returns the release version, such as "0.6.0-rc.1", as a static string that
+ * must not be freed. For reporting which build is loaded; use
+ * rezzy_abi_version to check compatibility. */
+const char *rezzy_version(void);
+
 /* Status codes. */
 enum {
   REZZY_ABI_VERSION = 1,

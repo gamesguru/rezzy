@@ -40,6 +40,13 @@ func checkABIVersion(expected, actual uint32) error {
 	return nil
 }
 
+// Version returns the release version of the linked native library, such as
+// "0.6.0-rc.1". Use it to report which build is loaded; use the package's
+// load-time ABI check, not this string, to decide compatibility.
+func Version() string {
+	return C.GoString(C.rezzy_version())
+}
+
 // EventID returns the reference-hash event ID of a JSON event under
 // roomVersion. Parsing and hashing failures, including opaque-ID versions,
 // return an error.

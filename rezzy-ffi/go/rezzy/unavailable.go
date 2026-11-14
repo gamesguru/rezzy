@@ -9,6 +9,9 @@ import "errors"
 // The package still compiles there so that importers can cross-build.
 var ErrUnavailable = errors.New("rezzy: native library not linked (needs linux and cgo)")
 
+// Version returns the empty string in this build.
+func Version() string { return "" }
+
 // EventID is unavailable in this build.
 func EventID(roomVersion string, event []byte) (string, error) {
 	return "", ErrUnavailable

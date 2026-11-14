@@ -34,8 +34,19 @@ const MAX_RECON_CAPACITY: usize = 256;
 /// Consumers should compare this with `REZZY_ABI_VERSION` from `rezzy.h`
 /// before calling any other exported function.
 #[no_mangle]
-pub extern "C" fn rezzy_abi_version() -> u32 {
+pub const extern "C" fn rezzy_abi_version() -> u32 {
     ABI_VERSION
+}
+
+/// Returns the crate's release version, such as `0.6.0-rc.1`, as a static
+/// NUL-terminated string. Never free it. Use it to report which release is
+/// loaded; use [`rezzy_abi_version`] to decide whether the library is
+/// compatible.
+#[no_mangle]
+pub const extern "C" fn rezzy_version() -> *const core::ffi::c_char {
+    concat!(env!("CARGO_PKG_VERSION"), "\0")
+        .as_ptr()
+        .cast::<core::ffi::c_char>()
 }
 
 /// Clears the output slots so an early return never leaves stale values.
@@ -2072,6 +2083,13 @@ mod tests {
         ));
         assert_eq!(wrong_length.0, ERR);
         assert!(wrong_length.1.contains("length"), "{}", wrong_length.1);
+    }
+
+    #[test]
+    fn version_is_the_crate_version() {
+        // SAFETY: returns a static NUL-terminated string.
+        let version = unsafe { std::ffi::CStr::from_ptr(rezzy_version()) };
+        assert_eq!(version.to_str().unwrap(), env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
