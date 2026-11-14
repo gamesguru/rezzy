@@ -1480,6 +1480,137 @@ mod tests {
         }
     }
 
+    fn call_client_step(client: *mut RezzyClient, request: &JsonValue) -> (i32, String) {
+        let input = rezzy::json::write_string_value(request).unwrap();
+        let mut out = ptr::null_mut();
+        let mut len = 0;
+        // SAFETY: live handle and valid request/output buffers; response is freed below.
+        let status = unsafe {
+            rezzy_client_step(
+                client,
+                input.as_ptr(),
+                input.len(),
+                &raw mut out,
+                &raw mut len,
+            )
+        };
+        (status, take_text(out, len))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn client_handle_drives_a_reconciliation_round() {
+        let local_ids = [ID_V3, ID_V12];
+        let remote_ids = [ID_V12, ID_V3_OTHER];
+        let kernel = rezzy_kernel_new();
+        for id in local_ids {
+            assert_eq!(kernel_op(rezzy_kernel_insert, kernel, id).0, OK);
+        }
+        // SAFETY: `kernel` is a live handle; the client copies it.
+        let client = unsafe { rezzy_client_new(kernel) };
+        assert!(!client.is_null());
+
+        let mut remote_state = ResidentKernel::new();
+        for id in remote_ids {
+            let element = ElementHash::from_matrix_event_id_any(id).unwrap();
+            remote_state.insert(element).unwrap();
+        }
+        let start = rezzy::json!({
+            "op": "start",
+            "digest": remote_state.accumulator().encode_digest(),
+            "known_event_count": remote_state.accumulator().known_event_count(),
+            "strata": JsonValue::Array(
+                rezzy_recon::encode_strata(remote_state.strata())
+                    .into_iter()
+                    .map(JsonValue::String)
+                    .collect()
+            ),
+            "frame_matches": true,
+            "has_unknown_extremity": false,
+        });
+        let (status, text) = call_client_step(client, &start);
+        assert_eq!(status, OK, "{text}");
+        let action = JsonValue::parse(&text).unwrap();
+        assert_eq!(
+            action.get("action").and_then(JsonValue::as_str),
+            Some("bucket_sketches")
+        );
+        let requests = action
+            .get("requests")
+            .and_then(JsonValue::as_array)
+            .unwrap()
+            .iter()
+            .map(|request| {
+                BucketRequest::new(
+                    u8::try_from(request.get("depth").and_then(JsonValue::as_u64).unwrap())
+                        .unwrap(),
+                    request.get("prefix").and_then(JsonValue::as_u64).unwrap(),
+                    usize::try_from(request.get("capacity").and_then(JsonValue::as_u64).unwrap())
+                        .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        // Simulate the responder: subtract each requester's sketch from its
+        // own, decode the differing short IDs, and classify which IDs it has.
+        let sorted_h64 = |ids: &[&str]| {
+            let mut hashes = ids
+                .iter()
+                .map(|id| ElementHash::from_matrix_event_id_any(id).unwrap().h64)
+                .collect::<Vec<_>>();
+            hashes.sort_unstable();
+            hashes
+        };
+        let local_h64 = sorted_h64(&local_ids);
+        let remote_h64 = sorted_h64(&remote_ids);
+        let local_sketches = rezzy_recon::build_bucket_sketches(&local_h64, &requests).unwrap();
+        let remote_sketches = rezzy_recon::build_bucket_sketches(&remote_h64, &requests).unwrap();
+        let mut requester_only_roots = Vec::new();
+        let mut responder_only_ids = Vec::new();
+        for ((request, local), remote) in requests.iter().zip(&local_sketches).zip(&remote_sketches)
+        {
+            for root in remote
+                .subtract(local)
+                .unwrap()
+                .decode_elements(request.capacity)
+                .unwrap()
+            {
+                if remote_h64.contains(&root) {
+                    responder_only_ids.extend(remote_ids.iter().copied().filter(|id| {
+                        ElementHash::from_matrix_event_id_any(id).unwrap().h64 == root
+                    }));
+                } else {
+                    requester_only_roots.push(root);
+                }
+            }
+        }
+        responder_only_ids.sort_unstable();
+        responder_only_ids.dedup();
+        assert_eq!(responder_only_ids, vec![ID_V3_OTHER]);
+        let advance = rezzy::json!({
+            "op": "advance",
+            "roots": JsonValue::Array(requester_only_roots.iter().copied().map(JsonValue::from).collect()),
+            "failed_buckets": [],
+        });
+        let (status, text) = call_client_step(client, &advance);
+        assert_eq!(status, OK, "{text}");
+        let result = JsonValue::parse(&text).unwrap();
+        assert_eq!(
+            result.get("action").and_then(JsonValue::as_str),
+            Some("resolve_roots")
+        );
+        let roots = result.get("roots").and_then(JsonValue::as_array).unwrap();
+        let local_only = ElementHash::from_matrix_event_id_any(ID_V3).unwrap().h64;
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].as_u64(), Some(local_only));
+
+        // SAFETY: each handle was returned by its constructor and is freed once.
+        unsafe {
+            rezzy_client_free(client);
+            rezzy_kernel_free(kernel);
+        }
+    }
+
     #[test]
     fn kernel_rejects_bad_input() {
         let kernel = rezzy_kernel_new();
@@ -1763,5 +1894,123 @@ mod tests {
             ERR
         );
         assert_eq!(call_hamt("!room:example.org", r#"{"op":"nope"}"#).0, ERR);
+    }
+
+    fn drain(status: i32, out: *mut u8, len: usize) -> (i32, String) {
+        let text = if out.is_null() {
+            String::new()
+        } else {
+            // SAFETY: `out`/`len` were just returned by the library.
+            let text = unsafe {
+                String::from_utf8_lossy(std::slice::from_raw_parts(out, len)).into_owned()
+            };
+            // SAFETY: freeing the buffer just returned, once.
+            unsafe { rezzy_free(out, len) };
+            text
+        };
+        (status, text)
+    }
+
+    fn call_client(client: *mut RezzyClient, request: &str) -> (i32, String) {
+        let mut out = ptr::null_mut();
+        let mut len = 0;
+        // SAFETY: the caller holds a live handle; request bytes are valid for
+        // their length; `out` is freed by `drain`.
+        let status = unsafe {
+            rezzy_client_step(
+                client,
+                request.as_ptr(),
+                request.len(),
+                &raw mut out,
+                &raw mut len,
+            )
+        };
+        drain(status, out, len)
+    }
+
+    fn start_message(remote: &ResidentKernel) -> String {
+        let strata = rezzy_recon::resident::encode_strata(remote.strata())
+            .into_iter()
+            .map(JsonValue::String)
+            .collect();
+        let request = rezzy::json!({
+            "op": "start",
+            "digest": remote.accumulator().encode_digest(),
+            "known_event_count": remote.accumulator().known_event_count(),
+            "strata": JsonValue::Array(strata),
+            "frame_matches": true,
+            "has_unknown_extremity": false,
+        });
+        rezzy::json::write_string_value(&request).unwrap()
+    }
+
+    #[test]
+    fn client_synchronizes_when_the_remote_set_matches() {
+        let kernel = rezzy_kernel_new();
+        // SAFETY: null is accepted; the handle is released below.
+        let client = unsafe { rezzy_client_new(kernel) };
+        assert!(!client.is_null());
+        let remote = ResidentKernel::new();
+        let (status, text) = call_client(client, &start_message(&remote));
+        assert_eq!(status, OK, "{text}");
+        let response = JsonValue::parse(&text).unwrap();
+        assert_eq!(
+            response.get("action").and_then(JsonValue::as_str),
+            Some("synchronized")
+        );
+        // SAFETY: both handles were created here and are freed once.
+        unsafe {
+            rezzy_client_free(client);
+            rezzy_kernel_free(kernel);
+        }
+    }
+
+    #[test]
+    fn client_rejects_out_of_order_steps() {
+        let kernel = rezzy_kernel_new();
+        // SAFETY: null is accepted; the handle is released below.
+        let client = unsafe { rezzy_client_new(kernel) };
+        assert!(!client.is_null());
+
+        let (status, text) =
+            call_client(client, r#"{"op":"advance","roots":[],"failed_buckets":[]}"#);
+        assert_eq!(status, ERR, "{text}");
+        assert!(text.contains("not waiting"), "{text}");
+
+        let remote = ResidentKernel::new();
+        assert_eq!(call_client(client, &start_message(&remote)).0, OK);
+        let (status, text) = call_client(client, &start_message(&remote));
+        assert_eq!(status, ERR, "{text}");
+        assert!(text.contains("already started"), "{text}");
+
+        // SAFETY: both handles were created here and are freed once.
+        unsafe {
+            rezzy_client_free(client);
+            rezzy_kernel_free(kernel);
+        }
+    }
+
+    #[test]
+    fn client_rejects_malformed_start_and_null_arguments() {
+        let kernel = rezzy_kernel_new();
+        // SAFETY: null is accepted; the handle is released below.
+        let client = unsafe { rezzy_client_new(kernel) };
+        assert!(!client.is_null());
+        let remote = ResidentKernel::new();
+        let request = std::format!(
+            r#"{{"op":"start","digest":"{}","known_event_count":0,"strata":["!!!not-strata"],"frame_matches":true,"has_unknown_extremity":false}}"#,
+            remote.accumulator().encode_digest()
+        );
+        assert_eq!(call_client(client, &request).0, ERR);
+        assert_eq!(
+            call_client(ptr::null_mut(), &start_message(&remote)).0,
+            BAD_ARG
+        );
+        // SAFETY: null is accepted by both constructors.
+        unsafe {
+            assert!(rezzy_client_new(ptr::null()).is_null());
+            rezzy_client_free(client);
+            rezzy_kernel_free(kernel);
+        }
     }
 }
