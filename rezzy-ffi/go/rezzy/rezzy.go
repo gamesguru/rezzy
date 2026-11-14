@@ -64,9 +64,6 @@ func HashEventsJSONL(roomVersion string, jsonl []byte) ([]byte, error) {
 	return call(roomVersion, jsonl, hashEventsOperation)
 }
 
-// HAMTEntry is one state-HAMT leaf: event type, state key, and event ID.
-type HAMTEntry [3]string
-
 // StateHAMTRoot returns the structural root hash and portable state-group ID
 // for a room state map.
 func StateHAMTRoot(roomID string, entries []HAMTEntry) (rootHash string, stateGroupID string, err error) {
