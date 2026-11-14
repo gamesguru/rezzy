@@ -31,6 +31,21 @@ pub extern "C" fn rezzy_abi_version() -> u32 {
     ABI_VERSION
 }
 
+/// Clears the output slots so an early return never leaves stale values.
+///
+/// # Safety
+/// Non-null `out` and `out_len` must point to writable storage.
+unsafe fn reset_outputs(out: *mut *mut u8, out_len: *mut usize) {
+    if !out.is_null() {
+        // SAFETY: non-null `out` is writable per the contract.
+        unsafe { *out = ptr::null_mut() };
+    }
+    if !out_len.is_null() {
+        // SAFETY: non-null `out_len` is writable per the contract.
+        unsafe { *out_len = 0 };
+    }
+}
+
 /// Moves `bytes` to a heap buffer owned by the caller until [`rezzy_free`].
 fn hand_over(bytes: Vec<u8>, out: *mut *mut u8, out_len: *mut usize) {
     let boxed = bytes.into_boxed_slice();
@@ -75,14 +90,8 @@ unsafe fn unpack_raw_args<'a>(
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> Result<(&'a str, &'a [u8]), i32> {
-    if !out.is_null() {
-        // SAFETY: non-null `out` is required to point to writable storage.
-        unsafe { *out = ptr::null_mut() };
-    }
-    if !out_len.is_null() {
-        // SAFETY: non-null `out_len` is required to point to writable storage.
-        unsafe { *out_len = 0 };
-    }
+    // SAFETY: non-null output slots are required to be writable.
+    unsafe { reset_outputs(out, out_len) };
     if room_version.is_null() || input.is_null() || out.is_null() || out_len.is_null() {
         return Err(BAD_ARG);
     }
@@ -257,14 +266,8 @@ pub unsafe extern "C" fn rezzy_recon_gf256_sketch(
     out_len: *mut usize,
 ) -> i32 {
     guard(out, out_len, || {
-        if !out.is_null() {
-            // SAFETY: non-null output slots are required to be writable.
-            unsafe { *out = ptr::null_mut() };
-        }
-        if !out_len.is_null() {
-            // SAFETY: non-null output slots are required to be writable.
-            unsafe { *out_len = 0 };
-        }
+        // SAFETY: non-null output slots are required to be writable.
+        unsafe { reset_outputs(out, out_len) };
         if out.is_null() || out_len.is_null() || (elements.is_null() && elements_len != 0) {
             return BAD_ARG;
         }
@@ -336,14 +339,8 @@ pub unsafe extern "C" fn rezzy_recon_gf256_difference(
     out_len: *mut usize,
 ) -> i32 {
     guard(out, out_len, || {
-        if !out.is_null() {
-            // SAFETY: non-null output slots are required to be writable.
-            unsafe { *out = ptr::null_mut() };
-        }
-        if !out_len.is_null() {
-            // SAFETY: non-null output slots are required to be writable.
-            unsafe { *out_len = 0 };
-        }
+        // SAFETY: non-null output slots are required to be writable.
+        unsafe { reset_outputs(out, out_len) };
         if out.is_null() || out_len.is_null() || left.is_null() || right.is_null() {
             return BAD_ARG;
         }
@@ -490,14 +487,8 @@ unsafe fn unpack_json_args<'a>(
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> Result<&'a [u8], i32> {
-    if !out.is_null() {
-        // SAFETY: non-null `out` is required to point to writable storage.
-        unsafe { *out = ptr::null_mut() };
-    }
-    if !out_len.is_null() {
-        // SAFETY: non-null `out_len` is required to point to writable storage.
-        unsafe { *out_len = 0 };
-    }
+    // SAFETY: non-null output slots are required to be writable.
+    unsafe { reset_outputs(out, out_len) };
     if input.is_null() || out.is_null() || out_len.is_null() {
         return Err(BAD_ARG);
     }
@@ -807,16 +798,7 @@ unsafe fn rezzy_hash_events_inner(
         return ERR;
     }
     let report = rezzy::event_report::report(records, version);
-    match rezzy::json::write_string_value(&report) {
-        Ok(json) => {
-            hand_over(json.into_bytes(), out, out_len);
-            OK
-        }
-        Err(error) => {
-            hand_over(error.to_string().into_bytes(), out, out_len);
-            ERR
-        }
-    }
+    write_json_response(&report, out, out_len)
 }
 
 /// Releases a buffer previously returned through `out`.
@@ -841,6 +823,19 @@ mod tests {
     const EVENT: &str = r#"{"auth_events":["$sbusQdJu8vp4mYghGgIdFrz9K_UbSNVmVr3UBxLM2Mk","$SbBcrKoU8Wo-rq9hH6NORFEcD7jrSgLkyYBgvlvNZVc"],"content":{"body":"A nice sunny day spent near the window.","m.mentions":{},"msgtype":"m.text"},"depth":265,"hashes":{"sha256":"BN2Mpld9Ox01qmZjEh+2SXjc3hf67Z+UrUvCc/TdJoc"},"origin_server_ts":1763426725083,"prev_events":["$YgQCx1FMxaNlpl8CoymZCmPLcE9YJ95kwnp8VBHJiqY"],"room_id":"!L58ME6ufiP49v97UIOBIpvWKEgj4912JmECPuDzlvCI","sender":"@chtr-x:matrix.org","signatures":{"matrix.org":{"ed25519:a_RXGa":"EKGxFhkSSIlattBwQDE9V1moJdRz6FGd4tC+u43q6z0/8v3oys743hvIStLWTO0LYR1GrntNOHyztbUaIVQOAw"}},"type":"m.room.message","unsigned":{"age_ts":1763426725083}}"#;
     const ID: &str = "$IYh3j5DDlpXmmErAivzq4d1PVT0DxegxvvKtlWVDoFE";
 
+    /// Copies a returned buffer into a `String` and releases it.
+    fn take_text(out: *mut u8, len: usize) -> String {
+        if out.is_null() {
+            return String::new();
+        }
+        // SAFETY: `out`/`len` were just returned by the library.
+        let text =
+            unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(out, len)).into_owned() };
+        // SAFETY: freeing the buffer just returned, once.
+        unsafe { rezzy_free(out, len) };
+        text
+    }
+
     fn call(
         f: unsafe extern "C" fn(*const c_char, *const u8, usize, *mut *mut u8, *mut usize) -> i32,
         version: &str,
@@ -859,18 +854,7 @@ mod tests {
                 &raw mut len,
             )
         };
-        let text = if out.is_null() {
-            String::new()
-        } else {
-            // SAFETY: `out`/`len` were just returned by the library.
-            let text = unsafe {
-                String::from_utf8_lossy(std::slice::from_raw_parts(out, len)).into_owned()
-            };
-            // SAFETY: freeing the buffer just returned, once.
-            unsafe { rezzy_free(out, len) };
-            text
-        };
-        (status, text)
+        (status, take_text(out, len))
     }
 
     fn call_recon(request: &str) -> (i32, String) {
@@ -879,18 +863,7 @@ mod tests {
         // SAFETY: valid pointers for the stated lengths; `out` freed below.
         let status =
             unsafe { rezzy_recon(request.as_ptr(), request.len(), &raw mut out, &raw mut len) };
-        let text = if out.is_null() {
-            String::new()
-        } else {
-            // SAFETY: `out`/`len` were just returned by the library.
-            let text = unsafe {
-                String::from_utf8_lossy(std::slice::from_raw_parts(out, len)).into_owned()
-            };
-            // SAFETY: freeing the buffer just returned, once.
-            unsafe { rezzy_free(out, len) };
-            text
-        };
-        (status, text)
+        (status, take_text(out, len))
     }
 
     fn call_hamt(room_id: &str, request: &str) -> (i32, String) {
@@ -907,18 +880,7 @@ mod tests {
                 &raw mut len,
             )
         };
-        let text = if out.is_null() {
-            String::new()
-        } else {
-            // SAFETY: `out`/`len` were just returned by the library.
-            let text = unsafe {
-                String::from_utf8_lossy(std::slice::from_raw_parts(out, len)).into_owned()
-            };
-            // SAFETY: freeing the buffer just returned, once.
-            unsafe { rezzy_free(out, len) };
-            text
-        };
-        (status, text)
+        (status, take_text(out, len))
     }
 
     #[test]
