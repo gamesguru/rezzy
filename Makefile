@@ -31,6 +31,7 @@ format: ##H Format codebase (Rust + Lean + scripts)
 	-isort $(LINT_LOCS_PY)
 	-shfmt -w $(LINT_LOCS_SH)
 	-clang-format -i $$(git ls-files '*.h')
+	-gofmt -w $$(git ls-files '*.go')
 
 .PHONY: check
 check:	##H Cargo check and code dupe
