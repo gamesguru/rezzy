@@ -35,7 +35,7 @@ pub extern "C" fn rezzy_abi_version() -> u32 {
 ///
 /// # Safety
 /// Non-null `out` and `out_len` must point to writable storage.
-unsafe fn reset_outputs(out: *mut *mut u8, out_len: *mut usize) {
+unsafe fn reset_outputs(out: *mut *mut u8, out_len: *mut usize) -> bool {
     if !out.is_null() {
         // SAFETY: non-null `out` is writable per the contract.
         unsafe { *out = ptr::null_mut() };
@@ -44,6 +44,7 @@ unsafe fn reset_outputs(out: *mut *mut u8, out_len: *mut usize) {
         // SAFETY: non-null `out_len` is writable per the contract.
         unsafe { *out_len = 0 };
     }
+    !out.is_null() && !out_len.is_null()
 }
 
 /// Moves `bytes` to a heap buffer owned by the caller until [`rezzy_free`].
@@ -91,8 +92,7 @@ unsafe fn unpack_raw_args<'a>(
     out_len: *mut usize,
 ) -> Result<(&'a str, &'a [u8]), i32> {
     // SAFETY: non-null output slots are required to be writable.
-    unsafe { reset_outputs(out, out_len) };
-    if room_version.is_null() || input.is_null() || out.is_null() || out_len.is_null() {
+    if !unsafe { reset_outputs(out, out_len) } || room_version.is_null() || input.is_null() {
         return Err(BAD_ARG);
     }
     // SAFETY: non-null and NUL-terminated per the contract.
@@ -267,8 +267,7 @@ pub unsafe extern "C" fn rezzy_recon_gf256_sketch(
 ) -> i32 {
     guard(out, out_len, || {
         // SAFETY: non-null output slots are required to be writable.
-        unsafe { reset_outputs(out, out_len) };
-        if out.is_null() || out_len.is_null() || (elements.is_null() && elements_len != 0) {
+        if !unsafe { reset_outputs(out, out_len) } || (elements.is_null() && elements_len != 0) {
             return BAD_ARG;
         }
         let Some(expected_len) = element_count.checked_mul(32) else {
@@ -340,8 +339,7 @@ pub unsafe extern "C" fn rezzy_recon_gf256_difference(
 ) -> i32 {
     guard(out, out_len, || {
         // SAFETY: non-null output slots are required to be writable.
-        unsafe { reset_outputs(out, out_len) };
-        if out.is_null() || out_len.is_null() || left.is_null() || right.is_null() {
+        if !unsafe { reset_outputs(out, out_len) } || left.is_null() || right.is_null() {
             return BAD_ARG;
         }
         // SAFETY: non-null pointers are required to reference their stated lengths.
@@ -412,20 +410,9 @@ pub unsafe extern "C" fn rezzy_state_hamt(
                 Ok(unpacked) => unpacked,
                 Err(status) => return status,
             };
-        let request = match JsonValue::parse_bytes(request_bytes) {
-            Ok(request) => request,
-            Err(error) => {
-                hand_over(error.to_string().into_bytes(), out, out_len);
-                return ERR;
-            }
-        };
-        match hamt_response(room_id, &request) {
-            Ok(response) => write_json_response(&response, out, out_len),
-            Err(error) => {
-                hand_over(error.into_bytes(), out, out_len);
-                ERR
-            }
-        }
+        process_json_request(request_bytes, out, out_len, |request| {
+            hamt_response(room_id, request)
+        })
     })
 }
 
@@ -450,20 +437,7 @@ pub unsafe extern "C" fn rezzy_recon(
             Ok(bytes) => bytes,
             Err(status) => return status,
         };
-        let request = match JsonValue::parse_bytes(request_bytes) {
-            Ok(request) => request,
-            Err(error) => {
-                hand_over(error.to_string().into_bytes(), out, out_len);
-                return ERR;
-            }
-        };
-        match recon_response(&request) {
-            Ok(response) => write_json_response(&response, out, out_len),
-            Err(error) => {
-                hand_over(error.into_bytes(), out, out_len);
-                ERR
-            }
-        }
+        process_json_request(request_bytes, out, out_len, recon_response)
     })
 }
 
@@ -480,6 +454,31 @@ fn write_json_response(response: &JsonValue, out: *mut *mut u8, out_len: *mut us
     }
 }
 
+fn process_json_request<F>(
+    request_bytes: &[u8],
+    out: *mut *mut u8,
+    out_len: *mut usize,
+    operation: F,
+) -> i32
+where
+    F: FnOnce(&JsonValue) -> Result<JsonValue, String>,
+{
+    let request = match JsonValue::parse_bytes(request_bytes) {
+        Ok(request) => request,
+        Err(error) => {
+            hand_over(error.to_string().into_bytes(), out, out_len);
+            return ERR;
+        }
+    };
+    match operation(&request) {
+        Ok(response) => write_json_response(&response, out, out_len),
+        Err(error) => {
+            hand_over(error.into_bytes(), out, out_len);
+            ERR
+        }
+    }
+}
+
 /// Resets and validates the output slots and one non-NUL-terminated buffer.
 unsafe fn unpack_json_args<'a>(
     input: *const u8,
@@ -488,8 +487,7 @@ unsafe fn unpack_json_args<'a>(
     out_len: *mut usize,
 ) -> Result<&'a [u8], i32> {
     // SAFETY: non-null output slots are required to be writable.
-    unsafe { reset_outputs(out, out_len) };
-    if input.is_null() || out.is_null() || out_len.is_null() {
+    if !unsafe { reset_outputs(out, out_len) } || input.is_null() {
         return Err(BAD_ARG);
     }
     // SAFETY: non-null, `input_len` readable bytes per the contract.
