@@ -94,6 +94,30 @@ int rezzy_recon_gf256_difference(const uint8_t *left, size_t left_len,
  *    "capacity":N}
  *     -> {"local_only":["$...",...],"remote_only":["<hex digest>",...],
  *         "count":N}
+ *
+ *   Responder side of an MSC4521 exchange (algebraic_v1). Each takes the
+ *   responder's own `event_ids`. By default each ID's format is detected, as
+ *   the kernel handle does; "format":"v4plus" or "v3" forces one.
+ *   {"op":"snapshot","event_ids":[...]}
+ *     -> {"digest":"<base64url>","count":N,"strata":["<base64url>",...]}
+ *     What `room_digest` and `room_digest/strata` return.
+ *   {"op":"bucket_sketches","event_ids":[...],
+ *    "requests":[{"depth":D,"prefix":P,"capacity":N,"overflow":false},...]}
+ *     -> {"sketches":["<base64url>",...]}   one per request
+ *     `prefix` may be a number or a decimal string; `overflow` is optional.
+ *     Also use this on the requester side to sketch its own buckets.
+ *   {"op":"bucket_diff","event_ids":[...],"requests":[...],
+ *    "local_sketches":["<base64url>",...],"local_digest":"<base64url>",
+ *    "local_known_event_count":N}
+ *     -> {"status":"decoded"|"capacity_exceeded",
+ *         "missing_event_ids":["$...",...],
+ *         "requester_only_short_ids":["<base64url h64>",...],
+ *         "expected_requester_side_accumulator":"<base64url>","count":N}
+ *     `local_*` fields describe the requester. `missing_event_ids` are the
+ *     responder's events the requester lacks; `requester_only_short_ids` are
+ *     the 8-byte big-endian short IDs only the requester holds (pass them as
+ *     numbers in the client's "advance" roots). `local_sketches` must have
+ *     one entry per request.
  */
 int rezzy_state_hamt(const char *room_id, const uint8_t *request_json,
                      size_t request_len, uint8_t **out, size_t *out_len);

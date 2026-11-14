@@ -1323,7 +1323,7 @@ fn recon_response(request: &JsonValue) -> Result<JsonValue, String> {
             }))
         }
         // Responder-side snapshot: the algebraic_v1 digest, count and strata
-        // for a room's event set. `format` is "v4plus" (default) or "v3".
+        // for a room's event set. `format` ("v4plus" or "v3") forces one ID format; by default each ID is detected.
         "snapshot" => {
             let elements = algebraic_event_elements(request)?;
             let mut kernel = ResidentKernel::new();
@@ -1483,14 +1483,21 @@ fn recon_response(request: &JsonValue) -> Result<JsonValue, String> {
 /// `"v4plus"` (default, room versions 4+) or `"v3"` (room version 3).
 fn algebraic_event_elements(request: &JsonValue) -> Result<Vec<(String, ElementHash)>, String> {
     let ids = parse_event_ids(request, "event_ids")?;
+    // Without `format`, detect each ID's format, as the kernel handle does, so
+    // rooms that mix v3 and v4+ IDs hash the same way on both sides.
     let format = match request.get("format").and_then(JsonValue::as_str) {
-        None | Some("v4plus") => EventIdFormat::V4Plus,
-        Some("v3") => EventIdFormat::V3,
+        None => None,
+        Some("v4plus") => Some(EventIdFormat::V4Plus),
+        Some("v3") => Some(EventIdFormat::V3),
         Some(other) => return Err(std::format!("unknown event ID format `{other}`")),
     };
     ids.into_iter()
         .map(|id| {
-            ElementHash::from_matrix_event_id(&id, format)
+            format
+                .map_or_else(
+                    || ElementHash::from_matrix_event_id_any(&id),
+                    |format| ElementHash::from_matrix_event_id(&id, format),
+                )
                 .map(|element| (id.clone(), element))
                 .map_err(|error| std::format!("invalid event ID `{id}`: {error:?}"))
         })
@@ -1911,6 +1918,160 @@ mod tests {
             rezzy_client_free(client);
             rezzy_kernel_free(kernel);
         }
+    }
+
+    /// Calls `rezzy_recon` with a JSON value and parses the response.
+    fn recon_value(request: &JsonValue) -> JsonValue {
+        let (status, text) = call_recon(&rezzy::json::write_string_value(request).unwrap());
+        assert_eq!(status, OK, "{text}");
+        JsonValue::parse(&text).unwrap()
+    }
+
+    /// Runs a whole exchange through the C ABI: the requester uses a kernel
+    /// and client handle, the responder uses the `rezzy_recon` operations.
+    /// Returns the responder's `bucket_diff` answer and the client's final
+    /// action, or the client's `synchronized` action when no round is needed.
+    fn exchange(local_ids: &[&str], remote_ids: &[&str]) -> (Option<JsonValue>, JsonValue) {
+        let ids =
+            |ids: &[&str]| JsonValue::Array(ids.iter().map(|id| JsonValue::from(*id)).collect());
+        let kernel = rezzy_kernel_new();
+        for id in local_ids {
+            assert_eq!(kernel_op(rezzy_kernel_insert, kernel, id).0, OK);
+        }
+        // SAFETY: `kernel` is a live handle; the client copies it.
+        let client = unsafe { rezzy_client_new(kernel) };
+        assert!(!client.is_null());
+        let (status, digest) = kernel_text(rezzy_kernel_digest, kernel);
+        assert_eq!(status, OK);
+        let local_digest = JsonValue::parse(std::str::from_utf8(&digest).unwrap()).unwrap();
+
+        // Responder: describe its event set.
+        let snapshot = recon_value(&rezzy::json!({
+            "op": "snapshot",
+            "event_ids": ids(remote_ids),
+        }));
+        let start = rezzy::json!({
+            "op": "start",
+            "digest": snapshot.get("digest").unwrap().clone(),
+            "known_event_count": snapshot.get("count").unwrap().clone(),
+            "strata": snapshot.get("strata").unwrap().clone(),
+            "frame_matches": true,
+            "has_unknown_extremity": false,
+        });
+        let (status, text) = call_client_step(client, &start);
+        assert_eq!(status, OK, "{text}");
+        let action = JsonValue::parse(&text).unwrap();
+        if action.get("action").and_then(JsonValue::as_str) != Some("bucket_sketches") {
+            // SAFETY: each handle is freed once.
+            unsafe {
+                rezzy_client_free(client);
+                rezzy_kernel_free(kernel);
+            }
+            return (None, action);
+        }
+
+        // Requester: sketch our own buckets. Responder: subtract and decode.
+        let requests = action.get("requests").unwrap().clone();
+        let local_sketches = recon_value(&rezzy::json!({
+            "op": "bucket_sketches",
+            "event_ids": ids(local_ids),
+            "requests": requests.clone(),
+        }));
+        let diff = recon_value(&rezzy::json!({
+            "op": "bucket_diff",
+            "event_ids": ids(remote_ids),
+            "requests": requests,
+            "local_sketches": local_sketches.get("sketches").unwrap().clone(),
+            "local_digest": local_digest.get("digest").unwrap().clone(),
+            "local_known_event_count": local_digest.get("count").unwrap().clone(),
+        }));
+
+        // Requester: hand back the short IDs only it holds.
+        let roots = diff
+            .get("requester_only_short_ids")
+            .and_then(JsonValue::as_array)
+            .unwrap()
+            .iter()
+            .map(|short| {
+                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(short.as_str().unwrap())
+                    .unwrap();
+                JsonValue::from(u64::from_be_bytes(bytes.try_into().unwrap()))
+            })
+            .collect::<Vec<_>>();
+        let advance = rezzy::json!({
+            "op": "advance",
+            "roots": JsonValue::Array(roots),
+            "failed_buckets": [],
+        });
+        let (status, text) = call_client_step(client, &advance);
+        assert_eq!(status, OK, "{text}");
+        // SAFETY: each handle is freed once.
+        unsafe {
+            rezzy_client_free(client);
+            rezzy_kernel_free(kernel);
+        }
+        (Some(diff), JsonValue::parse(&text).unwrap())
+    }
+
+    fn string_list(value: &JsonValue, key: &str) -> Vec<String> {
+        value
+            .get(key)
+            .and_then(JsonValue::as_array)
+            .unwrap()
+            .iter()
+            .map(|item| item.as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn exchange_through_the_c_abi_finds_the_differences() {
+        let (diff, action) = exchange(&[ID_V3, ID_V12], &[ID_V12, ID_V3_OTHER]);
+        let diff = diff.expect("sets differ, so a bucket round runs");
+        assert_eq!(
+            diff.get("status").and_then(JsonValue::as_str),
+            Some("decoded")
+        );
+        // The requester is missing one event, which the responder names.
+        assert_eq!(string_list(&diff, "missing_event_ids"), [ID_V3_OTHER]);
+        // The responder reports the one short ID that only the requester has,
+        // and the client then asks for exactly that root to be resolved.
+        let only_requester = string_list(&diff, "requester_only_short_ids");
+        assert_eq!(only_requester.len(), 1);
+        assert_eq!(
+            action.get("action").and_then(JsonValue::as_str),
+            Some("resolve_roots")
+        );
+        let expected = ElementHash::from_matrix_event_id_any(ID_V3).unwrap().h64;
+        let roots = action.get("roots").and_then(JsonValue::as_array).unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0].as_u64(), Some(expected));
+    }
+
+    #[test]
+    fn exchange_through_the_c_abi_is_synchronized_for_equal_sets() {
+        let (diff, action) = exchange(&[ID_V3, ID_V12], &[ID_V12, ID_V3]);
+        assert!(diff.is_none());
+        assert_eq!(
+            action.get("action").and_then(JsonValue::as_str),
+            Some("synchronized")
+        );
+    }
+
+    #[test]
+    fn bucket_operations_reject_bad_requests() {
+        let missing_requests = call_recon(&format!(
+            r#"{{"op":"bucket_sketches","event_ids":["{ID_V12}"]}}"#
+        ));
+        assert_eq!(missing_requests.0, ERR);
+        let wrong_length = call_recon(&format!(
+            r#"{{"op":"bucket_diff","event_ids":["{ID_V12}"],
+                "requests":[{{"depth":0,"prefix":0,"capacity":4}}],
+                "local_sketches":[],"local_digest":"AAAAAAAAAAAAAAAAAAAAAA",
+                "local_known_event_count":0}}"#
+        ));
+        assert_eq!(wrong_length.0, ERR);
+        assert!(wrong_length.1.contains("length"), "{}", wrong_length.1);
     }
 
     #[test]

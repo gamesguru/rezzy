@@ -30,6 +30,7 @@ format: ##H Format codebase (Rust + Lean + scripts)
 	-black $(LINT_LOCS_PY)
 	-isort $(LINT_LOCS_PY)
 	-shfmt -w $(LINT_LOCS_SH)
+	-clang-format -i $$(git ls-files '*.h')
 
 .PHONY: check
 check:	##H Cargo check and code dupe
@@ -48,6 +49,7 @@ macro: ##H See macro expansion costs
 lint: ##H Run all linters
 	-shellcheck $(LINT_LOCS_SH)
 	$(CARGO) clippy --all-targets --all-features $(filter --locked,$(CARGO_FEATURE_ARGS))
+	-cppcheck $$(git ls-files '*.h')
 
 .PHONY: fix
 fix:	##H Clippy auto-fix (per-package; workspace-wide --fix silently drops fixes)

@@ -220,14 +220,23 @@ func ReconDiff(localEventIDs []string, remoteSketch []byte, capacity int) (local
 	return parsed.LocalOnly, remoteOnly, nil
 }
 
+// withFormat adds the optional event ID format to a request; an empty format
+// leaves it out so each ID's format is detected.
+func withFormat(format string, request map[string]any) map[string]any {
+	if format != "" {
+		request["format"] = format
+	}
+	return request
+}
+
 // ReconSnapshot returns the MSC4521 digest, event count and 32 strata for a
-// set of reference-hash event IDs. format is "v4plus" or "v3".
+// set of event IDs. format is "v4plus" or "v3" to force one ID format, or
+// empty to detect each ID's format.
 func ReconSnapshot(eventIDs []string, format string) (*Snapshot, error) {
-	response, err := callRecon(map[string]any{
+	response, err := callRecon(withFormat(format, map[string]any{
 		"op":        "snapshot",
 		"event_ids": eventIDs,
-		"format":    format,
-	})
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -245,12 +254,11 @@ func ReconSnapshot(eventIDs []string, format string) (*Snapshot, error) {
 // ReconBucketSketches builds one base64url SyndromeSketch per requested bucket
 // over the given event set.
 func ReconBucketSketches(eventIDs []string, format string, requests []BucketRequest) ([]string, error) {
-	response, err := callRecon(map[string]any{
+	response, err := callRecon(withFormat(format, map[string]any{
 		"op":        "bucket_sketches",
 		"event_ids": eventIDs,
-		"format":    format,
 		"requests":  requests,
-	})
+	}))
 	if err != nil {
 		return nil, err
 	}
@@ -269,15 +277,14 @@ func ReconBucketDiff(
 	eventIDs []string, format string, requests []BucketRequest,
 	localSketches []string, localDigest string, localCount uint64,
 ) (*BucketDiffResult, error) {
-	response, err := callRecon(map[string]any{
+	response, err := callRecon(withFormat(format, map[string]any{
 		"op":                      "bucket_diff",
 		"event_ids":               eventIDs,
-		"format":                  format,
 		"requests":                requests,
 		"local_sketches":          localSketches,
 		"local_digest":            localDigest,
 		"local_known_event_count": localCount,
-	})
+	}))
 	if err != nil {
 		return nil, err
 	}
