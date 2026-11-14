@@ -139,8 +139,11 @@ fn check_name(what: &str, value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > MAX_NAME_LEN {
         return Err(format!("{what} must be 1 to {MAX_NAME_LEN} bytes"));
     }
-    if value.bytes().any(|byte| byte.is_ascii_control()) {
-        return Err(format!("{what} contains a control character"));
+    if value
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return Err(format!("{what} contains whitespace or a control character"));
     }
     Ok(())
 }
@@ -152,12 +155,19 @@ impl KeyBundle {
     /// Returns an error for an empty or oversized origin, no keys or too many,
     /// a key id that is not `ed25519:<version>`, duplicate key ids, a retired
     /// key with `retired_ms == 0`, or anything but exactly one active key.
-    pub fn new(origin: impl Into<String>, keys: Vec<KeyEntry>) -> Result<Self, String> {
+    pub fn new(origin: impl Into<String>, mut keys: Vec<KeyEntry>) -> Result<Self, String> {
         let origin = origin.into();
         check_name("origin", &origin)?;
         if keys.is_empty() || keys.len() > MAX_KEYS {
             return Err(format!("a bundle holds 1 to {MAX_KEYS} keys"));
         }
+        // Canonical order makes equal bundles encode to identical bytes even
+        // when their plaintext import rows were listed in a different order.
+        keys.sort_by(|left, right| {
+            left.created_ms
+                .cmp(&right.created_ms)
+                .then_with(|| left.key_id.cmp(&right.key_id))
+        });
         let mut active = 0_usize;
         for (index, key) in keys.iter().enumerate() {
             check_name("key id", &key.key_id)?;
@@ -170,6 +180,12 @@ impl KeyBundle {
             match key.retired_ms {
                 None => active = active.saturating_add(1),
                 Some(0) => return Err(format!("retired key {:?} has no retired time", key.key_id)),
+                Some(retired) if key.created_ms != 0 && retired < key.created_ms => {
+                    return Err(format!(
+                        "retired key {:?} expired before it was created",
+                        key.key_id
+                    ));
+                }
                 Some(_) => {}
             }
         }
@@ -433,6 +449,20 @@ mod tests {
     }
 
     #[test]
+    fn encoding_is_independent_of_input_key_order() {
+        let first = two_keys();
+        let reversed = KeyBundle::new(
+            ORIGIN,
+            vec![
+                KeyEntry::active("ed25519:new", seed(2), 3_000),
+                KeyEntry::retired("ed25519:old", seed(1), 1_000, 2_000),
+            ],
+        )
+        .unwrap();
+        assert_eq!(first.encode(), reversed.encode());
+    }
+
+    #[test]
     fn unlock_roundtrip_and_origin_binding() {
         let bundle = two_keys();
         let file = sealed(&bundle, b"pw");
@@ -503,6 +533,7 @@ mod tests {
         assert!(KeyBundle::new(ORIGIN, vec![key("curve25519:a")]).is_err());
         assert!(KeyBundle::new(ORIGIN, vec![key("ed25519:")]).is_err());
         assert!(KeyBundle::new(ORIGIN, vec![key("ed25519:a\n")]).is_err());
+        assert!(KeyBundle::new("minimat example", vec![key("ed25519:a")]).is_err());
         let duplicate = KeyBundle::new(
             ORIGIN,
             vec![
@@ -519,6 +550,16 @@ mod tests {
             ],
         );
         assert!(unretired.unwrap_err().contains("no retired time"));
+        let reversed_lifecycle = KeyBundle::new(
+            ORIGIN,
+            vec![
+                KeyEntry::retired("ed25519:old", seed(1), 10, 9),
+                KeyEntry::active("ed25519:new", seed(2), 11),
+            ],
+        );
+        assert!(reversed_lifecycle
+            .unwrap_err()
+            .contains("before it was created"));
     }
 
     #[test]
