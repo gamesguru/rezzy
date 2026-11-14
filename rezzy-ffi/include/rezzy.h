@@ -102,6 +102,46 @@ int rezzy_recon(const uint8_t *request_json, size_t request_len, uint8_t **out,
                 size_t *out_len);
 
 /*
+ * Running reconciliation state for one room (MSC4521 "algebraic_v1": the
+ * digest and strata that other servers exchange). A kernel is updated as
+ * events are accepted instead of being rebuilt from every event ID, and is
+ * persisted with rezzy_kernel_to_bytes / rezzy_kernel_from_bytes.
+ *
+ * A handle is not thread-safe: use one handle from one thread at a time.
+ * Free each handle once with rezzy_kernel_free (NULL is accepted).
+ *
+ * The kernel is an XOR accumulator. Insert each event once: inserting the
+ * same ID twice cancels it out, and removing an ID that was never inserted
+ * corrupts the digest. Removing from an empty kernel returns REZZY_ERR.
+ */
+typedef struct RezzyKernel RezzyKernel;
+
+RezzyKernel *rezzy_kernel_new(void);
+void rezzy_kernel_free(RezzyKernel *kernel);
+
+/* REZZY_OK, REZZY_ERR (message in *out) for an invalid ID or a limit error,
+ * or REZZY_BAD_ARG for a NULL argument. */
+int rezzy_kernel_insert(RezzyKernel *kernel, const uint8_t *event_id,
+                        size_t event_id_len, uint8_t **out, size_t *out_len);
+int rezzy_kernel_remove(RezzyKernel *kernel, const uint8_t *event_id,
+                        size_t event_id_len, uint8_t **out, size_t *out_len);
+
+/* On REZZY_OK, *out is the fixed-size persisted record. */
+int rezzy_kernel_to_bytes(const RezzyKernel *kernel, uint8_t **out,
+                          size_t *out_len);
+
+/* On REZZY_OK, *out is {"digest":"<base64url>","count":N}, the same shape
+ * rezzy_recon returns for "digest". */
+int rezzy_kernel_digest(const RezzyKernel *kernel, uint8_t **out,
+                        size_t *out_len);
+
+/* On REZZY_OK, *kernel is a new handle. On REZZY_ERR, *kernel is NULL and
+ * *out holds a message (wrong length, unknown version, inconsistent record). */
+int rezzy_kernel_from_bytes(const uint8_t *bytes, size_t bytes_len,
+                            RezzyKernel **kernel, uint8_t **out,
+                            size_t *out_len);
+
+/*
  * Releases a buffer returned through *out. Pass the exact out_len that came
  * back with it, and free each buffer once; a wrong length or a second free is
  * undefined behaviour. Accepts NULL.

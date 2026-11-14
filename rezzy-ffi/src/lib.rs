@@ -11,7 +11,10 @@ use rezzy::hamt::{build_hamt_root_handle, diff_hamt_nodes, HamtNode, RootHandle,
 use rezzy::incremental::LtHash;
 use rezzy::state::hamt_root::StateHamtKey;
 use rezzy::JsonValue;
-use rezzy_recon::{FixedWindowElementHash, Gf256, Gf256Decoder, Gf256Sketch, RoomAccumulator};
+use rezzy_recon::resident::ResidentKernel;
+use rezzy_recon::{
+    ElementHash, FixedWindowElementHash, Gf256, Gf256Decoder, Gf256Sketch, RoomAccumulator,
+};
 use std::ffi::{c_char, CStr};
 use std::ptr;
 use std::sync::Arc;
@@ -441,6 +444,217 @@ pub unsafe extern "C" fn rezzy_recon(
     })
 }
 
+/// Opaque running reconciliation state for one room: the digest and the
+/// estimator that `ResidentKernel` maintains as events are added and removed.
+/// Elements are `ElementHash` values, the MSC4521 `algebraic_v1` profile that
+/// other servers (for example congruent) speak on the wire.
+///
+/// A handle is not thread-safe; callers serialize access to one handle.
+pub struct RezzyKernel {
+    inner: ResidentKernel,
+}
+
+/// Creates an empty kernel. Release it with [`rezzy_kernel_free`].
+#[no_mangle]
+pub extern "C" fn rezzy_kernel_new() -> *mut RezzyKernel {
+    Box::into_raw(Box::new(RezzyKernel {
+        inner: ResidentKernel::new(),
+    }))
+}
+
+/// Releases a kernel. Accepts null; free each handle once.
+///
+/// # Safety
+/// `kernel` must be null or a pointer returned by [`rezzy_kernel_new`] or
+/// [`rezzy_kernel_from_bytes`] that has not been freed.
+#[no_mangle]
+pub unsafe extern "C" fn rezzy_kernel_free(kernel: *mut RezzyKernel) {
+    if !kernel.is_null() {
+        // SAFETY: allocated by `Box::new` in this crate, freed once per contract.
+        drop(unsafe { Box::from_raw(kernel) });
+    }
+}
+
+/// Adds (`insert`) or removes one event ID from the kernel.
+///
+/// # Safety
+/// Same contract as [`rezzy_kernel_insert`].
+unsafe fn kernel_update(
+    kernel: *mut RezzyKernel,
+    event_id: *const u8,
+    event_id_len: usize,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+    insert: bool,
+) -> i32 {
+    guard(out, out_len, || {
+        // SAFETY: non-null output slots are required to be writable.
+        unsafe { reset_outputs(out, out_len) };
+        if kernel.is_null() || event_id.is_null() || out.is_null() || out_len.is_null() {
+            return BAD_ARG;
+        }
+        // SAFETY: non-null, `event_id_len` readable bytes per the contract.
+        let bytes = unsafe { std::slice::from_raw_parts(event_id, event_id_len) };
+        let result = std::str::from_utf8(bytes)
+            .map_err(|_| String::from("event ID is not UTF-8"))
+            .and_then(|id| {
+                ElementHash::from_matrix_event_id_any(id)
+                    .map_err(|error| std::format!("invalid event ID `{id}`: {error:?}"))
+            })
+            .and_then(|element| {
+                // SAFETY: non-null and exclusively used for this call per the contract.
+                let kernel = unsafe { &mut *kernel };
+                if insert {
+                    kernel.inner.insert(element)
+                } else {
+                    kernel.inner.remove(element)
+                }
+                .map_err(|error| std::format!("{error:?}"))
+            });
+        match result {
+            Ok(()) => OK,
+            Err(message) => {
+                hand_over(message.into_bytes(), out, out_len);
+                ERR
+            }
+        }
+    })
+}
+
+/// Adds an event ID to the kernel.
+///
+/// The kernel is an XOR accumulator: inserting the same ID twice cancels it
+/// out. Insert each event once. Returns 0, 1 with a message in `*out` for an
+/// invalid ID or a limit error, or 2 for null arguments.
+///
+/// # Safety
+/// `kernel` must be a live handle used by one thread at a time. `event_id`
+/// must reference `event_id_len` readable bytes. Non-null `out` and `out_len`
+/// must point to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn rezzy_kernel_insert(
+    kernel: *mut RezzyKernel,
+    event_id: *const u8,
+    event_id_len: usize,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { kernel_update(kernel, event_id, event_id_len, out, out_len, true) }
+}
+
+/// Removes an event ID from the kernel. Removing from an empty kernel is an
+/// error; removing an ID that was never inserted corrupts the digest, so only
+/// remove IDs that were inserted.
+///
+/// # Safety
+/// Same contract as [`rezzy_kernel_insert`].
+#[no_mangle]
+pub unsafe extern "C" fn rezzy_kernel_remove(
+    kernel: *mut RezzyKernel,
+    event_id: *const u8,
+    event_id_len: usize,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { kernel_update(kernel, event_id, event_id_len, out, out_len, false) }
+}
+
+/// Writes the kernel's fixed-size persisted record to `*out`.
+///
+/// # Safety
+/// `kernel` must be a live handle. Non-null `out` and `out_len` must point to
+/// writable storage; free the buffer with [`rezzy_free`].
+#[no_mangle]
+pub unsafe extern "C" fn rezzy_kernel_to_bytes(
+    kernel: *const RezzyKernel,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    guard(out, out_len, || {
+        // SAFETY: non-null output slots are required to be writable.
+        unsafe { reset_outputs(out, out_len) };
+        if kernel.is_null() || out.is_null() || out_len.is_null() {
+            return BAD_ARG;
+        }
+        // SAFETY: non-null live handle per the contract.
+        let bytes = unsafe { &*kernel }.inner.to_bytes().to_vec();
+        hand_over(bytes, out, out_len);
+        OK
+    })
+}
+
+/// Writes `{"digest":"<base64url>","count":N}` for the kernel's current set,
+/// the same shape `rezzy_recon` returns for `digest`.
+///
+/// # Safety
+/// Same contract as [`rezzy_kernel_to_bytes`].
+#[no_mangle]
+pub unsafe extern "C" fn rezzy_kernel_digest(
+    kernel: *const RezzyKernel,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    guard(out, out_len, || {
+        // SAFETY: non-null output slots are required to be writable.
+        unsafe { reset_outputs(out, out_len) };
+        if kernel.is_null() || out.is_null() || out_len.is_null() {
+            return BAD_ARG;
+        }
+        // SAFETY: non-null live handle per the contract.
+        let accumulator = unsafe { &*kernel }.inner.accumulator();
+        let response = rezzy::json!({
+            "digest": accumulator.encode_digest(),
+            "count": accumulator.known_event_count(),
+        });
+        write_json_response(&response, out, out_len)
+    })
+}
+
+/// Rebuilds a kernel from the record written by [`rezzy_kernel_to_bytes`].
+///
+/// On 0, `*kernel` is a new handle to release with [`rezzy_kernel_free`]. On
+/// 1, `*kernel` is null and `*out` holds a message (wrong length, unknown
+/// version, or an inconsistent record). On 2, an argument was null.
+///
+/// # Safety
+/// `bytes` must reference `bytes_len` readable bytes. Non-null `kernel`, `out`
+/// and `out_len` must point to writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn rezzy_kernel_from_bytes(
+    bytes: *const u8,
+    bytes_len: usize,
+    kernel: *mut *mut RezzyKernel,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    guard(out, out_len, || {
+        // SAFETY: non-null output slots are required to be writable.
+        unsafe { reset_outputs(out, out_len) };
+        if !kernel.is_null() {
+            // SAFETY: non-null `kernel` is required to point to writable storage.
+            unsafe { *kernel = ptr::null_mut() };
+        }
+        if bytes.is_null() || kernel.is_null() || out.is_null() || out_len.is_null() {
+            return BAD_ARG;
+        }
+        // SAFETY: non-null, `bytes_len` readable bytes per the contract.
+        let record = unsafe { std::slice::from_raw_parts(bytes, bytes_len) };
+        match ResidentKernel::from_bytes(record) {
+            Ok(inner) => {
+                // SAFETY: checked non-null above.
+                unsafe { *kernel = Box::into_raw(Box::new(RezzyKernel { inner })) };
+                OK
+            }
+            Err(error) => {
+                hand_over(std::format!("{error:?}").into_bytes(), out, out_len);
+                ERR
+            }
+        }
+    })
+}
+
 fn write_json_response(response: &JsonValue, out: *mut *mut u8, out_len: *mut usize) -> i32 {
     match rezzy::json::write_string_value(response) {
         Ok(json) => {
@@ -853,6 +1067,130 @@ mod tests {
             )
         };
         (status, take_text(out, len))
+    }
+
+    fn event_id_bytes(id: &str) -> (*const u8, usize) {
+        (id.as_ptr(), id.len())
+    }
+
+    fn kernel_op(
+        f: unsafe extern "C" fn(
+            *mut RezzyKernel,
+            *const u8,
+            usize,
+            *mut *mut u8,
+            *mut usize,
+        ) -> i32,
+        kernel: *mut RezzyKernel,
+        id: &str,
+    ) -> (i32, String) {
+        let (ptr_id, len_id) = event_id_bytes(id);
+        let mut out = ptr::null_mut();
+        let mut len = 0;
+        // SAFETY: valid handle and buffers; `out` released by `take_text`.
+        let status = unsafe { f(kernel, ptr_id, len_id, &raw mut out, &raw mut len) };
+        (status, take_text(out, len))
+    }
+
+    fn kernel_text(
+        f: unsafe extern "C" fn(*const RezzyKernel, *mut *mut u8, *mut usize) -> i32,
+        kernel: *const RezzyKernel,
+    ) -> (i32, Vec<u8>) {
+        let mut out = ptr::null_mut();
+        let mut len = 0;
+        // SAFETY: valid handle and buffers.
+        let status = unsafe { f(kernel, &raw mut out, &raw mut len) };
+        let bytes = if out.is_null() {
+            Vec::new()
+        } else {
+            // SAFETY: just returned by the library; freed once.
+            let bytes = unsafe { std::slice::from_raw_parts(out, len) }.to_vec();
+            unsafe { rezzy_free(out, len) };
+            bytes
+        };
+        (status, bytes)
+    }
+
+    #[test]
+    fn kernel_matches_one_shot_digest_and_round_trips() {
+        let kernel = rezzy_kernel_new();
+        for id in [ID_V12, ID_V3] {
+            assert_eq!(kernel_op(rezzy_kernel_insert, kernel, id).0, OK);
+        }
+        let (status, digest) = kernel_text(rezzy_kernel_digest, kernel);
+        assert_eq!(status, OK);
+        let (_, expected) = call_recon(&format!(
+            r#"{{"op":"digest","event_ids":["{ID_V12}","{ID_V3}"]}}"#
+        ));
+        assert_eq!(String::from_utf8(digest).unwrap(), expected);
+
+        // Persist, rebuild, and confirm the same digest.
+        let (status, record) = kernel_text(rezzy_kernel_to_bytes, kernel);
+        assert_eq!(status, OK);
+        let mut rebuilt = ptr::null_mut();
+        let (mut out, mut len) = (ptr::null_mut(), 0);
+        // SAFETY: valid buffers; handle freed below.
+        let status = unsafe {
+            rezzy_kernel_from_bytes(
+                record.as_ptr(),
+                record.len(),
+                &raw mut rebuilt,
+                &raw mut out,
+                &raw mut len,
+            )
+        };
+        assert_eq!(status, OK);
+        assert!(out.is_null());
+        assert_eq!(
+            kernel_text(rezzy_kernel_digest, rebuilt).1,
+            expected.into_bytes()
+        );
+
+        // Removing an event returns to the digest of the smaller set.
+        assert_eq!(kernel_op(rezzy_kernel_remove, kernel, ID_V3).0, OK);
+        let (_, one) = call_recon(&format!(r#"{{"op":"digest","event_ids":["{ID_V12}"]}}"#));
+        assert_eq!(kernel_text(rezzy_kernel_digest, kernel).1, one.into_bytes());
+        // SAFETY: each handle freed once.
+        unsafe {
+            rezzy_kernel_free(kernel);
+            rezzy_kernel_free(rebuilt);
+        }
+    }
+
+    #[test]
+    fn kernel_rejects_bad_input() {
+        let kernel = rezzy_kernel_new();
+        let (status, message) = kernel_op(rezzy_kernel_insert, kernel, "not-an-event-id");
+        assert_eq!(status, ERR);
+        assert!(message.contains("invalid event ID"), "{message}");
+        assert_eq!(
+            kernel_op(rezzy_kernel_insert, ptr::null_mut(), ID_V12).0,
+            BAD_ARG
+        );
+        // Removing from an empty kernel fails instead of corrupting it.
+        assert_eq!(kernel_op(rezzy_kernel_remove, kernel, ID_V12).0, ERR);
+
+        let mut handle = ptr::null_mut();
+        let (mut out, mut len) = (ptr::null_mut(), 0);
+        let short = [1_u8; 3];
+        // SAFETY: valid buffers.
+        let status = unsafe {
+            rezzy_kernel_from_bytes(
+                short.as_ptr(),
+                short.len(),
+                &raw mut handle,
+                &raw mut out,
+                &raw mut len,
+            )
+        };
+        assert_eq!(status, ERR);
+        assert!(handle.is_null());
+        // SAFETY: freeing the message once, then the kernel once; null is accepted.
+        unsafe {
+            rezzy_free(out, len);
+            rezzy_kernel_free(handle);
+            rezzy_kernel_free(kernel);
+        }
     }
 
     fn call_recon(request: &str) -> (i32, String) {

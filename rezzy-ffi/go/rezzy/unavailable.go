@@ -53,3 +53,29 @@ func ReconSketch(eventIDs []string, capacity int) ([]byte, error) {
 func ReconDiff(localEventIDs []string, remoteSketch []byte, capacity int) (localOnly []string, remoteOnly [][32]byte, err error) {
 	return nil, nil, ErrUnavailable
 }
+
+// Kernel is unavailable in this build; every method returns ErrUnavailable.
+type Kernel struct{}
+
+// NewKernel is unavailable in this build.
+func NewKernel() (*Kernel, error) { return nil, ErrUnavailable }
+
+// KernelFromBytes is unavailable in this build.
+func KernelFromBytes(record []byte) (*Kernel, error) { return nil, ErrUnavailable }
+
+// Close does nothing in this build.
+func (k *Kernel) Close() {}
+
+// Insert is unavailable in this build.
+func (k *Kernel) Insert(eventID string) error { return ErrUnavailable }
+
+// Remove is unavailable in this build.
+func (k *Kernel) Remove(eventID string) error { return ErrUnavailable }
+
+// Bytes is unavailable in this build.
+func (k *Kernel) Bytes() ([]byte, error) { return nil, ErrUnavailable }
+
+// Digest is unavailable in this build.
+func (k *Kernel) Digest() (digest string, count uint64, err error) {
+	return "", 0, ErrUnavailable
+}

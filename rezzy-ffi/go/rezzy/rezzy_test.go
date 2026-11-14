@@ -129,3 +129,52 @@ func TestReconciliation(t *testing.T) {
 		t.Fatalf("remoteOnly = %v, want one digest", remoteOnly)
 	}
 }
+
+func TestKernelMatchesOneShotDigestAndRoundTrips(t *testing.T) {
+	ids := []string{knownID, "$RrGxF28UrHLmoASHndYb9Jb/1SFww2ptmtur9INS438"}
+	kernel, err := NewKernel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer kernel.Close()
+	for _, id := range ids {
+		if err := kernel.Insert(id); err != nil {
+			t.Fatalf("Insert(%s): %v", id, err)
+		}
+	}
+	digest, count, err := kernel.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDigest, wantCount, err := ReconDigest(ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest != wantDigest || count != wantCount {
+		t.Fatalf("kernel digest = %s/%d, one-shot = %s/%d", digest, count, wantDigest, wantCount)
+	}
+
+	record, err := kernel.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := KernelFromBytes(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rebuilt.Close()
+	if again, _, _ := rebuilt.Digest(); again != digest {
+		t.Fatalf("rebuilt digest = %s, want %s", again, digest)
+	}
+
+	if err := kernel.Insert("not-an-event-id"); err == nil {
+		t.Fatal("Insert of an invalid ID succeeded")
+	}
+	if _, err := KernelFromBytes([]byte{1, 2, 3}); err == nil {
+		t.Fatal("KernelFromBytes accepted a short record")
+	}
+	kernel.Close()
+	if err := kernel.Insert(knownID); err != ErrKernelClosed {
+		t.Fatalf("closed kernel error = %v, want ErrKernelClosed", err)
+	}
+}
