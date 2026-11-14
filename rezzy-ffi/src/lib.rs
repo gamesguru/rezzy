@@ -479,6 +479,29 @@ pub unsafe extern "C" fn rezzy_kernel_free(kernel: *mut RezzyKernel) {
     }
 }
 
+/// Shared prologue for the read-only kernel getters: clears the outputs,
+/// rejects null arguments, then runs `body` with the live handle.
+///
+/// # Safety
+/// `kernel` must be null or a live handle; non-null `out` and `out_len` must
+/// point to writable storage.
+unsafe fn kernel_read(
+    kernel: *const RezzyKernel,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+    body: impl FnOnce(&RezzyKernel, *mut *mut u8, *mut usize) -> i32 + std::panic::UnwindSafe,
+) -> i32 {
+    guard(out, out_len, || {
+        // SAFETY: non-null output slots are required to be writable.
+        unsafe { reset_outputs(out, out_len) };
+        if kernel.is_null() || out.is_null() || out_len.is_null() {
+            return BAD_ARG;
+        }
+        // SAFETY: non-null live handle per the contract.
+        body(unsafe { &*kernel }, out, out_len)
+    })
+}
+
 /// Adds (`insert`) or removes one event ID from the kernel.
 ///
 /// # Safety
@@ -576,17 +599,13 @@ pub unsafe extern "C" fn rezzy_kernel_to_bytes(
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    guard(out, out_len, || {
-        // SAFETY: non-null output slots are required to be writable.
-        unsafe { reset_outputs(out, out_len) };
-        if kernel.is_null() || out.is_null() || out_len.is_null() {
-            return BAD_ARG;
-        }
-        // SAFETY: non-null live handle per the contract.
-        let bytes = unsafe { &*kernel }.inner.to_bytes().to_vec();
-        hand_over(bytes, out, out_len);
-        OK
-    })
+    // SAFETY: forwarded from this function's contract.
+    unsafe {
+        kernel_read(kernel, out, out_len, |kernel, out, out_len| {
+            hand_over(kernel.inner.to_bytes().to_vec(), out, out_len);
+            OK
+        })
+    }
 }
 
 /// Writes `{"digest":"<base64url>","count":N}` for the kernel's current set,
@@ -600,21 +619,17 @@ pub unsafe extern "C" fn rezzy_kernel_digest(
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    guard(out, out_len, || {
-        // SAFETY: non-null output slots are required to be writable.
-        unsafe { reset_outputs(out, out_len) };
-        if kernel.is_null() || out.is_null() || out_len.is_null() {
-            return BAD_ARG;
-        }
-        // SAFETY: non-null live handle per the contract.
-        let kernel = unsafe { &*kernel };
-        let accumulator = kernel.inner.accumulator();
-        let response = rezzy::json!({
-            "digest": accumulator.encode_digest(),
-            "count": accumulator.known_event_count(),
-        });
-        write_json_response(&response, out, out_len)
-    })
+    // SAFETY: forwarded from this function's contract.
+    unsafe {
+        kernel_read(kernel, out, out_len, |kernel, out, out_len| {
+            let accumulator = kernel.inner.accumulator();
+            let response = rezzy::json!({
+                "digest": accumulator.encode_digest(),
+                "count": accumulator.known_event_count(),
+            });
+            write_json_response(&response, out, out_len)
+        })
+    }
 }
 
 /// Writes the kernel's 32 base64url-encoded strata coordinates as JSON.
@@ -627,19 +642,16 @@ pub unsafe extern "C" fn rezzy_kernel_strata(
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    guard(out, out_len, || {
-        // SAFETY: non-null output slots are required to be writable.
-        unsafe { reset_outputs(out, out_len) };
-        if kernel.is_null() || out.is_null() || out_len.is_null() {
-            return BAD_ARG;
-        }
-        // SAFETY: non-null live handle per the contract.
-        let strata = rezzy_recon::encode_strata(unsafe { &*kernel }.inner.strata());
-        let response = rezzy::json!({
-            "strata": JsonValue::Array(strata.into_iter().map(JsonValue::String).collect()),
-        });
-        write_json_response(&response, out, out_len)
-    })
+    // SAFETY: forwarded from this function's contract.
+    unsafe {
+        kernel_read(kernel, out, out_len, |kernel, out, out_len| {
+            let strata = rezzy_recon::encode_strata(kernel.inner.strata());
+            let response = rezzy::json!({
+                "strata": JsonValue::Array(strata.into_iter().map(JsonValue::String).collect()),
+            });
+            write_json_response(&response, out, out_len)
+        })
+    }
 }
 
 /// Rebuilds a kernel from the record written by [`rezzy_kernel_to_bytes`].
@@ -1226,6 +1238,9 @@ fn request_capacity(request: &JsonValue) -> Result<usize, String> {
     Ok(capacity)
 }
 
+// One dispatch keeps every reconciliation request/response pair comparable
+// side by side; splitting it by operation would scatter that contract.
+#[allow(clippy::too_many_lines)]
 fn recon_response(request: &JsonValue) -> Result<JsonValue, String> {
     match require_str(request, "op")? {
         "digest" => {
