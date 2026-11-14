@@ -7,15 +7,17 @@
 //! `out`/`out_len`. Buffers are allocated here and released with
 //! [`rezzy_free`]; callers never free them with their own allocator.
 
+use base64::Engine as _;
 use rezzy::hamt::{build_hamt_root_handle, diff_hamt_nodes, HamtNode, RootHandle, StructuralHash};
 use rezzy::incremental::LtHash;
 use rezzy::state::hamt_root::StateHamtKey;
 use rezzy::JsonValue;
 use rezzy_recon::resident::ResidentKernel;
 use rezzy_recon::{
-    BucketDecodeBatch, BucketDecodeSuccess, BucketRequest, ClientAction, ElementHash,
-    FixedWindowElementHash, Gf256, Gf256Decoder, Gf256Sketch, ReconciliationClient, RemoteDigest,
-    RoomAccumulator, MAX_BUCKETED_SKETCH_CAPACITY, MAX_RECONCILIATION_ROUNDS,
+    build_bucket_sketches, encode_strata, BucketDecodeBatch, BucketDecodeSuccess, BucketRequest,
+    ClientAction, ElementHash, EventIdFormat, FixedWindowElementHash, Gf256, Gf256Decoder,
+    Gf256Sketch, ReconciliationClient, RemoteDigest, RoomAccumulator, SortedPopulation,
+    SyndromeSketch, MAX_BUCKETED_SKETCH_CAPACITY, MAX_RECONCILIATION_ROUNDS,
 };
 use std::ffi::{c_char, CStr};
 use std::ptr;
@@ -605,10 +607,36 @@ pub unsafe extern "C" fn rezzy_kernel_digest(
             return BAD_ARG;
         }
         // SAFETY: non-null live handle per the contract.
-        let accumulator = unsafe { &*kernel }.inner.accumulator();
+        let kernel = unsafe { &*kernel };
+        let accumulator = kernel.inner.accumulator();
         let response = rezzy::json!({
             "digest": accumulator.encode_digest(),
             "count": accumulator.known_event_count(),
+        });
+        write_json_response(&response, out, out_len)
+    })
+}
+
+/// Writes the kernel's 32 base64url-encoded strata coordinates as JSON.
+///
+/// # Safety
+/// Same contract as [`rezzy_kernel_to_bytes`].
+#[no_mangle]
+pub unsafe extern "C" fn rezzy_kernel_strata(
+    kernel: *const RezzyKernel,
+    out: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    guard(out, out_len, || {
+        // SAFETY: non-null output slots are required to be writable.
+        unsafe { reset_outputs(out, out_len) };
+        if kernel.is_null() || out.is_null() || out_len.is_null() {
+            return BAD_ARG;
+        }
+        // SAFETY: non-null live handle per the contract.
+        let strata = rezzy_recon::encode_strata(unsafe { &*kernel }.inner.strata());
+        let response = rezzy::json!({
+            "strata": JsonValue::Array(strata.into_iter().map(JsonValue::String).collect()),
         });
         write_json_response(&response, out, out_len)
     })
@@ -729,6 +757,8 @@ pub unsafe extern "C" fn rezzy_client_step(
     out: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    // SAFETY: pointer validity and exclusive handle access are the caller's
+    // responsibility per this function's contract.
     guard(out, out_len, || unsafe {
         if client.is_null() {
             // SAFETY: non-null output slots are writable per the function contract.
@@ -757,6 +787,10 @@ pub unsafe extern "C" fn rezzy_client_step(
     })
 }
 
+// One JSON state machine keeps the two step kinds (`start`, `advance`) in one
+// place with their shared handle state, which is clearer than threading that
+// state through separate functions.
+#[allow(clippy::too_many_lines)]
 fn client_step_inner(client: &mut RezzyClient, request: &JsonValue) -> Result<JsonValue, String> {
     match require_str(request, "op")? {
         "start" => {
@@ -1273,8 +1307,247 @@ fn recon_response(request: &JsonValue) -> Result<JsonValue, String> {
                 "count": difference.len(),
             }))
         }
+        // Responder-side snapshot: the algebraic_v1 digest, count and strata
+        // for a room's event set. `format` is "v4plus" (default) or "v3".
+        "snapshot" => {
+            let elements = algebraic_event_elements(request)?;
+            let mut kernel = ResidentKernel::new();
+            for (_, element) in &elements {
+                kernel
+                    .insert(*element)
+                    .map_err(|error| std::format!("{error:?}"))?;
+            }
+            Ok(rezzy::json!({
+                "digest": kernel.accumulator().encode_digest(),
+                "count": kernel.accumulator().known_event_count(),
+                "strata": JsonValue::Array(
+                    encode_strata(kernel.strata())
+                        .into_iter()
+                        .map(JsonValue::String)
+                        .collect(),
+                ),
+            }))
+        }
+        // Responder-side bucket sketches for the requested MSC4521 triage
+        // buckets. Returns one unpadded base64url sketch per request.
+        "bucket_sketches" => {
+            let elements = algebraic_event_elements(request)?;
+            let requests = parse_bucket_requests(request)?;
+            let population =
+                SortedPopulation::new(elements.iter().map(|(_, element)| *element).collect());
+            let sketches = build_bucket_sketches(population.h64s(), &requests)
+                .map_err(|error| std::format!("{error:?}"))?;
+            Ok(rezzy::json!({
+                "sketches": JsonValue::Array(
+                    sketches
+                        .iter()
+                        .map(|sketch| JsonValue::String(sketch.encode()))
+                        .collect(),
+                ),
+            }))
+        }
+        // Responder-side room_diff: subtract the requester's sketches from
+        // ours, decode the symmetric difference, and report the events the
+        // requester is missing plus the short IDs only it holds.
+        "bucket_diff" => {
+            let elements = algebraic_event_elements(request)?;
+            let requests = parse_bucket_requests(request)?;
+            let local_sketches = parse_local_sketches(request, &requests)?;
+            let local_digest =
+                RoomAccumulator::decode_digest(require_str(request, "local_digest")?)
+                    .map_err(|error| std::format!("invalid local_digest: {error:?}"))?;
+            let local_count = request
+                .get("local_known_event_count")
+                .and_then(JsonValue::as_u64)
+                .ok_or_else(|| {
+                    String::from("`local_known_event_count` must be an unsigned integer")
+                })?;
+
+            let mut accumulator = RoomAccumulator::new();
+            let mut h64_to_events: std::collections::BTreeMap<u64, Vec<(String, ElementHash)>> =
+                std::collections::BTreeMap::new();
+            for (id, element) in &elements {
+                accumulator
+                    .insert(*element)
+                    .map_err(|error| std::format!("{error:?}"))?;
+                h64_to_events
+                    .entry(element.h64)
+                    .or_default()
+                    .push((id.clone(), *element));
+            }
+
+            let residual_digest = accumulator.digest() ^ local_digest;
+            if residual_digest == 0 && accumulator.known_event_count() == local_count {
+                return Ok(rezzy::json!({
+                    "status": "decoded",
+                    "missing_event_ids": JsonValue::Array(Vec::new()),
+                    "requester_only_short_ids": JsonValue::Array(Vec::new()),
+                    "expected_requester_side_accumulator":
+                        RoomAccumulator::new().encode_digest(),
+                    "count": accumulator.known_event_count(),
+                }));
+            }
+
+            let population =
+                SortedPopulation::new(elements.iter().map(|(_, element)| *element).collect());
+            let responder_sketches = build_bucket_sketches(population.h64s(), &requests)
+                .map_err(|error| std::format!("{error:?}"))?;
+
+            let mut responder_side = RoomAccumulator::new();
+            let mut missing_event_ids: Vec<String> = Vec::new();
+            let mut requester_only_short_ids: Vec<String> = Vec::new();
+            for ((request, local_sketch), responder_sketch) in requests
+                .iter()
+                .zip(&local_sketches)
+                .zip(&responder_sketches)
+            {
+                let residual = responder_sketch
+                    .subtract(local_sketch)
+                    .map_err(|error| std::format!("{error:?}"))?;
+                if residual
+                    .coordinates()
+                    .iter()
+                    .all(|&coordinate| coordinate == 0)
+                {
+                    continue;
+                }
+                let roots = match residual.decode_elements(request.capacity) {
+                    Ok(roots) => roots,
+                    Err(
+                        rezzy_recon::AlgebraicError::DecodeFailure
+                        | rezzy_recon::AlgebraicError::BudgetExhausted,
+                    ) => {
+                        return Ok(rezzy::json!({
+                            "status": "capacity_exceeded",
+                            "missing_event_ids": JsonValue::Array(Vec::new()),
+                            "requester_only_short_ids": JsonValue::Array(Vec::new()),
+                            "count": accumulator.known_event_count(),
+                        }));
+                    }
+                    Err(error) => return Err(std::format!("{error:?}")),
+                };
+                for root in roots {
+                    if let Some(events) = h64_to_events.get(&root) {
+                        for (event_id, element) in events {
+                            missing_event_ids.push(event_id.clone());
+                            responder_side
+                                .insert(*element)
+                                .map_err(|error| std::format!("{error:?}"))?;
+                        }
+                    } else {
+                        requester_only_short_ids.push(
+                            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                                .encode(root.to_be_bytes()),
+                        );
+                    }
+                }
+            }
+
+            Ok(rezzy::json!({
+                "status": "decoded",
+                "missing_event_ids": JsonValue::Array(
+                    missing_event_ids.into_iter().map(JsonValue::String).collect(),
+                ),
+                "requester_only_short_ids": JsonValue::Array(
+                    requester_only_short_ids.into_iter().map(JsonValue::String).collect(),
+                ),
+                "expected_requester_side_accumulator": RoomAccumulator::from_parts(
+                    residual_digest ^ responder_side.digest(),
+                    0,
+                )
+                .encode_digest(),
+                "count": accumulator.known_event_count(),
+            }))
+        }
         other => Err(std::format!("unknown reconciliation op `{other}`")),
     }
+}
+
+/// Parses the event IDs of an `algebraic_v1` request and derives their
+/// `ElementHash`es. `format` selects the reference-hash base64 alphabet:
+/// `"v4plus"` (default, room versions 4+) or `"v3"` (room version 3).
+fn algebraic_event_elements(request: &JsonValue) -> Result<Vec<(String, ElementHash)>, String> {
+    let ids = parse_event_ids(request, "event_ids")?;
+    let format = match request.get("format").and_then(JsonValue::as_str) {
+        None | Some("v4plus") => EventIdFormat::V4Plus,
+        Some("v3") => EventIdFormat::V3,
+        Some(other) => return Err(std::format!("unknown event ID format `{other}`")),
+    };
+    ids.into_iter()
+        .map(|id| {
+            ElementHash::from_matrix_event_id(&id, format)
+                .map(|element| (id.clone(), element))
+                .map_err(|error| std::format!("invalid event ID `{id}`: {error:?}"))
+        })
+        .collect()
+}
+
+/// Parses MSC4521 triage bucket requests. `prefix` may be a number or a
+/// decimal string, matching the wire format.
+fn parse_bucket_requests(request: &JsonValue) -> Result<Vec<BucketRequest>, String> {
+    let items = request
+        .get("requests")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| String::from("`requests` must be an array"))?;
+    let mut requests = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let depth = item
+            .get("depth")
+            .and_then(JsonValue::as_u64)
+            .and_then(|depth| u8::try_from(depth).ok())
+            .ok_or_else(|| std::format!("request {index} has invalid `depth`"))?;
+        let prefix = item
+            .get("prefix")
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+            })
+            .ok_or_else(|| std::format!("request {index} has invalid `prefix`"))?;
+        let capacity = item
+            .get("capacity")
+            .and_then(JsonValue::as_u64)
+            .and_then(|capacity| usize::try_from(capacity).ok())
+            .ok_or_else(|| std::format!("request {index} has invalid `capacity`"))?;
+        let overflow = item
+            .get("overflow")
+            .and_then(JsonValue::as_bool)
+            .unwrap_or(false);
+        requests.push(if overflow {
+            BucketRequest::with_overflow(depth, prefix, capacity)
+        } else {
+            BucketRequest::new(depth, prefix, capacity)
+        });
+    }
+    Ok(requests)
+}
+
+/// Decodes the requester's sketches, one per bucket request.
+fn parse_local_sketches(
+    request: &JsonValue,
+    requests: &[BucketRequest],
+) -> Result<Vec<SyndromeSketch>, String> {
+    let sketches = request
+        .get("local_sketches")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| String::from("`local_sketches` must be an array"))?;
+    if sketches.len() != requests.len() {
+        return Err(String::from(
+            "`local_sketches` length must match `requests` length",
+        ));
+    }
+    sketches
+        .iter()
+        .zip(requests)
+        .enumerate()
+        .map(|(index, (value, request))| {
+            let encoded = value
+                .as_str()
+                .ok_or_else(|| std::format!("`local_sketches` entry {index} must be a string"))?;
+            SyndromeSketch::decode(request.capacity, encoded)
+                .map_err(|error| std::format!("invalid local sketch {index}: {error:?}"))
+        })
+        .collect()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -1428,6 +1701,7 @@ mod tests {
         } else {
             // SAFETY: just returned by the library; freed once.
             let bytes = unsafe { std::slice::from_raw_parts(out, len) }.to_vec();
+            // SAFETY: same buffer, freed exactly once with its returned length.
             unsafe { rezzy_free(out, len) };
             bytes
         };
@@ -1442,6 +1716,17 @@ mod tests {
         }
         let (status, digest) = kernel_text(rezzy_kernel_digest, kernel);
         assert_eq!(status, OK);
+        let (status, strata) = kernel_text(rezzy_kernel_strata, kernel);
+        assert_eq!(status, OK);
+        let strata = JsonValue::parse(std::str::from_utf8(&strata).unwrap()).unwrap();
+        assert_eq!(
+            strata
+                .get("strata")
+                .and_then(JsonValue::as_array)
+                .unwrap()
+                .len(),
+            32
+        );
         let (_, expected) = call_recon(&format!(
             r#"{{"op":"digest","event_ids":["{ID_V12}","{ID_V3}"]}}"#
         ));

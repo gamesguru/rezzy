@@ -16,6 +16,7 @@ exclude = ["examples/", "go/", "go.mod"]
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
+base64 = { workspace = true, features = ["std"] }
 rezzy = { workspace = true, default-features = false, features = ["std"] }
 rezzy-recon = { workspace = true, default-features = false, features = ["std"] }
 

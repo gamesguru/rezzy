@@ -129,3 +129,28 @@ func (k *Kernel) Digest() (digest string, count uint64, err error) {
 	}
 	return parsed.Digest, parsed.Count, nil
 }
+
+// Strata returns the 32 base64url-encoded coordinates used by the
+// room_digest/strata response.
+func (k *Kernel) Strata() ([]string, error) {
+	if k == nil || k.handle == nil {
+		return nil, ErrKernelClosed
+	}
+	var out *C.uint8_t
+	var outLen C.size_t
+	status := C.rezzy_kernel_strata(k.handle, &out, &outLen)
+	response, err := finish(status, out, outLen)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Strata []string `json:"strata"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, fmt.Errorf("rezzy: decode kernel strata: %w", err)
+	}
+	if len(parsed.Strata) != 32 {
+		return nil, fmt.Errorf("rezzy: kernel returned %d strata, want 32", len(parsed.Strata))
+	}
+	return parsed.Strata, nil
+}

@@ -135,6 +135,11 @@ int rezzy_kernel_to_bytes(const RezzyKernel *kernel, uint8_t **out,
 int rezzy_kernel_digest(const RezzyKernel *kernel, uint8_t **out,
                         size_t *out_len);
 
+/* On REZZY_OK, *out is {"strata":["<base64url>", ...]} with 32 entries,
+ * suitable for the room_digest/strata response. */
+int rezzy_kernel_strata(const RezzyKernel *kernel, uint8_t **out,
+                        size_t *out_len);
+
 /* On REZZY_OK, *kernel is a new handle. On REZZY_ERR, *kernel is NULL and
  * *out holds a message (wrong length, unknown version, inconsistent record). */
 int rezzy_kernel_from_bytes(const uint8_t *bytes, size_t bytes_len,

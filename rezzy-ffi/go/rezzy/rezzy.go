@@ -220,6 +220,86 @@ func ReconDiff(localEventIDs []string, remoteSketch []byte, capacity int) (local
 	return parsed.LocalOnly, remoteOnly, nil
 }
 
+// ReconSnapshot returns the MSC4521 digest, event count and 32 strata for a
+// set of reference-hash event IDs. format is "v4plus" or "v3".
+func ReconSnapshot(eventIDs []string, format string) (*Snapshot, error) {
+	response, err := callRecon(map[string]any{
+		"op":        "snapshot",
+		"event_ids": eventIDs,
+		"format":    format,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Digest string   `json:"digest"`
+		Count  uint64   `json:"count"`
+		Strata []string `json:"strata"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, fmt.Errorf("rezzy: decode reconciliation snapshot: %w", err)
+	}
+	return &Snapshot{Digest: parsed.Digest, Count: parsed.Count, Strata: parsed.Strata}, nil
+}
+
+// ReconBucketSketches builds one base64url SyndromeSketch per requested bucket
+// over the given event set.
+func ReconBucketSketches(eventIDs []string, format string, requests []BucketRequest) ([]string, error) {
+	response, err := callRecon(map[string]any{
+		"op":        "bucket_sketches",
+		"event_ids": eventIDs,
+		"format":    format,
+		"requests":  requests,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Sketches []string `json:"sketches"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, fmt.Errorf("rezzy: decode bucket sketches: %w", err)
+	}
+	return parsed.Sketches, nil
+}
+
+// ReconBucketDiff subtracts the requester's bucket sketches from the local
+// event set and decodes the symmetric difference.
+func ReconBucketDiff(
+	eventIDs []string, format string, requests []BucketRequest,
+	localSketches []string, localDigest string, localCount uint64,
+) (*BucketDiffResult, error) {
+	response, err := callRecon(map[string]any{
+		"op":                      "bucket_diff",
+		"event_ids":               eventIDs,
+		"format":                  format,
+		"requests":                requests,
+		"local_sketches":          localSketches,
+		"local_digest":            localDigest,
+		"local_known_event_count": localCount,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Status                           string   `json:"status"`
+		MissingEventIDs                  []string `json:"missing_event_ids"`
+		RequesterOnlyShortIDs            []string `json:"requester_only_short_ids"`
+		ExpectedRequesterSideAccumulator string   `json:"expected_requester_side_accumulator"`
+		Count                            uint64   `json:"count"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, fmt.Errorf("rezzy: decode bucket diff: %w", err)
+	}
+	return &BucketDiffResult{
+		Status:                           parsed.Status,
+		MissingEventIDs:                  parsed.MissingEventIDs,
+		RequesterOnlyShortIDs:            parsed.RequesterOnlyShortIDs,
+		ExpectedRequesterSideAccumulator: parsed.ExpectedRequesterSideAccumulator,
+		KnownEventCount:                  parsed.Count,
+	}, nil
+}
+
 // Client drives the requester-side reconciliation policy. It snapshots the
 // kernel at creation and expects each decoded room-diff result through Step.
 type Client struct {

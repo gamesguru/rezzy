@@ -54,6 +54,24 @@ func ReconDiff(localEventIDs []string, remoteSketch []byte, capacity int) (local
 	return nil, nil, ErrUnavailable
 }
 
+// ReconSnapshot is unavailable in this build.
+func ReconSnapshot(eventIDs []string, format string) (*Snapshot, error) {
+	return nil, ErrUnavailable
+}
+
+// ReconBucketSketches is unavailable in this build.
+func ReconBucketSketches(eventIDs []string, format string, requests []BucketRequest) ([]string, error) {
+	return nil, ErrUnavailable
+}
+
+// ReconBucketDiff is unavailable in this build.
+func ReconBucketDiff(
+	eventIDs []string, format string, requests []BucketRequest,
+	localSketches []string, localDigest string, localCount uint64,
+) (*BucketDiffResult, error) {
+	return nil, ErrUnavailable
+}
+
 // Kernel is unavailable in this build; every method returns ErrUnavailable.
 type Kernel struct{}
 
@@ -79,6 +97,9 @@ func (k *Kernel) Bytes() ([]byte, error) { return nil, ErrUnavailable }
 func (k *Kernel) Digest() (digest string, count uint64, err error) {
 	return "", 0, ErrUnavailable
 }
+
+// Strata is unavailable in this build.
+func (k *Kernel) Strata() ([]string, error) { return nil, ErrUnavailable }
 
 // Client is unavailable in this build; every method returns ErrUnavailable.
 type Client struct{}

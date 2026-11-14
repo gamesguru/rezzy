@@ -43,7 +43,9 @@ cgo toolchain (`CGO_ENABLED=1`) to run native operations.
 ## Requester loop
 
 `Kernel` tracks one room's `algebraic_v1` digest and strata. Persist it with
-`Bytes` and restore it with `KernelFromBytes`. `NewClient` snapshots a kernel;
+`Bytes` and restore it with `KernelFromBytes`. `Digest` returns the digest and
+count; `Strata` returns the encoded 32-strata field for `room_digest/strata`.
+`NewClient` snapshots a kernel;
 feed its first remote digest and each decoded bucket response to `Step` as JSON.
 The result is the next action as JSON. The host remains responsible for
 federation requests and event handling. See the `rezzy_client_step` contract in

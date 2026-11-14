@@ -3,6 +3,7 @@
 package rezzy
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 )
@@ -152,6 +153,19 @@ func TestKernelMatchesOneShotDigestAndRoundTrips(t *testing.T) {
 	}
 	if digest != wantDigest || count != wantCount {
 		t.Fatalf("kernel digest = %s/%d, one-shot = %s/%d", digest, count, wantDigest, wantCount)
+	}
+	strata, err := kernel.Strata()
+	if err != nil {
+		t.Fatalf("Kernel.Strata: %v", err)
+	}
+	if len(strata) != 32 {
+		t.Fatalf("Kernel.Strata returned %d strata, want 32", len(strata))
+	}
+	for i, encoded := range strata {
+		coordinates, err := base64.RawURLEncoding.DecodeString(encoded)
+		if err != nil || len(coordinates) != 8*8 {
+			t.Fatalf("stratum %d is invalid: decoded length %d, error %v", i, len(coordinates), err)
+		}
 	}
 
 	record, err := kernel.Bytes()

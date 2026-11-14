@@ -628,6 +628,7 @@ dependencies = [
 name = "rezzy-ffi"
 version = "0.6.0-rc.1"
 dependencies = [
+ "base64",
  "rezzy",
  "rezzy-recon",
 ]
