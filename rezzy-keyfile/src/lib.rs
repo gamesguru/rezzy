@@ -15,4 +15,6 @@ pub mod bundle;
 pub mod container;
 
 pub use bundle::{KeyBundle, KeyEntry};
+#[cfg(any(test, feature = "weak-kdf-for-tests"))]
+pub use container::seal_with;
 pub use container::{open, seal};

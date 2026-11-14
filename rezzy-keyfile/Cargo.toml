@@ -11,6 +11,12 @@ description = "Passphrase-encrypted signing-key files and the multi-key bundle f
 keywords = ["matrix", "signing-key", "encryption", "federation"]
 categories = ["cryptography"]
 
+[features]
+# Exposes `container::seal_with`, which writes key files with weak Argon2
+# costs. For tests only: enable it from `[dev-dependencies]`, never in a
+# normal dependency, so a shipped build cannot write a low-cost key file.
+weak-kdf-for-tests = []
+
 [dependencies]
 argon2.workspace = true
 chacha20poly1305.workspace = true

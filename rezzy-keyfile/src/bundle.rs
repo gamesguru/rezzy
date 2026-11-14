@@ -329,8 +329,16 @@ impl KeyBundle {
     /// # Errors
     /// Returns an error if the RNG, KDF, or cipher fails.
     pub fn seal(&self, passphrase: &[u8]) -> Result<Vec<u8>, String> {
+        self.seal_using(passphrase, container::seal)
+    }
+
+    fn seal_using(
+        &self,
+        passphrase: &[u8],
+        seal: impl FnOnce(&[u8], &[u8]) -> Result<Vec<u8>, String>,
+    ) -> Result<Vec<u8>, String> {
         let mut plain = self.encode();
-        let sealed = container::seal(&plain, passphrase);
+        let sealed = seal(&plain, passphrase);
         plain.fill(0);
         sealed
     }
@@ -474,6 +482,21 @@ mod tests {
     }
 
     #[test]
+    fn reduced_cost_seal_path_round_trips() {
+        let bundle = two_keys();
+        let file = bundle
+            .seal_using(b"pw", |plain, passphrase| {
+                container::seal_with(plain, passphrase, FAST)
+            })
+            .unwrap();
+        let back = KeyBundle::unlock(&file, b"pw", Some(ORIGIN)).unwrap();
+        assert_eq!(back.encode(), bundle.encode());
+    }
+
+    // The only test that runs the production-cost KDF (64 MiB, 3 passes, twice).
+    // The test above exercises this same bundle sealing path with low test costs.
+    #[test]
+    #[ignore = "runs the production-cost KDF twice; use --ignored"]
     fn the_production_seal_path_round_trips() {
         let bundle = two_keys();
         let file = bundle.seal(b"pw").unwrap();

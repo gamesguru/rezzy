@@ -41,5 +41,8 @@ rpassword = { workspace = true, optional = true }
 sha2.workspace = true
 ureq.workspace = true
 
+[dev-dependencies]
+rezzy-keyfile = { workspace = true, features = ["weak-kdf-for-tests"] }
+
 [lints]
 workspace = true

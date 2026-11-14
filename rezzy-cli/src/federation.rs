@@ -2795,17 +2795,27 @@ mod tests {
             .contains("bad retired="));
     }
 
-    /// `encrypt-key --bundle` then `load_signing_key`: the active key is the
-    /// one used, a bundle for another origin is refused, and an old single-key
-    /// file still loads.
+    /// Weak Argon2 costs for fixtures whose KDF is not what the test is about.
+    const FAST_KDF: (u32, u32, u32) = (8, 1, 1);
+
+    fn write_fast(path: &std::path::Path, plaintext: &[u8]) {
+        let sealed =
+            rezzy_keyfile::container::seal_with(plaintext, b"throwaway", FAST_KDF).unwrap();
+        std::fs::write(path, sealed).unwrap();
+    }
+
+    /// The one test that runs `encrypt-key --bundle` at the production KDF
+    /// costs: one seal and one load. Everything else uses [`FAST_KDF`].
+    /// Ignored by default so the suite stays fast even without an optimized
+    /// dependency; run it with `cargo test -- --ignored`.
     #[test]
-    fn a_sealed_bundle_loads_for_its_origin_only_and_single_keys_still_work() {
-        let dir = std::env::temp_dir().join(format!("rezzy-bundle-load-{}", std::process::id()));
+    #[ignore = "pays the production Argon2 cost; use --ignored"]
+    fn encrypt_key_bundle_round_trips_at_production_costs() {
+        let dir = std::env::temp_dir().join(format!("rezzy-bundle-e2e-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         // Origin-scoped, so no other test or the user's environment is read.
-        std::env::set_var("REZZY_KEY_PASSPHRASE_BUNDLE_LOAD_EXAMPLE", "throwaway");
-
+        std::env::set_var("REZZY_KEY_PASSPHRASE_BUNDLE_E2E_EXAMPLE", "throwaway");
         let input = dir.join("keys.txt");
         std::fs::write(
             &input,
@@ -2817,15 +2827,40 @@ mod tests {
         )
         .unwrap();
         let sealed = dir.join("bundle.enc");
-        super::encrypt_key_file_with_origin(&input, &sealed, Some("bundle-load.example"), true)
+        super::encrypt_key_file_with_origin(&input, &sealed, Some("bundle-e2e.example"), true)
             .unwrap();
-        let spec = super::load_signing_key("bundle-load.example", Some(&sealed)).unwrap();
+        let spec = super::load_signing_key("bundle-e2e.example", Some(&sealed)).unwrap();
         assert_eq!(spec.key_id, "ed25519:new");
         assert_eq!(
             <[u8; 32]>::from(spec.key),
             [2; 32],
             "the active key's seed is the one signing"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Origin binding and legacy single-key files, on cheap key files: a
+    /// bundle loads for its own server name only, and an old single-key file
+    /// still loads.
+    #[test]
+    fn a_bundle_loads_for_its_origin_only_and_single_keys_still_work() {
+        let dir = std::env::temp_dir().join(format!("rezzy-bundle-load-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("REZZY_KEY_PASSPHRASE_BUNDLE_LOAD_EXAMPLE", "throwaway");
+
+        let bundle = rezzy_keyfile::KeyBundle::new(
+            "bundle-load.example",
+            vec![
+                rezzy_keyfile::KeyEntry::retired("ed25519:old", [1; 32], 0, 20),
+                rezzy_keyfile::KeyEntry::active("ed25519:new", [2; 32], 0),
+            ],
+        )
+        .unwrap();
+        let sealed = dir.join("bundle.enc");
+        write_fast(&sealed, &bundle.encode());
+        let spec = super::load_signing_key("bundle-load.example", Some(&sealed)).unwrap();
+        assert_eq!(spec.key_id, "ed25519:new");
         // The scheme and path of an origin are not part of its server name.
         assert!(super::load_signing_key("https://bundle-load.example/", Some(&sealed)).is_ok());
         let other = super::load_signing_key("bundle-load.example:8448", Some(&sealed));
@@ -2835,19 +2870,16 @@ mod tests {
         );
 
         // `--bundle` without an origin is refused rather than guessed.
+        let input = dir.join("keys.txt");
+        std::fs::write(&input, format!("ed25519:a {}\n", throwaway_seed(1))).unwrap();
         assert!(super::encrypt_key_file_with_origin(&input, &sealed, None, true).is_err());
 
-        // A single-key file made the old way keeps loading.
-        let single_in = dir.join("single.txt");
-        std::fs::write(&single_in, format!("ed25519:solo {}\n", throwaway_seed(3))).unwrap();
+        // A single-key file in the old text form keeps loading.
         let single = dir.join("single.enc");
-        super::encrypt_key_file_with_origin(
-            &single_in,
+        write_fast(
             &single,
-            Some("bundle-load.example"),
-            false,
-        )
-        .unwrap();
+            format!("ed25519:solo {}\n", throwaway_seed(3)).as_bytes(),
+        );
         let spec = super::load_signing_key("bundle-load.example", Some(&single)).unwrap();
         assert_eq!(spec.key_id, "ed25519:solo");
         let _ = std::fs::remove_dir_all(&dir);

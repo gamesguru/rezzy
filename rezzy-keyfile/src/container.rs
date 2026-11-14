@@ -37,14 +37,16 @@ fn derive(passphrase: &[u8], salt: &[u8], m: u32, t: u32, p: u32) -> Result<[u8;
 
 /// Encrypt `plaintext` with explicit Argon2id costs `(m_cost KiB, t_cost, lanes)`.
 ///
-/// Only compiled for this crate's own tests, so shipped builds cannot write
-/// low-cost key files. `encrypt-key` goes through [`seal`], pinned to the
-/// production costs. The costs must be within the bounds `open` accepts.
+/// Only compiled for tests (this crate's own, or a dependent that enables the
+/// `weak-kdf-for-tests` feature from `[dev-dependencies]`), so shipped builds
+/// cannot write low-cost key files. `encrypt-key` goes through [`seal`],
+/// pinned to the production costs. The costs must be within the bounds `open`
+/// accepts.
 ///
 /// # Errors
 /// Returns an error if the costs are out of bounds, or the RNG, KDF, or cipher fails.
-#[cfg(test)]
-pub(crate) fn seal_with(
+#[cfg(any(test, feature = "weak-kdf-for-tests"))]
+pub fn seal_with(
     plaintext: &[u8],
     passphrase: &[u8],
     (m, t, p): (u32, u32, u32),
@@ -195,6 +197,14 @@ mod tests {
             );
         }
     }
+
+    // Checked at compile time, so a bad production cost fails the build and
+    // no key derivation runs: `open` must accept what `seal` writes.
+    const _: () = {
+        assert!(DEFAULT_M_COST_KIB <= MAX_M_COST_KIB);
+        assert!(DEFAULT_T_COST >= 1 && DEFAULT_T_COST <= MAX_T_COST);
+        assert!(DEFAULT_LANES >= 1 && DEFAULT_LANES <= MAX_LANES);
+    };
 
     #[test]
     fn salts_differ() {
