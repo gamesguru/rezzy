@@ -1352,6 +1352,20 @@ fn prev_outcome(out: &Output, id: &str) -> (String, String) {
     (field("outcome"), field("server"))
 }
 
+/// The servers the report says were asked.
+fn queried_servers(out: &Output) -> Vec<String> {
+    let stdout = text(&out.stdout);
+    let value = rezzy::JsonValue::parse(stdout.trim()).expect("report is JSON");
+    value
+        .get("queried_servers")
+        .and_then(rezzy::JsonValue::as_array)
+        .expect("report lists queried_servers")
+        .iter()
+        .filter_map(rezzy::JsonValue::as_str)
+        .map(str::to_owned)
+        .collect()
+}
+
 #[test]
 fn a_404_from_the_server_is_reported_as_not_found_by_that_server() {
     let (mock, _fx, out) = run("outcome-404", Backfill::Blank, EventShape::Missing);
@@ -1359,6 +1373,11 @@ fn a_404_from_the_server_is_reported_as_not_found_by_that_server() {
     let (outcome, server) = prev_outcome(&out, TARGET);
     assert_eq!(outcome, "not_found");
     assert_eq!(server, mock.url, "the answer names the server asked");
+    assert_eq!(
+        queried_servers(&out),
+        vec![mock.url],
+        "the report names the sources an answer is relative to"
+    );
 }
 
 #[test]
@@ -1380,4 +1399,18 @@ fn a_200_without_the_event_is_transient_not_found_evidence() {
         outcome, "transient",
         "a 200 that carried nothing is not a found event"
     );
+}
+
+#[test]
+fn an_id_only_omitted_from_backfill_is_unanswered_not_not_found() {
+    // With fallback disabled a blank backfill stops the crawl, so the ID was
+    // never asked for by itself. Omitting an event from a batch is not a
+    // refusal, and the report must not turn it into one.
+    let mock = spawn_mock(Backfill::Blank, EventShape::Pdus);
+    let fx = Fixture::new("outcome-unanswered");
+    let out = fx.gap_fill_with(&mock.url, true, "1", &["--no-fallback"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (outcome, server) = prev_outcome(&out, TARGET);
+    assert_eq!(outcome, "unanswered");
+    assert_eq!(server, mock.url);
 }

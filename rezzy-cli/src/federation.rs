@@ -2178,6 +2178,15 @@ struct GapOutcomes {
     auth_queries: BTreeMap<String, IdOutcome>,
 }
 
+/// Summarizes a gap-fill run.
+///
+/// `missing_prev_outcomes` answers, for every prev still missing, what the
+/// destination said when the ID was requested by itself. `found` cannot occur
+/// there: a found event stops being missing. `not_found` is a definite answer
+/// from the named server only, never proof that no one holds the event;
+/// `refused`, `transient` and `unanswered` say nothing about the event.
+/// `queried_servers` names every server this run asked, so an answer is always
+/// read against the sources that were actually consulted.
 fn gap_fill_result(
     events: &[rezzy::JsonValue],
     fetched: &[PathBuf],
@@ -2213,6 +2222,7 @@ fn gap_fill_result(
         .map(|id| describe(id, &outcomes.auth_queries))
         .collect::<Vec<_>>();
     rezzy::json!({
+        "queried_servers": [destination],
         "missing_prev_outcomes": missing_prev_outcomes,
         "auth_query_outcomes": auth_query_outcomes,
         "status": if closed || final_report.is_closed() { "closed" } else { "incomplete" },
