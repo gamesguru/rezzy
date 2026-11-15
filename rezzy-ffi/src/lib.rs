@@ -1357,15 +1357,19 @@ fn apply_mutations(room_id: &str, request: &JsonValue) -> Result<JsonValue, Stri
 
     let structural_key = room_id.as_bytes();
     let mut resolver =
-        |hash: &StructuralHash| -> Result<Arc<HamtNode<StateHamtKey, String>>, StructuralHash> {
-            let bytes = nodes.get(hash).ok_or(*hash)?;
+        |hash: &StructuralHash| -> Result<Arc<HamtNode<StateHamtKey, String>>, String> {
+            let bytes = nodes
+                .get(hash)
+                .ok_or_else(|| std::format!("missing:{}", hex_encode(hash)))?;
             PersistedInternalNode::<StateHamtKey, String>::decode_v1_verified(
                 bytes,
                 structural_key,
                 *hash,
             )
             .map(Arc::new)
-            .map_err(|_| *hash)
+            .map_err(|error| {
+                std::format!("node {} failed verification: {error}", hex_encode(hash))
+            })
         };
     let applied = rezzy::hamt::persist_mutations(
         &prev_root,
@@ -1375,7 +1379,16 @@ fn apply_mutations(room_id: &str, request: &JsonValue) -> Result<JsonValue, Stri
     );
     let (new_root, displaced, created) = match applied {
         Ok(applied) => applied,
-        Err(rezzy::hamt::HamtMutateError::Resolve(hash)) => return Ok(missing_json(&hash)),
+        Err(rezzy::hamt::HamtMutateError::Resolve(error)) => {
+            if let Some(encoded_hash) = error.strip_prefix("missing:") {
+                let bytes = hex_decode_limited(encoded_hash, 64)?;
+                let hash: StructuralHash = bytes
+                    .try_into()
+                    .map_err(|_| String::from("missing HAMT hash was not 32 bytes"))?;
+                return Ok(missing_json(&hash));
+            }
+            return Err(error);
+        }
         Err(error) => return Err(std::format!("{error:?}")),
     };
 
