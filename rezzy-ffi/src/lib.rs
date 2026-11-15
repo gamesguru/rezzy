@@ -1367,9 +1367,7 @@ fn apply_mutations(room_id: &str, request: &JsonValue) -> Result<JsonValue, Stri
                 *hash,
             )
             .map(Arc::new)
-            .map_err(|error| {
-                std::format!("node {} failed verification: {error}", hex_encode(hash))
-            })
+            .map_err(|error| std::format!("node {} failed verification: {error}", hex_encode(hash)))
         };
     let applied = rezzy::hamt::persist_mutations(
         &prev_root,

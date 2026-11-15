@@ -1358,11 +1358,13 @@ fn checkpoint_batch(
             state.skip.insert(id);
         }
     }
-    write_tried_file(checkpoint.tried_path, checkpoint.tried)?;
+    // Persist answers before the tried set. If this write fails, the run
+    // aborts without marking the IDs tried, so a resumed --skip-tried run asks
+    // again instead of skipping an ID whose answer was never saved.
     if let Some(path) = checkpoint.outcomes_path {
         write_outcomes_file(path, dag_request.destination, checkpoint.outcomes)?;
     }
-    Ok(())
+    write_tried_file(checkpoint.tried_path, checkpoint.tried)
 }
 
 impl IdOutcome {
