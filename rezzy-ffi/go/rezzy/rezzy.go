@@ -147,6 +147,224 @@ func StateHAMTDiff(roomID string, a, b []HAMTEntry) (added []HAMTEntry, removed 
 	return parsed.Added, parsed.Removed, nil
 }
 
+// HAMTNodeKey identifies one leaf for root-based lookups.
+type HAMTNodeKey struct {
+	EventType string
+	StateKey  string
+}
+
+func encodeNodes(nodes []HAMTNode) [][]string {
+	encoded := make([][]string, len(nodes))
+	for i, node := range nodes {
+		encoded[i] = []string{node.Hash, hex.EncodeToString(node.Bytes)}
+	}
+	return encoded
+}
+
+func decodeNodes(encoded [][]string) ([]HAMTNode, error) {
+	nodes := make([]HAMTNode, 0, len(encoded))
+	for _, pair := range encoded {
+		if len(pair) != 2 {
+			return nil, fmt.Errorf("rezzy: node record must be [hash, bytes]")
+		}
+		bytes, err := hex.DecodeString(pair[1])
+		if err != nil {
+			return nil, fmt.Errorf("rezzy: decode node %s: %w", pair[0], err)
+		}
+		nodes = append(nodes, HAMTNode{Hash: pair[0], Bytes: bytes})
+	}
+	return nodes, nil
+}
+
+// StateHAMTPersist builds a state HAMT and returns every MTHN record and the
+// MTHR root record needed to store it.
+func StateHAMTPersist(roomID string, entries []HAMTEntry) (*HAMTPersisted, error) {
+	payload, err := json.Marshal(map[string]any{
+		"op":      "root",
+		"persist": true,
+		"entries": entries,
+	})
+	if err != nil {
+		return nil, err
+	}
+	response, err := callStateHAMT(roomID, payload)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		RootHash     string     `json:"root_hash"`
+		StateGroupID string     `json:"state_group_id"`
+		RootRecord   string     `json:"root_record"`
+		Nodes        [][]string `json:"nodes"`
+		EntryCount   int        `json:"entry_count"`
+		NodeBytes    int        `json:"node_bytes"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, fmt.Errorf("rezzy: decode persisted state HAMT: %w", err)
+	}
+	record, err := hex.DecodeString(parsed.RootRecord)
+	if err != nil {
+		return nil, fmt.Errorf("rezzy: decode state HAMT root record: %w", err)
+	}
+	nodes, err := decodeNodes(parsed.Nodes)
+	if err != nil {
+		return nil, err
+	}
+	return &HAMTPersisted{
+		RootHash:     parsed.RootHash,
+		StateGroupID: parsed.StateGroupID,
+		RootRecord:   record,
+		Nodes:        nodes,
+		EntryCount:   parsed.EntryCount,
+		NodeBytes:    parsed.NodeBytes,
+	}, nil
+}
+
+// StateHAMTNeeded returns node hashes reachable from rootHash that are not in
+// nodes. Repeat until it returns an empty slice, then call a read operation.
+func StateHAMTNeeded(roomID, rootHash string, nodes []HAMTNode) ([]string, error) {
+	payload, err := json.Marshal(map[string]any{
+		"op":        "needed",
+		"root_hash": rootHash,
+		"nodes":     encodeNodes(nodes),
+	})
+	if err != nil {
+		return nil, err
+	}
+	response, err := callStateHAMT(roomID, payload)
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Needed []string `json:"needed"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, fmt.Errorf("rezzy: decode state HAMT needed nodes: %w", err)
+	}
+	return parsed.Needed, nil
+}
+
+func missingNodes(response []byte) error {
+	var parsed struct {
+		Missing []string `json:"missing"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil
+	}
+	if len(parsed.Missing) == 0 {
+		return nil
+	}
+	return &MissingNodesError{Hashes: parsed.Missing}
+}
+
+// StateHAMTReadEntries returns every (event type, state key, event ID) leaf
+// under rootHash. All reachable nodes must be supplied.
+func StateHAMTReadEntries(roomID, rootHash string, nodes []HAMTNode) ([]HAMTEntry, error) {
+	payload, err := json.Marshal(map[string]any{
+		"op":        "entries_root",
+		"root_hash": rootHash,
+		"nodes":     encodeNodes(nodes),
+	})
+	if err != nil {
+		return nil, err
+	}
+	response, err := callStateHAMT(roomID, payload)
+	if err != nil {
+		return nil, err
+	}
+	if err := missingNodes(response); err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Entries []HAMTEntry `json:"entries"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, fmt.Errorf("rezzy: decode state HAMT entries: %w", err)
+	}
+	return parsed.Entries, nil
+}
+
+// StateHAMTLookupRoot resolves each key under rootHash. The result has one
+// entry per key; found reports whether that key is present.
+func StateHAMTLookupRoot(roomID, rootHash string, nodes []HAMTNode, keys []HAMTNodeKey) (values []string, found []bool, err error) {
+	encodedKeys := make([][2]string, len(keys))
+	for i, key := range keys {
+		encodedKeys[i] = [2]string{key.EventType, key.StateKey}
+	}
+	payload, err := json.Marshal(map[string]any{
+		"op":        "lookup_root",
+		"root_hash": rootHash,
+		"nodes":     encodeNodes(nodes),
+		"keys":      encodedKeys,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	response, err := callStateHAMT(roomID, payload)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := missingNodes(response); err != nil {
+		return nil, nil, err
+	}
+	var parsed struct {
+		Values []*string `json:"values"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, nil, fmt.Errorf("rezzy: decode state HAMT lookups: %w", err)
+	}
+	values = make([]string, len(parsed.Values))
+	found = make([]bool, len(parsed.Values))
+	for i, value := range parsed.Values {
+		if value != nil {
+			values[i] = *value
+			found[i] = true
+		}
+	}
+	return values, found, nil
+}
+
+// StateHAMTVerify checks a root record and every supplied node, and returns
+// the identity encoded in the record after walking the whole tree.
+func StateHAMTVerify(roomID string, rootRecord []byte, nodes []HAMTNode) (*HAMTVerification, error) {
+	payload, err := json.Marshal(map[string]any{
+		"op":          "verify",
+		"root_record": hex.EncodeToString(rootRecord),
+		"nodes":       encodeNodes(nodes),
+	})
+	if err != nil {
+		return nil, err
+	}
+	response, err := callStateHAMT(roomID, payload)
+	if err != nil {
+		return nil, err
+	}
+	if err := missingNodes(response); err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		RootHash     string `json:"root_hash"`
+		StateGroupID string `json:"state_group_id"`
+		RoomID       string `json:"room_id"`
+		Prefix       string `json:"prefix"`
+		EntryCount   int    `json:"entry_count"`
+	}
+	if err := json.Unmarshal(response, &parsed); err != nil {
+		return nil, fmt.Errorf("rezzy: decode state HAMT verification: %w", err)
+	}
+	prefix, err := hex.DecodeString(parsed.Prefix)
+	if err != nil {
+		return nil, fmt.Errorf("rezzy: decode state HAMT prefix: %w", err)
+	}
+	return &HAMTVerification{
+		RootHash:     parsed.RootHash,
+		StateGroupID: parsed.StateGroupID,
+		RoomID:       parsed.RoomID,
+		Prefix:       prefix,
+		EntryCount:   parsed.EntryCount,
+	}, nil
+}
+
 // ReconDigest returns the MSC4521 frame digest and event count for a set of
 // reference-hash event IDs.
 func ReconDigest(eventIDs []string) (digest string, count uint64, err error) {

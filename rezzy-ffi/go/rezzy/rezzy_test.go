@@ -4,6 +4,7 @@ package rezzy
 
 import (
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -190,5 +191,74 @@ func TestKernelMatchesOneShotDigestAndRoundTrips(t *testing.T) {
 	kernel.Close()
 	if err := kernel.Insert(knownID); err != ErrKernelClosed {
 		t.Fatalf("closed kernel error = %v, want ErrKernelClosed", err)
+	}
+}
+
+func TestStateHAMTPersistRoundTrip(t *testing.T) {
+	const room = "!room:example.org"
+	entries := []HAMTEntry{
+		{"m.room.create", "", "$create:example.org"},
+		{"m.room.member", "@alice:example.org", "$member:example.org"},
+	}
+
+	persisted, err := StateHAMTPersist(room, entries)
+	if err != nil {
+		t.Fatalf("StateHAMTPersist: %v", err)
+	}
+	if len(persisted.RootRecord) < 5 || string(persisted.RootRecord[:5]) != "MTHR\x01" {
+		t.Fatalf("root record = %x, want MTHR\\x01 prefix", persisted.RootRecord)
+	}
+	if len(persisted.Nodes) == 0 || persisted.EntryCount != len(entries) {
+		t.Fatalf("nodes = %d, entries = %d", len(persisted.Nodes), persisted.EntryCount)
+	}
+
+	needed, err := StateHAMTNeeded(room, persisted.RootHash, nil)
+	if err != nil {
+		t.Fatalf("StateHAMTNeeded: %v", err)
+	}
+	if len(needed) != 1 || needed[0] != persisted.RootHash {
+		t.Fatalf("needed = %v, want just the root", needed)
+	}
+
+	if _, err := StateHAMTReadEntries(room, persisted.RootHash, nil); err == nil {
+		t.Fatal("read without nodes should report the missing root")
+	} else {
+		var missing *MissingNodesError
+		if !errors.As(err, &missing) {
+			t.Fatalf("missing error = %v, want *MissingNodesError", err)
+		}
+	}
+
+	read, err := StateHAMTReadEntries(room, persisted.RootHash, persisted.Nodes)
+	if err != nil {
+		t.Fatalf("StateHAMTReadEntries: %v", err)
+	}
+	if len(read) != len(entries) {
+		t.Fatalf("read %d entries, want %d", len(read), len(entries))
+	}
+
+	values, found, err := StateHAMTLookupRoot(room, persisted.RootHash, persisted.Nodes, []HAMTNodeKey{
+		{"m.room.member", "@alice:example.org"},
+		{"m.room.member", "@bob:example.org"},
+	})
+	if err != nil {
+		t.Fatalf("StateHAMTLookupRoot: %v", err)
+	}
+	if !found[0] || values[0] != "$member:example.org" {
+		t.Fatalf("lookup[0] = %q, %v", values[0], found[0])
+	}
+	if found[1] {
+		t.Fatalf("lookup[1] should be absent, got %q", values[1])
+	}
+
+	verified, err := StateHAMTVerify(room, persisted.RootRecord, persisted.Nodes)
+	if err != nil {
+		t.Fatalf("StateHAMTVerify: %v", err)
+	}
+	if verified.RootHash != persisted.RootHash || verified.StateGroupID != persisted.StateGroupID {
+		t.Fatalf("verified root = %s/%s", verified.RootHash, verified.StateGroupID)
+	}
+	if verified.EntryCount != len(entries) {
+		t.Fatalf("verified %d entries, want %d", verified.EntryCount, len(entries))
 	}
 }

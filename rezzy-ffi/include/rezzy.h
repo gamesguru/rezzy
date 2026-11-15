@@ -85,6 +85,23 @@ int rezzy_recon_gf256_difference(const uint8_t *left, size_t left_len,
  *     -> {"value":"<event_id>"} or {"value":null}
  *   {"op":"diff","a":[...],"b":[...]}
  *     -> {"added":[[type,key,id],...],"removed":[...]}
+ *   Add "persist":true to "root" to also return the persisted form:
+ *     -> {"root_hash","state_group_id","root_record":"<hex MTHR>",
+ *         "nodes":[["<hex hash>","<hex MTHN>"],...],
+ *         "entry_count":N,"node_count":N,"node_bytes":N}
+ *   Persisted reads take a root hash plus the nodes fetched so far:
+ *   {"op":"needed","root_hash":"<hex>","nodes":[[hash,bytes],...]}
+ *     -> {"needed":["<hex>",...]}
+ *   {"op":"entries_root","root_hash":"<hex>","nodes":[...]}
+ *     -> {"entries":[[type,key,id],...]} or {"missing":["<hex>"]}
+ *   {"op":"lookup_root","root_hash":"<hex>","nodes":[...],
+ *    "keys":[[type,key],...]}
+ *     -> {"values":[id|null,...]} or {"missing":["<hex>"]}
+ *   {"op":"verify","root_record":"<hex>","nodes":[...]}
+ *     -> {"root_hash","state_group_id","room_id","prefix","entry_count"}
+ *        or {"missing":["<hex>"]}
+ *   Repeat "needed" until it returns an empty list, then read. Every supplied
+ *   node is verified against its structural hash before use.
  *   Each entries array must contain at most one row per (event_type,
  *   state_key); repeated keys cannot be separated and fail the build.
  *

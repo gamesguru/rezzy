@@ -8,9 +8,13 @@
 //! [`rezzy_free`]; callers never free them with their own allocator.
 
 use base64::Engine as _;
-use rezzy::hamt::{build_hamt_root_handle, diff_hamt_nodes, HamtNode, RootHandle, StructuralHash};
+use rezzy::hamt::codec::PersistedInternalNode;
+use rezzy::hamt::{
+    build_hamt_root_handle, diff_hamt_nodes, HamtNode, HamtReadError, NodeRef, PersistedHamtReader,
+    RootHandle, StructuralHash,
+};
 use rezzy::incremental::LtHash;
-use rezzy::state::hamt_root::StateHamtKey;
+use rezzy::state::hamt_root::{decode_state_hamt_root, encode_state_hamt_root, StateHamtKey};
 use rezzy::JsonValue;
 use rezzy_recon::resident::ResidentKernel;
 use rezzy_recon::{
@@ -1130,22 +1134,129 @@ fn parse_hamt_entries(value: &JsonValue) -> Result<Vec<(StateHamtKey, String)>, 
     Ok(entries)
 }
 
+type BuiltStateHamt = (RootHandle, Arc<HamtNode<StateHamtKey, String>>, LtHash);
+
 fn build_state_hamt(
     room_id: &str,
     entries: &[(StateHamtKey, String)],
-) -> Result<(RootHandle, Arc<HamtNode<StateHamtKey, String>>), String> {
+) -> Result<BuiltStateHamt, String> {
     let mut lattice = LtHash::ZERO;
     for ((event_type, state_key), event_id) in entries {
         lattice.add_seed(&LtHash::seed(event_type.as_str(), state_key, event_id));
     }
-    build_hamt_root_handle(room_id.as_bytes(), &lattice, entries.iter().cloned())
-        .map_err(|error| std::format!("{error:?}"))
+    let (handle, root) =
+        build_hamt_root_handle(room_id.as_bytes(), &lattice, entries.iter().cloned())
+            .map_err(|error| std::format!("{error:?}"))?;
+    Ok((handle, root, lattice))
 }
 
 fn entry_json((key, value): &(StateHamtKey, String)) -> JsonValue {
     rezzy::json!([key.0.as_str(), key.1.as_str(), value.as_str()])
 }
 
+const HAMT_MAX_WALK_DEPTH: usize = 64;
+/// Upper bound on one hex-encoded persisted node or root record.
+const MAX_HAMT_HEX_LEN: usize = 64 * 1024 * 1024;
+
+fn parse_root_hash(request: &JsonValue, field: &str) -> Result<StructuralHash, String> {
+    let text = require_str(request, field)?;
+    let bytes = hex_decode_limited(text, 64)?;
+    bytes
+        .try_into()
+        .map_err(|_| std::format!("`{field}` must be 32 bytes"))
+}
+
+fn parse_node_list(
+    value: &JsonValue,
+) -> Result<std::collections::BTreeMap<StructuralHash, Vec<u8>>, String> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| String::from("`nodes` must be an array of [hash, bytes] pairs"))?;
+    let mut nodes = std::collections::BTreeMap::new();
+    for (index, item) in items.iter().enumerate() {
+        let parts = item
+            .as_array()
+            .ok_or_else(|| std::format!("node {index} must be [hash, bytes]"))?;
+        if parts.len() != 2 {
+            return Err(std::format!("node {index} must have exactly two elements"));
+        }
+        let hash_text = parts[0]
+            .as_str()
+            .ok_or_else(|| std::format!("node {index} hash must be a string"))?;
+        let bytes_text = parts[1]
+            .as_str()
+            .ok_or_else(|| std::format!("node {index} bytes must be a string"))?;
+        let hash: StructuralHash = hex_decode_limited(hash_text, 64)?
+            .try_into()
+            .map_err(|_| std::format!("node {index} hash must be 32 bytes"))?;
+        let bytes = hex_decode_limited(bytes_text, MAX_HAMT_HEX_LEN)?;
+        nodes.insert(hash, bytes);
+    }
+    Ok(nodes)
+}
+
+fn node_json((hash, bytes): (&StructuralHash, &Vec<u8>)) -> JsonValue {
+    rezzy::json!([hex_encode(hash), hex_encode(bytes)])
+}
+
+fn collect_persisted_nodes(
+    node: &HamtNode<StateHamtKey, String>,
+    out: &mut std::collections::BTreeMap<StructuralHash, Vec<u8>>,
+) {
+    if out.contains_key(&node.structural_hash) {
+        return;
+    }
+    out.insert(
+        node.structural_hash,
+        PersistedInternalNode::from(node).encode_v1(),
+    );
+    for child in &node.children {
+        if let NodeRef::Resolved(child) = child {
+            collect_persisted_nodes(child, out);
+        }
+    }
+}
+
+/// Hashes reachable from `root` that are not yet in `nodes`.
+fn needed_node_hashes(
+    structural_key: &[u8],
+    root: StructuralHash,
+    nodes: &std::collections::BTreeMap<StructuralHash, Vec<u8>>,
+) -> Result<Vec<StructuralHash>, String> {
+    let mut needed = std::collections::BTreeSet::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut stack = vec![(root, 0_usize)];
+    while let Some((hash, depth)) = stack.pop() {
+        if depth > HAMT_MAX_WALK_DEPTH {
+            return Err(String::from("persisted HAMT exceeds maximum depth"));
+        }
+        if !seen.insert(hash) {
+            continue;
+        }
+        let Some(bytes) = nodes.get(&hash) else {
+            needed.insert(hash);
+            continue;
+        };
+        let node = PersistedInternalNode::<StateHamtKey, String>::decode_v1_verified(
+            bytes,
+            structural_key,
+            hash,
+        )
+        .map_err(|error| std::format!("node {} failed verification: {error}", hex_encode(&hash)))?;
+        for child in &node.children {
+            stack.push((child.structural_hash(), depth.saturating_add(1)));
+        }
+    }
+    Ok(needed.into_iter().collect())
+}
+
+fn missing_json(hash: &StructuralHash) -> JsonValue {
+    rezzy::json!({ "missing": [hex_encode(hash)] })
+}
+
+type StateHamtReader<'a, L> = PersistedHamtReader<'a, StateHamtKey, String, (), L>;
+
+#[allow(clippy::too_many_lines)]
 fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String> {
     match require_str(request, "op")? {
         "root" => {
@@ -1154,11 +1265,148 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     .get("entries")
                     .ok_or_else(|| String::from("missing `entries`"))?,
             )?;
-            let (handle, _) = build_state_hamt(room_id, &entries)?;
+            let (handle, root, lattice) = build_state_hamt(room_id, &entries)?;
+            let persist = request
+                .get("persist")
+                .and_then(JsonValue::as_bool)
+                .unwrap_or(false);
+            if !persist {
+                return Ok(rezzy::json!({
+                    "root_hash": hex_encode(&handle.structural_hash),
+                    "state_group_id": hex_encode(&handle.state_group_id),
+                }));
+            }
+            let record = encode_state_hamt_root(
+                room_id.as_bytes(),
+                room_id,
+                &handle.structural_hash,
+                &lattice,
+            )
+            .map_err(|error| std::format!("{error}"))?;
+            let mut nodes = std::collections::BTreeMap::new();
+            collect_persisted_nodes(&root, &mut nodes);
+            let node_bytes: usize = nodes.values().map(Vec::len).sum();
             Ok(rezzy::json!({
                 "root_hash": hex_encode(&handle.structural_hash),
                 "state_group_id": hex_encode(&handle.state_group_id),
+                "root_record": hex_encode(&record),
+                "nodes": JsonValue::Array(nodes.iter().map(node_json).collect()),
+                "entry_count": entries.len() as u64,
+                "node_count": nodes.len() as u64,
+                "node_bytes": node_bytes as u64,
             }))
+        }
+        "needed" => {
+            let root = parse_root_hash(request, "root_hash")?;
+            let nodes = parse_node_list(
+                request
+                    .get("nodes")
+                    .ok_or_else(|| String::from("missing `nodes`"))?,
+            )?;
+            let needed = needed_node_hashes(room_id.as_bytes(), root, &nodes)?;
+            Ok(rezzy::json!({
+                "needed": JsonValue::Array(
+                    needed.iter().map(|hash| JsonValue::String(hex_encode(hash))).collect()
+                ),
+            }))
+        }
+        "lookup_root" => {
+            let root = parse_root_hash(request, "root_hash")?;
+            let nodes = parse_node_list(
+                request
+                    .get("nodes")
+                    .ok_or_else(|| String::from("missing `nodes`"))?,
+            )?;
+            let key_items = request
+                .get("keys")
+                .and_then(JsonValue::as_array)
+                .ok_or_else(|| String::from("`keys` must be an array of [type, state_key]"))?;
+            let mut keys = Vec::with_capacity(key_items.len());
+            for (index, item) in key_items.iter().enumerate() {
+                let parts = item
+                    .as_array()
+                    .ok_or_else(|| std::format!("key {index} must be [event_type, state_key]"))?;
+                if parts.len() != 2 {
+                    return Err(std::format!("key {index} must have exactly two elements"));
+                }
+                let event_type = parts[0]
+                    .as_str()
+                    .ok_or_else(|| std::format!("key {index} event_type must be a string"))?;
+                let state_key = parts[1]
+                    .as_str()
+                    .ok_or_else(|| std::format!("key {index} state_key must be a string"))?;
+                keys.push((rezzy::EventType::from(event_type), state_key.to_owned()));
+            }
+            let mut nodes_for_reader = nodes;
+            let mut reader: StateHamtReader<'_, _> =
+                PersistedHamtReader::new(room_id.as_bytes(), move |hash| {
+                    Ok::<_, ()>(nodes_for_reader.remove(hash))
+                });
+            match reader.get_many(root, &keys) {
+                Ok(values) => Ok(rezzy::json!({
+                    "values": JsonValue::Array(
+                        values
+                            .into_iter()
+                            .map(|value| value.map_or(JsonValue::Null, JsonValue::String))
+                            .collect()
+                    ),
+                })),
+                Err(HamtReadError::Missing(hash)) => Ok(missing_json(&hash)),
+                Err(error) => Err(std::format!("{error:?}")),
+            }
+        }
+        "entries_root" => {
+            let root = parse_root_hash(request, "root_hash")?;
+            let nodes = parse_node_list(
+                request
+                    .get("nodes")
+                    .ok_or_else(|| String::from("missing `nodes`"))?,
+            )?;
+            let mut nodes_for_reader = nodes;
+            let mut reader: StateHamtReader<'_, _> =
+                PersistedHamtReader::new(room_id.as_bytes(), move |hash| {
+                    Ok::<_, ()>(nodes_for_reader.remove(hash))
+                });
+            match reader.collect_entries(root) {
+                Ok(entries) => Ok(rezzy::json!({
+                    "entries": JsonValue::Array(entries.iter().map(entry_json).collect()),
+                })),
+                Err(HamtReadError::Missing(hash)) => Ok(missing_json(&hash)),
+                Err(error) => Err(std::format!("{error:?}")),
+            }
+        }
+        "verify" => {
+            let record_text = require_str(request, "root_record")?;
+            let record = hex_decode_limited(record_text, 8192)?;
+            let decoded =
+                decode_state_hamt_root(&record).map_err(|error| std::format!("{error}"))?;
+            if decoded.room_id != room_id {
+                return Err(std::format!(
+                    "root record is for room {:?}, not {room_id:?}",
+                    decoded.room_id
+                ));
+            }
+            let nodes = parse_node_list(
+                request
+                    .get("nodes")
+                    .ok_or_else(|| String::from("missing `nodes`"))?,
+            )?;
+            let mut nodes_for_reader = nodes;
+            let mut reader: StateHamtReader<'_, _> =
+                PersistedHamtReader::new(room_id.as_bytes(), move |hash| {
+                    Ok::<_, ()>(nodes_for_reader.remove(hash))
+                });
+            match reader.collect_entries(decoded.root_hash) {
+                Ok(entries) => Ok(rezzy::json!({
+                    "root_hash": hex_encode(&decoded.root_hash),
+                    "state_group_id": hex_encode(&decoded.state_group_id),
+                    "room_id": decoded.room_id,
+                    "prefix": hex_encode(&decoded.prefix),
+                    "entry_count": entries.len() as u64,
+                })),
+                Err(HamtReadError::Missing(hash)) => Ok(missing_json(&hash)),
+                Err(error) => Err(std::format!("{error:?}")),
+            }
         }
         "lookup" => {
             let entries = parse_hamt_entries(
@@ -1166,7 +1414,7 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     .get("entries")
                     .ok_or_else(|| String::from("missing `entries`"))?,
             )?;
-            let (_, root) = build_state_hamt(room_id, &entries)?;
+            let (_, root, _) = build_state_hamt(room_id, &entries)?;
             let event_type = require_str(request, "event_type")?;
             let state_key = require_str(request, "state_key")?;
             let key = (rezzy::EventType::from(event_type), state_key.to_owned());
@@ -1189,8 +1437,8 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     .get("b")
                     .ok_or_else(|| String::from("missing `b`"))?,
             )?;
-            let (_, root_a) = build_state_hamt(room_id, &a)?;
-            let (_, root_b) = build_state_hamt(room_id, &b)?;
+            let (_, root_a, _) = build_state_hamt(room_id, &a)?;
+            let (_, root_b, _) = build_state_hamt(room_id, &b)?;
             let mut resolver =
                 |_hash: &StructuralHash| -> Result<Arc<HamtNode<StateHamtKey, String>>, String> {
                     Err(String::from("unexpected lazy HAMT node"))
@@ -1596,8 +1844,12 @@ fn hex_encode(bytes: &[u8]) -> String {
 const MAX_HEX_LEN: usize = MAX_RECON_CAPACITY * 32 * 2;
 
 fn hex_decode(text: &str) -> Result<Vec<u8>, String> {
-    if text.len() > MAX_HEX_LEN {
-        return Err(std::format!("hex string exceeds {MAX_HEX_LEN} characters"));
+    hex_decode_limited(text, MAX_HEX_LEN)
+}
+
+fn hex_decode_limited(text: &str, max_len: usize) -> Result<Vec<u8>, String> {
+    if text.len() > max_len {
+        return Err(std::format!("hex string exceeds {max_len} characters"));
     }
     if !text.len().is_multiple_of(2) {
         return Err(String::from("hex string must have an even length"));
@@ -2296,6 +2548,165 @@ mod tests {
         assert_eq!(
             removed[0].as_array().unwrap()[2].as_str(),
             Some("$member:example.org")
+        );
+    }
+
+    fn nodes_argument(nodes: &[JsonValue]) -> String {
+        let pairs = nodes
+            .iter()
+            .map(|node| {
+                let parts = node.as_array().unwrap();
+                format!(
+                    "[{:?},{:?}]",
+                    parts[0].as_str().unwrap(),
+                    parts[1].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        format!("[{pairs}]")
+    }
+
+    #[test]
+    fn state_hamt_persist_and_read_from_nodes() {
+        let room = "!room:example.org";
+        let (status, text) = call_hamt(
+            room,
+            &format!(r#"{{"op":"root","persist":true,"entries":{HAMT_ENTRIES}}}"#),
+        );
+        assert_eq!(status, OK, "{text}");
+        let persisted = JsonValue::parse(&text).unwrap();
+        let root_hash = persisted
+            .get("root_hash")
+            .and_then(JsonValue::as_str)
+            .unwrap()
+            .to_owned();
+        let state_group_id = persisted
+            .get("state_group_id")
+            .and_then(JsonValue::as_str)
+            .unwrap()
+            .to_owned();
+        let root_record = persisted
+            .get("root_record")
+            .and_then(JsonValue::as_str)
+            .unwrap()
+            .to_owned();
+        assert_eq!(&root_record[..10], "4d54485201", "MTHR\x01 prefix");
+        let nodes = persisted
+            .get("nodes")
+            .and_then(JsonValue::as_array)
+            .unwrap()
+            .clone();
+        assert!(!nodes.is_empty());
+        assert_eq!(
+            persisted.get("node_count").and_then(JsonValue::as_u64),
+            Some(nodes.len() as u64)
+        );
+        assert_eq!(
+            persisted.get("entry_count").and_then(JsonValue::as_u64),
+            Some(2)
+        );
+        let all_nodes = nodes_argument(&nodes);
+
+        // An empty node set reports the root as missing rather than failing.
+        let (status, text) = call_hamt(
+            room,
+            &format!(r#"{{"op":"entries_root","root_hash":"{root_hash}","nodes":[]}}"#),
+        );
+        assert_eq!(status, OK, "{text}");
+        let missing = JsonValue::parse(&text).unwrap();
+        assert_eq!(
+            missing
+                .get("missing")
+                .and_then(JsonValue::as_array)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // With the full set, enumeration and lookup resolve from stored bytes.
+        let (status, text) = call_hamt(
+            room,
+            &format!(r#"{{"op":"entries_root","root_hash":"{root_hash}","nodes":{all_nodes}}}"#),
+        );
+        assert_eq!(status, OK, "{text}");
+        let entries = JsonValue::parse(&text).unwrap();
+        assert_eq!(
+            entries
+                .get("entries")
+                .and_then(JsonValue::as_array)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let (status, text) = call_hamt(
+            room,
+            &format!(
+                r#"{{"op":"lookup_root","root_hash":"{root_hash}","nodes":{all_nodes},"keys":[["m.room.member","@alice:example.org"],["m.room.member","@bob:example.org"]]}}"#
+            ),
+        );
+        assert_eq!(status, OK, "{text}");
+        let values = JsonValue::parse(&text).unwrap();
+        let values = values.get("values").and_then(JsonValue::as_array).unwrap();
+        assert_eq!(values[0].as_str(), Some("$member:example.org"));
+        assert_eq!(values[1], JsonValue::Null);
+
+        // The root record verifies the whole tree and matches the hashes.
+        let (status, text) = call_hamt(
+            room,
+            &format!(r#"{{"op":"verify","root_record":"{root_record}","nodes":{all_nodes}}}"#),
+        );
+        assert_eq!(status, OK, "{text}");
+        let verified = JsonValue::parse(&text).unwrap();
+        assert_eq!(
+            verified.get("root_hash").and_then(JsonValue::as_str),
+            Some(root_hash.as_str())
+        );
+        assert_eq!(
+            verified.get("state_group_id").and_then(JsonValue::as_str),
+            Some(state_group_id.as_str())
+        );
+        assert_eq!(
+            verified.get("entry_count").and_then(JsonValue::as_u64),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn state_hamt_rejects_a_tampered_node() {
+        let room = "!room:example.org";
+        let (status, text) = call_hamt(
+            room,
+            &format!(r#"{{"op":"root","persist":true,"entries":{HAMT_ENTRIES}}}"#),
+        );
+        assert_eq!(status, OK, "{text}");
+        let persisted = JsonValue::parse(&text).unwrap();
+        let root_hash = persisted
+            .get("root_hash")
+            .and_then(JsonValue::as_str)
+            .unwrap()
+            .to_owned();
+        let mut nodes = persisted
+            .get("nodes")
+            .and_then(JsonValue::as_array)
+            .unwrap()
+            .clone();
+        let parts = nodes[0].as_array().unwrap();
+        let mut bytes = parts[1].as_str().unwrap().to_owned();
+        bytes.replace_range(..2, "4e");
+        let hash = parts[0].as_str().unwrap().to_owned();
+        nodes[0] = rezzy::json!([hash, bytes]);
+        let all_nodes = nodes_argument(&nodes);
+
+        let (status, text) = call_hamt(
+            room,
+            &format!(r#"{{"op":"entries_root","root_hash":"{root_hash}","nodes":{all_nodes}}}"#),
+        );
+        assert_eq!(status, ERR, "{text}");
+        assert!(
+            text.contains("failed verification") || text.contains("Invalid"),
+            "{text}"
         );
     }
 
