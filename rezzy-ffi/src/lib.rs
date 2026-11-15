@@ -1386,6 +1386,11 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     decoded.room_id
                 ));
             }
+            if decoded.prefix != room_id.as_bytes() {
+                return Err(String::from(
+                    "root record prefix does not match the structural key",
+                ));
+            }
             let nodes = parse_node_list(
                 request
                     .get("nodes")
@@ -1397,13 +1402,27 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     Ok::<_, ()>(nodes_for_reader.remove(hash))
                 });
             match reader.collect_entries(decoded.root_hash) {
-                Ok(entries) => Ok(rezzy::json!({
-                    "root_hash": hex_encode(&decoded.root_hash),
-                    "state_group_id": hex_encode(&decoded.state_group_id),
-                    "room_id": decoded.room_id,
-                    "prefix": hex_encode(&decoded.prefix),
-                    "entry_count": entries.len() as u64,
-                })),
+                Ok(entries) => {
+                    // The lattice in the root record must be the one the
+                    // leaves produce, otherwise the record and tree disagree
+                    // about the identity of the state set.
+                    let mut lattice = LtHash::ZERO;
+                    for ((event_type, state_key), event_id) in &entries {
+                        lattice.add_seed(&LtHash::seed(event_type.as_str(), state_key, event_id));
+                    }
+                    if lattice != decoded.lattice {
+                        return Err(String::from(
+                            "root record lattice does not match its leaves",
+                        ));
+                    }
+                    Ok(rezzy::json!({
+                        "root_hash": hex_encode(&decoded.root_hash),
+                        "state_group_id": hex_encode(&decoded.state_group_id),
+                        "room_id": decoded.room_id,
+                        "prefix": hex_encode(&decoded.prefix),
+                        "entry_count": entries.len() as u64,
+                    }))
+                }
                 Err(HamtReadError::Missing(hash)) => Ok(missing_json(&hash)),
                 Err(error) => Err(std::format!("{error:?}")),
             }
@@ -2708,6 +2727,50 @@ mod tests {
             text.contains("failed verification") || text.contains("Invalid"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn state_hamt_verify_rejects_root_record_mismatches() {
+        let room = "!room:example.org";
+        let (status, text) = call_hamt(
+            room,
+            &format!(r#"{{"op":"root","persist":true,"entries":{HAMT_ENTRIES}}}"#),
+        );
+        assert_eq!(status, OK, "{text}");
+        let persisted = JsonValue::parse(&text).unwrap();
+        let record = persisted
+            .get("root_record")
+            .and_then(JsonValue::as_str)
+            .unwrap()
+            .to_owned();
+        let nodes = persisted
+            .get("nodes")
+            .and_then(JsonValue::as_array)
+            .unwrap()
+            .clone();
+        let all_nodes = nodes_argument(&nodes);
+
+        // Prefix starts at byte 7: magic(4) + version(1) + u16 length(2).
+        let mut wrong_prefix = record.clone();
+        wrong_prefix.replace_range(14..16, "22");
+        let (status, text) = call_hamt(
+            room,
+            &format!(r#"{{"op":"verify","root_record":"{wrong_prefix}","nodes":{all_nodes}}}"#),
+        );
+        assert_eq!(status, ERR, "{text}");
+        assert!(text.contains("prefix"), "{text}");
+
+        // The lattice is the tail of the fixed-width record.
+        let mut wrong_lattice = record.clone();
+        let tail = record.len() - 2;
+        let replacement = if &record[tail..] == "00" { "01" } else { "00" };
+        wrong_lattice.replace_range(tail.., replacement);
+        let (status, text) = call_hamt(
+            room,
+            &format!(r#"{{"op":"verify","root_record":"{wrong_lattice}","nodes":{all_nodes}}}"#),
+        );
+        assert_eq!(status, ERR, "{text}");
+        assert!(text.contains("lattice"), "{text}");
     }
 
     const ID_V3: &str = "$RrGxF28UrHLmoASHndYb9Jb/1SFww2ptmtur9INS438";
