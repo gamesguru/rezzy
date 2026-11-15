@@ -1327,6 +1327,8 @@ struct Checkpoint<'a> {
     skip_tried: bool,
     /// Receives what the destination said about each ID asked for by itself.
     outcomes: &'a mut BTreeMap<String, IdOutcome>,
+    /// Where `outcomes` is persisted for `destination`, next to `tried.txt`.
+    outcomes_path: Option<&'a Path>,
 }
 
 /// Records the supplied IDs as tried and persists the checkpoint, optionally
@@ -1356,7 +1358,105 @@ fn checkpoint_batch(
             state.skip.insert(id);
         }
     }
-    write_tried_file(checkpoint.tried_path, checkpoint.tried)
+    write_tried_file(checkpoint.tried_path, checkpoint.tried)?;
+    if let Some(path) = checkpoint.outcomes_path {
+        write_outcomes_file(path, dag_request.destination, checkpoint.outcomes)?;
+    }
+    Ok(())
+}
+
+impl IdOutcome {
+    /// Rebuilds an outcome from a persisted line; unknown kinds are rejected
+    /// rather than guessed.
+    fn from_json(value: &JsonValue) -> Option<(String, Self)> {
+        let id = value.get("id")?.as_str()?.to_owned();
+        let kind = match value.get("outcome")?.as_str()? {
+            "found" => "found",
+            "not_found" => "not_found",
+            "refused" => "refused",
+            "transient" => "transient",
+            _ => return None,
+        };
+        let status = value
+            .get("status")
+            .and_then(JsonValue::as_u64)
+            .and_then(|n| u16::try_from(n).ok());
+        let errcode = value
+            .get("errcode")
+            .and_then(JsonValue::as_str)
+            .map(str::to_owned);
+        Some((
+            id,
+            Self {
+                kind,
+                status,
+                errcode,
+            },
+        ))
+    }
+}
+
+/// Reads the answers earlier runs recorded for `server`. Answers from other
+/// servers are not this run's evidence and are ignored. A missing file is
+/// empty; unreadable or malformed lines are errors, never silently dropped.
+fn read_outcomes_file(path: &Path, server: &str) -> Result<BTreeMap<String, IdOutcome>, AppError> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut out = BTreeMap::new();
+    for line in text.lines().filter(|l| !l.trim().is_empty()) {
+        let value = JsonValue::parse(line).map_err(|error| {
+            AppError::new(
+                ErrorCode::IoError,
+                format!("{}: malformed outcome line: {error}", path.display()),
+            )
+        })?;
+        if value.get("server").and_then(JsonValue::as_str) != Some(server) {
+            continue;
+        }
+        let (id, outcome) = IdOutcome::from_json(&value).ok_or_else(|| {
+            AppError::new(
+                ErrorCode::IoError,
+                format!("{}: unrecognized outcome line", path.display()),
+            )
+        })?;
+        out.insert(id, outcome);
+    }
+    Ok(out)
+}
+
+/// Replaces `server`'s answers in the file, keeping every other server's lines.
+fn write_outcomes_file(
+    path: &Path,
+    server: &str,
+    outcomes: &BTreeMap<String, IdOutcome>,
+) -> Result<(), AppError> {
+    let mut text = String::new();
+    match fs::read_to_string(path) {
+        Ok(existing) => {
+            for line in existing.lines().filter(|l| !l.trim().is_empty()) {
+                let other = JsonValue::parse(line)
+                    .ok()
+                    .is_some_and(|v| v.get("server").and_then(JsonValue::as_str) != Some(server));
+                if other {
+                    text.push_str(line);
+                    text.push('\n');
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    for (id, outcome) in outcomes {
+        let mut entry = outcome.to_json();
+        let _ = entry.insert(String::from("id"), rezzy::json!(id.clone()));
+        let _ = entry.insert(String::from("server"), rezzy::json!(server));
+        text.push_str(&entry.to_string());
+        text.push('\n');
+    }
+    write_frontier_checkpoint_text(path, &text)
 }
 
 /// Formats request counts in sorted label order, separated by spaces.
@@ -2070,6 +2170,8 @@ struct GapFillRequest<'a> {
 /// resumed runs do not ask again for events the server has already refused.
 const TRIED_FILE: &str = "tried.txt";
 const AUTH_TRIED_FILE: &str = "auth-tried.txt";
+/// Per-ID answers to single-event requests, one JSON object per line.
+const OUTCOMES_FILE: &str = "outcomes.jsonl";
 
 /// Debug-only log of every request in a round. It is not event data, so it must
 /// never be reloaded as events when resuming.
@@ -2221,8 +2323,19 @@ fn gap_fill_result(
         .filter(|id| outcomes.auth_queries.contains_key(*id))
         .map(|id| describe(id, &outcomes.auth_queries))
         .collect::<Vec<_>>();
+    // Ids the destination answered `found` for and that are now in the event
+    // set. Listed explicitly so a consumer never infers "found" from an id
+    // simply being absent from `missing_prev_outcomes`. It is still the
+    // consumer's import that closes a gap, not this list.
+    let resolved = outcomes
+        .prev
+        .iter()
+        .filter(|(id, outcome)| outcome.kind == "found" && final_report.present.contains(*id))
+        .map(|(id, _)| rezzy::json!({"id": id.clone(), "server": destination, "outcome": "found"}))
+        .collect::<Vec<_>>();
     rezzy::json!({
         "queried_servers": [destination],
+        "resolved": resolved,
         "missing_prev_outcomes": missing_prev_outcomes,
         "auth_query_outcomes": auth_query_outcomes,
         "status": if closed || final_report.is_closed() { "closed" } else { "incomplete" },
@@ -2283,6 +2396,7 @@ fn fetch_gap_round(
             emit_missing: None,
         };
         let tried_path = request.output_dir.join(TRIED_FILE);
+        let outcomes_path = request.output_dir.join(OUTCOMES_FILE);
         let result = get_remote_dag_with_known_and_checkpoint(
             &dag_request,
             Some(&known),
@@ -2293,6 +2407,7 @@ fn fetch_gap_round(
                 round,
                 skip_tried: request.skip_tried,
                 outcomes: &mut outcomes.prev,
+                outcomes_path: Some(&outcomes_path),
             }),
         );
         let summary = match result {
@@ -2395,6 +2510,11 @@ fn gap_fill(request: &GapFillRequest<'_>) -> Result<JsonValue, AppError> {
     let mut failed_requests = 0_usize;
     let mut closed = false;
     let mut outcomes = GapOutcomes::default();
+    if request.resume {
+        // Answers from earlier runs against this same server, so a resumed run
+        // does not report them as unanswered.
+        outcomes.prev = read_outcomes_file(&output_dir.join(OUTCOMES_FILE), request.destination)?;
+    }
     let mut ran = 0_u32;
     loop {
         if rounds != 0 && ran >= rounds {
@@ -2718,6 +2838,11 @@ fn write_frontier_checkpoint(path: &Path, frontier: &[String]) -> Result<(), App
         text.push_str(id);
         text.push('\n');
     }
+    write_frontier_checkpoint_text(path, &text)
+}
+
+/// Atomically replaces `path` with `text`.
+fn write_frontier_checkpoint_text(path: &Path, text: &str) -> Result<(), AppError> {
     if let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
@@ -2732,6 +2857,34 @@ fn write_frontier_checkpoint(path: &Path, frontier: &[String]) -> Result<(), App
 #[cfg(test)]
 mod tests {
     use std::fmt::Write as _;
+
+    #[test]
+    fn outcomes_persist_per_server_and_reload_only_that_servers_answers() {
+        use super::{read_outcomes_file, write_outcomes_file, IdOutcome};
+        use std::collections::BTreeMap;
+
+        let dir = std::env::temp_dir().join(format!("rezzy-outcomes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("outcomes.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let answer = |kind: &'static str, status| IdOutcome {
+            kind,
+            status: Some(status),
+            errcode: None,
+        };
+        let a = BTreeMap::from([("$x".to_owned(), answer("not_found", 404))]);
+        let b = BTreeMap::from([("$x".to_owned(), answer("transient", 503))]);
+        write_outcomes_file(&path, "a.test", &a).unwrap();
+        write_outcomes_file(&path, "b.test", &b).unwrap();
+        // Rewriting one server must not drop the other's evidence.
+        write_outcomes_file(&path, "a.test", &a).unwrap();
+        assert_eq!(read_outcomes_file(&path, "a.test").unwrap(), a);
+        assert_eq!(read_outcomes_file(&path, "b.test").unwrap(), b);
+        assert!(read_outcomes_file(&path, "c.test").unwrap().is_empty());
+        std::fs::write(&path, "not json\n").unwrap();
+        assert!(read_outcomes_file(&path, "a.test").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     use super::{
         domain_env_suffix, parse_signing_key, AppError, ErrorCode, FetchFailures, SigningKey,

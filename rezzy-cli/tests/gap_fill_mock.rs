@@ -602,15 +602,18 @@ fn resume_with_skip_tried_does_not_re_request_ids_that_already_failed() {
     let fx = Fixture::new("resume-no-retry");
     assert!(fx.gap_fill_with(&mock.url, true, "1", &[]).status.success());
     assert_eq!(mock.count(&format!("/event/{STILL_MISSING}")), 1);
-    assert!(fx
-        .gap_fill_with(&mock.url, true, "1", &["--resume", "--skip-tried"])
-        .status
-        .success());
+    let resumed = fx.gap_fill_with(&mock.url, true, "1", &["--resume", "--skip-tried"]);
+    assert!(resumed.status.success(), "{}", text(&resumed.stderr));
     assert_eq!(
         mock.count(&format!("/event/{STILL_MISSING}")),
         1,
         "failed ID asked for again: {:?}",
         mock.requests()
+    );
+    assert_eq!(
+        prev_outcome(&resumed, STILL_MISSING).0,
+        "not_found",
+        "a resumed run must reload earlier answers, not report them unanswered"
     );
 }
 
@@ -1377,6 +1380,39 @@ fn a_404_from_the_server_is_reported_as_not_found_by_that_server() {
         queried_servers(&out),
         vec![mock.url],
         "the report names the sources an answer is relative to"
+    );
+}
+
+#[test]
+fn a_found_event_is_reported_as_resolved_instead_of_inferred_from_omission() {
+    // A blank backfill falls back to fetching the target by ID, so the target
+    // is a found answer rather than an event silently dropped from the list.
+    let (_mock, _fx, out) = run("resolved-found", Backfill::Blank, EventShape::Pdus);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let value = rezzy::JsonValue::parse(stdout.trim()).expect("report is JSON");
+    let resolved = value
+        .get("resolved")
+        .and_then(rezzy::JsonValue::as_array)
+        .expect("report lists resolved ids");
+    let entry = resolved
+        .iter()
+        .find(|entry| entry.get("id").and_then(rezzy::JsonValue::as_str) == Some(TARGET))
+        .unwrap_or_else(|| panic!("no resolved entry for {TARGET}: {stdout}"));
+    assert_eq!(
+        entry.get("outcome").and_then(rezzy::JsonValue::as_str),
+        Some("found"),
+        "a resolved id names the answer, not just its absence from the missing list"
+    );
+    let missing = value
+        .get("missing_prev_outcomes")
+        .and_then(rezzy::JsonValue::as_array)
+        .expect("report lists missing_prev_outcomes");
+    assert!(
+        !missing
+            .iter()
+            .any(|entry| { entry.get("id").and_then(rezzy::JsonValue::as_str) == Some(TARGET) }),
+        "a found event is not still listed among the missing"
     );
 }
 
