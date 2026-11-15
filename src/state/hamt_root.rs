@@ -394,3 +394,177 @@ mod tests {
         );
     }
 }
+
+/// Golden vectors for the flat state-HAMT format.
+///
+/// A fixed two-entry state set pins the persisted node bytes, the structural
+/// `root_hash`, the portable `state_group_id`, and the BLAKE3 digest of the
+/// `MTHR` record. Changing the leaf codec, routing, structural-hash preimage or
+/// root-record layout must change these constants deliberately; an accidental
+/// change should fail here.
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod golden_vectors {
+    use super::*;
+    use crate::basespec::event_types::EventType;
+    use crate::hamt::codec::PersistedInternalNode;
+    use crate::hamt::{
+        HAMT_CODEC_VERSION, HAMT_NODE_MAGIC, HAMT_ROOT_MAGIC, HAMT_ROUTING_VERSION,
+        HAMT_WIRE_VERSION,
+    };
+    use alloc::{
+        string::{String, ToString},
+        vec,
+        vec::Vec,
+    };
+
+    const GOLDEN_ROOM_ID: &str = "!golden:example.org";
+    const GOLDEN_NODE_BYTES_HEX: &str =
+        "4d54484e01100000010000000002000000000000000d0000006d2e726f6f6d2e6372656174650000000013000000246372656174653a6578616d706c652e6f72670d0000006d2e726f6f6d2e6d656d6265721200000040616c6963653a6578616d706c652e6f726711000000246a6f696e3a6578616d706c652e6f7267";
+    const GOLDEN_ROOT_HASH_HEX: &str =
+        "815a6dadafb5aed3195b8a9a5b24985e312fb940d8e754866c744d90c83e6d15";
+    const GOLDEN_STATE_GROUP_ID_HEX: &str =
+        "8716f8f25928d52ddf2a97866c257e27abcafff216dc758f53b294033f3c54eb";
+    const GOLDEN_MTHR_LEN: usize = 2127;
+    const GOLDEN_MTHR_BLAKE3_HEX: &str =
+        "04e50c14f9b9cbad1807353a07f4fd53b5d71b377be154eb31a4edfc4fae68c7";
+
+    fn hex(bytes: &[u8]) -> String {
+        use core::fmt::Write as _;
+        let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+        for byte in bytes {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    }
+
+    fn golden_entries() -> Vec<(StateHamtKey, String)> {
+        vec![
+            (
+                (EventType::from("m.room.create"), String::new()),
+                "$create:example.org".to_string(),
+            ),
+            (
+                (
+                    EventType::from("m.room.member"),
+                    "@alice:example.org".to_string(),
+                ),
+                "$join:example.org".to_string(),
+            ),
+        ]
+    }
+
+    fn golden_lattice(entries: &[(StateHamtKey, String)]) -> LtHash {
+        let mut lattice = LtHash::ZERO;
+        for (key, value) in entries {
+            lattice.insert(key.0.as_str(), &key.1, value);
+        }
+        lattice
+    }
+
+    fn golden_tree() -> (
+        crate::hamt::RootHandle,
+        alloc::sync::Arc<crate::hamt::HamtNode<StateHamtKey, String>>,
+        LtHash,
+    ) {
+        let entries = golden_entries();
+        let lattice = golden_lattice(&entries);
+        let (handle, root) =
+            crate::hamt::build_hamt_root_handle(GOLDEN_ROOM_ID.as_bytes(), &lattice, entries)
+                .expect("golden state set must build");
+        (handle, root, lattice)
+    }
+
+    #[test]
+    fn golden_node_root_and_record_vectors() {
+        let (handle, root, lattice) = golden_tree();
+
+        // The two golden leaves diverge at the root, so the whole tree is one
+        // inline node.
+        assert_eq!(root.nodemap, 0);
+        assert_eq!(root.children.len(), 0);
+        assert_eq!(root.leaves.len(), 2);
+
+        let persisted = PersistedInternalNode::from(root.as_ref());
+        let node_bytes = persisted.encode_v1();
+        assert_eq!(hex(&node_bytes), GOLDEN_NODE_BYTES_HEX);
+        assert_eq!(hex(&handle.structural_hash), GOLDEN_ROOT_HASH_HEX);
+        assert_eq!(hex(&handle.state_group_id), GOLDEN_STATE_GROUP_ID_HEX);
+        assert_eq!(handle.state_group_id, lattice.digest());
+
+        let record = encode_state_hamt_root(
+            GOLDEN_ROOM_ID.as_bytes(),
+            GOLDEN_ROOM_ID,
+            &handle.structural_hash,
+            &lattice,
+        )
+        .expect("golden record must encode");
+        assert_eq!(record.len(), GOLDEN_MTHR_LEN);
+        assert_eq!(&record[..5], b"MTHR\x01");
+        let digest = *blake3::hash(&record).as_bytes();
+        assert_eq!(hex(&digest), GOLDEN_MTHR_BLAKE3_HEX);
+        // The record digest commits to the full 2048-byte lattice, which is
+        // separately identified by the state-group id.
+        assert_eq!(hex(&lattice.digest()), GOLDEN_STATE_GROUP_ID_HEX);
+    }
+
+    #[test]
+    fn golden_node_decodes_and_reencodes() {
+        let (handle, root, _lattice) = golden_tree();
+        let bytes = PersistedInternalNode::from(root.as_ref()).encode_v1();
+
+        let decoded = PersistedInternalNode::<StateHamtKey, String>::decode_v1_unverified(&bytes)
+            .expect("golden node must decode");
+        assert_eq!(decoded.encode_v1(), bytes);
+        assert_eq!(decoded.leaves.len(), 2);
+
+        let verified = PersistedInternalNode::<StateHamtKey, String>::decode_v1_verified(
+            &bytes,
+            GOLDEN_ROOM_ID.as_bytes(),
+            handle.structural_hash,
+        )
+        .expect("golden node must verify under its structural hash");
+        assert_eq!(verified.structural_hash, handle.structural_hash);
+        assert_eq!(verified.leaves, root.leaves);
+        assert_eq!(verified.datamap, root.datamap);
+        assert_eq!(verified.nodemap, root.nodemap);
+    }
+
+    #[test]
+    fn golden_mthr_record_round_trips() {
+        let (handle, _root, lattice) = golden_tree();
+        let record = encode_state_hamt_root(
+            GOLDEN_ROOM_ID.as_bytes(),
+            GOLDEN_ROOM_ID,
+            &handle.structural_hash,
+            &lattice,
+        )
+        .expect("golden record must encode");
+
+        let decoded = decode_state_hamt_root(&record).expect("golden record must decode");
+        assert_eq!(decoded.prefix, GOLDEN_ROOM_ID.as_bytes());
+        assert_eq!(decoded.room_id, GOLDEN_ROOM_ID);
+        assert_eq!(decoded.root_hash, handle.structural_hash);
+        assert_eq!(decoded.state_group_id, handle.state_group_id);
+        assert_eq!(decoded.lattice, lattice);
+
+        let reencoded = encode_state_hamt_root(
+            &decoded.prefix,
+            &decoded.room_id,
+            &decoded.root_hash,
+            &decoded.lattice,
+        )
+        .expect("decoded record must re-encode");
+        assert_eq!(reencoded, record);
+    }
+
+    #[test]
+    fn golden_format_version_constants() {
+        assert_eq!(HAMT_NODE_MAGIC, b"MTHN");
+        assert_eq!(HAMT_ROOT_MAGIC, b"MTHR");
+        assert_eq!(HAMT_WIRE_VERSION, 0x01);
+        assert_eq!(STATE_HAMT_ROOT_VERSION, 0x01);
+        assert_eq!(HAMT_CODEC_VERSION, 1);
+        assert_eq!(HAMT_ROUTING_VERSION, 1);
+    }
+}
