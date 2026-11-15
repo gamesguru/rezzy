@@ -1583,6 +1583,7 @@ mod tests {
             format,
             debug: false,
             quiet: false,
+            exact: false,
             check: false,
             origin: String::from("matrix.org"),
             timeline_order: TimelineOrder::default(),

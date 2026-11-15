@@ -490,13 +490,14 @@ pub fn parse_and_extract_heads(
 /// [`partition_state_maps_fast`]; larger graphs use the per-head pipeline.
 const MAX_HEAD_BITS_BYTES: usize = 64 * 1024 * 1024;
 
-/// Partition the per-head state maps directly from the DAG.
+/// Partition state keys directly from the DAG, routing multi-candidate keys
+/// through exact conflict resolution.
 ///
-/// This is equivalent to building one full state map per head and passing them
-/// to [`rezzy::partition_state_maps`], but it never materializes those maps.
-/// Each event carries the bitset of heads it is an ancestor of; walking the
-/// state events by descending `(depth, event_id)` assigns the winning event
-/// for every key/head pair. The cost is proportional to
+/// Each event carries the bitset of heads it is an ancestor of. A key with one
+/// candidate event is unconflicted; keys with multiple candidate events send
+/// all candidates through exact state resolution. This avoids trusting a
+/// max-depth winner where a merge may choose an older event. The cost of the
+/// partition pass is proportional to
 /// `edges × heads/64 + state_events × heads/64`, not `heads × events`.
 ///
 /// # Panics
@@ -509,6 +510,27 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
     heads: &[String],
     events_map: &HashMap<String, LeanEvent, S1>,
     version: StateResVersion,
+    debug: bool,
+) -> (ResolvedState, Vec<String>) {
+    partition_state_maps_with(heads, events_map, version, false, true, debug)
+}
+
+/// Like [`partition_state_maps_fast`]; `exact` forces the per-head
+/// state-at-event pipeline over the locally available DAG. `exact_conflicts`
+/// sends every multi-candidate key through the exact conflict resolver while
+/// retaining the fast bitset partition for single-candidate keys.
+///
+/// # Panics
+///
+/// Same as [`partition_state_maps_fast`].
+#[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
+#[must_use]
+pub fn partition_state_maps_with<S1: std::hash::BuildHasher>(
+    heads: &[String],
+    events_map: &HashMap<String, LeanEvent, S1>,
+    version: StateResVersion,
+    exact: bool,
+    exact_conflicts: bool,
     debug: bool,
 ) -> (ResolvedState, Vec<String>) {
     let start = Instant::now();
@@ -532,10 +554,11 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
     }
 
     let order = crate::timeline_order::kahn_order_borrowed(&ids, &parents, &timestamps, &depths);
-    // The fast reverse pass is valid only when one global event ordering also
-    // preserves each head's resolved state. Multi-parent merges and cycles can
-    // violate that assumption, so use the state-at-event pipeline for those
-    // graphs. This keeps the optimized path for simple acyclic chains/forks.
+    // This pass partitions keys into unconflicted vs conflicted. Keys with
+    // multiple candidate events go through exact conflict resolution, because
+    // a merge may select an event other than the max-(depth, event_id)
+    // candidate. Cycles cannot be ordered, so they use the per-head
+    // state-at-event pipeline.
     //
     // The bitset pass is O(events × heads). Many independent events (roughly
     // one head each) would otherwise allocate a dense `n × words` array that
@@ -544,19 +567,25 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
     let head_bits_bytes = n
         .saturating_mul(words)
         .saturating_mul(core::mem::size_of::<u64>());
-    if order.len() != n
-        || parents.iter().any(|event_parents| event_parents.len() > 1)
-        || head_bits_bytes > MAX_HEAD_BITS_BYTES
-    {
-        let states: Vec<_> = heads
-            .iter()
-            .filter_map(|head| rezzy::compute_state_at(head, events_map, version, &String::new()))
-            .collect();
+    if exact || order.len() != n || head_bits_bytes > MAX_HEAD_BITS_BYTES {
+        // Compute every head's state in one shared topological pass. Calling
+        // `compute_state_at` per head re-walked and re-resolved the whole DAG
+        // for each head (468 heads × 82k events took over 12 minutes on a
+        // merged room).
+        let head_refs: Vec<&str> = heads.iter().map(String::as_str).collect();
+        let mut states: Vec<SharedState> = Vec::with_capacity(head_refs.len());
+        rezzy::StreamingInputs::compute(
+            &head_refs,
+            events_map,
+            version,
+            |_, state| states.push(state),
+            &String::new(),
+        );
         let (unconflicted, conflicted) =
-            rezzy::partition_state_maps(states.iter().map(|state| state.iter()), states.len());
+            rezzy::partition_state_maps(states.iter().map(SharedState::iter), states.len());
         if debug {
             eprintln!(
-                "[DEBUG] Used state-at-event partitioning for a cyclic, multi-parent, or very large graph"
+                "[DEBUG] Used state-at-event partitioning (--exact, cyclic, or very large graph)"
             );
         }
         return (unconflicted, conflicted);
@@ -627,6 +656,8 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
     };
     let mut unconflicted_state = ResolvedState::new();
     let mut conflicted_ids = Vec::new();
+    let mut exact_conflict_keys = 0_usize;
+    let mut exact_conflict_events = 0_usize;
 
     for (key, event_indices) in by_key {
         let mut remaining = vec![u64::MAX; words];
@@ -637,15 +668,23 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
         let mut assigned = 0_usize;
         // Each event appears once per key, so winners are distinct.
         let mut winners: Vec<&str> = Vec::new();
+        let mut candidates: Vec<&str> = Vec::new();
         for event_index in event_indices {
             let base = event_index.saturating_mul(words);
             let mut here_count = 0_usize;
+            let mut is_candidate = false;
             for word in 0..words {
-                let here = head_bits[base.saturating_add(word)] & remaining[word];
+                let head_mask = head_bits[base.saturating_add(word)];
+                is_candidate |= head_mask != 0;
+                let here = head_mask & remaining[word];
                 if here != 0 {
                     here_count = here_count.saturating_add(here.count_ones() as usize);
                     remaining[word] &= !here;
                 }
+            }
+
+            if is_candidate {
+                candidates.push(ids[event_index]);
             }
 
             if here_count > 0 {
@@ -653,9 +692,16 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
                 winners.push(ids[event_index]);
             }
 
-            if assigned == head_count {
+            if assigned == head_count && !exact_conflicts {
                 break;
             }
+        }
+
+        if exact_conflicts && candidates.len() > 1 {
+            exact_conflict_keys = exact_conflict_keys.saturating_add(1);
+            exact_conflict_events = exact_conflict_events.saturating_add(candidates.len());
+            conflicted_ids.extend(candidates.into_iter().map(str::to_owned));
+            continue;
         }
 
         let absent = head_count.saturating_sub(assigned);
@@ -671,6 +717,11 @@ pub fn partition_state_maps_fast<S1: std::hash::BuildHasher>(
             "[DEBUG] partitioned {key_count} state keys over {head_count} heads in {:.2?}",
             start.elapsed()
         );
+        if exact_conflicts {
+            eprintln!(
+                "[DEBUG] routed {exact_conflict_keys} multi-candidate keys ({exact_conflict_events} events) through exact conflict resolution"
+            );
+        }
     }
 
     (unconflicted_state, conflicted_ids)
@@ -1420,8 +1471,14 @@ mod tests {
                 heads.iter().step_by(3).cloned().collect(),
                 heads[..1].to_vec(),
             ] {
-                let (fast_unconflicted, mut fast_conflicted) =
-                    partition_state_maps_fast(&subset, &events, StateResVersion::V2_1, false);
+                let (fast_unconflicted, mut fast_conflicted) = partition_state_maps_with(
+                    &subset,
+                    &events,
+                    StateResVersion::V2_1,
+                    false,
+                    false,
+                    false,
+                );
                 fast_conflicted.sort_unstable();
                 let fast_unconflicted: Vec<_> = fast_unconflicted
                     .iter()
@@ -1457,5 +1514,42 @@ mod tests {
             partition_state_maps_fast(&[], &events, StateResVersion::V2_1, false);
         assert_eq!(unconflicted.iter().count(), 0);
         assert!(conflicted.is_empty());
+    }
+
+    #[test]
+    fn default_partition_routes_multi_parent_member_candidates_across_a_gap() {
+        let events = map_from_jsonl(
+            r#"{"event_id":"$create","type":"m.room.create","state_key":"","depth":1,"sender":"@creator:example.org","content":{"room_version":"12"},"prev_events":[],"auth_events":[]}
+{"event_id":"$ban","type":"m.room.member","state_key":"@alice:example.org","depth":2,"sender":"@mod:example.org","content":{"membership":"ban"},"prev_events":["$missing_ban_parent"],"auth_events":["$create"]}
+{"event_id":"$join","type":"m.room.member","state_key":"@alice:example.org","depth":3,"sender":"@alice:example.org","content":{"membership":"join"},"prev_events":["$missing_join_parent"],"auth_events":["$create"]}
+{"event_id":"$merge","type":"m.room.message","depth":4,"sender":"@alice:example.org","content":{},"prev_events":["$ban","$join"],"auth_events":["$create"]}
+"#,
+        );
+        let heads = vec![String::from("$merge")];
+
+        let (unconflicted, mut conflicted) =
+            partition_state_maps_fast(&heads, &events, StateResVersion::V2_1, false);
+        assert!(unconflicted
+            .get(&(
+                EventType::from("m.room.member"),
+                String::from("@alice:example.org")
+            ))
+            .is_none());
+        conflicted.sort_unstable();
+        assert_eq!(
+            conflicted,
+            vec![String::from("$ban"), String::from("$join")]
+        );
+
+        let (approx_unconflicted, approx_conflicted) =
+            partition_state_maps_with(&heads, &events, StateResVersion::V2_1, false, false, false);
+        assert_eq!(
+            approx_unconflicted.get(&(
+                EventType::from("m.room.member"),
+                String::from("@alice:example.org")
+            )),
+            Some(&String::from("$join"))
+        );
+        assert!(approx_conflicted.is_empty());
     }
 }

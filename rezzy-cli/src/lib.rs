@@ -50,7 +50,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use utils::{
     apply_global_power_levels, detect_version, load_or_fetch_input_value, parse_and_extract_heads,
-    partition_state_maps_fast, resolve_partitioned_state,
+    partition_state_maps_with, resolve_partitioned_state,
 };
 
 #[allow(clippy::struct_excessive_bools)]
@@ -83,6 +83,9 @@ pub struct Args {
 
     /// Suppress informational and warning messages.
     pub quiet: bool,
+
+    /// Force per-head state computation over the locally available DAG.
+    pub exact: bool,
 
     /// Validate input only; suppress state output and exit.
     pub check: bool,
@@ -142,6 +145,7 @@ impl Args {
                 .unwrap_or_default(),
             debug: matches.get_flag("debug"),
             quiet: matches.get_flag("quiet"),
+            exact: matches.get_flag("exact"),
             check: matches.get_flag("check"),
             origin: matches
                 .get_one::<String>("origin")
@@ -214,6 +218,14 @@ pub fn cli_command() -> clap::Command {
             clap::Arg::new("quiet")
                 .short('q')
                 .long("quiet")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            clap::Arg::new("exact")
+                .long("exact")
+                .help(
+                    "Compute every head's state from its local prev_events ancestry (slow on merged rooms)",
+                )
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
@@ -571,7 +583,8 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
             eprintln!("[progress] building state maps...");
         }
         let t = Instant::now();
-        let m = partition_state_maps_fast(&heads, &events_map, version, args.debug);
+        let m =
+            partition_state_maps_with(&heads, &events_map, version, args.exact, true, args.debug);
         if !args.quiet {
             eprintln!("[progress] state maps built in {:.2?}", t.elapsed());
         }
@@ -821,6 +834,7 @@ mod tests {
             format: OutputFormat::Default,
             debug: false,
             quiet: true,
+            exact: false,
             check: true,
             origin: String::from("matrix.org"),
             timeline_order: crate::timeline_order::TimelineOrder::default(),
