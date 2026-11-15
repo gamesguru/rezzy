@@ -65,3 +65,11 @@ type MissingNodesError struct {
 func (e *MissingNodesError) Error() string {
 	return fmt.Sprintf("rezzy: state HAMT is missing %d node(s)", len(e.Hashes))
 }
+
+// HAMTMutation is one state change for StateHAMTApply. A nil EventID removes
+// the key.
+type HAMTMutation struct {
+	EventType string
+	StateKey  string
+	EventID   *string
+}

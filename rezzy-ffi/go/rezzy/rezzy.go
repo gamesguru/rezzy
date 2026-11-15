@@ -191,6 +191,10 @@ func StateHAMTPersist(roomID string, entries []HAMTEntry) (*HAMTPersisted, error
 	if err != nil {
 		return nil, err
 	}
+	return decodePersisted(response)
+}
+
+func decodePersisted(response []byte) (*HAMTPersisted, error) {
 	var parsed struct {
 		RootHash     string     `json:"root_hash"`
 		StateGroupID string     `json:"state_group_id"`
@@ -242,6 +246,42 @@ func StateHAMTNeeded(roomID, rootHash string, nodes []HAMTNode) ([]string, error
 		return nil, fmt.Errorf("rezzy: decode state HAMT needed nodes: %w", err)
 	}
 	return parsed.Needed, nil
+}
+
+// StateHAMTApply applies mutations to the persisted HAMT described by
+// parentRoot (an MTHR record; nil starts from the empty state) and returns
+// the new root record plus only the nodes created relative to the parent.
+// nodes should hold the parent nodes already fetched. When another path node
+// is needed it returns a *MissingNodesError; fetch those nodes and call again.
+func StateHAMTApply(
+	roomID string, parentRoot []byte, parentEntryCount int,
+	nodes []HAMTNode, mutations []HAMTMutation,
+) (*HAMTPersisted, error) {
+	encoded := make([][3]*string, len(mutations))
+	for i := range mutations {
+		encoded[i] = [3]*string{&mutations[i].EventType, &mutations[i].StateKey, mutations[i].EventID}
+	}
+	request := map[string]any{
+		"op":                 "apply",
+		"parent_entry_count": parentEntryCount,
+		"nodes":              encodeNodes(nodes),
+		"mutations":          encoded,
+	}
+	if parentRoot != nil {
+		request["parent_root_record"] = hex.EncodeToString(parentRoot)
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, err
+	}
+	response, err := callStateHAMT(roomID, payload)
+	if err != nil {
+		return nil, err
+	}
+	if err := missingNodes(response); err != nil {
+		return nil, err
+	}
+	return decodePersisted(response)
 }
 
 func missingNodes(response []byte) error {

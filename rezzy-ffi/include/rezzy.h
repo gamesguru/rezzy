@@ -100,6 +100,15 @@ int rezzy_recon_gf256_difference(const uint8_t *left, size_t left_len,
  *   {"op":"verify","root_record":"<hex>","nodes":[...]}
  *     -> {"root_hash","state_group_id","room_id","prefix","entry_count"}
  *        or {"missing":["<hex>"]}
+ *   {"op":"apply","parent_root_record":"<hex MTHR>"|omitted,
+ *    "parent_entry_count":N,"nodes":[...],
+ *    "mutations":[[type,key,id|null],...]}
+ *     -> the "persist" response for the new state, with "nodes" holding only
+ *        the nodes created relative to the parent, or {"missing":["<hex>"]}
+ *     Incremental update in O(|mutations| log n): only the nodes on the
+ *     mutated paths are needed, and the lattice is carried forward from the
+ *     parent record. A null id removes the key. Load the missing node and
+ *     call again. Omit parent_root_record to start from the empty state.
  *   Repeat "needed" until it returns an empty list, then read. Every supplied
  *   node is verified against its structural hash before use.
  *   Each entries array must contain at most one row per (event_type,

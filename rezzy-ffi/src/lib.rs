@@ -1254,6 +1254,164 @@ fn missing_json(hash: &StructuralHash) -> JsonValue {
     rezzy::json!({ "missing": [hex_encode(hash)] })
 }
 
+/// Applies `mutations` to the persisted HAMT described by `parent_root_record`
+/// in O(|mutations| * log n), carrying the lattice forward with
+/// `sub_seed`/`add_seed` instead of rehashing every entry.
+///
+/// Only the nodes on the mutated paths are needed. When one is absent from
+/// `nodes` the response is `{"missing":[hash]}`; the caller loads it and
+/// retries. Without `parent_root_record` the base is the empty state.
+/// `entry_count` is derived from `parent_entry_count` and the mutations.
+#[allow(clippy::too_many_lines)]
+fn apply_mutations(room_id: &str, request: &JsonValue) -> Result<JsonValue, String> {
+    let (parent_root, mut lattice) = match request.get("parent_root_record") {
+        Some(value) if !value.is_null() => {
+            let record = hex_decode_limited(
+                value
+                    .as_str()
+                    .ok_or_else(|| String::from("`parent_root_record` must be a hex string"))?,
+                8192,
+            )?;
+            let decoded =
+                decode_state_hamt_root(&record).map_err(|error| std::format!("{error}"))?;
+            if decoded.room_id != room_id || decoded.prefix != room_id.as_bytes() {
+                return Err(std::format!(
+                    "parent root record is for room {:?}, not {room_id:?}",
+                    decoded.room_id
+                ));
+            }
+            (Some(decoded.root_hash), decoded.lattice)
+        }
+        _ => (None, LtHash::ZERO),
+    };
+    let nodes = match request.get("nodes") {
+        Some(value) => parse_node_list(value)?,
+        None => std::collections::BTreeMap::new(),
+    };
+    let parent_count = request
+        .get("parent_entry_count")
+        .and_then(JsonValue::as_u64)
+        .unwrap_or(0);
+    let items = request
+        .get("mutations")
+        .and_then(JsonValue::as_array)
+        .ok_or_else(|| String::from("`mutations` must be an array"))?;
+    let mut mutations = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let parts = item.as_array().ok_or_else(|| {
+            std::format!("mutation {index} must be [event_type, state_key, event_id|null]")
+        })?;
+        if parts.len() != 3 {
+            return Err(std::format!(
+                "mutation {index} must have exactly three elements"
+            ));
+        }
+        let event_type = parts[0]
+            .as_str()
+            .ok_or_else(|| std::format!("mutation {index} event_type must be a string"))?;
+        let state_key = parts[1]
+            .as_str()
+            .ok_or_else(|| std::format!("mutation {index} state_key must be a string"))?;
+        let event_id = if parts[2].is_null() {
+            None
+        } else {
+            Some(
+                parts[2]
+                    .as_str()
+                    .ok_or_else(|| {
+                        std::format!("mutation {index} event_id must be a string or null")
+                    })?
+                    .to_owned(),
+            )
+        };
+        mutations.push((
+            (rezzy::EventType::from(event_type), state_key.to_owned()),
+            event_id,
+        ));
+    }
+
+    let prev_root: Arc<HamtNode<StateHamtKey, String>> = match parent_root {
+        Some(hash) => {
+            let Some(bytes) = nodes.get(&hash) else {
+                return Ok(missing_json(&hash));
+            };
+            Arc::new(
+                PersistedInternalNode::<StateHamtKey, String>::decode_v1_verified(
+                    bytes,
+                    room_id.as_bytes(),
+                    hash,
+                )
+                .map_err(|error| std::format!("parent root failed verification: {error}"))?,
+            )
+        }
+        None => {
+            build_hamt_root_handle(
+                room_id.as_bytes(),
+                &LtHash::ZERO,
+                Vec::<(StateHamtKey, String)>::new(),
+            )
+            .map_err(|error| std::format!("{error:?}"))?
+            .1
+        }
+    };
+
+    let structural_key = room_id.as_bytes();
+    let mut resolver =
+        |hash: &StructuralHash| -> Result<Arc<HamtNode<StateHamtKey, String>>, StructuralHash> {
+            let bytes = nodes.get(hash).ok_or(*hash)?;
+            PersistedInternalNode::<StateHamtKey, String>::decode_v1_verified(
+                bytes,
+                structural_key,
+                *hash,
+            )
+            .map(Arc::new)
+            .map_err(|_| *hash)
+        };
+    let applied = rezzy::hamt::persist_mutations(
+        &prev_root,
+        structural_key,
+        mutations.iter().cloned(),
+        &mut resolver,
+    );
+    let (new_root, displaced, created) = match applied {
+        Ok(applied) => applied,
+        Err(rezzy::hamt::HamtMutateError::Resolve(hash)) => return Ok(missing_json(&hash)),
+        Err(error) => return Err(std::format!("{error:?}")),
+    };
+
+    let mut entry_count = parent_count;
+    for (((event_type, state_key), new_value), old_value) in mutations.iter().zip(&displaced) {
+        if let Some(old) = old_value {
+            lattice.sub_seed(&LtHash::seed(event_type.as_str(), state_key, old));
+        } else if new_value.is_some() {
+            entry_count = entry_count.saturating_add(1);
+        }
+        if let Some(new) = new_value {
+            lattice.add_seed(&LtHash::seed(event_type.as_str(), state_key, new));
+        } else if old_value.is_some() {
+            entry_count = entry_count.saturating_sub(1);
+        }
+    }
+    let handle = RootHandle::from_lthash(new_root.structural_hash, &lattice);
+    let record = encode_state_hamt_root(
+        room_id.as_bytes(),
+        room_id,
+        &handle.structural_hash,
+        &lattice,
+    )
+    .map_err(|error| std::format!("{error}"))?;
+    let node_bytes: usize = created.iter().map(|(_, bytes)| bytes.len()).sum();
+    Ok(rezzy::json!({
+        "root_hash": hex_encode(&handle.structural_hash),
+        "state_group_id": hex_encode(&handle.state_group_id),
+        "root_record": hex_encode(&record),
+        "nodes": JsonValue::Array(created.iter().map(|(hash, bytes)| node_json((hash, bytes))).collect()),
+        "entry_count": entry_count,
+        "node_count": created.len() as u64,
+        "node_bytes": node_bytes as u64,
+    }))
+}
+
 type StateHamtReader<'a, L> = PersistedHamtReader<'a, StateHamtKey, String, (), L>;
 
 #[allow(clippy::too_many_lines)]
@@ -1296,6 +1454,7 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                 "node_bytes": node_bytes as u64,
             }))
         }
+        "apply" => apply_mutations(room_id, request),
         "needed" => {
             let root = parse_root_hash(request, "root_hash")?;
             let nodes = parse_node_list(
@@ -2584,6 +2743,142 @@ mod tests {
             .collect::<Vec<_>>()
             .join(",");
         format!("[{pairs}]")
+    }
+
+    fn field(value: &JsonValue, name: &str) -> String {
+        value
+            .get(name)
+            .and_then(JsonValue::as_str)
+            .unwrap()
+            .to_owned()
+    }
+
+    /// Incremental `apply` must produce exactly what a full rebuild of the
+    /// resulting state produces, while resolving only the nodes on the
+    /// mutated paths.
+    #[test]
+    fn state_hamt_apply_matches_full_rebuild() {
+        let room = "!room:example.org";
+        let entry = |i: usize, version: usize| format!(r#"["m.test","key{i}","$ev{i}v{version}"]"#);
+        let list = |entries: &[String]| format!("[{}]", entries.join(","));
+
+        let base: Vec<String> = (0..300).map(|i| entry(i, 0)).collect();
+        let (status, text) = call_hamt(
+            room,
+            &format!(
+                r#"{{"op":"root","persist":true,"entries":{}}}"#,
+                list(&base)
+            ),
+        );
+        assert_eq!(status, OK, "{text}");
+        let parent = JsonValue::parse(&text).unwrap();
+        let parent_nodes = parent
+            .get("nodes")
+            .and_then(JsonValue::as_array)
+            .unwrap()
+            .clone();
+        let parent_record = field(&parent, "root_record");
+
+        // Replace key 7, add key 1000, remove key 42.
+        let mutations = r#"[["m.test","key7","$ev7v1"],["m.test","key1000","$ev1000v0"],["m.test","key42",null]]"#;
+        let mut want: Vec<String> = base
+            .iter()
+            .filter(|e| !e.contains("\"key42\""))
+            .map(|e| {
+                if e.contains("\"key7\"") {
+                    entry(7, 1)
+                } else {
+                    e.clone()
+                }
+            })
+            .collect();
+        want.push(entry(1000, 0));
+        let (status, text) = call_hamt(
+            room,
+            &format!(
+                r#"{{"op":"root","persist":true,"entries":{}}}"#,
+                list(&want)
+            ),
+        );
+        assert_eq!(status, OK, "{text}");
+        let rebuilt = JsonValue::parse(&text).unwrap();
+
+        // Resolve lazily: start with no nodes and feed back what is missing.
+        let mut supplied: Vec<JsonValue> = Vec::new();
+        let applied = loop {
+            let request = format!(
+                r#"{{"op":"apply","parent_root_record":"{parent_record}","parent_entry_count":300,"nodes":{},"mutations":{mutations}}}"#,
+                JsonValue::Array(supplied.clone()),
+            );
+            let (status, text) = call_hamt(room, &request);
+            assert_eq!(status, OK, "{text}");
+            let response = JsonValue::parse(&text).unwrap();
+            let Some(missing) = response.get("missing").and_then(JsonValue::as_array) else {
+                break response;
+            };
+            let wanted = missing[0].as_str().unwrap();
+            let node = parent_nodes
+                .iter()
+                .find(|n| n.as_array().unwrap()[0].as_str() == Some(wanted))
+                .unwrap_or_else(|| panic!("missing node {wanted} is not in the parent tree"));
+            supplied.push(node.clone());
+        };
+
+        assert_eq!(field(&applied, "root_hash"), field(&rebuilt, "root_hash"));
+        assert_eq!(
+            field(&applied, "state_group_id"),
+            field(&rebuilt, "state_group_id")
+        );
+        assert_eq!(
+            field(&applied, "root_record"),
+            field(&rebuilt, "root_record")
+        );
+        assert_eq!(
+            applied.get("entry_count").and_then(JsonValue::as_u64),
+            Some(300)
+        );
+        assert!(
+            supplied.len() < parent_nodes.len(),
+            "apply loaded {} of {} nodes; it should touch only the mutated paths",
+            supplied.len(),
+            parent_nodes.len()
+        );
+        let created = applied
+            .get("node_count")
+            .and_then(JsonValue::as_u64)
+            .unwrap();
+        assert!(
+            created
+                < rebuilt
+                    .get("node_count")
+                    .and_then(JsonValue::as_u64)
+                    .unwrap()
+        );
+    }
+
+    #[test]
+    fn state_hamt_apply_from_empty_matches_build() {
+        let room = "!room:example.org";
+        let (status, text) = call_hamt(
+            room,
+            r#"{"op":"apply","nodes":[],"mutations":[["m.room.create","","$c"],["m.room.name","","$n"]]}"#,
+        );
+        assert_eq!(status, OK, "{text}");
+        let applied = JsonValue::parse(&text).unwrap();
+        let (status, text) = call_hamt(
+            room,
+            r#"{"op":"root","persist":true,"entries":[["m.room.create","","$c"],["m.room.name","","$n"]]}"#,
+        );
+        assert_eq!(status, OK, "{text}");
+        let rebuilt = JsonValue::parse(&text).unwrap();
+        assert_eq!(
+            field(&applied, "root_record"),
+            field(&rebuilt, "root_record")
+        );
+        assert_eq!(
+            applied.get("entry_count").and_then(JsonValue::as_u64),
+            Some(2)
+        );
     }
 
     #[test]

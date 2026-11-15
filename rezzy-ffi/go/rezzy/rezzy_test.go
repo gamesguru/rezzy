@@ -3,8 +3,10 @@
 package rezzy
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -260,5 +262,78 @@ func TestStateHAMTPersistRoundTrip(t *testing.T) {
 	}
 	if verified.EntryCount != len(entries) {
 		t.Fatalf("verified %d entries, want %d", verified.EntryCount, len(entries))
+	}
+}
+
+func TestStateHAMTApplyMatchesRebuild(t *testing.T) {
+	const room = "!room:example.org"
+	base := make([]HAMTEntry, 0, 200)
+	for i := 0; i < 200; i++ {
+		base = append(base, HAMTEntry{"m.test", fmt.Sprintf("key%d", i), fmt.Sprintf("$ev%d", i)})
+	}
+	parent, err := StateHAMTPersist(room, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byHash := map[string]HAMTNode{}
+	for _, node := range parent.Nodes {
+		byHash[node.Hash] = node
+	}
+
+	replaced, added := "$ev3b", "$new"
+	mutations := []HAMTMutation{
+		{EventType: "m.test", StateKey: "key3", EventID: &replaced},
+		{EventType: "m.test", StateKey: "fresh", EventID: &added},
+		{EventType: "m.test", StateKey: "key9"},
+	}
+	var supplied []HAMTNode
+	var applied *HAMTPersisted
+	for {
+		applied, err = StateHAMTApply(room, parent.RootRecord, parent.EntryCount, supplied, mutations)
+		var missing *MissingNodesError
+		if errors.As(err, &missing) {
+			for _, hash := range missing.Hashes {
+				node, ok := byHash[hash]
+				if !ok {
+					t.Fatalf("apply asked for node %s outside the parent tree", hash)
+				}
+				supplied = append(supplied, node)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+
+	want := make([]HAMTEntry, 0, len(base))
+	for _, entry := range base {
+		switch entry[1] {
+		case "key9":
+			continue
+		case "key3":
+			entry[2] = replaced
+		}
+		want = append(want, entry)
+	}
+	want = append(want, HAMTEntry{"m.test", "fresh", added})
+	rebuilt, err := StateHAMTPersist(room, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.RootHash != rebuilt.RootHash || applied.StateGroupID != rebuilt.StateGroupID {
+		t.Fatalf("apply and rebuild disagree: %s/%s vs %s/%s",
+			applied.RootHash, applied.StateGroupID, rebuilt.RootHash, rebuilt.StateGroupID)
+	}
+	if !bytes.Equal(applied.RootRecord, rebuilt.RootRecord) {
+		t.Fatal("root records differ")
+	}
+	if applied.EntryCount != 200 {
+		t.Fatalf("entry count = %d, want 200", applied.EntryCount)
+	}
+	if len(supplied) >= len(parent.Nodes) || len(applied.Nodes) >= len(rebuilt.Nodes) {
+		t.Fatalf("apply touched too much: loaded %d/%d, created %d/%d",
+			len(supplied), len(parent.Nodes), len(applied.Nodes), len(rebuilt.Nodes))
 	}
 }

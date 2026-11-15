@@ -115,3 +115,11 @@ func (c *Client) Close() {}
 
 // Step is unavailable in this build.
 func (c *Client) Step(input []byte) ([]byte, error) { return nil, ErrUnavailable }
+
+// StateHAMTApply is unavailable in this build.
+func StateHAMTApply(
+	roomID string, parentRoot []byte, parentEntryCount int,
+	nodes []HAMTNode, mutations []HAMTMutation,
+) (*HAMTPersisted, error) {
+	return nil, ErrUnavailable
+}
