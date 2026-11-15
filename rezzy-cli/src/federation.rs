@@ -1325,6 +1325,8 @@ struct Checkpoint<'a> {
     round: u32,
     /// Do not queue IDs already in `tried`, including parents found mid-crawl.
     skip_tried: bool,
+    /// Receives what the destination said about each ID asked for by itself.
+    outcomes: &'a mut BTreeMap<String, IdOutcome>,
 }
 
 /// Records the supplied IDs as tried and persists the checkpoint, optionally
@@ -1336,6 +1338,7 @@ fn checkpoint_batch(
     state: &mut DagWalkState,
     ids: Vec<String>,
 ) -> Result<(), AppError> {
+    checkpoint.outcomes.append(&mut state.outcomes);
     if let Some(path) = checkpoint.requests_path {
         append_attempts(
             path,
@@ -1391,12 +1394,59 @@ struct DagWalkState {
     follow_prev_events: bool,
     /// IDs a resumed gap-fill run was told not to ask for again.
     skip: HashSet<String>,
+    /// What the destination said about each ID asked for by itself.
+    outcomes: BTreeMap<String, IdOutcome>,
+}
+
+/// What one server said when asked for one event by ID.
+///
+/// `NotFound` is a definite answer from that server only; it never proves the
+/// event exists nowhere. `Transient` and `Refused` are not answers about the
+/// event at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IdOutcome {
+    kind: &'static str,
+    status: Option<u16>,
+    errcode: Option<String>,
+}
+
+impl IdOutcome {
+    /// Classifies a single-event request attempt.
+    fn of(attempt: &Attempt) -> Self {
+        let kind = match attempt.status {
+            Some(200) => "found",
+            Some(404) => "not_found",
+            Some(408 | 429 | 500..=599) | None => "transient",
+            Some(_) => "refused",
+        };
+        Self {
+            kind,
+            status: attempt.status,
+            errcode: attempt.errcode.clone(),
+        }
+    }
+
+    fn to_json(&self) -> JsonValue {
+        let mut value = rezzy::json!({"outcome": self.kind});
+        if let Some(status) = self.status {
+            let _ = value.insert(String::from("status"), rezzy::json!(u64::from(status)));
+        }
+        if let Some(code) = &self.errcode {
+            let _ = value.insert(String::from("errcode"), rezzy::json!(code.clone()));
+        }
+        value
+    }
 }
 
 impl DagWalkState {
     /// Counts the outcome and retains its event ID for checkpointing; retains
     /// the full attempt only when request logging is enabled.
     fn record(&mut self, attempt: Attempt) {
+        if attempt.endpoint == "event" {
+            if let Some(id) = &attempt.event_id {
+                self.outcomes.insert(id.clone(), IdOutcome::of(&attempt));
+            }
+        }
         let count = self.stats.entry(stat_label(&attempt)).or_insert(0);
         *count = count.saturating_add(1);
         if self.track_requested {
@@ -1471,6 +1521,7 @@ fn initialize_dag(
             skipped_deep: 0,
             follow_prev_events: true,
             skip: HashSet::new(),
+            outcomes: BTreeMap::new(),
         },
         max,
     ))
@@ -2089,15 +2140,54 @@ fn write_tried_file(path: &Path, tried: &HashSet<String>) -> Result<(), AppError
     write_frontier_checkpoint(path, &ids)
 }
 
+/// What the destination said, per ID, across a gap-fill run. Each answer is
+/// relative to that one server; the latest answer per ID wins.
+#[derive(Default)]
+struct GapOutcomes {
+    /// Single-event answers for missing `prev_events`.
+    prev: BTreeMap<String, IdOutcome>,
+    /// `event_auth` answers, keyed by the event whose auth chain was asked for
+    /// (not by the missing auth ID, which that request cannot name).
+    auth_queries: BTreeMap<String, IdOutcome>,
+}
+
 fn gap_fill_result(
     events: &[rezzy::JsonValue],
     fetched: &[PathBuf],
     completed_rounds: u32,
     failed_requests: usize,
     closed: bool,
+    outcomes: &GapOutcomes,
+    destination: &str,
 ) -> JsonValue {
     let final_report = crate::repair::scan_gaps(events);
+    let describe = |id: &String, answers: &BTreeMap<String, IdOutcome>| {
+        let mut entry = answers.get(id).map_or_else(
+            || rezzy::json!({"outcome": "unanswered"}),
+            IdOutcome::to_json,
+        );
+        let _ = entry.insert(String::from("id"), rezzy::json!(id.clone()));
+        let _ = entry.insert(String::from("server"), rezzy::json!(destination));
+        entry
+    };
+    let missing_prev_outcomes = final_report
+        .missing_prev
+        .iter()
+        .map(|id| describe(id, &outcomes.prev))
+        .collect::<Vec<_>>();
+    let auth_query_outcomes = final_report
+        .references
+        .iter()
+        .filter(|r| r.kind == crate::repair::ReferenceKind::AuthEvents)
+        .map(|r| &r.event_id)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|id| outcomes.auth_queries.contains_key(*id))
+        .map(|id| describe(id, &outcomes.auth_queries))
+        .collect::<Vec<_>>();
     rezzy::json!({
+        "missing_prev_outcomes": missing_prev_outcomes,
+        "auth_query_outcomes": auth_query_outcomes,
         "status": if closed || final_report.is_closed() { "closed" } else { "incomplete" },
         "rounds": completed_rounds,
         "events": final_report.present.len(),
@@ -2119,6 +2209,7 @@ fn fetch_gap_round(
     round: u32,
     tried: &mut HashSet<String>,
     auth_tried: &mut HashSet<String>,
+    outcomes: &mut GapOutcomes,
 ) -> Result<(usize, usize, Vec<PathBuf>, usize), AppError> {
     let before = crate::repair::scan_gaps(events).present.len();
     let report = crate::repair::scan_gaps(events);
@@ -2164,6 +2255,7 @@ fn fetch_gap_round(
                 requests_path: requests_path.as_deref(),
                 round,
                 skip_tried: request.skip_tried,
+                outcomes: &mut outcomes.prev,
             }),
         );
         let summary = match result {
@@ -2198,6 +2290,7 @@ fn fetch_gap_round(
         round,
         auth_tried,
         requests_path.as_deref(),
+        &mut outcomes.auth_queries,
     )?;
     if let Some(path) = auth_path {
         fetched.push(path);
@@ -2264,6 +2357,7 @@ fn gap_fill(request: &GapFillRequest<'_>) -> Result<JsonValue, AppError> {
     let mut completed_rounds = round;
     let mut failed_requests = 0_usize;
     let mut closed = false;
+    let mut outcomes = GapOutcomes::default();
     let mut ran = 0_u32;
     loop {
         if rounds != 0 && ran >= rounds {
@@ -2282,6 +2376,7 @@ fn gap_fill(request: &GapFillRequest<'_>) -> Result<JsonValue, AppError> {
             round,
             &mut tried,
             &mut auth_tried,
+            &mut outcomes,
         )?;
         write_tried(output_dir, &tried)?;
         ran = ran.saturating_add(1);
@@ -2299,6 +2394,8 @@ fn gap_fill(request: &GapFillRequest<'_>) -> Result<JsonValue, AppError> {
         completed_rounds,
         failed_requests,
         closed,
+        &outcomes,
+        request.destination,
     ))
 }
 
@@ -2353,6 +2450,8 @@ struct AuthFetchContext<'a> {
     requests_path: Option<&'a Path>,
     round: u32,
     skip_tried: bool,
+    /// Receives the `event_auth` answer for each citing event asked about.
+    outcomes: &'a mut BTreeMap<String, IdOutcome>,
 }
 
 /// Fetches auth chains for events citing missing auth references and writes
@@ -2374,6 +2473,7 @@ fn fetch_auth_batches(
         requests_path,
         round,
         skip_tried,
+        outcomes,
     } = context;
     let mut referencing = std::collections::BTreeSet::new();
     for reference in &report.references {
@@ -2404,6 +2504,7 @@ fn fetch_auth_batches(
             key_path,
         );
         let attempt = attempt_of(Some(&event_id), "event_auth", &result, started);
+        outcomes.insert(event_id.clone(), IdOutcome::of(&attempt));
         if let Some(path) = requests_path {
             append_auth_attempt(
                 path,
@@ -2463,6 +2564,7 @@ fn fetch_auth_for_round(
     round: u32,
     auth_tried: &mut HashSet<String>,
     requests_path: Option<&Path>,
+    auth_queries: &mut BTreeMap<String, IdOutcome>,
 ) -> Result<(Option<PathBuf>, usize), AppError> {
     let report = crate::repair::scan_gaps(events);
     if report.missing_auth.is_empty() {
@@ -2482,6 +2584,7 @@ fn fetch_auth_for_round(
             requests_path,
             round,
             skip_tried: request.skip_tried,
+            outcomes: auth_queries,
         },
     )?;
     if !failures.is_empty() {

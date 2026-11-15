@@ -54,6 +54,8 @@ enum EventShape {
     Pdu,
     /// The event endpoint returns HTTP 404 for every requested ID.
     Missing,
+    /// The event endpoint returns HTTP 500 for every requested ID.
+    Error,
 }
 
 struct Mock {
@@ -167,6 +169,10 @@ fn handle(
                 EventShape::Pdu => format!(r#"{{"pdu":{PDU}}}"#),
                 EventShape::Missing => {
                     respond(&mut stream, 404, r#"{"errcode":"M_NOT_FOUND"}"#);
+                    return;
+                }
+                EventShape::Error => {
+                    respond(&mut stream, 500, r#"{"errcode":"M_UNKNOWN"}"#);
                     return;
                 }
             };
@@ -1312,4 +1318,43 @@ fn state_diff_rejects_a_room_without_the_sigil_before_any_request() {
     let fx = Fixture::new("sd-bad-room");
     let out = fx.state_diff(&[&a.url], "clearR", &[]);
     assert_rejects_room_without_sigil(&out, &a);
+}
+
+/// The outcome the report gives for one missing prev, as `(outcome, server)`.
+fn prev_outcome(out: &Output, id: &str) -> (String, String) {
+    let stdout = text(&out.stdout);
+    let value = rezzy::JsonValue::parse(stdout.trim()).expect("report is JSON");
+    let entries = value
+        .get("missing_prev_outcomes")
+        .and_then(rezzy::JsonValue::as_array)
+        .expect("report lists missing_prev_outcomes");
+    let entry = entries
+        .iter()
+        .find(|e| e.get("id").and_then(rezzy::JsonValue::as_str) == Some(id))
+        .unwrap_or_else(|| panic!("no outcome for {id}: {stdout}"));
+    let field = |name: &str| {
+        entry
+            .get(name)
+            .and_then(rezzy::JsonValue::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    };
+    (field("outcome"), field("server"))
+}
+
+#[test]
+fn a_404_from_the_server_is_reported_as_not_found_by_that_server() {
+    let (mock, _fx, out) = run("outcome-404", Backfill::Blank, EventShape::Missing);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (outcome, server) = prev_outcome(&out, TARGET);
+    assert_eq!(outcome, "not_found");
+    assert_eq!(server, mock.url, "the answer names the server asked");
+}
+
+#[test]
+fn a_server_error_is_transient_not_not_found() {
+    let (_mock, _fx, out) = run("outcome-5xx", Backfill::Blank, EventShape::Error);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (outcome, _) = prev_outcome(&out, TARGET);
+    assert_eq!(outcome, "transient", "a 500 says nothing about the event");
 }
