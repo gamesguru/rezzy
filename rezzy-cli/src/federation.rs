@@ -1426,6 +1426,17 @@ impl IdOutcome {
         }
     }
 
+    /// A `200` that did not carry the event asked for. A success status alone
+    /// is not an answer about this event, so it stays transient rather than
+    /// claiming the event was found.
+    const fn unexpected() -> Self {
+        Self {
+            kind: "transient",
+            status: None,
+            errcode: None,
+        }
+    }
+
     fn to_json(&self) -> JsonValue {
         let mut value = rezzy::json!({"outcome": self.kind});
         if let Some(status) = self.status {
@@ -1685,7 +1696,19 @@ fn fetch_events_individually(
         );
         state.record(attempt_of(Some(id), "event", &result, started));
         match result {
-            Ok(v) => pdus.extend(event_pdus_from_response(v)),
+            Ok(v) => {
+                let returned = event_pdus_from_response(v);
+                // `record` classes any 200 as found, but only a response that
+                // names this event is an answer about it. Servers can answer
+                // 200 with an empty `pdus` list or a different event.
+                if !returned
+                    .iter()
+                    .any(|pdu| pdu_id(pdu, dag_request.room_version).is_some_and(|got| got == *id))
+                {
+                    state.outcomes.insert(id.clone(), IdOutcome::unexpected());
+                }
+                pdus.extend(returned);
+            }
             Err(e) if is_unreachable(&e) => {
                 state.failures.record(&e);
                 state
@@ -1698,6 +1721,16 @@ fn fetch_events_individually(
         }
     }
     pdus
+}
+
+/// The ID a fetched PDU is filed under: its own `event_id`, or the reference
+/// hash the wire omits for room v3 and later.
+fn pdu_id(pdu: &JsonValue, room_version: &str) -> Option<String> {
+    crate::repair::event_id_of(pdu).or_else(|| {
+        rezzy::reference_hash(pdu, room_version)
+            .ok()
+            .map(|hash| format!("${hash}"))
+    })
 }
 
 /// Extract event objects from the common federation event response shapes.
@@ -1829,15 +1862,9 @@ pub(super) fn get_remote_events_by_id(
             continue;
         }
         let pdus = fetch_events_individually(dag_request, std::slice::from_ref(id), &mut state);
-        let found = pdus.iter().any(|pdu| {
-            crate::repair::event_id_of(pdu)
-                .or_else(|| {
-                    rezzy::reference_hash(pdu, dag_request.room_version)
-                        .ok()
-                        .map(|hash| format!("${hash}"))
-                })
-                .is_some_and(|returned| returned == *id)
-        });
+        let found = pdus
+            .iter()
+            .any(|pdu| pdu_id(pdu, dag_request.room_version).is_some_and(|got| got == *id));
         // An unreachable server already put this ID in `unresolved`.
         if !found && state.unreachable.is_none() {
             state.unresolved.push(id.clone());

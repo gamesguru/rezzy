@@ -56,6 +56,8 @@ enum EventShape {
     Missing,
     /// The event endpoint returns HTTP 500 for every requested ID.
     Error,
+    /// The event endpoint answers 200 with an empty `pdus` list.
+    Empty,
 }
 
 struct Mock {
@@ -173,6 +175,14 @@ fn handle(
                 }
                 EventShape::Error => {
                     respond(&mut stream, 500, r#"{"errcode":"M_UNKNOWN"}"#);
+                    return;
+                }
+                EventShape::Empty => {
+                    respond(
+                        &mut stream,
+                        200,
+                        r#"{"origin":"mock","origin_server_ts":1,"pdus":[]}"#,
+                    );
                     return;
                 }
             };
@@ -1357,4 +1367,17 @@ fn a_server_error_is_transient_not_not_found() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let (outcome, _) = prev_outcome(&out, TARGET);
     assert_eq!(outcome, "transient", "a 500 says nothing about the event");
+}
+
+#[test]
+fn a_200_without_the_event_is_transient_not_found_evidence() {
+    // A server can answer 200 with an empty `pdus` list. That is not the event,
+    // so it must not be reported as found while the ID stays missing.
+    let (_mock, _fx, out) = run("outcome-200-empty", Backfill::Blank, EventShape::Empty);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (outcome, _) = prev_outcome(&out, TARGET);
+    assert_eq!(
+        outcome, "transient",
+        "a 200 that carried nothing is not a found event"
+    );
 }
