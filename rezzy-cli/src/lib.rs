@@ -87,6 +87,9 @@ pub struct Args {
     /// Force per-head state computation over the locally available DAG.
     pub exact: bool,
 
+    /// Resolve the state before this event instead of all heads.
+    pub at: Option<String>,
+
     /// Validate input only; suppress state output and exit.
     pub check: bool,
 
@@ -146,6 +149,7 @@ impl Args {
             debug: matches.get_flag("debug"),
             quiet: matches.get_flag("quiet"),
             exact: matches.get_flag("exact"),
+            at: matches.get_one::<String>("at").cloned(),
             check: matches.get_flag("check"),
             origin: matches
                 .get_one::<String>("origin")
@@ -166,6 +170,7 @@ impl Args {
 }
 
 /// Build the top-level CLI parser, including subcommands.
+#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn cli_command() -> clap::Command {
     let command = clap::Command::new("rezzy")
@@ -227,6 +232,14 @@ pub fn cli_command() -> clap::Command {
                     "Compute every head's state from its local prev_events ancestry (slow on merged rooms)",
                 )
                 .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            clap::Arg::new("at")
+                .long("at")
+                .value_name("EVENT_ID")
+                .help(
+                    "Resolve the state before this event instead of all heads (matches federation /state_ids)",
+                ),
         )
         .arg(
             clap::Arg::new("check")
@@ -475,7 +488,9 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
         }
     }
 
-    let heads = if heads.is_empty() {
+    let mut heads = if args.at.is_some() || !heads.is_empty() {
+        heads
+    } else {
         // Borrow while scanning: cloning every id and every referenced id into
         // two string sets is measurable on a backfilled room.
         let mut referenced: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -504,9 +519,44 @@ pub fn run_cli(args: &Args) -> Result<rezzy::JsonValue, error::AppError> {
             );
         }
         auto_heads
-    } else {
-        heads
     };
+
+    if let Some(target) = args.at.as_deref() {
+        let Some(target_event) = events_map.get(target) else {
+            return Err(error::AppError::new(
+                error::ErrorCode::UnknownTargetEvent,
+                format!("--at event {target} is not present in the input"),
+            ));
+        };
+        let mut at_heads = Vec::with_capacity(target_event.prev_events.len());
+        let mut missing = 0_usize;
+        for prev in &target_event.prev_events {
+            if events_map.contains_key(prev) {
+                at_heads.push(prev.clone());
+            } else {
+                missing = missing.saturating_add(1);
+            }
+        }
+        at_heads.sort_unstable();
+        at_heads.dedup();
+        if !args.quiet {
+            eprintln!(
+                "[progress] --at {target}: resolving state before {} with {} prev_event(s)",
+                target_event.event_type,
+                at_heads.len()
+            );
+            if missing > 0 {
+                eprintln!(
+                    "[WARN] --at {target}: {missing} of {} prev_event(s) are absent from the input; the state before this event is incomplete",
+                    target_event.prev_events.len()
+                );
+            }
+        }
+        if args.debug {
+            eprintln!("[DEBUG] --at heads: {at_heads:?}");
+        }
+        heads = at_heads;
+    }
 
     if !args.quiet {
         let room_label = args.room.as_deref().unwrap_or("<local-input>");
@@ -835,6 +885,7 @@ mod tests {
             debug: false,
             quiet: true,
             exact: false,
+            at: None,
             check: true,
             origin: String::from("matrix.org"),
             timeline_order: crate::timeline_order::TimelineOrder::default(),
@@ -912,6 +963,68 @@ mod tests {
 
         assert_eq!(error.code(), ErrorCode::MissingHomeserver);
     }
+
+    fn resolved_event_ids(output: &rezzy::JsonValue) -> Vec<String> {
+        output["resolved_state"]
+            .as_array()
+            .expect("resolve-state output has resolved_state")
+            .iter()
+            .filter_map(|entry| entry["event_id"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn at_resolves_state_before_the_target_event() {
+        let fixture = write_fixture(
+            r#"{"events":[
+                {"event_id":"$create","type":"m.room.create","state_key":"","sender":"@a:example.org","depth":1,"content":{"room_version":"10","creator":"@a:example.org"},"prev_events":[],"auth_events":[]},
+                {"event_id":"$pl","type":"m.room.power_levels","state_key":"","sender":"@a:example.org","depth":2,"content":{"users":{"@a:example.org":100}},"prev_events":["$create"],"auth_events":["$create"]},
+                {"event_id":"$join","type":"m.room.member","state_key":"@a:example.org","sender":"@a:example.org","depth":3,"content":{"membership":"join"},"prev_events":["$pl"],"auth_events":["$create","$pl"]},
+                {"event_id":"$leave","type":"m.room.member","state_key":"@a:example.org","sender":"@a:example.org","depth":4,"content":{"membership":"leave"},"prev_events":["$join"],"auth_events":["$create","$pl","$join"]},
+                {"event_id":"$msg","type":"m.room.message","sender":"@a:example.org","depth":5,"content":{"body":"hi","msgtype":"m.text"},"prev_events":["$leave"],"auth_events":["$create","$pl","$leave"]}
+            ]}"#,
+        );
+
+        let mut args = args_for_input(fixture.path.clone());
+        args.check = false;
+        args.format = OutputFormat::ResolveState;
+
+        let after = run_cli(&args).expect("resolve without --at");
+        let after_ids = resolved_event_ids(&after);
+        assert!(
+            after_ids.iter().any(|id| id == "$leave"),
+            "all-head state should select the leave: {after_ids:?}"
+        );
+
+        args.at = Some(String::from("$leave"));
+        let before = run_cli(&args).expect("resolve with --at");
+        let before_ids = resolved_event_ids(&before);
+        assert!(
+            before_ids.iter().any(|id| id == "$join"),
+            "state before the leave keeps the join: {before_ids:?}"
+        );
+        assert!(
+            !before_ids.iter().any(|id| id == "$leave"),
+            "state before the leave excludes the leave itself: {before_ids:?}"
+        );
+    }
+
+    #[test]
+    fn at_unknown_event_returns_unknown_target_error() {
+        let fixture = write_fixture(
+            r#"{"events":[
+                {"event_id":"$create","type":"m.room.create","state_key":"","sender":"@a:example.org","depth":1,"content":{"room_version":"10","creator":"@a:example.org"},"prev_events":[],"auth_events":[]}
+            ]}"#,
+        );
+
+        let mut args = args_for_input(fixture.path.clone());
+        args.check = false;
+        args.at = Some(String::from("$missing"));
+
+        let error = run_cli(&args).expect_err("unknown --at event fails");
+
+        assert_eq!(error.code(), ErrorCode::UnknownTargetEvent);
+    }
 }
 
 #[cfg(test)]
@@ -980,6 +1093,15 @@ mod cli_tests {
             ])
             .expect_err("--output and --output-dir should conflict");
         assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn at_event_parses() {
+        let matches = cli_command()
+            .try_get_matches_from(["rezzy", "-i", "room.jsonl", "--at", "$target"])
+            .expect("--at should parse");
+        let args = Args::from_matches(&matches);
+        assert_eq!(args.at.as_deref(), Some("$target"));
     }
 
     fn timeline_args(extra: &[&str]) -> Args {

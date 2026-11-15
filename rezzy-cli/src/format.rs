@@ -1584,6 +1584,7 @@ mod tests {
             debug: false,
             quiet: false,
             exact: false,
+            at: None,
             check: false,
             origin: String::from("matrix.org"),
             timeline_order: TimelineOrder::default(),
