@@ -497,6 +497,11 @@ pub(crate) fn reduce_limbs(limbs: [u64; 8]) -> Gf256 {
     Gf256(reduce(Wide(limbs)))
 }
 
+/// Portable multiply: four-limb Karatsuba over `gf64::clmul_raw`.
+pub(crate) fn portable_mul(a: Gf256, b: Gf256) -> Gf256 {
+    Gf256(reduce(clmul256(a.0, b.0)))
+}
+
 fn reduce(product: Wide) -> [u64; 4] {
     // Fold the high half with x^256 = 1 + x^2 + x^5 + x^10. A shift by `k`
     // spills the top `k` bits of the last high limb above degree 255; those
@@ -543,7 +548,11 @@ impl BinaryField for Gf256 {
     }
 
     fn mul(self, other: Self) -> Self {
-        Self(reduce(clmul256(self.0, other.0)))
+        #[cfg(all(feature = "std", target_arch = "x86_64"))]
+        if let Some(product) = crate::gf256_clmul::try_mul(self, other) {
+            return product;
+        }
+        portable_mul(self, other)
     }
 
     fn square(self) -> Self {

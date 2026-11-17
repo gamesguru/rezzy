@@ -21,6 +21,8 @@ pub(crate) mod binary_field;
 pub mod bitmap;
 pub mod client;
 pub mod gf256;
+#[cfg(all(feature = "std", target_arch = "x86_64"))]
+mod gf256_clmul;
 pub mod gf256_exchange;
 mod gf256_simd;
 pub mod gf64;
