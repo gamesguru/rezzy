@@ -111,14 +111,11 @@ all: format lint check doc test
 .PHONY: rust/build
 rust/build: ##H Compile Rust binary and the C ABI library (release)
 	$(CARGO) build --locked --release --timings -p rezzy-cli -p rezzy-ffi
-	cp target/release/librezzy_ffi.a target/release/librezzy.a
-	cp target/release/librezzy_ffi.$(DYLIB_EXT) target/release/librezzy.$(DYLIB_EXT)
 	@echo "Built: target/release/librezzy.$(DYLIB_EXT) and target/release/librezzy.a (header: rezzy-ffi/include/rezzy.h)"
 
 .PHONY: rust/so
 rust/so: ##H Compile the C ABI shared library (librezzy.so)
 	$(CARGO) build --locked --release -p rezzy-ffi
-	cp target/release/librezzy_ffi.$(DYLIB_EXT) target/release/librezzy.$(DYLIB_EXT)
 	@echo "Built: target/release/librezzy.$(DYLIB_EXT)"
 
 .PHONY: rust/test
@@ -169,8 +166,8 @@ rust/install: ##H Install rezzy binary to cargo bin, and the C ABI lib + header 
 	$(CARGO) install --timings --locked --path rezzy-cli --bin rezzy --features tls,logging
 	$(CARGO) build --locked --release -p rezzy-ffi
 	install -d $(DESTDIR)$(LIBDIR)/pkgconfig $(DESTDIR)$(INCLUDEDIR)
-	install -m755 target/release/librezzy_ffi.$(DYLIB_EXT) $(DESTDIR)$(LIBDIR)/librezzy.$(DYLIB_EXT)
-	install -m644 target/release/librezzy_ffi.a $(DESTDIR)$(LIBDIR)/librezzy.a
+	install -m755 target/release/librezzy.$(DYLIB_EXT) $(DESTDIR)$(LIBDIR)/librezzy.$(DYLIB_EXT)
+	install -m644 target/release/librezzy.a $(DESTDIR)$(LIBDIR)/librezzy.a
 	install -m644 rezzy-ffi/include/rezzy.h $(DESTDIR)$(INCLUDEDIR)/
 	# One module, named rezzy-ffi, describing the static archive that cgo links.
 	# The version comes from the crate so it cannot drift from the release.

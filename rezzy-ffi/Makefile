@@ -19,7 +19,6 @@ format: ## Format Go sources
 
 native: ## Build librezzy.a and the rezzy-ffi.pc file for the current target
 	cd .. && $(CARGO) build --release -p rezzy-ffi
-	cp ../target/release/librezzy_ffi.a ../target/release/librezzy.a
 	@mkdir -p ../target/pkgconfig
 	@printf 'prefix=%s\nlibdir=%s\nincludedir=%s\n\nName: rezzy-ffi\nDescription: Rezzy static C ABI\nVersion: %s\nLibs: %s/librezzy.a -lpthread -ldl -lm\nCflags: -I%s\n' \
 		"$(abspath ..)" "$(abspath ../target/release)" "$(abspath include)" \
