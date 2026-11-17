@@ -120,6 +120,9 @@ elided_lifetimes_in_paths = "warn"
 unreachable_pub = "warn"
 unused_lifetimes = "warn"
 unsafe_code = "deny"
+# Unsafe operations inside an `unsafe fn` still need their own `unsafe {}` block
+# (and SAFETY comment); the fn signature alone is not enough.
+unsafe_op_in_unsafe_fn = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = [
     "cfg(coverage)",
     "cfg(coverage_nightly)",

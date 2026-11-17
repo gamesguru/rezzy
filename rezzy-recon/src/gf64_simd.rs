@@ -1,7 +1,5 @@
 //! SIMD-accelerated GF(2^64) polynomial evaluation for minisketch reconciliation.
 
-#![allow(unsafe_code)]
-
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 use std::io::Write as _;
 
@@ -42,6 +40,7 @@ pub(crate) struct Avx512Evaluator;
 #[cfg(target_arch = "x86_64")]
 impl Gf64Evaluator for Avx512Evaluator {
     #[cfg_attr(coverage_nightly, coverage(off))]
+    #[allow(unsafe_code)] // calls the AVX-512 kernel; backend is chosen only after detection
     fn poly_mac(term: u64, source: &[u64], target: &mut [u64]) {
         // SAFETY: The dispatcher only selects this backend after runtime AVX-512 detection.
         unsafe { poly_mac_avx512(term, source, target) }
@@ -52,6 +51,7 @@ impl Gf64Evaluator for Avx512Evaluator {
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 // SAFETY: Only called by `Avx512Evaluator::poly_mac`, which enforces CPU feature constraints.
+#[allow(unsafe_code)] // `unsafe fn` kernel with raw loads/stores and AVX-512 intrinsics
 unsafe fn poly_mac_avx512(term: u64, source: &[u64], target: &mut [u64]) {
     assert_eq!(source.len(), target.len());
     let mut i = 0;
@@ -134,6 +134,7 @@ unsafe fn poly_mac_avx512(term: u64, source: &[u64], target: &mut [u64]) {
 #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 // SAFETY: Only called by `Avx512Evaluator::poly_mac` which enforces CPU feature constraints.
+#[allow(unsafe_code)] // `unsafe fn` wrapping AVX-512 intrinsics
 unsafe fn gf64_mul_x4_avx512(a: __m512i, b: __m512i) -> __m512i {
     let product = _mm512_clmulepi64_epi128(a, b, 0x00);
     let high = _mm512_bsrli_epi128::<8>(product);
@@ -479,6 +480,7 @@ mod tests {
     /// the known-correct scalar `mul_bitwise` reference.
     #[cfg(target_arch = "x86_64")]
     #[test]
+    #[allow(unsafe_code)] // drives the AVX-512 kernel directly after feature checks
     fn avx512_mul_matches_scalar_for_high_bit_heavy_operands() {
         use core::arch::x86_64::{_mm512_set_epi64, _mm512_store_si512};
 

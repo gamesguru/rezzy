@@ -342,7 +342,6 @@ pub(crate) fn record_split_summaries(
 
 /// Removes and returns parents whose descendants now form a complete cover.
 /// The boolean is false when the descendant count sum overflowed.
-#[allow(clippy::type_complexity)]
 pub(crate) fn take_complete_split_summaries(
     parents: &mut alloc::vec::Vec<(u8, u64, NodeSummary)>,
     awaiting: &[(u8, u64, NodeSummary)],

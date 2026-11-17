@@ -15,13 +15,12 @@
 //! runtime when the CPU reports `avx512f` and `vpclmulqdq`. Other targets and
 //! `no_std` builds use the scalar fallback.
 
-#![allow(unsafe_code)]
-
 use crate::binary_field::BinaryField;
 use crate::gf256::Gf256;
 
 /// `target[i] ^= term * source[i]`, with a lane-parallel backend when
 /// available.
+#[allow(unsafe_code)] // calls the AVX-512 kernel after runtime feature detection
 pub(crate) fn poly_mac(term: Gf256, source: &[Gf256], target: &mut [Gf256]) {
     debug_assert_eq!(source.len(), target.len());
 
@@ -43,7 +42,7 @@ fn scalar_poly_mac(term: Gf256, source: &[Gf256], target: &mut [Gf256]) {
 
 #[cfg(all(feature = "std", target_arch = "x86_64"))]
 #[target_feature(enable = "avx512f,vpclmulqdq")]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(unsafe_code)] // `unsafe fn` kernel using AVX-512 intrinsics and raw stores
 unsafe fn poly_mac_avx512(term: Gf256, source: &[Gf256], target: &mut [Gf256]) {
     use core::arch::x86_64::{_mm512_clmulepi64_epi128, _mm512_storeu_si512};
 
@@ -57,9 +56,9 @@ unsafe fn poly_mac_avx512(term: Gf256, source: &[Gf256], target: &mut [Gf256]) {
     ];
 
     let mut start = 0_usize;
-    while start + LANES <= source.len() {
+    while let Some(end) = start.checked_add(LANES).filter(|end| *end <= source.len()) {
         let mut coefficient_limbs = [[0_u64; LANES]; 4];
-        for (offset, coefficient) in source[start..start + LANES].iter().enumerate() {
+        for (offset, coefficient) in source[start..end].iter().enumerate() {
             let limbs = coefficient.limbs();
             for (lane, limb) in coefficient_limbs.iter_mut().zip(limbs) {
                 lane[offset] = limb;
@@ -78,7 +77,11 @@ unsafe fn poly_mac_avx512(term: Gf256, source: &[Gf256], target: &mut [Gf256]) {
         for (i, left) in coefficient_vectors.iter().enumerate() {
             for (j, right) in term_vectors.iter().enumerate() {
                 let product = _mm512_clmulepi64_epi128(*left, *right, 0x00);
-                let slot = &mut products[i * 4 + j];
+                let product_index = i
+                    .checked_mul(4)
+                    .and_then(|base| base.checked_add(j))
+                    .expect("4x4 product index fits");
+                let slot = &mut products[product_index];
                 // SAFETY: `slot` is an aligned-independent scratch array large
                 // enough for one 512-bit store.
                 unsafe { _mm512_storeu_si512(slot.as_mut_ptr().cast(), product) };
@@ -87,17 +90,28 @@ unsafe fn poly_mac_avx512(term: Gf256, source: &[Gf256], target: &mut [Gf256]) {
 
         for lane in 0..LANES {
             let mut limbs = [0_u64; 8];
-            for i in 0..4 {
-                for j in 0..4 {
-                    let product = &products[i * 4 + j];
-                    limbs[i + j] ^= product[2 * lane];
-                    limbs[i + j + 1] ^= product[2 * lane + 1];
+            for i in 0_usize..4 {
+                for j in 0_usize..4 {
+                    let product_index = i
+                        .checked_mul(4)
+                        .and_then(|base| base.checked_add(j))
+                        .expect("4x4 product index fits");
+                    let product = &products[product_index];
+                    let limb_index = i.checked_add(j).expect("product limb index fits");
+                    let lane_index = lane.checked_mul(2).expect("lane limb index fits");
+                    limbs[limb_index] ^= product[lane_index];
+                    limbs[limb_index
+                        .checked_add(1)
+                        .expect("high product limb index fits")] ^= product[lane_index
+                        .checked_add(1)
+                        .expect("high lane limb index fits")];
                 }
             }
-            target[start + lane] =
-                BinaryField::add(target[start + lane], crate::gf256::reduce_limbs(limbs));
+            let target_index = start.checked_add(lane).expect("target index fits");
+            target[target_index] =
+                BinaryField::add(target[target_index], crate::gf256::reduce_limbs(limbs));
         }
-        start += LANES;
+        start = end;
     }
 
     for offset in start..source.len() {
@@ -169,6 +183,7 @@ mod tests {
 
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
     #[test]
+    #[allow(unsafe_code)] // calls the AVX-512 kernel after the feature checks below
     fn lane_parallel_mac_matches_scalar() {
         if !std::is_x86_feature_detected!("avx512f") || !std::is_x86_feature_detected!("vpclmulqdq")
         {
