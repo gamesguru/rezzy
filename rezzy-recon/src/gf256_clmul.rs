@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use crate::gf256::{reduce_limbs, Gf256};
+use crate::gf256::{clmul256_with, reduce_limbs, Gf256};
 
 type MulFn = unsafe fn([u64; 4], [u64; 4]) -> Gf256;
 
@@ -21,43 +21,10 @@ fn implementation() -> Option<MulFn> {
 #[target_feature(enable = "pclmulqdq")]
 #[allow(unsafe_code)] // declares an `unsafe fn` that requires PCLMULQDQ
 unsafe fn mul_pclmul(left: [u64; 4], right: [u64; 4]) -> Gf256 {
-    let limbs = clmul256_pclmul(left, right);
+    // The closure is defined inside this target-feature fn, so it inherits
+    // `pclmulqdq` and the whole Karatsuba skeleton inlines into one region.
+    let limbs = clmul256_with(&|x, y| clmul64(x, y), left, right);
     reduce_limbs(limbs)
-}
-
-#[target_feature(enable = "pclmulqdq")]
-fn clmul256_pclmul(a: [u64; 4], b: [u64; 4]) -> [u64; 8] {
-    let z0 = clmul128([a[0], a[1]], [b[0], b[1]]);
-    let z2 = clmul128([a[2], a[3]], [b[2], b[3]]);
-    let z1 = clmul128([a[0] ^ a[2], a[1] ^ a[3]], [b[0] ^ b[2], b[1] ^ b[3]]);
-    let mut middle = z1;
-    for i in 0..4 {
-        middle[i] ^= z0[i] ^ z2[i];
-    }
-    // product = z0 + (middle << 128) + (z2 << 256), as 64-bit limbs.
-    [
-        z0[0],
-        z0[1],
-        z0[2] ^ middle[0],
-        z0[3] ^ middle[1],
-        z2[0] ^ middle[2],
-        z2[1] ^ middle[3],
-        z2[2],
-        z2[3],
-    ]
-}
-
-#[target_feature(enable = "pclmulqdq")]
-fn clmul128(a: [u64; 2], b: [u64; 2]) -> [u64; 4] {
-    let z0 = clmul64(a[0], b[0]);
-    let z2 = clmul64(a[1], b[1]);
-    let z1 = clmul64(a[0] ^ a[1], b[0] ^ b[1]);
-    [
-        z0[0],
-        z0[1] ^ z1[0] ^ z0[0] ^ z2[0],
-        z2[0] ^ z1[1] ^ z0[1] ^ z2[1],
-        z2[1],
-    ]
 }
 
 #[target_feature(enable = "pclmulqdq")]

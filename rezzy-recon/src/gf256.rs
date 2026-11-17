@@ -425,14 +425,6 @@ impl core::ops::Mul for Gf256 {
 struct Wide([u64; 8]);
 
 impl Wide {
-    fn xor_at(&mut self, offset: usize, value: &[u64]) -> Option<()> {
-        for (index, limb) in value.iter().copied().enumerate() {
-            let target = offset.checked_add(index)?;
-            *self.0.get_mut(target)? ^= limb;
-        }
-        Some(())
-    }
-
     #[cfg(test)]
     const fn bit(&self, index: usize) -> Option<bool> {
         if index < 512 {
@@ -453,33 +445,53 @@ impl Wide {
     }
 }
 
-/// Carry-less 64×64 product, represented as two little-endian limbs.
-fn clmul64(a: u64, b: u64) -> [u64; 2] {
-    crate::gf64::clmul_raw(a, b)
-}
-
 /// Four-limb Karatsuba product. Three recursive 128-bit products require
 /// nine carry-less 64×64 products rather than sixteen schoolbook products.
 fn clmul256(a: [u64; 4], b: [u64; 4]) -> Wide {
-    let z0 = clmul128([a[0], a[1]], [b[0], b[1]]);
-    let z2 = clmul128([a[2], a[3]], [b[2], b[3]]);
-    let z1 = clmul128([a[0] ^ a[2], a[1] ^ a[3]], [b[0] ^ b[2], b[1] ^ b[3]]);
+    Wide(clmul256_with(&crate::gf64::clmul_raw, a, b))
+}
+
+/// Karatsuba skeleton shared by the portable and PCLMUL backends.
+///
+/// `clmul64` is the carry-less 64×64 primitive (two little-endian limbs out).
+/// `#[inline(always)]` lets this generic code inline into a `#[target_feature]`
+/// caller, where the closure inherits that caller's features.
+#[allow(clippy::inline_always)] // must inline into `#[target_feature]` callers
+#[inline(always)]
+pub(crate) fn clmul256_with<F>(clmul64: &F, a: [u64; 4], b: [u64; 4]) -> [u64; 8]
+where
+    F: Fn(u64, u64) -> [u64; 2],
+{
+    let z0 = clmul128_with(clmul64, [a[0], a[1]], [b[0], b[1]]);
+    let z2 = clmul128_with(clmul64, [a[2], a[3]], [b[2], b[3]]);
+    let z1 = clmul128_with(
+        clmul64,
+        [a[0] ^ a[2], a[1] ^ a[3]],
+        [b[0] ^ b[2], b[1] ^ b[3]],
+    );
     let mut middle = z1;
     for index in 0..4 {
         middle[index] ^= z0[index] ^ z2[index];
     }
-    let mut product = Wide([0; 8]);
-    product.xor_at(0, &z0).expect("low product fits in 8 limbs");
-    product
-        .xor_at(2, &middle)
-        .expect("middle product fits in 8 limbs");
-    product
-        .xor_at(4, &z2)
-        .expect("high product fits in 8 limbs");
-    product
+    // product = z0 + (middle << 128) + (z2 << 256), as 64-bit limbs.
+    [
+        z0[0],
+        z0[1],
+        z0[2] ^ middle[0],
+        z0[3] ^ middle[1],
+        z2[0] ^ middle[2],
+        z2[1] ^ middle[3],
+        z2[2],
+        z2[3],
+    ]
 }
 
-fn clmul128(a: [u64; 2], b: [u64; 2]) -> [u64; 4] {
+#[allow(clippy::inline_always)] // must inline into `#[target_feature]` callers
+#[inline(always)]
+fn clmul128_with<F>(clmul64: &F, a: [u64; 2], b: [u64; 2]) -> [u64; 4]
+where
+    F: Fn(u64, u64) -> [u64; 2],
+{
     let z0 = clmul64(a[0], b[0]);
     let z2 = clmul64(a[1], b[1]);
     let z1 = clmul64(a[0] ^ a[1], b[0] ^ b[1]);
