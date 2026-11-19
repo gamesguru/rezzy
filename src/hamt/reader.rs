@@ -22,22 +22,12 @@ use core::fmt;
 use core::hash::Hash;
 
 use super::codec::PersistedInternalNode;
-use super::hash::StructuralHashBuilder;
 use super::{HamtCodec, HamtNode, NodeRef, StructuralHash, HAMT_MAX_DEPTH};
 
 /// Index into a compressed bitmap array for `slot`.
 fn slot_index(bitmap: u32, slot: usize) -> usize {
     let lower_mask = (1_u32 << slot).wrapping_sub(1);
     (bitmap & lower_mask).count_ones() as usize
-}
-
-/// The pre-encoding routing hash, used only to read roots persisted by earlier
-/// builds. It hashes the key's Rust `Hash` stream, which differs from its
-/// canonical encoding for types such as `String`.
-fn legacy_key_path_hash<K: Hash + ?Sized>(structural_key: &[u8], key: &K) -> StructuralHash {
-    let mut hasher = StructuralHashBuilder::new(structural_key);
-    key.hash(&mut hasher);
-    hasher.finalize()
 }
 
 /// Why a persisted HAMT could not be read.
@@ -139,11 +129,6 @@ where
     /// For trees built with a custom routing hash use
     /// [`Self::get_with_key_hash`].
     ///
-    /// Roots persisted before routing moved to key encodings were laid out by
-    /// the key's Rust `Hash` stream, and the root metadata cannot distinguish
-    /// the two layouts. A miss on the canonical route is therefore retried
-    /// with the legacy route, so old roots stay readable.
-    ///
     /// `root` is the structural hash of the root node, not the state-group id
     /// from the root record. Callers that hold a root record should pass its
     /// [`StateHamtRoot::root_hash`](crate::state::hamt_root::StateHamtRoot::root_hash).
@@ -155,20 +140,13 @@ where
     where
         K: Eq + Borrow<Q>,
         V: Clone,
-        Q: super::HamtRoutingKey + Eq + Hash + ?Sized,
+        Q: super::HamtRoutingKey + Eq + ?Sized,
     {
         let root_node = self.node(&root)?;
         // Copy the reference before the resolver closure borrows `self`.
         let structural_key = self.structural_key;
         let mut resolver = |hash: &StructuralHash| self.node(hash);
-        if let Some(value) = root_node.search(structural_key, key, &mut resolver)? {
-            return Ok(Some(value));
-        }
-        root_node.search_with_key_hash(
-            key,
-            |key| legacy_key_path_hash(structural_key, key),
-            &mut resolver,
-        )
+        root_node.search(structural_key, key, &mut resolver)
     }
 
     /// Look up one key under `root` in a tree built with a custom routing hash
@@ -292,7 +270,7 @@ where
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::hamt::{build_hamt_root_handle, build_hamt_with_key_hash, NodeRef};
+    use crate::hamt::{build_hamt_root_handle, NodeRef};
     use crate::incremental::LtHash;
     use alloc::string::{String, ToString};
     use alloc::vec;
@@ -421,24 +399,6 @@ mod tests {
             })
             .unwrap();
         assert_eq!(order, ["first", "child", "last"]);
-    }
-
-    #[test]
-    fn legacy_hash_routed_roots_remain_readable() {
-        let entries = vec![("alpha".to_string(), "1".to_string())];
-        let root = build_hamt_with_key_hash(KEY, entries, |key| legacy_key_path_hash(KEY, key))
-            .expect("build legacy fixture");
-        let mut records = BTreeMap::new();
-        collect(&root, &mut records);
-
-        let mut reader = reader_for(&records, KEY);
-        assert_eq!(
-            reader
-                .get(root.structural_hash, "alpha")
-                .unwrap()
-                .as_deref(),
-            Some("1")
-        );
     }
 
     #[test]

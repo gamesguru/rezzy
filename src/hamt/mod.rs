@@ -1724,16 +1724,15 @@ pub type PersistMutationsResult<K, V, E> = Result<
 /// This is for a single published state group. The returned `created` nodes must be written to
 /// storage before publishing the state group root pointer.
 ///
-/// # Roots using an earlier or custom routing hash
+/// # Roots using a custom routing hash
 /// This always routes with the default keyed structural hash, the same one
 /// [`build_hamt`] uses. It is only correct for trees built by [`build_hamt`]
 /// (or `prev_root`s produced by a prior call to this function). Do not call
-/// this on a `prev_root` built by [`build_hamt_with_key_hash`] or by the
-/// pre-encoding default that routed via Rust's `Hash` stream. Both can use
-/// routing version 1 metadata, so that version does not identify the layout.
-/// The wrong route can miss existing entries and leave the tree inconsistent.
-/// Use [`persist_mutation_with_key_hash`] or the [`HamtMutator`] methods with
-/// the root's original routing function, or migrate the root before mutation.
+/// this on a `prev_root` built by [`build_hamt_with_key_hash`]: the root
+/// metadata does not identify the routing function, and the wrong route can
+/// miss existing entries and leave the tree inconsistent. Use
+/// [`persist_mutation_with_key_hash`] or the [`HamtMutator`] methods with the
+/// root's original routing function.
 ///
 /// # Errors
 /// Returns [`HamtMutateError`] if `resolver` fails to load a lazy child or depth is exhausted.
