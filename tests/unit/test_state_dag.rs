@@ -1396,3 +1396,248 @@ fn test_omitted_demotion_head_lets_demoted_sender_authorise_against_stale_state(
         "once the demotion is in the cited cut the same action is rejected"
     );
 }
+
+/// Authorises `event` as a V2.2 receiver does: state-before from the DAG, derive auth events
+/// from it, then run the auth rules. Returns state-before and the verdict.
+fn authorise_against_dag(
+    event: &LeanEvent,
+    events: &HashMap<String, LeanEvent>,
+) -> (
+    rezzy::state::at::SharedState<String, String>,
+    Result<(), rezzy::auth::AuthError>,
+) {
+    let empty_key = String::new();
+    let state_before = compute_state_before_from_dag(&DagInputs::new(
+        event,
+        events,
+        StateResVersion::V2_2,
+        &empty_key,
+    ))
+    .expect("state before");
+    let derived = derive_auth_events_from_state_dag(event, &state_before, events, "12.1")
+        .expect("derived auth events");
+    let mut authorised = event.clone();
+    authorised.auth_events = derived;
+    let room_state = room_state_from_shared(&state_before, events);
+    let verdict = check_auth_with_context(
+        &authorised,
+        &room_state,
+        StateResVersion::V2_2,
+        None,
+        Some(events),
+    );
+    (state_before, verdict)
+}
+
+/// Merge-shape dependence: does resolving three concurrent heads at once give the same state as
+/// merging two of them first (as a 20-parent cap forces) and the third later?
+///
+/// Branches off a shared `$t0` (topic "T0"), room creator alice, admin bob (100), mod dave (50):
+///   E1  `$e1`   dave sets topic X                      ts 10
+///   E2  `$pl_b` bob promotes carol to 50               ts 15, then `$e2` carol sets topic Y ts 20
+///   E21 `$pl_a` alice (creator) demotes bob to 0       ts 12
+///
+/// Each event is valid against its own cut, so none is rejected at the PDU level; whatever
+/// happens to Y is a state-resolution outcome, not a rejection cascade.
+#[test]
+fn test_merge_shape_does_not_change_resolved_state() {
+    let empty_key = String::new();
+    let alice = "@alice:example.com";
+    let bob = "@bob:example.com";
+    let carol = "@carol:example.com";
+    let dave = "@dave:example.com";
+
+    let join = |id: &str, user: &str, parent: &str| {
+        make_state_event(
+            id,
+            M_ROOM_MEMBER,
+            user,
+            user,
+            vec![parent],
+            json!({ "membership": "join" }),
+            None,
+        )
+    };
+    // alice is the V12 creator, so she is absent from every `users` map.
+    let pl0 = make_state_event(
+        "$pl0",
+        M_ROOM_POWER_LEVELS,
+        "",
+        alice,
+        vec!["$alice_join"],
+        json!({
+            "users": { "@bob:example.com": 100, "@dave:example.com": 50 },
+            "events": { "m.room.power_levels": 100, "m.room.topic": 50 },
+            "state_default": 50
+        }),
+        None,
+    );
+    let jr = make_state_event(
+        "$jr",
+        M_ROOM_JOIN_RULES,
+        "",
+        alice,
+        vec!["$pl0"],
+        json!({ "join_rule": "public" }),
+        None,
+    );
+    let t0 = make_state_event(
+        "$t0",
+        "m.room.topic",
+        "",
+        alice,
+        vec!["$dave_join"],
+        json!({ "topic": "T0" }),
+        None,
+    );
+    let mut e1 = make_state_event(
+        "$e1",
+        "m.room.topic",
+        "",
+        dave,
+        vec!["$t0"],
+        json!({ "topic": "X" }),
+        None,
+    );
+    e1.origin_server_ts = 10_010;
+    let mut pl_b = make_state_event(
+        "$pl_b",
+        M_ROOM_POWER_LEVELS,
+        "",
+        bob,
+        vec!["$t0"],
+        json!({
+            "users": {
+                "@bob:example.com": 100, "@dave:example.com": 50, "@carol:example.com": 50
+            },
+            "events": { "m.room.power_levels": 100, "m.room.topic": 50 },
+            "state_default": 50
+        }),
+        None,
+    );
+    pl_b.origin_server_ts = 10_015;
+    let mut e2 = make_state_event(
+        "$e2",
+        "m.room.topic",
+        "",
+        carol,
+        vec!["$pl_b"],
+        json!({ "topic": "Y" }),
+        None,
+    );
+    e2.origin_server_ts = 10_020;
+    let mut pl_a = make_state_event(
+        "$pl_a",
+        M_ROOM_POWER_LEVELS,
+        "",
+        alice,
+        vec!["$t0"],
+        json!({
+            "users": { "@dave:example.com": 50 },
+            "events": { "m.room.power_levels": 100, "m.room.topic": 50 },
+            "state_default": 50
+        }),
+        None,
+    );
+    pl_a.origin_server_ts = 10_012;
+
+    let mut events = HashMap::new();
+    for e in [
+        root_create(alice),
+        join("$alice_join", alice, "$create"),
+        pl0,
+        jr,
+        join("$bob_join", bob, "$jr"),
+        join("$carol_join", carol, "$bob_join"),
+        join("$dave_join", dave, "$carol_join"),
+        t0,
+        e1,
+        pl_b,
+        e2,
+        pl_a,
+    ] {
+        events.insert(e.event_id.clone(), e);
+    }
+
+    // Every branch event is accepted against its own cut: nothing here is a PDU rejection.
+    for id in ["$e1", "$pl_b", "$e2", "$pl_a"] {
+        let ev = events[id].clone();
+        let (_, verdict) = authorise_against_dag(&ev, &events);
+        assert!(verdict.is_ok(), "{id} must pass auth on its own cut: {verdict:?}");
+    }
+
+    // Shape A: one event cites all three heads (what an uncapped server would do).
+    let probe_all = make_state_event(
+        "$probe_all",
+        "org.example.probe",
+        "all",
+        alice,
+        vec!["$e1", "$e2", "$pl_a"],
+        json!({}),
+        None,
+    );
+    // Shape B: the cap forces {E1, E2} to be merged first; E21 is merged later.
+    let m1 = make_state_event(
+        "$m1",
+        "org.example.merge",
+        "m1",
+        alice,
+        vec!["$e1", "$e2"],
+        json!({}),
+        None,
+    );
+    let m2 = make_state_event(
+        "$m2",
+        "org.example.merge",
+        "m2",
+        alice,
+        vec!["$m1", "$pl_a"],
+        json!({}),
+        None,
+    );
+    let probe_step = make_state_event(
+        "$probe_step",
+        "org.example.probe",
+        "step",
+        alice,
+        vec!["$m2"],
+        json!({}),
+        None,
+    );
+    for e in [probe_all.clone(), m1, m2, probe_step.clone()] {
+        events.insert(e.event_id.clone(), e);
+    }
+
+    // Intermediate: after the first (capped) merge, Y is expected to win on {E1, E2} alone.
+    let mid = make_state_event(
+        "$mid",
+        "org.example.probe",
+        "mid",
+        alice,
+        vec!["$m1"],
+        json!({}),
+        None,
+    );
+    events.insert(mid.event_id.clone(), mid.clone());
+    let (state_mid, _) = authorise_against_dag(&mid, &events);
+    eprintln!(
+        "after M1 only: topic={:?}",
+        state_mid.get(&(EventType::from("m.room.topic"), String::new()))
+    );
+
+    let (state_all, _) = authorise_against_dag(&probe_all, &events);
+    let (state_step, _) = authorise_against_dag(&probe_step, &events);
+    let key = |t: &str| (EventType::from(t), empty_key.clone());
+    let topic_all = state_all.get(&key("m.room.topic")).cloned();
+    let topic_step = state_step.get(&key("m.room.topic")).cloned();
+    let pl_all = state_all.get(&key(M_ROOM_POWER_LEVELS)).cloned();
+    let pl_step = state_step.get(&key(M_ROOM_POWER_LEVELS)).cloned();
+    eprintln!("all-at-once: topic={topic_all:?} pl={pl_all:?}");
+    eprintln!("stepwise   : topic={topic_step:?} pl={pl_step:?}");
+
+    assert_eq!(pl_all, pl_step, "power levels depend on merge shape");
+    assert_eq!(
+        topic_all, topic_step,
+        "topic depends on how the 20-parent cap grouped the merge"
+    );
+}
