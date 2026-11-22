@@ -810,6 +810,110 @@ fn test_compute_state_from_dag_fork_resolution() {
     );
 }
 
+/// A bounded parent list cannot merge an arbitrary number of concurrent heads
+/// in one event. The omitted head remains live and still contributes state when
+/// a later event resolves both the new merge and that omitted branch.
+#[test]
+fn test_twenty_parent_merge_leaves_omitted_extremity_live() {
+    let empty_key = String::new();
+    let creator = "@creator:example.com";
+    let create = root_create(creator);
+    let creator_join = creator_join_after(vec!["$create"]);
+    let mut pl = make_state_event(
+        "$pl",
+        M_ROOM_POWER_LEVELS,
+        "",
+        creator,
+        vec!["$creator_join"],
+        json!({ "users": { "@creator:example.com": 100 } }),
+        None,
+    );
+    pl.depth = 2;
+
+    let mut events = HashMap::new();
+    events.insert(create.event_id.clone(), create);
+    events.insert(creator_join.event_id.clone(), creator_join);
+    events.insert(pl.event_id.clone(), pl);
+
+    // Give each head a distinct state key so all 21 can be observed after
+    // resolution. `$head_zz` sorts after the 20 selected heads, matching the
+    // shape produced by lexicographic truncation.
+    let mut selected_heads = Vec::new();
+    for i in 0..20 {
+        let id = format!("$head_{i:02}");
+        let key = format!("head_{i:02}");
+        let head = make_state_event(
+            &id,
+            "m.room.topic",
+            &key,
+            creator,
+            vec!["$pl"],
+            json!({ "topic": key.clone() }),
+            None,
+        );
+        selected_heads.push(id.clone());
+        events.insert(id, head);
+    }
+    let omitted = make_state_event(
+        "$head_zz",
+        "m.room.topic",
+        "head_zz",
+        creator,
+        vec!["$pl"],
+        json!({ "topic": "omitted" }),
+        None,
+    );
+    events.insert(omitted.event_id.clone(), omitted);
+
+    // This event cites the maximum allowed 20 parents and leaves `$head_zz`
+    // outside its ancestry.
+    let selected_refs: Vec<&str> = selected_heads.iter().map(String::as_str).collect();
+    let merge = make_state_event(
+        "$merge",
+        "m.room.topic",
+        "merge_marker",
+        creator,
+        selected_refs,
+        json!({ "topic": "merged selected heads" }),
+        None,
+    );
+    events.insert(merge.event_id.clone(), merge.clone());
+
+    // Resolving the new merge together with the omitted extremity models the
+    // still-live forward frontier. Its unique state key survives, proving that
+    // citing 20 parents did not implicitly absorb the 21st.
+    let probe = make_timeline_event(
+        "$probe",
+        "m.room.message",
+        creator,
+        vec!["$merge", "$head_zz"],
+        json!({ "body": "resolve remaining frontier" }),
+        None,
+    );
+    let state = compute_state_before_from_dag(&DagInputs::new(
+        &probe,
+        &events,
+        StateResVersion::V2_2,
+        &empty_key,
+    ))
+    .expect("the complete DAG with two live heads resolves");
+
+    assert_eq!(
+        state.get(&(EventType::from("m.room.topic"), "head_zz".to_string())),
+        Some(&"$head_zz".to_string()),
+        "the omitted head remains a live state contributor"
+    );
+    for i in 0..20 {
+        let key = format!("head_{i:02}");
+        let id = format!("$head_{i:02}");
+        assert_eq!(
+            state.get(&(EventType::from("m.room.topic"), key)),
+            Some(&id),
+            "selected parent {id} should remain represented in resolved state"
+        );
+    }
+}
+
 /// A complete State DAG has one deterministic state-before result. Storage-map
 /// insertion order must not affect which state tuple wins at a merge.
 #[test]
@@ -1113,5 +1217,182 @@ fn test_v2_2_derives_auth_from_single_state_parent_citation() {
     assert!(
         result.is_ok(),
         "V2.2 should accept the join once auth is derived from the validated State DAG: {result:?}"
+    );
+}
+
+/// Security consequence of a bounded parent list (companion to
+/// `test_twenty_parent_merge_leaves_omitted_extremity_live`).
+///
+/// MSC4242 caps `prev_state_events` at 20 but gives no rule for which 20 to cite when there are
+/// more extremities. Synapse keeps the 20 lowest event IDs (`sorted(..)[:20]` in
+/// `EventBuilder.build`). Event IDs are hashes, so an attacker can grind a branch whose ID sorts
+/// last.
+///
+/// Here the starved head is a power-levels demotion of `@mallory`. An event that omits it is
+/// authorised against the pre-demotion state and is accepted. An event that cites the demotion is
+/// rejected. Both are well-formed; the only difference is which extremities were cited. This
+/// documents why "which 20" is a security-relevant choice, not an implementation detail.
+#[test]
+fn test_omitted_demotion_head_lets_demoted_sender_authorise_against_stale_state() {
+    let empty_key = String::new();
+    let alice = "@alice:example.com";
+    let mallory = "@mallory:example.com";
+
+    let create = root_create(alice);
+    // alice is the creator, so (V12 rule) she must not appear in the `users` map; she has
+    // unlimited power regardless. She must be joined, and in the ancestry, or her power events are rejected in resolution.
+    let alice_join = make_state_event(
+        "$alice_join",
+        M_ROOM_MEMBER,
+        alice,
+        alice,
+        vec!["$create"],
+        json!({ "membership": "join" }),
+        None,
+    );
+    let pl = make_state_event(
+        "$pl",
+        M_ROOM_POWER_LEVELS,
+        "",
+        alice,
+        vec!["$alice_join"],
+        json!({ "users": { "@mallory:example.com": 50 } }),
+        None,
+    );
+    let jr = make_state_event(
+        "$jr",
+        M_ROOM_JOIN_RULES,
+        "",
+        alice,
+        vec!["$pl"],
+        json!({ "join_rule": "public" }),
+        None,
+    );
+    let mallory_join = make_state_event(
+        "$mallory_join",
+        M_ROOM_MEMBER,
+        mallory,
+        mallory,
+        vec!["$jr"],
+        json!({ "membership": "join" }),
+        None,
+    );
+
+    let mut events = HashMap::new();
+    for e in [create, alice_join, pl, jr, mallory_join] {
+        events.insert(e.event_id.clone(), e);
+    }
+
+    // 20 benign concurrent heads plus one demotion head. `$zz_demote` sorts after all of them,
+    // which is what lexicographic truncation drops.
+    let mut selected: Vec<String> = Vec::new();
+    for i in 0..20 {
+        let id = format!("$head_{i:02}");
+        let key = format!("head_{i:02}");
+        let head = make_state_event(
+            &id,
+            "m.room.topic",
+            &key,
+            alice,
+            vec!["$mallory_join"],
+            json!({ "topic": key.clone() }),
+            None,
+        );
+        selected.push(id.clone());
+        events.insert(id, head);
+    }
+    let demote = make_state_event(
+        "$zz_demote",
+        M_ROOM_POWER_LEVELS,
+        "",
+        alice,
+        vec!["$mallory_join"],
+        json!({ "users": {} }),
+        None,
+    );
+    events.insert(demote.event_id.clone(), demote);
+    assert!(
+        selected.iter().all(|id| id.as_str() < "$zz_demote"),
+        "the demotion must sort after every selected head"
+    );
+
+    // Authorises `event` the way a V2.2 receiver does: state-before from the DAG, derive auth
+    // events from it, then run the auth rules.
+    let authorise = |event: &LeanEvent, events: &HashMap<String, LeanEvent>| {
+        let state_before = compute_state_before_from_dag(&DagInputs::new(
+            event,
+            events,
+            StateResVersion::V2_2,
+            &empty_key,
+        ))
+        .expect("state before");
+        let derived = derive_auth_events_from_state_dag(event, &state_before, events, "12.1")
+            .expect("derived auth events");
+        let mut authorised = event.clone();
+        authorised.auth_events = derived;
+        let room_state = room_state_from_shared(&state_before, events);
+        let verdict = check_auth_with_context(
+            &authorised,
+            &room_state,
+            StateResVersion::V2_2,
+            None,
+            Some(events),
+        );
+        (state_before, verdict)
+    };
+
+    // (a) Mallory cites exactly the 20 selected heads: the demotion is not in his ancestry.
+    let selected_refs: Vec<&str> = selected.iter().map(String::as_str).collect();
+    let stale = make_state_event(
+        "$mallory_stale",
+        "m.room.topic",
+        "mallory_topic",
+        mallory,
+        selected_refs,
+        json!({ "topic": "set while demoted" }),
+        None,
+    );
+    let (stale_state, stale_verdict) = authorise(&stale, &events);
+    assert_eq!(
+        stale_state.get(&(EventType::from(M_ROOM_POWER_LEVELS), empty_key.clone())),
+        Some(&"$pl".to_string()),
+        "state before the stale event does not contain the demotion"
+    );
+    assert!(
+        stale_verdict.is_ok(),
+        "authorised against the pre-demotion power levels, the event is accepted: {stale_verdict:?}"
+    );
+
+    // (b) The same sender and content, but the cut includes the demotion head.
+    // The 20 benign heads are merged by one event so the parent list stays within the cap.
+    let selected_refs: Vec<&str> = selected.iter().map(String::as_str).collect();
+    let merge = make_state_event(
+        "$merge",
+        "m.room.topic",
+        "merge_marker",
+        alice,
+        selected_refs,
+        json!({ "topic": "merged" }),
+        None,
+    );
+    events.insert(merge.event_id.clone(), merge);
+    let fresh = make_state_event(
+        "$mallory_fresh",
+        "m.room.topic",
+        "mallory_topic",
+        mallory,
+        vec!["$merge", "$zz_demote"],
+        json!({ "topic": "set while demoted" }),
+        None,
+    );
+    let (fresh_state, fresh_verdict) = authorise(&fresh, &events);
+    assert_eq!(
+        fresh_state.get(&(EventType::from(M_ROOM_POWER_LEVELS), empty_key.clone())),
+        Some(&"$zz_demote".to_string()),
+        "state before the fresh event contains the demotion"
+    );
+    assert!(
+        fresh_verdict.is_err(),
+        "once the demotion is in the cited cut the same action is rejected"
     );
 }
