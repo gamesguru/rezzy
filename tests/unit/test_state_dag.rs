@@ -1563,7 +1563,10 @@ fn test_merge_shape_does_not_change_resolved_state() {
     for id in ["$e1", "$pl_b", "$e2", "$pl_a"] {
         let ev = events[id].clone();
         let (_, verdict) = authorise_against_dag(&ev, &events);
-        assert!(verdict.is_ok(), "{id} must pass auth on its own cut: {verdict:?}");
+        assert!(
+            verdict.is_ok(),
+            "{id} must pass auth on its own cut: {verdict:?}"
+        );
     }
 
     // Shape A: one event cites all three heads (what an uncapped server would do).
@@ -1640,4 +1643,151 @@ fn test_merge_shape_does_not_change_resolved_state() {
         topic_all, topic_step,
         "topic depends on how the 20-parent cap grouped the merge"
     );
+}
+
+/// Checks the proposed five-event merge-shape counterexample against the DAG API.
+#[test]
+fn test_v2_2_proposed_unconflicted_shadowing_counterexample() {
+    let empty = String::new();
+    let alice = "@alice:example.com";
+    let bob = "@bob:example.com";
+    let dave = "@dave:example.com";
+
+    let join = |id: &str, user: &str, parent: &str| {
+        make_state_event(
+            id,
+            M_ROOM_MEMBER,
+            user,
+            user,
+            vec![parent],
+            json!({"membership": "join"}),
+            None,
+        )
+    };
+    let mut pl0 = make_state_event(
+        "$pl0",
+        M_ROOM_POWER_LEVELS,
+        "",
+        alice,
+        vec!["$dave_join"],
+        json!({
+            "users": {"@alice:example.com": 100, "@bob:example.com": 90, "@dave:example.com": 50},
+            "events": {"m.room.power_levels": 90, "m.room.topic": 50},
+            "state_default": 50, "events_default": 0
+        }),
+        None,
+    );
+    pl0.origin_server_ts = 4;
+    let mut t0 = make_state_event(
+        "$t0",
+        "m.room.topic",
+        "",
+        alice,
+        vec!["$pl0"],
+        json!({"topic": "T0"}),
+        None,
+    );
+    t0.origin_server_ts = 5;
+
+    let mut x = make_state_event(
+        "$x",
+        "m.room.topic",
+        "",
+        dave,
+        vec!["$t0"],
+        json!({"topic": "X"}),
+        None,
+    );
+    x.origin_server_ts = 10;
+    let mut pl_b = make_state_event(
+        "$pl_b",
+        M_ROOM_POWER_LEVELS,
+        "",
+        bob,
+        vec!["$t0"],
+        json!({
+            "users": {"@alice:example.com": 100, "@bob:example.com": 90, "@dave:example.com": 0},
+            "events": {"m.room.power_levels": 90, "m.room.topic": 50},
+            "state_default": 50, "events_default": 0
+        }),
+        None,
+    );
+    pl_b.origin_server_ts = 15;
+    let mut pl_a = make_state_event(
+        "$pl_a",
+        M_ROOM_POWER_LEVELS,
+        "",
+        alice,
+        vec!["$t0"],
+        json!({
+            "users": {"@alice:example.com": 100, "@bob:example.com": 0, "@dave:example.com": 50},
+            "events": {"m.room.power_levels": 90, "m.room.topic": 50},
+            "state_default": 50, "events_default": 0
+        }),
+        None,
+    );
+    pl_a.origin_server_ts = 12;
+
+    let mut events = HashMap::new();
+    for ev in [
+        root_create(alice),
+        join("$alice_join", alice, "$create"),
+        join("$bob_join", bob, "$alice_join"),
+        join("$dave_join", dave, "$bob_join"),
+        pl0,
+        t0,
+        x,
+        pl_b,
+        pl_a,
+    ] {
+        events.insert(ev.event_id.clone(), ev);
+    }
+    let m1 = make_state_event(
+        "$m1",
+        "org.example.merge",
+        "m1",
+        bob,
+        vec!["$x", "$pl_b"],
+        json!({}),
+        None,
+    );
+    let all = make_state_event(
+        "$all",
+        "org.example.merge",
+        "all",
+        alice,
+        vec!["$x", "$pl_b", "$pl_a"],
+        json!({}),
+        None,
+    );
+    let step = make_state_event(
+        "$step",
+        "org.example.merge",
+        "step",
+        alice,
+        vec!["$m1", "$pl_a"],
+        json!({}),
+        None,
+    );
+    for ev in [m1, all.clone(), step.clone()] {
+        events.insert(ev.event_id.clone(), ev);
+    }
+
+    let before = |id: &str| {
+        let event = events.get(id).unwrap();
+        compute_state_before_from_dag(&DagInputs::new(
+            event,
+            &events,
+            StateResVersion::V2_2,
+            &empty,
+        ))
+        .expect("complete state DAG")
+    };
+    let mid = before("$m1");
+    let topic_key = (EventType::from("m.room.topic"), empty.clone());
+    let state_all = before("$all");
+    let state_step = before("$step");
+    assert_eq!(mid.get(&topic_key), Some(&"$x".to_string()));
+    assert_eq!(state_all.get(&topic_key), Some(&"$x".to_string()));
+    assert_eq!(state_step.get(&topic_key), Some(&"$x".to_string()));
 }
