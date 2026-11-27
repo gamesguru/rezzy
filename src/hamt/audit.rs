@@ -14,7 +14,7 @@
 //! further safety checks, never as a delete list on its own.
 
 use crate::dense_index::{DenseIndex, IndexTooLarge};
-use crate::HashSet;
+use crate::{HashMap, HashSet};
 use alloc::{sync::Arc, vec::Vec};
 use core::fmt;
 
@@ -243,7 +243,7 @@ where
     // check covers dedup for anything actually in `universe`, so this set
     // only ever grows for hashes the caller's `universe` scan missed.
     let mut visited_outside_universe: HashSet<StructuralHash> = HashSet::default();
-    let mut checked_placements = HashSet::default();
+    let mut checked_placements = HashMap::default();
     for root in roots {
         walk_reachable_node_hashes_with_placements(
             &root,
@@ -321,7 +321,7 @@ where
     F: FnMut(&StructuralHash) -> Result<Arc<HamtNode<K, V>>, E>,
 {
     let mut marked: HashSet<StructuralHash> = HashSet::default();
-    let mut checked_placements = HashSet::default();
+    let mut checked_placements = HashMap::default();
     for root in roots {
         walk_reachable_node_hashes_with_placements(
             &root,

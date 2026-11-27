@@ -4,9 +4,6 @@ use alloc::{sync::Arc, vec::Vec};
 use core::cmp::Ordering;
 use core::fmt;
 
-use crate::incremental::LtHash;
-use crate::HashSet;
-
 use super::{
     map_index, HamtCodec, HamtNode, NodePtr, NodeRef, NodeResolver, StructuralHash, HAMT_MAX_DEPTH,
 };
@@ -54,41 +51,8 @@ fn encoded_keys<K: HamtCodec, V>(leaves: &[(K, V)]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Isolates the delta (added/removed items) between two HAMT tries in O(|Delta|
-/// * log32 N) time. Uses the `LtHash` lattice to quickly short-circuit if the
-///   tries are convergently identical.
-///
-/// # Errors
-/// Returns [`HamtTraversalError::Resolve`] if the `resolver` fails to resolve a lazy node, or
-/// [`HamtTraversalError::MaxDepthExceeded`] if the diff recurses past the deepest depth a
-/// legitimately-built HAMT can have.
-pub fn isolate_delta<K, V, F, E>(
-    root_a: &NodePtr<K, V>,
-    lattice_a: &LtHash,
-    root_b: &NodePtr<K, V>,
-    lattice_b: &LtHash,
-    resolver: &mut F,
-) -> DeltaResult<K, V, HamtTraversalError<E>>
-where
-    K: Clone + Eq + HamtCodec,
-    V: Clone + Eq,
-    F: NodeResolver<K, V, E>,
-{
-    // Validate both roots before the shortcut: two structurally identical
-    // misplaced collision buckets must still be rejected.
-    validate_roots_at_depth_zero(root_a, root_b)?;
-    // Short-circuit only when both the lattice and the root structural hashes
-    // match. A lattice collision alone must not suppress a real structural
-    // diff.
-    if lattice_a == lattice_b && root_a.structural_hash == root_b.structural_hash {
-        return Ok((Vec::new(), Vec::new()));
-    }
-
-    collect_delta(root_a, root_b, resolver)
-}
-
-/// Isolates the delta (added/removed items) between two HAMT root nodes directly,
-/// short-circuiting on identical structural hashes without requiring `LtHash` references.
+/// Isolates the delta (added/removed items) between two HAMT root nodes,
+/// short-circuiting on identical structural hashes.
 ///
 /// # Errors
 /// Returns [`HamtTraversalError::Resolve`] if the `resolver` fails to resolve a lazy node, or
@@ -726,7 +690,7 @@ where
     if !mark(root.structural_hash) {
         return Ok(());
     }
-    walk_reachable_children(root, resolver, mark, 0, &mut local)
+    walk_reachable_children(root, resolver, mark, 0, &mut local, false)
 }
 
 /// Reachability walk shared by audits so content marking and placement
@@ -735,7 +699,7 @@ pub(super) fn walk_reachable_node_hashes_with_placements<K, V, F, E, M>(
     root: &NodePtr<K, V>,
     resolver: &mut F,
     mark: &mut M,
-    checked_placements: &mut HashSet<(StructuralHash, usize)>,
+    checked_placements: &mut crate::HashMap<StructuralHash, crate::HashSet<usize>>,
 ) -> Result<(), HamtTraversalError<E>>
 where
     F: NodeResolver<K, V, E>,
@@ -744,11 +708,14 @@ where
     // Validate the root even when its content was already seen by an earlier
     // call; otherwise a shared hash could mask a misplaced bucket at depth 0.
     check_node_depth(root, 0)?;
-    checked_placements.insert((root.structural_hash, 0));
+    checked_placements
+        .entry(root.structural_hash)
+        .or_default()
+        .insert(0);
     if !mark(root.structural_hash) {
         return Ok(());
     }
-    walk_placed_reachable_children(root, resolver, mark, checked_placements, 0)
+    walk_reachable_children(root, resolver, mark, 0, checked_placements, true)
 }
 
 /// Resolves a child and validates that its shape is legal at `depth`.
@@ -765,18 +732,17 @@ where
     Ok(node)
 }
 
-/// Content-deduplicating child walk used by the single-root public API.
-///
-/// A `mark` miss is skipped before resolving, preserving the documented
-/// reaped-node safety property. Callers that also need per-depth placement
-/// validation across several roots use
-/// [`walk_reachable_node_hashes_with_placements`] instead.
+/// Shared reachability walk. `validate_mark_miss` is enabled for multi-root
+/// audits, where a marked hash at an unseen depth still has to be resolved to
+/// validate that placement. The public single-walk path preserves the GC-safe
+/// mark-miss shortcut unless the current walk has already seen that hash.
 fn walk_reachable_children<K, V, F, E, M>(
     node: &NodePtr<K, V>,
     resolver: &mut F,
     mark: &mut M,
     depth: usize,
     local: &mut crate::HashMap<StructuralHash, crate::HashSet<usize>>,
+    validate_mark_miss: bool,
 ) -> Result<(), HamtTraversalError<E>>
 where
     F: NodeResolver<K, V, E>,
@@ -791,51 +757,20 @@ where
         if depths_seen.is_some_and(|depths| depths.contains(&next_depth)) {
             continue;
         }
-        // Recurse for new content, or when the same content is re-referenced
-        // at a different depth in this call (its descendants' placements then
-        // need revalidation). Content seen in an earlier call is validated at
-        // this depth but not walked again.
-        let recurse = newly_marked || depths_seen.is_some();
-        let child_node = resolve_child_at_depth(child, resolver, next_depth)?;
-        local.entry(hash).or_default().insert(next_depth);
-        if recurse {
-            walk_reachable_children(&child_node, resolver, mark, next_depth, local)?;
-        }
-    }
-    Ok(())
-}
-
-/// Placement-aware child walk used by multi-root audits: content
-/// deduplication never hides a node re-referenced at a different depth.
-fn walk_placed_reachable_children<K, V, F, E, M>(
-    node: &NodePtr<K, V>,
-    resolver: &mut F,
-    mark: &mut M,
-    checked_placements: &mut HashSet<(StructuralHash, usize)>,
-    depth: usize,
-) -> Result<(), HamtTraversalError<E>>
-where
-    F: NodeResolver<K, V, E>,
-    M: FnMut(StructuralHash) -> bool,
-{
-    check_node_depth(node, depth)?;
-    let next_depth = depth.saturating_add(1);
-    for child in &node.children {
-        let hash = child.structural_hash();
-        let should_walk_content = mark(hash);
-        let placement = (hash, next_depth);
-        if !should_walk_content && checked_placements.contains(&placement) {
+        let repeated_hash = depths_seen.is_some();
+        if !newly_marked && !repeated_hash && !validate_mark_miss {
             continue;
         }
         let child_node = resolve_child_at_depth(child, resolver, next_depth)?;
-        checked_placements.insert(placement);
-        if should_walk_content {
-            walk_placed_reachable_children(
+        local.entry(hash).or_default().insert(next_depth);
+        if newly_marked || repeated_hash {
+            walk_reachable_children(
                 &child_node,
                 resolver,
                 mark,
-                checked_placements,
                 next_depth,
+                local,
+                validate_mark_miss,
             )?;
         }
     }

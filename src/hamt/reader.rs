@@ -463,6 +463,15 @@ mod tests {
             reader.get_by_path_hash(root.structural_hash, &1, &[0_u8; 32]),
             Err(HamtReadError::Decode("leaf routed to wrong slot"))
         ));
+
+        let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
+            PersistedHamtReader::new(KEY, |hash| Ok(records.get(hash).cloned()));
+        assert!(matches!(
+            reader.for_each_entry(root.structural_hash, |_, _| {}),
+            Err(HamtReadError::Decode(
+                "collision bucket leaves route to different path hashes"
+            ))
+        ));
     }
 
     #[test]

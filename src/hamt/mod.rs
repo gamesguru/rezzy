@@ -65,8 +65,8 @@ pub use codec::{
     HAMT_ROOT_MAGIC, HAMT_WIRE_VERSION,
 };
 pub use delta::{
-    diff_hamt_nodes, diff_node_hashes, isolate_delta, reachable_node_hashes,
-    walk_reachable_node_hashes, Delta, DeltaResult, HamtTraversalError, NodeHashDelta,
+    diff_hamt_nodes, diff_node_hashes, reachable_node_hashes, walk_reachable_node_hashes, Delta,
+    DeltaResult, HamtTraversalError, NodeHashDelta,
 };
 #[cfg(feature = "unstable-refcount-gc")]
 pub use gc::{LinearRootChain, RefcountTable, RefcountUnderflow};

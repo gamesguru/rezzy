@@ -1,6 +1,6 @@
 use super::*;
 use crate::hamt::codec::PersistedInternalNode;
-use crate::hamt::delta::{isolate_delta, HamtTraversalError};
+use crate::hamt::delta::{diff_hamt_nodes, HamtTraversalError};
 use crate::hamt::{build_hamt, build_hamt_root_handle};
 use crate::incremental::LtHash;
 use alloc::{boxed::Box, vec};
@@ -19,6 +19,21 @@ fn collision_node<K, V>(mut node: &HamtNode<K, V>) -> &HamtNode<K, V> {
         node = child;
     }
     node
+}
+
+fn collision_root(key: &[u8], entries: Vec<(u64, u64)>) -> Arc<HamtNode<u64, u64>> {
+    crate::hamt::build_hamt_with_routing(key, entries, constant_routing)
+}
+
+fn assert_collision_entries(root: &HamtNode<u64, u64>, entries: &[(u64, u64)]) {
+    assert_eq!(collision_node(root).leaves.len(), entries.len());
+    for (key, value) in entries {
+        assert_eq!(root.get_by_path_hash(key, &[0_u8; 32]), Some(value));
+    }
+}
+
+fn misplaced_collision(key: &[u8]) -> Arc<HamtNode<u64, u64>> {
+    rebuild_node(key, 0, 0, vec![(1_u64, 10_u64), (2_u64, 20_u64)], vec![])
 }
 
 macro_rules! impl_u64_hamt_codec {
@@ -127,45 +142,7 @@ fn test_hamt_traversal_error_display_and_source() {
 }
 
 #[test]
-fn test_lthash_short_circuit() {
-    let key = b"dummy_server_key";
-    let leaf1 = rebuild_node(key, 1, 0, vec![(1, 100)], vec![]);
-
-    let lattice_a = LtHash::default();
-    let lattice_b = LtHash::default();
-
-    let mut resolver = |_hash: &StructuralHash| Ok::<_, ()>(leaf1.clone());
-
-    // Simulate identical roots.
-    let (added, removed) =
-        isolate_delta(&leaf1, &lattice_a, &leaf1, &lattice_b, &mut resolver).unwrap();
-    assert_eq!(added.len(), 0);
-    assert_eq!(removed.len(), 0);
-}
-
-#[test]
-fn test_lthash_equal_does_not_mask_different_roots() {
-    let key = b"dummy_server_key";
-    let root_a = rebuild_node(key, 1, 0, vec![(1, 100)], vec![]);
-    let root_b = rebuild_node(key, 1, 0, vec![(2, 200)], vec![]);
-
-    let lattice_a = LtHash::from_lanes([7u16; 1024]);
-    let lattice_b = LtHash::from_lanes([7u16; 1024]);
-    let (added, removed) = isolate_delta(
-        &root_a,
-        &lattice_a,
-        &root_b,
-        &lattice_b,
-        &mut panic_resolver,
-    )
-    .unwrap();
-
-    assert_eq!(removed, vec![(1, 100)]);
-    assert_eq!(added, vec![(2, 200)]);
-}
-
-#[test]
-fn test_isolate_delta_resolves_lazy_child() {
+fn test_diff_hamt_nodes_resolves_lazy_child() {
     let key = b"dummy_server_key";
     let leaf = rebuild_node(key, 1, 0, vec![(1, 100)], vec![]);
     let root_a = rebuild_node(
@@ -182,14 +159,8 @@ fn test_isolate_delta_resolves_lazy_child() {
         Ok::<_, ()>(leaf.clone())
     };
 
-    let (added, removed) = isolate_delta(
-        &root_a,
-        &LtHash::default(),
-        &root_b,
-        &LtHash::from_lanes([1u16; 1024]),
-        &mut resolver,
-    )
-    .expect("delta should resolve lazy child");
+    let (added, removed) =
+        diff_hamt_nodes(&root_a, &root_b, &mut resolver).expect("delta should resolve lazy child");
 
     assert_eq!(added.len(), 0);
     assert_eq!(removed, vec![(1, 100)]);
@@ -1038,22 +1009,15 @@ fn test_in_memory_mutation_with_hamt_codec() {
 #[test]
 fn test_build_hamt_with_routing_makes_collision_node() {
     let key = b"dummy_server_key";
-    let root = crate::hamt::build_hamt_with_routing(
-        key,
-        vec![(1_u64, 10_u64), (2_u64, 20_u64)],
-        constant_routing,
-    );
-
-    let node = collision_node(&root);
-    assert_eq!(node.leaves.len(), 2);
-    assert_eq!(root.get_by_path_hash(&1_u64, &[0u8; 32]), Some(&10));
+    let root = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 20_u64)]);
+    assert_collision_entries(&root, &[(1, 10), (2, 20)]);
 }
 
 #[test]
 fn test_build_hamt_adversarial_multi_key_collision() {
     let key = b"dummy_server_key";
     let entries = (1_u64..=5).map(|i| (i, i * 10)).collect::<Vec<_>>();
-    let root = crate::hamt::build_hamt_with_routing(key, entries, constant_routing);
+    let root = collision_root(key, entries);
 
     let node = collision_node(&root);
     assert_eq!(node.leaves.len(), 5);
@@ -1065,11 +1029,7 @@ fn test_build_hamt_adversarial_multi_key_collision() {
 #[test]
 fn test_collision_node_round_trips_as_zero_wire_mthn() {
     let key = b"dummy_server_key";
-    let root = crate::hamt::build_hamt_with_routing(
-        key,
-        vec![(2_u64, 20_u64), (1_u64, 10_u64)],
-        constant_routing,
-    );
+    let root = collision_root(key, vec![(2_u64, 20_u64), (1_u64, 10_u64)]);
     let node = collision_node(&root);
 
     let bytes = PersistedInternalNode::from(node).encode_v1();
@@ -1086,11 +1046,7 @@ fn test_collision_node_round_trips_as_zero_wire_mthn() {
 #[test]
 fn test_descend_level_returns_every_key_in_a_collision_bucket() {
     let key = b"dummy_server_key";
-    let root = crate::hamt::build_hamt_with_routing(
-        key,
-        vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)],
-        constant_routing,
-    );
+    let root = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)]);
     let node = collision_node(&root);
     let bytes = PersistedInternalNode::from(node).encode_v1();
     let result: DescendResult<u64, u64> = descend_level_impl(
@@ -1130,7 +1086,7 @@ fn test_descend_level_rejects_a_collision_bucket_with_mixed_routing() {
 #[test]
 fn test_hamt_insert_builds_collision_node() {
     let key = b"dummy_server_key";
-    let root = crate::hamt::build_hamt_with_routing(key, vec![(1_u64, 10_u64)], constant_routing);
+    let root = collision_root(key, vec![(1_u64, 10_u64)]);
 
     let mut route = constant_routing;
     let mut resolver = unreachable_resolver();
@@ -1142,10 +1098,7 @@ fn test_hamt_insert_builds_collision_node() {
             .expect("collision insert must succeed");
 
     assert_eq!(displaced, None);
-    let node = collision_node(&root);
-    assert_eq!(node.leaves.len(), 2);
-    assert_eq!(root.get_by_path_hash(&1_u64, &[0u8; 32]), Some(&10));
-    assert_eq!(root.get_by_path_hash(&2_u64, &[0u8; 32]), Some(&20));
+    assert_collision_entries(&root, &[(1, 10), (2, 20)]);
 }
 
 #[test]
@@ -1178,22 +1131,14 @@ fn test_collision_insert_is_order_independent_and_replaces_values() {
 
     // Building the same final map in a different input order must produce the
     // same canonical tree, byte-for-byte.
-    let rebuilt = crate::hamt::build_hamt_with_routing(
-        key,
-        vec![(3_u64, 30_u64), (2_u64, 99_u64), (1_u64, 10_u64)],
-        constant_routing,
-    );
+    let rebuilt = collision_root(key, vec![(3_u64, 30_u64), (2_u64, 99_u64), (1_u64, 10_u64)]);
     assert_eq!(rebuilt.structural_hash, root.structural_hash);
 }
 
 #[test]
 fn test_collision_remove_shrinks_and_collapses_to_a_leaf() {
     let key = b"dummy_server_key";
-    let root = crate::hamt::build_hamt_with_routing(
-        key,
-        vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)],
-        constant_routing,
-    );
+    let root = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)]);
     let mut route = constant_routing;
     let mut resolver = unreachable_resolver();
 
@@ -1213,8 +1158,7 @@ fn test_collision_remove_shrinks_and_collapses_to_a_leaf() {
     assert!(!root.is_collision());
     assert_eq!(root.leaves, [(3, 30)]);
     assert_eq!(root.nodemap, 0);
-    let rebuilt =
-        crate::hamt::build_hamt_with_routing(key, vec![(3_u64, 30_u64)], constant_routing);
+    let rebuilt = collision_root(key, vec![(3_u64, 30_u64)]);
     assert_eq!(rebuilt.structural_hash, root.structural_hash);
     assert_eq!(root.get_by_path_hash(&3_u64, &[0u8; 32]), Some(&30));
 }
@@ -1222,11 +1166,7 @@ fn test_collision_remove_shrinks_and_collapses_to_a_leaf() {
 #[test]
 fn test_collision_remove_of_absent_key_is_a_noop() {
     let key = b"dummy_server_key";
-    let root = crate::hamt::build_hamt_with_routing(
-        key,
-        vec![(1_u64, 10_u64), (2_u64, 20_u64)],
-        constant_routing,
-    );
+    let root = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 20_u64)]);
     let mut route = constant_routing;
     let mut resolver = unreachable_resolver();
 
@@ -1320,11 +1260,7 @@ fn test_collision_persisted_reader_resolves_lazy_spine_and_visits_bucket() {
     }
 
     let key = b"dummy_server_key";
-    let root = crate::hamt::build_hamt_with_routing(
-        key,
-        vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)],
-        constant_routing,
-    );
+    let root = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)]);
     let mut storage = std::collections::HashMap::new();
     store(&root, &mut storage);
 
@@ -1362,16 +1298,8 @@ fn test_collision_persisted_reader_resolves_lazy_spine_and_visits_bucket() {
 #[test]
 fn test_collision_nodes_diff_and_isolate_like_an_ordered_map() {
     let key = b"dummy_server_key";
-    let before = crate::hamt::build_hamt_with_routing(
-        key,
-        vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)],
-        constant_routing,
-    );
-    let after = crate::hamt::build_hamt_with_routing(
-        key,
-        vec![(1_u64, 10_u64), (2_u64, 99_u64), (4_u64, 40_u64)],
-        constant_routing,
-    );
+    let before = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)]);
+    let after = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 99_u64), (4_u64, 40_u64)]);
     let mut resolver = unreachable_resolver();
 
     let (mut added, mut removed) =
@@ -1381,10 +1309,8 @@ fn test_collision_nodes_diff_and_isolate_like_an_ordered_map() {
     assert_eq!(added, [(2, 99), (4, 40)]);
     assert_eq!(removed, [(2, 20), (3, 30)]);
 
-    let lattice = LtHash::default();
     let (mut isolated_added, mut isolated_removed) =
-        isolate_delta(&before, &lattice, &after, &lattice, &mut resolver)
-            .expect("collision isolate");
+        diff_hamt_nodes(&before, &after, &mut resolver).expect("collision isolate");
     isolated_added.sort_unstable();
     isolated_removed.sort_unstable();
     assert_eq!(isolated_added, added);
@@ -1414,9 +1340,9 @@ fn test_malformed_node_shape_is_absent_for_reads_and_rejected_for_mutation() {
 }
 
 #[test]
-fn test_misplaced_collision_root_is_rejected_even_when_hashes_match() {
+fn test_misplaced_collision_is_rejected_even_when_hashes_match() {
     let key = b"dummy_server_key";
-    let corrupt = rebuild_node(key, 0, 0, vec![(1_u64, 10_u64), (2_u64, 20_u64)], vec![]);
+    let corrupt = misplaced_collision(key);
     let mut resolver = unreachable_resolver();
 
     assert!(matches!(
@@ -1463,7 +1389,7 @@ fn test_reachability_rechecks_a_seen_hash_at_a_new_depth() {
 #[test]
 fn test_collision_bucket_above_routing_limit_is_rejected() {
     let key = b"dummy_server_key";
-    let corrupt = rebuild_node(key, 0, 0, vec![(1_u64, 10_u64), (2_u64, 20_u64)], vec![]);
+    let corrupt = misplaced_collision(key);
     assert!(
         corrupt.is_collision(),
         "test fixture has the collision shape"
@@ -1489,7 +1415,7 @@ fn test_collision_bucket_above_routing_limit_is_rejected() {
 #[test]
 fn test_visit_entries_rejects_a_misplaced_collision_bucket() {
     let key = b"dummy_server_key";
-    let corrupt = rebuild_node(key, 0, 0, vec![(1_u64, 10_u64), (2_u64, 20_u64)], vec![]);
+    let corrupt = misplaced_collision(key);
     let mut resolver = unreachable_resolver();
     let mut visitor = |_k: &u64, _v: &u64| -> Result<(), ()> { Ok(()) };
 
@@ -2402,10 +2328,9 @@ fn test_walk_reachable_node_hashes_skips_shared_lazy_child_without_resolving() {
         "walk over root_b should succeed",
     );
 
-    // These are independent public walk calls, so the shared child is
-    // resolved once per call: each call must validate its own placement.
-    // `node_reachability_audit` shares placement checks across roots.
-    assert_eq!(shared_resolve_count.get(), 2);
+    // A shared content mark at the same previously checked placement skips
+    // resolution, preserving the GC-safe behavior of separate walk calls.
+    assert_eq!(shared_resolve_count.get(), 1);
     assert!(seen.contains(&root_a.structural_hash));
     assert!(seen.contains(&root_b.structural_hash));
     assert!(seen.contains(&shared_leaf.structural_hash));
@@ -2505,23 +2430,6 @@ fn test_diff_node_hashes_rejects_excessive_depth() {
 
     let err = crate::hamt::diff_node_hashes(&root_a, &root_b, &mut resolver)
         .expect_err("a chain deeper than HAMT_MAX_DEPTH must be rejected, not stack-overflow");
-    assert_max_depth_exceeded(&err);
-}
-
-#[test]
-fn test_isolate_delta_rejects_excessive_depth() {
-    let RootPair { root_a, root_b } = deep_diff_roots();
-
-    let mut resolver = unreachable_resolver();
-
-    let err = isolate_delta(
-        &root_a,
-        &LtHash::default(),
-        &root_b,
-        &LtHash::default(),
-        &mut resolver,
-    )
-    .expect_err("a chain deeper than HAMT_MAX_DEPTH must be rejected, not stack-overflow");
     assert_max_depth_exceeded(&err);
 }
 
@@ -2634,10 +2542,6 @@ fn test_diff_nodes_and_lazy_resolver() {
         vec![child_b1.clone(), child_b2.clone(), child_b4.clone()],
     );
 
-    // Ensure lattice short-circuit does not fire
-    let lattice_a = LtHash::default();
-    let lattice_b = LtHash::from_lanes([1u16; 1024]);
-
     let mut resolve_called = false;
     let mut resolver = |hash: &StructuralHash| {
         if hash == &leaf3.structural_hash {
@@ -2648,8 +2552,7 @@ fn test_diff_nodes_and_lazy_resolver() {
         }
     };
 
-    let (added, removed) =
-        isolate_delta(&root_a, &lattice_a, &root_b, &lattice_b, &mut resolver).unwrap();
+    let (added, removed) = diff_hamt_nodes(&root_a, &root_b, &mut resolver).unwrap();
 
     assert!(
         resolve_called,
@@ -2728,7 +2631,7 @@ fn test_leaf_differences() {
     // Node B will have leaves at slots 1, 2
     let root_b = rebuild_node(key, 0b110, 0, vec![(2, 250), (3, 300)], vec![]);
 
-    let IsolatedDelta { added, removed } = isolate_delta_default(&root_a, &root_b);
+    let HamtDiff { added, removed } = diff_hamt_nodes_default(&root_a, &root_b);
 
     // slot 0 (true, false): removed (1, 100)
     // slot 1 (true, true): differs, removed (2, 200) added (2, 250)
@@ -2749,22 +2652,16 @@ fn unreachable_resolver<K, V>() -> impl FnMut(&StructuralHash) -> Result<Arc<Ham
     panic_resolver::<K, V>
 }
 
-/// Diffs two `i32`-keyed roots with the canonical default/`[1; 1024]` lattices.
-struct IsolatedDelta {
+/// Diffs two `i32`-keyed roots with a fully resident resolver.
+struct HamtDiff {
     added: Vec<(i32, i32)>,
     removed: Vec<(i32, i32)>,
 }
 
-fn isolate_delta_default(root_a: &NodePtr<i32, i32>, root_b: &NodePtr<i32, i32>) -> IsolatedDelta {
-    let (added, removed) = isolate_delta(
-        root_a,
-        &LtHash::default(),
-        root_b,
-        &LtHash::from_lanes([1u16; 1024]),
-        &mut panic_resolver,
-    )
-    .unwrap();
-    IsolatedDelta { added, removed }
+fn diff_hamt_nodes_default(root_a: &NodePtr<i32, i32>, root_b: &NodePtr<i32, i32>) -> HamtDiff {
+    let (added, removed) =
+        diff_hamt_nodes(root_a, root_b, &mut panic_resolver).expect("diff_hamt_nodes");
+    HamtDiff { added, removed }
 }
 
 fn internal_root<K, V>(key: &[u8], slot: usize, child: NodeRef<K, V>) -> Arc<HamtNode<K, V>>
@@ -3048,7 +2945,7 @@ fn test_collect_all_leaves_recursion() {
     // triggering collect_all_leaves on internal, which then recurses into its children (leaf).
     let root_b = rebuild_node::<i32, i32>(key, 0, 0, vec![], vec![]);
 
-    let IsolatedDelta { added, removed } = isolate_delta_default(&root_a, &root_b);
+    let HamtDiff { added, removed } = diff_hamt_nodes_default(&root_a, &root_b);
 
     assert_eq!(added.len(), 0);
     assert_eq!(removed.len(), 1);
@@ -3072,7 +2969,7 @@ fn test_collect_all_leaves_recursion_added_side() {
 
     let root_a = rebuild_node::<i32, i32>(key, 0, 0, vec![], vec![]);
 
-    let IsolatedDelta { added, removed } = isolate_delta_default(&root_a, &root_b);
+    let HamtDiff { added, removed } = diff_hamt_nodes_default(&root_a, &root_b);
 
     assert_eq!(removed.len(), 0);
     assert_eq!(added.len(), 1);
@@ -3098,20 +2995,15 @@ fn test_diff_nodes_fast_paths() {
 
     let node2 = rebuild_node(key, 1, 0, vec![(1, 100)], vec![]);
 
-    let lattice_a = LtHash::default();
-    let lattice_b = LtHash::from_lanes([1u16; 1024]);
-
     // -- Arc pointer equality --
     // node1 and node1 are the same Arc allocation.
-    let (added1, removed1) =
-        isolate_delta(&node1, &lattice_a, &node1, &lattice_b, &mut panic_resolver).unwrap();
+    let (added1, removed1) = diff_hamt_nodes(&node1, &node1, &mut panic_resolver).unwrap();
     assert_eq!(added1.len(), 0);
     assert_eq!(removed1.len(), 0);
 
     // -- Structural hash equality --
     // node1 and node2 are different Arcs, but have the exact same structural hash.
-    let (added2, removed2) =
-        isolate_delta(&node1, &lattice_a, &node2, &lattice_b, &mut panic_resolver).unwrap();
+    let (added2, removed2) = diff_hamt_nodes(&node1, &node2, &mut panic_resolver).unwrap();
     assert_eq!(added2.len(), 0);
     assert_eq!(removed2.len(), 0);
 }
@@ -3828,7 +3720,7 @@ fn test_unreachable_node_hashes_propagates_resolver_error_without_partial_result
     );
 }
 
-// --- isolate_delta order-invariance -----------------------------------
+// --- diff_hamt_nodes order-invariance -----------------------------------
 //
 // `diff_nodes` (src/hamt/delta.rs) derives three disjoint slot classes per
 // bitmap (both/only_a/only_b) via bitwise set ops instead of a naive 0..32
@@ -3871,7 +3763,7 @@ where
 }
 
 /// Computes `added`/`removed` as sorted `(key, value)` vectors from the
-/// oracle leaf maps, independent of `isolate_delta`'s emission order.
+/// oracle leaf maps, independent of `diff_hamt_nodes`'s emission order.
 fn oracle_delta(
     a: &alloc::collections::BTreeMap<u32, u32>,
     b: &alloc::collections::BTreeMap<u32, u32>,
@@ -3891,7 +3783,7 @@ fn oracle_delta(
     (added, removed)
 }
 
-/// Asserts `isolate_delta`'s output matches the oracle as sorted multisets,
+/// Asserts `diff_hamt_nodes`'s output matches the oracle as sorted multisets,
 /// i.e. up to reordering only (no missing/extra/duplicated entries).
 fn assert_delta_matches_oracle(root_a: &Arc<HamtNode<u32, u32>>, root_b: &Arc<HamtNode<u32, u32>>) {
     let mut infallible =
@@ -3903,11 +3795,8 @@ fn assert_delta_matches_oracle(root_a: &Arc<HamtNode<u32, u32>>, root_b: &Arc<Ha
     let leaves_b = oracle_leaves(root_b, &mut infallible);
     let (mut want_added, mut want_removed) = oracle_delta(&leaves_a, &leaves_b);
 
-    let lattice_a = LtHash::default();
-    let lattice_b = LtHash::from_lanes([1u16; 1024]);
-    let (mut got_added, mut got_removed) =
-        isolate_delta(root_a, &lattice_a, root_b, &lattice_b, &mut infallible)
-            .expect("isolate_delta should succeed against lazy-free fixtures");
+    let (mut got_added, mut got_removed) = diff_hamt_nodes(root_a, root_b, &mut infallible)
+        .expect("diff_hamt_nodes should succeed against lazy-free fixtures");
     got_added.sort_unstable();
     got_removed.sort_unstable();
     want_added.sort_unstable();
@@ -3921,7 +3810,7 @@ fn assert_delta_matches_oracle(root_a: &Arc<HamtNode<u32, u32>>, root_b: &Arc<Ha
 }
 
 #[test]
-fn test_isolate_delta_leaf_subtree_transition() {
+fn test_diff_hamt_nodes_leaf_subtree_transition() {
     let key = b"leaf_subtree_delta";
     let leaf_root = rebuild_node(key, 1, 0, vec![(1_u32, 10_u32)], vec![]);
     let child = rebuild_node(key, 0b11, 0, vec![(1_u32, 10_u32), (2_u32, 20_u32)], vec![]);
@@ -3951,7 +3840,7 @@ fn test_isolate_delta_leaf_subtree_transition() {
 /// datamap slots: 0 (both, differing value), 1 (`only_a`), 2 (`only_b`)
 /// nodemap slots: 3 (both, differing child), 4 (`only_a`), 5 (`only_b`)
 #[test]
-fn test_isolate_delta_boundary_straddling_class_order_invariant() {
+fn test_diff_hamt_nodes_boundary_straddling_class_order_invariant() {
     let key = b"order_invariance_boundary";
 
     let child_a_leaf = rebuild_node(key, 1, 0, vec![(30_u32, 3000_u32)], vec![]);
@@ -4006,7 +3895,7 @@ impl Rng {
 }
 
 #[test]
-fn test_isolate_delta_order_invariant_randomized() {
+fn test_diff_hamt_nodes_order_invariant_randomized() {
     let mut rng = Rng::new(0xD15C_0DE1);
 
     // Trials that actually build both roots and run the assertions. Collisions
@@ -4050,11 +3939,8 @@ fn test_isolate_delta_order_invariant_randomized() {
             };
 
         let (mut want_added, mut want_removed) = oracle_delta(&map_a, &map_b);
-        let lattice_a = LtHash::default();
-        let lattice_b = LtHash::from_lanes([1u16; 1024]);
-        let (mut got_added, mut got_removed) =
-            isolate_delta(&root_a, &lattice_a, &root_b, &lattice_b, &mut infallible)
-                .expect("isolate_delta should succeed against lazy-free random fixtures");
+        let (mut got_added, mut got_removed) = diff_hamt_nodes(&root_a, &root_b, &mut infallible)
+            .expect("diff_hamt_nodes should succeed against lazy-free random fixtures");
 
         got_added.sort_unstable();
         got_removed.sort_unstable();
@@ -4429,9 +4315,7 @@ fn test_persist_mutation_rebuild_equivalence() {
 
     let mut current_root = build_hamt(key, state.clone());
 
-    let mut no_resolver = |_h: &StructuralHash| -> Result<Arc<HamtNode<u32, u64>>, ()> {
-        panic!("unexpected lazy resolution in memory test")
-    };
+    let mut no_resolver = unreachable_resolver::<u32, u64>();
 
     // Perform sequence of 100 pseudo-random mutations (inserts, updates, deletes)
     let mut rng_state: u64 = 0xdead_beef;
@@ -4566,9 +4450,7 @@ fn test_persist_chain_coverage() {
     let key = b"prop_chain_coverage_key";
     let prev_root = build_hamt(key, (0_u32..20_u32).map(|i| (i, u64::from(i) * 100)));
 
-    let mut no_resolver = |_h: &StructuralHash| -> Result<Arc<HamtNode<u32, u64>>, ()> {
-        panic!("unexpected lazy resolution in memory test")
-    };
+    let mut no_resolver = unreachable_resolver::<u32, u64>();
 
     let prev_reachable: std::collections::BTreeSet<StructuralHash> =
         reachable_node_hashes(&prev_root, &mut no_resolver)
@@ -4619,9 +4501,7 @@ fn test_persist_chain_refcount_closure_with_retirement() {
     let key = b"prop_refcount_closure_key";
     let prev_root = build_hamt(key, (0_u32..10_u32).map(|i| (i, u64::from(i))));
 
-    let mut no_resolver = |_h: &StructuralHash| -> Result<Arc<HamtNode<u32, u64>>, ()> {
-        panic!("unexpected lazy resolution in memory test")
-    };
+    let mut no_resolver = unreachable_resolver::<u32, u64>();
 
     let mutations = vec![
         (1_u32, Some(100_u64)),
@@ -4708,9 +4588,7 @@ fn test_persist_chain_overwrite_then_revert() {
     let key = b"overwrite_revert_key";
     let root_0 = build_hamt(key, vec![(1_u32, 100_u64)]);
 
-    let mut no_resolver = |_h: &StructuralHash| -> Result<Arc<HamtNode<u32, u64>>, ()> {
-        panic!("unexpected lazy resolution in memory test")
-    };
+    let mut no_resolver = unreachable_resolver::<u32, u64>();
 
     let mutations = vec![
         (1_u32, Some(200_u64)), // Step 1: overwrite
@@ -4758,9 +4636,7 @@ fn test_hamt_deep_split_mutation() {
     let key = b"deep_split_key";
     let mut root = build_hamt(key, vec![(1_u32, 100_u64)]);
 
-    let mut no_resolver = |_h: &StructuralHash| -> Result<Arc<HamtNode<u32, u64>>, ()> {
-        panic!("unexpected lazy resolution in memory test")
-    };
+    let mut no_resolver = unreachable_resolver::<u32, u64>();
 
     // Insert 100 entries to force multi-level trie branching at depth >= 2
     for i in 2..=100_u32 {
@@ -4796,9 +4672,7 @@ fn test_descend_level_batched_exact_lookup() {
     let entries: Vec<(u32, u64)> = (0_u32..50_u32).map(|i| (i, u64::from(i) * 7)).collect();
     let root = build_hamt(key, entries.clone());
 
-    let mut no_resolver = |_h: &StructuralHash| -> Result<Arc<HamtNode<u32, u64>>, ()> {
-        panic!("unexpected lazy resolution in memory test")
-    };
+    let mut no_resolver = unreachable_resolver::<u32, u64>();
 
     // Collect all internal nodes encoded
     let _all_hashes = reachable_node_hashes(&root, &mut no_resolver).expect("reachable");
