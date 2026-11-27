@@ -51,13 +51,14 @@ fn encoded_keys<K: HamtCodec, V>(leaves: &[(K, V)]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Isolates the delta (added/removed items) between two HAMT root nodes,
+/// Computes the delta (added/removed items) between two HAMT root nodes,
 /// short-circuiting on identical structural hashes.
 ///
 /// # Errors
-/// Returns [`HamtTraversalError::Resolve`] if the `resolver` fails to resolve a lazy node, or
-/// [`HamtTraversalError::MaxDepthExceeded`] if the diff recurses past the deepest depth a
-/// legitimately-built HAMT can have.
+/// Returns [`HamtTraversalError::Resolve`] if the `resolver` fails to resolve a lazy node,
+/// [`HamtTraversalError::CorruptNode`] if either root has a malformed shape or a misplaced
+/// collision bucket, or [`HamtTraversalError::MaxDepthExceeded`] if the diff recurses past the
+/// deepest depth a legitimately-built HAMT can have.
 pub fn diff_hamt_nodes<K, V, F, E>(
     root_a: &NodePtr<K, V>,
     root_b: &NodePtr<K, V>,

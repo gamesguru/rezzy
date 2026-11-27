@@ -1344,6 +1344,22 @@ fn test_diff_rejects_unsorted_in_memory_collision_bucket() {
 }
 
 #[test]
+fn test_remove_rejects_unsorted_in_memory_collision_bucket() {
+    let key = b"dummy_server_key";
+    let bucket = unverified_collision(0xA1, vec![(2_u64, 20_u64), (1_u64, 10_u64)]);
+    let root = chain_over(key, HAMT_MAX_DEPTH, bucket);
+    let mut route = |_: &u64| [0_u8; 32];
+    let mut resolver = unreachable_resolver();
+
+    assert!(matches!(
+        crate::hamt::remove_with_routing(&root, key, &2_u64, &mut route, &mut resolver),
+        Err(HamtMutateError::CorruptNode(
+            "MTHC keys are not in canonical order"
+        ))
+    ));
+}
+
+#[test]
 fn test_collision_nodes_diff_like_an_ordered_map() {
     let key = b"dummy_server_key";
     let before = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)]);
@@ -1484,13 +1500,10 @@ fn test_visit_entries_rejects_a_misplaced_collision_bucket() {
 }
 
 #[test]
-fn test_insert_node_with_ctx_guards_max_depth_reentry() {
-    // Exercises the `depth >= HAMT_MAX_DEPTH` guard in `insert_node_with_ctx`
-    // directly. This is a defensive re-entry check: `insert_into_child_slot`
-    // always calls back in with `next_depth = depth.saturating_add(1)`, so in
-    // practice the guard is reached one recursion after the last real slot,
-    // rather than through the leaf-split-at-`build_node` path already covered
-    // by `test_hamt_insert_propagates_build_hash_collision`.
+fn test_insert_node_rejects_ordinary_leaf_at_max_depth() {
+    // At the routing limit only a terminal collision bucket is legal.
+    // `check_node_depth` must reject an ordinary leaf before any slot lookup,
+    // rather than treating the exhausted depth as a miss.
     let key = b"dummy_server_key";
     let node = single_leaf_node(1_u64, 10_u64);
 
@@ -1514,15 +1527,11 @@ fn test_insert_node_with_ctx_guards_max_depth_reentry() {
     );
 }
 
-/// Covers the `depth >= HAMT_MAX_DEPTH` entry guard in `remove_node_with_ctx`
-/// (mod.rs:1189-1191): a removal invoked already at max depth must report
-/// `MaxDepthExceeded` instead of silently returning a no-op success, so
-/// callers like `persist_mutation` cannot mistake exhausted depth for "key
-/// not found". This is the defensive re-entry check; `remove` always starts
-/// at depth 0, so it is only reachable by calling the context function
-/// directly.
+/// An ordinary leaf at the routing limit is malformed. Its depth check must
+/// report `MaxDepthExceeded` instead of silently returning "key not found", so
+/// callers such as `persist_mutation` cannot mistake corruption for absence.
 #[test]
-fn test_remove_node_with_ctx_guards_max_depth_entry() {
+fn test_remove_node_with_ctx_rejects_ordinary_leaf_at_max_depth() {
     let key = b"dummy_server_key";
     let node = single_leaf_node(1_u64, 10_u64);
 
@@ -1544,15 +1553,11 @@ fn test_remove_node_with_ctx_guards_max_depth_entry() {
     );
 }
 
-/// Covers the `next_depth >= HAMT_MAX_DEPTH` re-entry guard in
-/// `remove_node_with_ctx` (mod.rs:1228-1230): a removal that resolved a child
-/// at depth `HAMT_MAX_DEPTH - 1` must report `MaxDepthExceeded` before
-/// recursing one level too deep, rather than silently returning a no-op
-/// success. The caller must land on the nodemap branch (a child at the
-/// routed slot) so `depth.checked_add(1)` is actually reached; a zero
-/// path-hash routes slot 0 at every depth.
+/// A child loaded from the last routing level is checked before it is used.
+/// An ordinary leaf at `HAMT_MAX_DEPTH` must report `MaxDepthExceeded`
+/// instead of being treated as an absent key.
 #[test]
-fn test_remove_node_with_ctx_guards_max_depth_reentry() {
+fn test_remove_node_with_ctx_rejects_child_at_max_depth() {
     let key = b"dummy_server_key";
     let child = single_leaf_node(2_u64, 20_u64);
     let node = Arc::new(HamtNode::<u64, u64> {
@@ -1746,14 +1751,13 @@ fn find_different_key_with_slot_at_depth(
     panic!("no alternate key found for requested depth/slot");
 }
 
-/// White-box test exercising `insert_node`'s own max-depth guard directly:
-/// a leaf-vs-leaf collision discovered one level below `HAMT_MAX_DEPTH - 1`
-/// can't be resolved with a single more level of splitting, so it must
-/// error instead of building a corrupt tree. Real trees never reach
-/// `HAMT_MAX_DEPTH - 1` through ordinary hashing, so this constructs the
-/// node directly rather than building up to it through `insert`.
+/// White-box test of `insert_node` at the last routing level: two keys that
+/// still share a slot at `HAMT_MAX_DEPTH - 1` cannot be split any further, so
+/// they must land in a terminal collision bucket. Real trees never reach this
+/// depth through ordinary hashing, so this constructs the node directly rather
+/// than building up to it through `insert`.
 #[test]
-fn test_insert_node_errors_at_max_depth_boundary() {
+fn test_insert_node_builds_collision_bucket_at_max_depth_boundary() {
     let key = b"dummy_server_key";
     let depth = HAMT_MAX_DEPTH - 1;
     // At depth = HAMT_MAX_DEPTH - 1 (depth 51 for a 256-bit hash with 5-bit levels),

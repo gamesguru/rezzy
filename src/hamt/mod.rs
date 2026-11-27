@@ -1209,7 +1209,8 @@ where
 ///
 /// # Errors
 /// Returns [`HamtMutateError::Resolve`] if `resolver` fails to load a lazy
-/// child on the path to `key`, or `MaxDepthExceeded` for malformed trees.
+/// child on the path to `key`. Returns [`HamtMutateError::CorruptNode`] or
+/// [`HamtMutateError::MaxDepthExceeded`] only for malformed trees.
 pub fn insert<K, V, F, E>(
     node: &NodePtr<K, V>,
     structural_key: &[u8],
@@ -1365,7 +1366,8 @@ where
 ///
 /// # Errors
 /// Returns [`HamtMutateError::Resolve`] if `resolver` fails to load a lazy
-/// child on the path to `key`.
+/// child on the path to `key`. Returns [`HamtMutateError::CorruptNode`] or
+/// [`HamtMutateError::MaxDepthExceeded`] only for malformed trees.
 pub fn remove<K, V, Q, F, E>(
     node: &NodePtr<K, V>,
     structural_key: &[u8],
@@ -1437,6 +1439,10 @@ where
 {
     delta::check_node_depth(node, depth)?;
     if node.is_collision() {
+        // A public-field bucket can be built without the encoder's canonical
+        // order check. Reject it here: rebuilding a still-unsorted bucket
+        // would otherwise panic inside `encode_v1_parts`.
+        codec::check_collision_key_order(&node.leaves).map_err(HamtMutateError::CorruptNode)?;
         let Some(index) = node
             .leaves
             .iter()

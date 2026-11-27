@@ -251,6 +251,9 @@ where
         let route = self.route;
         let structural_key = self.structural_key;
         let mut stack = vec![Pending::Node(self.node(&root)?, 0_usize)];
+        // Slots leading to the current node. A child is popped as soon as it
+        // is pushed, so `path[..depth]` always describes the node in hand.
+        let mut path = [0_usize; HAMT_MAX_DEPTH];
         while let Some(pending) = stack.pop() {
             match pending {
                 Pending::Node(node, depth) => {
@@ -261,12 +264,25 @@ where
                         if depth != super::HAMT_MAX_DEPTH {
                             return Err(HamtReadError::Decode("misplaced collision bucket"));
                         }
-                        super::collision_route_hash(&node.leaves, |key| route(key, structural_key))
-                            .map_err(|_| {
-                                HamtReadError::Decode(
-                                    "collision bucket leaves route to different path hashes",
-                                )
-                            })?;
+                        let hash = super::collision_route_hash(&node.leaves, |key| {
+                            route(key, structural_key)
+                        })
+                        .map_err(|_| {
+                            HamtReadError::Decode(
+                                "collision bucket leaves route to different path hashes",
+                            )
+                        })?;
+                        // A bucket sits at the routing limit, so every slot
+                        // of `path` must be the one its route selects.
+                        if path
+                            .iter()
+                            .enumerate()
+                            .any(|(level, &slot)| super::bucket_index(&hash, level) != slot)
+                        {
+                            return Err(HamtReadError::Decode(
+                                "collision bucket does not match its trie path",
+                            ));
+                        }
                         for (key, value) in &node.leaves {
                             visit(key, value);
                         }
@@ -294,6 +310,7 @@ where
                             NodeRef::Resolved(child) => Arc::clone(child),
                             NodeRef::Lazy(hash) => self.node(hash)?,
                         };
+                        path[depth] = slot;
                         stack.push(Pending::Node(child, depth.saturating_add(1)));
                     }
                 }
@@ -402,15 +419,40 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reads_terminal_collision_buckets() {
-        let root = crate::hamt::build_hamt_with_routing(
-            KEY,
-            vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)],
-            |_| [0_u8; 32],
-        );
+    /// Records and root hash for a tree whose keys all take the all-zero
+    /// route, so they share one terminal collision bucket.
+    fn zero_routed_fixture(
+        entries: Vec<(u64, u64)>,
+    ) -> (BTreeMap<StructuralHash, Vec<u8>>, StructuralHash) {
+        let root = crate::hamt::build_hamt_with_routing(KEY, entries, |_| [0_u8; 32]);
         let mut records = BTreeMap::new();
         collect(&root, &mut records);
+        (records, root.structural_hash)
+    }
+
+    #[test]
+    fn full_walk_rejects_a_collision_bucket_under_the_wrong_path() {
+        // Built along the all-zero route, then read with a route the bucket's
+        // keys agree on but that never selects the slots leading to them.
+        let (records, root) = zero_routed_fixture(vec![(1, 10), (2, 20)]);
+
+        let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
+            PersistedHamtReader::new_with_route(
+                KEY,
+                |hash| Ok(records.get(hash).cloned()),
+                |_, _| [0xFF_u8; 32],
+            );
+        assert!(matches!(
+            reader.for_each_entry(root, |_, _| {}),
+            Err(HamtReadError::Decode(
+                "collision bucket does not match its trie path"
+            ))
+        ));
+    }
+
+    #[test]
+    fn reads_terminal_collision_buckets() {
+        let (records, root) = zero_routed_fixture(vec![(1, 10), (2, 20), (3, 30)]);
 
         let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
             PersistedHamtReader::new_with_route(
@@ -419,38 +461,26 @@ mod tests {
                 |_, _| [0_u8; 32],
             );
         assert_eq!(
-            reader
-                .get_by_path_hash(root.structural_hash, &2, &[0_u8; 32])
-                .unwrap(),
+            reader.get_by_path_hash(root, &2, &[0_u8; 32]).unwrap(),
             Some(20)
         );
         assert_eq!(
-            reader
-                .get_by_path_hash(root.structural_hash, &3, &[0_u8; 32])
-                .unwrap(),
+            reader.get_by_path_hash(root, &3, &[0_u8; 32]).unwrap(),
             Some(30)
         );
         assert_eq!(
-            reader
-                .get_by_path_hash(root.structural_hash, &9, &[0_u8; 32])
-                .unwrap(),
+            reader.get_by_path_hash(root, &9, &[0_u8; 32]).unwrap(),
             None
         );
 
-        let mut entries = reader.collect_entries(root.structural_hash).unwrap();
+        let mut entries = reader.collect_entries(root).unwrap();
         entries.sort_unstable();
         assert_eq!(entries, vec![(1, 10), (2, 20), (3, 30)]);
     }
 
     #[test]
     fn rejects_collision_bucket_with_inconsistent_routing() {
-        let root = crate::hamt::build_hamt_with_routing(
-            KEY,
-            vec![(1_u64, 10_u64), (2_u64, 20_u64)],
-            |_| [0_u8; 32],
-        );
-        let mut records = BTreeMap::new();
-        collect(&root, &mut records);
+        let (records, root) = zero_routed_fixture(vec![(1, 10), (2, 20)]);
 
         // Production routing is the default keyed hash, not the synthetic
         // constant route the fixture was built with. The bucket's leaves
@@ -458,14 +488,14 @@ mod tests {
         let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
             PersistedHamtReader::new(KEY, |hash| Ok(records.get(hash).cloned()));
         assert!(matches!(
-            reader.get_by_path_hash(root.structural_hash, &1, &[0_u8; 32]),
+            reader.get_by_path_hash(root, &1, &[0_u8; 32]),
             Err(HamtReadError::Decode("leaf routed to wrong slot"))
         ));
 
         let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
             PersistedHamtReader::new(KEY, |hash| Ok(records.get(hash).cloned()));
         assert!(matches!(
-            reader.for_each_entry(root.structural_hash, |_, _| {}),
+            reader.for_each_entry(root, |_, _| {}),
             Err(HamtReadError::Decode(
                 "collision bucket leaves route to different path hashes"
             ))

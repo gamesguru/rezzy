@@ -66,7 +66,9 @@ fn read_len_prefixed<'a>(input: &'a [u8], cursor: &mut usize) -> Result<&'a [u8]
 /// insertion order. Both the decoder and the direct verified-conversion path
 /// use this, so a caller cannot bypass the check by constructing
 /// [`PersistedInternalNode`] fields by hand.
-fn check_collision_key_order<K: HamtCodec, V>(leaves: &[(K, V)]) -> Result<(), &'static str> {
+pub(super) fn check_collision_key_order<K: HamtCodec, V>(
+    leaves: &[(K, V)],
+) -> Result<(), &'static str> {
     let mut previous: Option<Vec<u8>> = None;
     for (key, _) in leaves {
         let mut encoded = Vec::new();
