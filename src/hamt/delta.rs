@@ -5,6 +5,7 @@ use core::cmp::Ordering;
 use core::fmt;
 
 use crate::incremental::LtHash;
+use crate::HashSet;
 
 use super::{
     map_index, HamtCodec, HamtNode, NodePtr, NodeRef, NodeResolver, StructuralHash, HAMT_MAX_DEPTH,
@@ -29,6 +30,30 @@ where
     Ok((added, removed))
 }
 
+/// Validates both diff roots before an identity shortcut can hide a misplaced
+/// node.
+fn validate_roots_at_depth_zero<K, V, E>(
+    root_a: &NodePtr<K, V>,
+    root_b: &NodePtr<K, V>,
+) -> Result<(), HamtTraversalError<E>> {
+    check_node_depth(root_a, 0)?;
+    check_node_depth(root_b, 0)?;
+    Ok(())
+}
+
+/// Encodes every leaf key so a collision-bucket merge can compare canonical
+/// wire order without re-encoding inside the loop.
+fn encoded_keys<K: HamtCodec, V>(leaves: &[(K, V)]) -> Vec<Vec<u8>> {
+    leaves
+        .iter()
+        .map(|(key, _)| {
+            let mut bytes = Vec::new();
+            key.encode_hamt(&mut bytes);
+            bytes
+        })
+        .collect()
+}
+
 /// Isolates the delta (added/removed items) between two HAMT tries in O(|Delta|
 /// * log32 N) time. Uses the `LtHash` lattice to quickly short-circuit if the
 ///   tries are convergently identical.
@@ -51,8 +76,7 @@ where
 {
     // Validate both roots before the shortcut: two structurally identical
     // misplaced collision buckets must still be rejected.
-    check_node_depth(root_a, 0)?;
-    check_node_depth(root_b, 0)?;
+    validate_roots_at_depth_zero(root_a, root_b)?;
     // Short-circuit only when both the lattice and the root structural hashes
     // match. A lattice collision alone must not suppress a real structural
     // diff.
@@ -82,8 +106,7 @@ where
 {
     // Validate both roots before the shortcut: two structurally identical
     // misplaced collision buckets must still be rejected.
-    check_node_depth(root_a, 0)?;
-    check_node_depth(root_b, 0)?;
+    validate_roots_at_depth_zero(root_a, root_b)?;
     if root_a.structural_hash == root_b.structural_hash {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -119,16 +142,6 @@ pub(super) fn check_node_depth<K, V, E>(
         ));
     }
     Ok(())
-}
-
-/// Compares two keys by their canonical persisted bytes, matching the order
-/// used to store terminal collision buckets.
-fn compare_encoded_keys<K: HamtCodec>(left: &K, right: &K) -> Ordering {
-    let mut left_bytes = Vec::new();
-    let mut right_bytes = Vec::new();
-    left.encode_hamt(&mut left_bytes);
-    right.encode_hamt(&mut right_bytes);
-    left_bytes.cmp(&right_bytes)
 }
 
 /// Helper to iterate over the indices of set bits in a 32-bit integer.
@@ -207,26 +220,28 @@ where
         // Collision leaves are canonically sorted by encoded key bytes, so a
         // linear merge avoids the quadratic nested scans a bucket-sized pair
         // of long collision lists would otherwise cause.
+        let encoded_a = encoded_keys(leaves_a);
+        let encoded_b = encoded_keys(leaves_b);
         let (mut i, mut j) = (0_usize, 0_usize);
         while i < leaves_a.len() && j < leaves_b.len() {
             let (key_a, value_a) = &leaves_a[i];
             let (key_b, value_b) = &leaves_b[j];
-            match compare_encoded_keys(key_a, key_b) {
+            match encoded_a[i].cmp(&encoded_b[j]) {
                 Ordering::Less => {
                     removed.push((key_a.clone(), value_a.clone()));
-                    i += 1;
+                    i = i.saturating_add(1);
                 }
                 Ordering::Greater => {
                     added.push((key_b.clone(), value_b.clone()));
-                    j += 1;
+                    j = j.saturating_add(1);
                 }
                 Ordering::Equal => {
                     if key_a != key_b || value_a != value_b {
                         removed.push((key_a.clone(), value_a.clone()));
                         added.push((key_b.clone(), value_b.clone()));
                     }
-                    i += 1;
-                    j += 1;
+                    i = i.saturating_add(1);
+                    j = j.saturating_add(1);
                 }
             }
         }
@@ -681,9 +696,10 @@ where
 }
 
 /// Walks `root`'s internal-node graph, calling `mark` for every hash.
-/// Reuse one caller-owned mark set across roots: `false` skips an already
-/// visited subtree, so shared structure is walked once. Use
-/// [`reachable_node_hashes`] for a single root.
+/// Reuse one caller-owned mark set across roots: `false` skips content already
+/// visited at a checked placement. If a hash appears at a new depth, its node
+/// is resolved to validate that placement before its descendants are skipped.
+/// Use [`reachable_node_hashes`] for a single root.
 ///
 /// # Errors
 /// Returns [`HamtTraversalError::Resolve`] if `resolver` fails, or
@@ -704,24 +720,98 @@ where
     // Validate the root even when its content was already seen by an earlier
     // call; otherwise a shared hash could mask a misplaced bucket at depth 0.
     check_node_depth(root, 0)?;
+    let mut local: crate::HashMap<StructuralHash, crate::HashSet<usize>> =
+        crate::HashMap::default();
+    local.entry(root.structural_hash).or_default().insert(0);
     if !mark(root.structural_hash) {
         return Ok(());
     }
-    walk_reachable_children(root, resolver, mark, 0)
+    walk_reachable_children(root, resolver, mark, 0, &mut local)
 }
 
-/// Walks `node`'s children, checking each child's hash against `mark`
-/// *before* resolving it — a shared subtree already marked by an earlier
-/// call in the same sweep is skipped without ever calling `resolver` for
-/// it. This matters beyond avoiding wasted resolves: if the caller is
-/// mid-GC-sweep and an already-accounted-for node has since been reaped by
-/// a concurrent pass, resolving it again to reach a `mark` check we didn't
-/// need would fail the whole walk for no reason — checking first makes
-/// that impossible.
+/// Reachability walk shared by audits so content marking and placement
+/// validation remain distinct across all roots in the audit.
+pub(super) fn walk_reachable_node_hashes_with_placements<K, V, F, E, M>(
+    root: &NodePtr<K, V>,
+    resolver: &mut F,
+    mark: &mut M,
+    checked_placements: &mut HashSet<(StructuralHash, usize)>,
+) -> Result<(), HamtTraversalError<E>>
+where
+    F: NodeResolver<K, V, E>,
+    M: FnMut(StructuralHash) -> bool,
+{
+    // Validate the root even when its content was already seen by an earlier
+    // call; otherwise a shared hash could mask a misplaced bucket at depth 0.
+    check_node_depth(root, 0)?;
+    checked_placements.insert((root.structural_hash, 0));
+    if !mark(root.structural_hash) {
+        return Ok(());
+    }
+    walk_placed_reachable_children(root, resolver, mark, checked_placements, 0)
+}
+
+/// Resolves a child and validates that its shape is legal at `depth`.
+fn resolve_child_at_depth<K, V, F, E>(
+    child: &NodeRef<K, V>,
+    resolver: &mut F,
+    depth: usize,
+) -> Result<NodePtr<K, V>, HamtTraversalError<E>>
+where
+    F: NodeResolver<K, V, E>,
+{
+    let node = resolve_node_checked(child, resolver)?;
+    check_node_depth(&node, depth)?;
+    Ok(node)
+}
+
+/// Content-deduplicating child walk used by the single-root public API.
+///
+/// A `mark` miss is skipped before resolving, preserving the documented
+/// reaped-node safety property. Callers that also need per-depth placement
+/// validation across several roots use
+/// [`walk_reachable_node_hashes_with_placements`] instead.
 fn walk_reachable_children<K, V, F, E, M>(
     node: &NodePtr<K, V>,
     resolver: &mut F,
     mark: &mut M,
+    depth: usize,
+    local: &mut crate::HashMap<StructuralHash, crate::HashSet<usize>>,
+) -> Result<(), HamtTraversalError<E>>
+where
+    F: NodeResolver<K, V, E>,
+    M: FnMut(StructuralHash) -> bool,
+{
+    check_node_depth(node, depth)?;
+    let next_depth = depth.saturating_add(1);
+    for child in &node.children {
+        let hash = child.structural_hash();
+        let newly_marked = mark(hash);
+        let depths_seen = local.get(&hash);
+        if depths_seen.is_some_and(|depths| depths.contains(&next_depth)) {
+            continue;
+        }
+        // Recurse for new content, or when the same content is re-referenced
+        // at a different depth in this call (its descendants' placements then
+        // need revalidation). Content seen in an earlier call is validated at
+        // this depth but not walked again.
+        let recurse = newly_marked || depths_seen.is_some();
+        let child_node = resolve_child_at_depth(child, resolver, next_depth)?;
+        local.entry(hash).or_default().insert(next_depth);
+        if recurse {
+            walk_reachable_children(&child_node, resolver, mark, next_depth, local)?;
+        }
+    }
+    Ok(())
+}
+
+/// Placement-aware child walk used by multi-root audits: content
+/// deduplication never hides a node re-referenced at a different depth.
+fn walk_placed_reachable_children<K, V, F, E, M>(
+    node: &NodePtr<K, V>,
+    resolver: &mut F,
+    mark: &mut M,
+    checked_placements: &mut HashSet<(StructuralHash, usize)>,
     depth: usize,
 ) -> Result<(), HamtTraversalError<E>>
 where
@@ -731,11 +821,23 @@ where
     check_node_depth(node, depth)?;
     let next_depth = depth.saturating_add(1);
     for child in &node.children {
-        if !mark(child.structural_hash()) {
+        let hash = child.structural_hash();
+        let should_walk_content = mark(hash);
+        let placement = (hash, next_depth);
+        if !should_walk_content && checked_placements.contains(&placement) {
             continue;
         }
-        let child_node = resolve_node_checked(child, resolver)?;
-        walk_reachable_children(&child_node, resolver, mark, next_depth)?;
+        let child_node = resolve_child_at_depth(child, resolver, next_depth)?;
+        checked_placements.insert(placement);
+        if should_walk_content {
+            walk_placed_reachable_children(
+                &child_node,
+                resolver,
+                mark,
+                checked_placements,
+                next_depth,
+            )?;
+        }
     }
     Ok(())
 }

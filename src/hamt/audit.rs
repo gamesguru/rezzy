@@ -21,7 +21,7 @@ use core::fmt;
 use crate::bitmap::Bitmap;
 
 use super::{
-    delta::{walk_reachable_node_hashes, HamtTraversalError},
+    delta::{walk_reachable_node_hashes_with_placements, HamtTraversalError},
     HamtNode, StructuralHash,
 };
 
@@ -243,14 +243,20 @@ where
     // check covers dedup for anything actually in `universe`, so this set
     // only ever grows for hashes the caller's `universe` scan missed.
     let mut visited_outside_universe: HashSet<StructuralHash> = HashSet::default();
+    let mut checked_placements = HashSet::default();
     for root in roots {
-        walk_reachable_node_hashes(&root, resolver, &mut |hash| {
-            if let Some(idx) = universe.index_of(&hash) {
-                reachable.insert(idx)
-            } else {
-                visited_outside_universe.insert(hash)
-            }
-        })
+        walk_reachable_node_hashes_with_placements(
+            &root,
+            resolver,
+            &mut |hash| {
+                if let Some(idx) = universe.index_of(&hash) {
+                    reachable.insert(idx)
+                } else {
+                    visited_outside_universe.insert(hash)
+                }
+            },
+            &mut checked_placements,
+        )
         .map_err(BitmapAuditError::Traversal)?;
     }
 
@@ -288,10 +294,10 @@ pub struct NodeReachabilityAudit {
 /// are not.
 ///
 /// Walks each root with [`walk_reachable_node_hashes`] against one shared
-/// `HashSet`, so subtrees shared between roots are resolved and walked only
-/// once in total. `resolver` is called once per distinct node hash
-/// encountered across all roots combined (not once per root), same as the
-/// underlying walk.
+/// `HashSet`, so subtrees shared between roots are walked once when they
+/// occupy the same depth. A repeated hash at a different depth is resolved
+/// again so its placement can be validated. `resolver` is therefore called
+/// at most once per distinct `(node hash, depth)` placement across the audit.
 ///
 /// `reachable` is the full mark set intersected with `universe`; nodes the
 /// walk reaches that are outside `universe` (e.g. a caller's scan missed
@@ -315,8 +321,14 @@ where
     F: FnMut(&StructuralHash) -> Result<Arc<HamtNode<K, V>>, E>,
 {
     let mut marked: HashSet<StructuralHash> = HashSet::default();
+    let mut checked_placements = HashSet::default();
     for root in roots {
-        walk_reachable_node_hashes(&root, resolver, &mut |hash| marked.insert(hash))?;
+        walk_reachable_node_hashes_with_placements(
+            &root,
+            resolver,
+            &mut |hash| marked.insert(hash),
+            &mut checked_placements,
+        )?;
     }
 
     let mut reachable: HashSet<StructuralHash> = HashSet::default();

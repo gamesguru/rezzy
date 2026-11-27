@@ -392,22 +392,44 @@ impl<K, V> HamtNode<K, V> {
         Q: Eq + ?Sized,
         F: NodeResolver<K, V, E>,
     {
-        // Iterative descent with a single owned cursor for resolved children:
-        // each child is an `Arc`, so replacing the cursor drops the previous
-        // node without retaining the ancestor chain.
+        match self.search_by_path_hash_checked(key, path_hash, resolver, &mut |_, _| Ok(())) {
+            Ok(found) => Ok(found),
+            Err(HamtTraversalError::Resolve(error)) => Err(error),
+            Err(
+                HamtTraversalError::CorruptNode(_) | HamtTraversalError::MaxDepthExceeded { .. },
+            ) => {
+                // Preserve the historical Option-like behavior of this API
+                // for malformed in-memory trees.
+                Ok(None)
+            }
+        }
+    }
+
+    /// Shared checked descent used by in-memory search and persisted reads.
+    /// The collision validator lets persisted callers enforce routing without
+    /// duplicating slot traversal or its shape checks.
+    pub(crate) fn search_by_path_hash_checked<Q, F, E, C>(
+        &self,
+        key: &Q,
+        path_hash: &StructuralHash,
+        resolver: &mut F,
+        validate_collision: &mut C,
+    ) -> Result<Option<V>, HamtTraversalError<E>>
+    where
+        K: Eq + Borrow<Q>,
+        V: Clone,
+        Q: Eq + ?Sized,
+        F: NodeResolver<K, V, E>,
+        C: FnMut(&[(K, V)], &StructuralHash) -> Result<(), &'static str>,
+    {
+        // Iterative descent with a single owned cursor for resolved children.
         let mut cursor: Option<NodePtr<K, V>> = None;
         for depth in 0..=HAMT_MAX_DEPTH {
             let node: &HamtNode<K, V> = cursor.as_deref().unwrap_or(self);
-            if node.shape_error().is_some() {
-                return Ok(None);
-            }
+            delta::check_node_depth(node, depth)?;
             if node.is_collision() {
-                // Collision buckets are only valid at the routing limit; a
-                // bucket higher up is corrupt, so treat the key as absent
-                // rather than letting the shape leak into the public result.
-                if depth != HAMT_MAX_DEPTH {
-                    return Ok(None);
-                }
+                validate_collision(&node.leaves, path_hash)
+                    .map_err(HamtTraversalError::CorruptNode)?;
                 return Ok(node
                     .leaves
                     .iter()
@@ -421,8 +443,7 @@ impl<K, V> HamtNode<K, V> {
                 Slot::Leaf((stored_key, value)) => {
                     return Ok((stored_key.borrow() == key).then(|| value.clone()));
                 }
-                Slot::Child(NodeRef::Resolved(child)) => cursor = Some(child.clone()),
-                Slot::Child(NodeRef::Lazy(hash)) => cursor = Some(resolver(hash)?),
+                Slot::Child(child) => cursor = Some(delta::resolve_node_checked(child, resolver)?),
                 Slot::Empty => return Ok(None),
             }
         }
@@ -439,26 +460,26 @@ impl<K, V> HamtNode<K, V> {
     /// Returns [`HamtVisitError::Resolve`] or [`HamtVisitError::Visitor`] for
     /// callback failures, and reports malformed node shape or depth instead
     /// of silently returning an incomplete collection.
-    pub fn visit_entries<F, E>(
+    pub fn visit_entries<F, ResolveE, VisitorE>(
         &self,
         resolver: &mut F,
-        visitor: &mut impl FnMut(&K, &V) -> Result<(), E>,
-    ) -> Result<(), HamtVisitError<E, E>>
+        visitor: &mut impl FnMut(&K, &V) -> Result<(), VisitorE>,
+    ) -> Result<(), HamtVisitError<ResolveE, VisitorE>>
     where
-        F: NodeResolver<K, V, E>,
+        F: NodeResolver<K, V, ResolveE>,
     {
         self.visit_entries_inner(resolver, visitor, 0)
     }
 
     /// Depth-checked implementation of [`Self::visit_entries`].
-    fn visit_entries_inner<F, E>(
+    fn visit_entries_inner<F, ResolveE, VisitorE>(
         &self,
         resolver: &mut F,
-        visitor: &mut impl FnMut(&K, &V) -> Result<(), E>,
+        visitor: &mut impl FnMut(&K, &V) -> Result<(), VisitorE>,
         depth: usize,
-    ) -> Result<(), HamtVisitError<E, E>>
+    ) -> Result<(), HamtVisitError<ResolveE, VisitorE>>
     where
-        F: NodeResolver<K, V, E>,
+        F: NodeResolver<K, V, ResolveE>,
     {
         delta::check_node_depth(self, depth).map_err(|error| match error {
             HamtTraversalError::Resolve(error) => HamtVisitError::Resolve(error),
@@ -556,6 +577,25 @@ enum Slot<'a, K, V> {
     Leaf(&'a (K, V)),
     Child(&'a NodeRef<K, V>),
     Empty,
+}
+
+/// Returns the shared route for a terminal collision bucket, rejecting a
+/// bucket whose keys do not all consume the same complete path hash.
+pub(crate) fn collision_route_hash<K, V, F>(
+    leaves: &[(K, V)],
+    mut route: F,
+) -> Result<StructuralHash, &'static str>
+where
+    F: FnMut(&K) -> StructuralHash,
+{
+    let Some((first_key, _)) = leaves.first() else {
+        return Err("collision bucket is empty");
+    };
+    let hash = route(first_key);
+    if leaves.iter().skip(1).any(|(key, _)| route(key) != hash) {
+        return Err("leaf routed to wrong slot");
+    }
+    Ok(hash)
 }
 
 /// The routing hash of `key`: a keyed hash of its [`HamtRoutingKey`] bytes.
@@ -1834,16 +1874,10 @@ where
             return Err(DescendError::CorruptNode("misplaced collision bucket"));
         }
         let collision_path_hash = if node.is_collision() {
-            let first_hash = key_hash(&node.leaves[0].0);
-            if node
-                .leaves
-                .iter()
-                .skip(1)
-                .any(|(leaf_key, _)| key_hash(leaf_key) != first_hash)
-            {
-                return Err(DescendError::CorruptNode("leaf routed to wrong slot"));
-            }
-            Some(first_hash)
+            Some(
+                collision_route_hash(&node.leaves, &mut key_hash)
+                    .map_err(DescendError::CorruptNode)?,
+            )
         } else {
             None
         };

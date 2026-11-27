@@ -770,6 +770,20 @@ fn test_hamt_visit_entries_propagates_resolver_error() {
 }
 
 #[test]
+fn test_visit_entries_keeps_resolver_and_visitor_errors_distinct() {
+    use core::convert::Infallible;
+
+    let key = b"dummy_server_key";
+    let root = build_hamt(key, vec![(1_u64, 10_u64)]);
+    let mut resolver = unreachable_resolver();
+    let mut visitor = |_k: &u64, _v: &u64| -> Result<(), Infallible> { Ok(()) };
+
+    let result: Result<(), HamtVisitError<(), Infallible>> =
+        root.visit_entries(&mut resolver, &mut visitor);
+    assert_eq!(result, Ok(()));
+}
+
+#[test]
 fn test_hamt_is_empty() {
     let empty_node = HamtNode::<u64, u64> {
         datamap: 0,
@@ -1422,6 +1436,31 @@ fn test_misplaced_collision_root_is_rejected_even_when_hashes_match() {
 }
 
 #[test]
+fn test_reachability_rechecks_a_seen_hash_at_a_new_depth() {
+    let key = b"dummy_server_key";
+    let misplaced_child = rebuild_node(key, 0, 0, vec![(1_u64, 10_u64), (2_u64, 20_u64)], vec![]);
+    let root = Arc::new(HamtNode {
+        datamap: 0,
+        nodemap: 1,
+        leaves: vec![],
+        children: vec![NodeRef::Resolved(Arc::clone(&misplaced_child))],
+        // Deliberately repeat the child hash. Content is marked already, but
+        // the collision shape still needs validation at this new depth.
+        structural_hash: misplaced_child.structural_hash,
+    });
+    let mut resolver = unreachable_resolver();
+    let mut marked = BTreeSet::new();
+
+    assert!(matches!(
+        crate::hamt::walk_reachable_node_hashes(&root, &mut resolver, &mut |hash| marked
+            .insert(hash)),
+        Err(HamtTraversalError::CorruptNode(
+            "misplaced collision bucket"
+        ))
+    ));
+}
+
+#[test]
 fn test_collision_bucket_above_routing_limit_is_rejected() {
     let key = b"dummy_server_key";
     let corrupt = rebuild_node(key, 0, 0, vec![(1_u64, 10_u64), (2_u64, 20_u64)], vec![]);
@@ -1746,15 +1785,19 @@ fn test_insert_node_errors_at_max_depth_boundary() {
     let shared_path_hash = leaf_hash_for_key(key, existing);
     let new_path_hash = shared_path_hash;
     let mut resolver = unreachable_resolver();
+    let mut route = |_: &u64| shared_path_hash;
+    let mut sink = |_: &NodePtr<u64, u64>| {};
 
-    let result = insert_node(
+    let result = insert_via_ctx(
         &node,
         key,
         new_key,
         2_u64,
-        &new_path_hash,
+        new_path_hash,
         depth,
+        &mut route,
         &mut resolver,
+        &mut sink,
     );
 
     let (new_node, old_value) = result.expect("terminal split must produce a collision node");
@@ -2359,10 +2402,10 @@ fn test_walk_reachable_node_hashes_skips_shared_lazy_child_without_resolving() {
         "walk over root_b should succeed",
     );
 
-    // The root-level hashes genuinely differ, so both roots get walked --
-    // but the shared child must be resolved exactly once across both
-    // walks, and the whole reachable set is root_a + root_b + 3 leaves.
-    assert_eq!(shared_resolve_count.get(), 1);
+    // These are independent public walk calls, so the shared child is
+    // resolved once per call: each call must validate its own placement.
+    // `node_reachability_audit` shares placement checks across roots.
+    assert_eq!(shared_resolve_count.get(), 2);
     assert!(seen.contains(&root_a.structural_hash));
     assert!(seen.contains(&root_b.structural_hash));
     assert!(seen.contains(&shared_leaf.structural_hash));

@@ -95,24 +95,6 @@ fn default_route<K: HamtCodec>(key: &K, structural_key: &[u8]) -> StructuralHash
 
 /// Validates that every leaf in a terminal collision bucket routes to the same
 /// path hash, returning that hash.
-fn collision_bucket_route<K: HamtCodec, V, E>(
-    node: &HamtNode<K, V>,
-    structural_key: &[u8],
-    route: fn(&K, &[u8]) -> StructuralHash,
-) -> Result<StructuralHash, HamtReadError<E>> {
-    let mut bucket_hash = None;
-    for (key, _) in &node.leaves {
-        let leaf_hash = route(key, structural_key);
-        if bucket_hash.is_some_and(|existing| existing != leaf_hash) {
-            return Err(HamtReadError::Decode(
-                "collision bucket leaves route to different path hashes",
-            ));
-        }
-        bucket_hash = Some(leaf_hash);
-    }
-    bucket_hash.ok_or(HamtReadError::Decode("collision bucket is empty"))
-}
-
 impl<'k, K, V, E, L> PersistedHamtReader<'k, K, V, E, L>
 where
     K: HamtCodec,
@@ -201,52 +183,30 @@ where
     {
         let route = self.route;
         let structural_key = self.structural_key;
-        let mut cursor = self.node(&root)?;
-        let mut depth = 0;
-        loop {
-            if depth > super::HAMT_MAX_DEPTH {
-                return Err(HamtReadError::Decode("HAMT exceeds maximum depth"));
+        let root_node = self.node(&root)?;
+        let mut resolver = |hash: &StructuralHash| self.node(hash);
+        let mut validate_collision = |leaves: &[(K, V)], expected: &StructuralHash| {
+            let actual = super::collision_route_hash(leaves, |key| route(key, structural_key))?;
+            if actual == *expected {
+                Ok(())
+            } else {
+                Err("collision bucket routes to a different path hash")
             }
-            if cursor.is_collision() {
-                if depth != super::HAMT_MAX_DEPTH {
-                    return Err(HamtReadError::Decode("misplaced collision bucket"));
+        };
+        root_node
+            .search_by_path_hash_checked(key, path_hash, &mut resolver, &mut validate_collision)
+            .map_err(|error| match error {
+                super::HamtTraversalError::Resolve(error) => error,
+                super::HamtTraversalError::CorruptNode(reason) => HamtReadError::Decode(reason),
+                super::HamtTraversalError::MaxDepthExceeded { depth }
+                    if depth == super::HAMT_MAX_DEPTH =>
+                {
+                    HamtReadError::Decode("terminal node is not a collision bucket")
                 }
-                let bucket_hash = collision_bucket_route(&cursor, structural_key, route)?;
-                if bucket_hash != *path_hash {
-                    return Ok(None);
+                super::HamtTraversalError::MaxDepthExceeded { .. } => {
+                    HamtReadError::Decode("HAMT exceeds maximum depth")
                 }
-                return Ok(cursor
-                    .leaves
-                    .iter()
-                    .find(|(stored_key, _)| stored_key.borrow() == key)
-                    .map(|(_, value)| value.clone()));
-            }
-            if depth == super::HAMT_MAX_DEPTH {
-                return Err(HamtReadError::Decode(
-                    "terminal node is not a collision bucket",
-                ));
-            }
-            let slot = super::bucket_index(path_hash, depth);
-            let bit = 1_u32 << slot;
-            if cursor.datamap & bit != 0 {
-                let Some((stored_key, value)) = cursor.leaves.get(map_index(cursor.datamap, slot))
-                else {
-                    return Err(HamtReadError::Decode("leaf index out of bounds"));
-                };
-                return Ok((stored_key.borrow() == key).then(|| value.clone()));
-            }
-            if cursor.nodemap & bit == 0 {
-                return Ok(None);
-            }
-            let Some(child_ref) = cursor.children.get(map_index(cursor.nodemap, slot)) else {
-                return Err(HamtReadError::Decode("child index out of bounds"));
-            };
-            cursor = match child_ref {
-                NodeRef::Resolved(child) => Arc::clone(child),
-                NodeRef::Lazy(hash) => self.node(hash)?,
-            };
-            depth = depth.saturating_add(1);
-        }
+            })
     }
 
     /// Look up each key under `root`, in order.
@@ -296,11 +256,19 @@ where
         while let Some(pending) = stack.pop() {
             match pending {
                 Pending::Node(node, depth) => {
+                    if let Some(reason) = node.shape_error() {
+                        return Err(HamtReadError::Decode(reason));
+                    }
                     if node.is_collision() {
                         if depth != super::HAMT_MAX_DEPTH {
                             return Err(HamtReadError::Decode("misplaced collision bucket"));
                         }
-                        collision_bucket_route(&node, structural_key, route)?;
+                        super::collision_route_hash(&node.leaves, |key| route(key, structural_key))
+                            .map_err(|_| {
+                                HamtReadError::Decode(
+                                    "collision bucket leaves route to different path hashes",
+                                )
+                            })?;
                         for (key, value) in &node.leaves {
                             visit(key, value);
                         }
@@ -493,8 +461,78 @@ mod tests {
             PersistedHamtReader::new(KEY, |hash| Ok(records.get(hash).cloned()));
         assert!(matches!(
             reader.get_by_path_hash(root.structural_hash, &1, &[0_u8; 32]),
+            Err(HamtReadError::Decode("leaf routed to wrong slot"))
+        ));
+    }
+
+    #[test]
+    fn rejects_misplaced_collision_bucket_root() {
+        let bucket =
+            crate::hamt::rebuild_node(KEY, 0, 0, vec![(1_u64, 10_u64), (2_u64, 20_u64)], vec![]);
+        let mut records = BTreeMap::new();
+        collect(&bucket, &mut records);
+
+        let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
+            PersistedHamtReader::new(KEY, |hash| Ok(records.get(hash).cloned()));
+        assert!(matches!(
+            reader.get_by_path_hash(bucket.structural_hash, &1, &[0_u8; 32]),
+            Err(HamtReadError::Decode("misplaced collision bucket"))
+        ));
+    }
+
+    #[test]
+    fn get_by_path_hash_rejects_misplaced_and_nonterminal_end_nodes() {
+        let misplaced_leaves = vec![(1_u64, 10_u64), (2_u64, 20_u64)];
+        let misplaced_hash = HamtNode::compute_structural_hash(KEY, 0, 0, &misplaced_leaves, &[]);
+        let misplaced = Arc::new(HamtNode {
+            datamap: 0,
+            nodemap: 0,
+            leaves: misplaced_leaves,
+            children: vec![],
+            structural_hash: misplaced_hash,
+        });
+        let mut misplaced_records = BTreeMap::new();
+        collect(&misplaced, &mut misplaced_records);
+        let mut misplaced_reader: PersistedHamtReader<'_, u64, u64, (), _> =
+            PersistedHamtReader::new_with_route(
+                KEY,
+                |hash| Ok(misplaced_records.get(hash).cloned()),
+                |_, _| [0_u8; 32],
+            );
+        assert!(matches!(
+            misplaced_reader.get_by_path_hash(misplaced_hash, &1, &[0_u8; 32]),
+            Err(HamtReadError::Decode("misplaced collision bucket"))
+        ));
+
+        // Construct a structurally valid ordinary node at depth MAX. Its
+        // bytes and hash verify, but it cannot legally terminate a routed path.
+        let empty_hash = HamtNode::<u64, u64>::compute_structural_hash(KEY, 0, 0, &[], &[]);
+        let mut terminal = Arc::new(HamtNode::<u64, u64> {
+            datamap: 0,
+            nodemap: 0,
+            leaves: vec![],
+            children: vec![],
+            structural_hash: empty_hash,
+        });
+        for _ in 0..HAMT_MAX_DEPTH {
+            let children = vec![NodeRef::Resolved(Arc::clone(&terminal))];
+            let hash = HamtNode::compute_structural_hash(KEY, 0, 1, &[], &children);
+            terminal = Arc::new(HamtNode {
+                datamap: 0,
+                nodemap: 1,
+                leaves: vec![],
+                children,
+                structural_hash: hash,
+            });
+        }
+        let mut terminal_records = BTreeMap::new();
+        collect(&terminal, &mut terminal_records);
+        let mut terminal_reader: PersistedHamtReader<'_, u64, u64, (), _> =
+            PersistedHamtReader::new(KEY, |hash| Ok(terminal_records.get(hash).cloned()));
+        assert!(matches!(
+            terminal_reader.get_by_path_hash(terminal.structural_hash, &1, &[0_u8; 32]),
             Err(HamtReadError::Decode(
-                "collision bucket leaves route to different path hashes"
+                "terminal node is not a collision bucket"
             ))
         ));
     }
