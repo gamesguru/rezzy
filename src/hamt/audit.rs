@@ -199,7 +199,7 @@ impl<E> From<HamtTraversalError<E>> for BitmapAuditError<E> {
 /// accumulating a `HashSet<StructuralHash>` mark set first — this is the
 /// version worth using when the caller actually wants the bitmap
 /// representation, not `node_reachability_audit`'s result reshaped afterward.
-/// Hashes the walk reaches that are outside `universe` are marked but never
+/// Hashes the walk reaches that are outside `universe` are not marked and never
 /// materialize a bitmap entry, matching `node_reachability_audit`'s handling of
 /// the same case.
 ///

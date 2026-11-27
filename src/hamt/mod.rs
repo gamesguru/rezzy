@@ -1793,12 +1793,16 @@ where
 /// A key is reported in `absent` ONLY when:
 /// 1. Its routed slot bit is clear in both `datamap` and `nodemap`.
 /// 2. Its routed slot bit is set in `datamap`, but the decoded leaf key at that slot has a
-///    different path hash. At a terminal collision node, every leaf sharing the requested path
-///    hash is returned; path hashes alone cannot distinguish a full 256-bit collision.
+///    different path hash.
+///
+/// A terminal collision bucket is not an absence boundary: a bucket only occurs after every
+/// routing slot is consumed, so every request must carry the bucket's complete 256-bit route.
+/// A mismatch is reported as corruption, never as `absent`.
 ///
 /// # Errors
 /// Returns [`DescendError::Decode`] if any node byte slice fails v1 parsing, or
-/// [`DescendError::CorruptNode`] if internal bitmap invariants are violated.
+/// [`DescendError::CorruptNode`] if internal bitmap invariants are violated or a request does
+/// not match its terminal collision bucket's full route.
 pub fn descend_level<K, V>(
     structural_key: &[u8],
     nodes_and_keys: &[(StructuralHash, &[u8], usize, &[KeyPathHash])],
@@ -1869,28 +1873,21 @@ where
                 let collision_path_hash = collision_path_hash.ok_or(DescendError::CorruptNode(
                     "collision bucket has no route hash",
                 ))?;
-                // The collision bucket is reached through every routing slot
-                // before the final slot. A request that disagrees earlier
-                // was sent down the wrong ancestor path; only a difference in
-                // the terminal slot proves absence at this bucket.
-                let terminal_depth = HAMT_MAX_DEPTH.saturating_sub(1);
-                if (0..terminal_depth).any(|ancestor_depth| {
-                    bucket_index(&req_hash, ancestor_depth)
-                        != bucket_index(&collision_path_hash, ancestor_depth)
-                }) {
+                // A bucket only sits at `HAMT_MAX_DEPTH`, after every routing
+                // slot has been consumed. Any request reaching it must carry
+                // the bucket's complete 256-bit route; a difference anywhere
+                // means the request did not route here, so the placement is
+                // corrupt rather than the key merely absent.
+                if collision_path_hash != req_hash {
                     return Err(DescendError::CorruptNode(
-                        "collision bucket is on the wrong ancestor path",
+                        "collision bucket does not match its trie path",
                     ));
                 }
-                if collision_path_hash == req_hash {
-                    found.extend(
-                        node.leaves
-                            .iter()
-                            .map(|(leaf_key, value)| (req_hash, leaf_key.clone(), value.clone())),
-                    );
-                } else {
-                    absent.push(req_hash);
-                }
+                found.extend(
+                    node.leaves
+                        .iter()
+                        .map(|(leaf_key, value)| (req_hash, leaf_key.clone(), value.clone())),
+                );
                 continue;
             }
             let slot = bucket_index(&req_hash, depth);

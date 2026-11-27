@@ -1104,43 +1104,25 @@ fn test_descend_level_rejects_collision_bucket_on_wrong_ancestor_path() {
     let root = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 20_u64)]);
     let node = collision_node(&root);
     let bytes = PersistedInternalNode::from(node).encode_v1();
-    let mut wrong_ancestor_hash = [0_u8; 32];
-    wrong_ancestor_hash[0] = 1;
 
-    let result: Result<DescendResult<u64, u64>, DescendError> = descend_level_impl(
-        key,
-        &[(
-            node.structural_hash,
-            &bytes,
-            HAMT_MAX_DEPTH,
-            &[wrong_ancestor_hash],
-        )],
-        constant_routing,
-    );
-    assert_eq!(
-        result,
-        Err(DescendError::CorruptNode(
-            "collision bucket is on the wrong ancestor path"
-        ))
-    );
-
-    // A mismatch only in the final routing slot is a proven absence at this
-    // bucket; all ancestor slots still lead to it.
-    let mut terminal_mismatch = [0_u8; 32];
-    terminal_mismatch[31] = 0x80;
-    let result: DescendResult<u64, u64> = descend_level_impl(
-        key,
-        &[(
-            node.structural_hash,
-            &bytes,
-            HAMT_MAX_DEPTH,
-            &[terminal_mismatch],
-        )],
-        constant_routing,
-    )
-    .expect("terminal route mismatch is absence");
-    assert!(result.found.is_empty());
-    assert_eq!(result.absent, [terminal_mismatch]);
+    // The first and last hash bits. The last one picks the slot in the
+    // bucket's parent, so it is part of the path like every other bit.
+    for (byte, bit) in [(0, 0x01), (31, 0x80)] {
+        let mut requested = [0_u8; 32];
+        requested[byte] = bit;
+        let result: Result<DescendResult<u64, u64>, DescendError> = descend_level_impl(
+            key,
+            &[(node.structural_hash, &bytes, HAMT_MAX_DEPTH, &[requested])],
+            constant_routing,
+        );
+        assert_eq!(
+            result,
+            Err(DescendError::CorruptNode(
+                "collision bucket does not match its trie path"
+            )),
+            "mismatch in hash byte {byte}"
+        );
+    }
 }
 
 #[test]
