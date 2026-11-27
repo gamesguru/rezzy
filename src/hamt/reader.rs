@@ -93,8 +93,6 @@ fn default_route<K: HamtCodec>(key: &K, structural_key: &[u8]) -> StructuralHash
     super::key_path_hash(structural_key, key)
 }
 
-/// Validates that every leaf in a terminal collision bucket routes to the same
-/// path hash, returning that hash.
 impl<'k, K, V, E, L> PersistedHamtReader<'k, K, V, E, L>
 where
     K: HamtCodec,

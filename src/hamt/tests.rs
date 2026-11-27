@@ -36,6 +36,37 @@ fn misplaced_collision(key: &[u8]) -> Arc<HamtNode<u64, u64>> {
     rebuild_node(key, 0, 0, vec![(1_u64, 10_u64), (2_u64, 20_u64)], vec![])
 }
 
+/// Wraps `node` in `wrappers` ordinary single-child nodes.
+fn chain_over(
+    key: &[u8],
+    wrappers: usize,
+    mut node: Arc<HamtNode<u64, u64>>,
+) -> Arc<HamtNode<u64, u64>> {
+    for _ in 0..wrappers {
+        node = internal_root(key, 0, NodeRef::Resolved(node));
+    }
+    node
+}
+
+/// Wraps a terminal collision bucket in `wrappers` ordinary single-child
+/// nodes, so the bucket sits exactly `wrappers` levels below the root.
+fn collision_chain(key: &[u8], wrappers: usize, leaves: &[(u64, u64)]) -> Arc<HamtNode<u64, u64>> {
+    let bucket = rebuild_node(key, 0, 0, leaves.to_vec(), vec![]);
+    chain_over(key, wrappers, bucket)
+}
+
+/// A collision-shaped node whose leaves may violate canonical key order, as
+/// only an unverified public-field construction can produce.
+fn unverified_collision(tag: u8, leaves: Vec<(u64, u64)>) -> Arc<HamtNode<u64, u64>> {
+    Arc::new(HamtNode {
+        datamap: 0,
+        nodemap: 0,
+        leaves,
+        children: vec![],
+        structural_hash: [tag; 32],
+    })
+}
+
 macro_rules! impl_u64_hamt_codec {
     ($ty:ty) => {
         impl HamtCodec for $ty {
@@ -1296,7 +1327,24 @@ fn test_collision_persisted_reader_resolves_lazy_spine_and_visits_bucket() {
 }
 
 #[test]
-fn test_collision_nodes_diff_and_isolate_like_an_ordered_map() {
+fn test_diff_rejects_unsorted_in_memory_collision_bucket() {
+    let key = b"dummy_server_key";
+    let bucket_a = unverified_collision(0xA1, vec![(2_u64, 20_u64), (1_u64, 10_u64)]);
+    let bucket_b = unverified_collision(0xB2, vec![(3_u64, 30_u64), (1_u64, 10_u64)]);
+    let root_a = chain_over(key, HAMT_MAX_DEPTH, bucket_a);
+    let root_b = chain_over(key, HAMT_MAX_DEPTH, bucket_b);
+    let mut resolver = unreachable_resolver();
+
+    assert!(matches!(
+        diff_hamt_nodes(&root_a, &root_b, &mut resolver),
+        Err(HamtTraversalError::CorruptNode(
+            "MTHC keys are not in canonical order"
+        ))
+    ));
+}
+
+#[test]
+fn test_collision_nodes_diff_like_an_ordered_map() {
     let key = b"dummy_server_key";
     let before = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)]);
     let after = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 99_u64), (4_u64, 40_u64)]);
@@ -1308,13 +1356,6 @@ fn test_collision_nodes_diff_and_isolate_like_an_ordered_map() {
     removed.sort_unstable();
     assert_eq!(added, [(2, 99), (4, 40)]);
     assert_eq!(removed, [(2, 20), (3, 30)]);
-
-    let (mut isolated_added, mut isolated_removed) =
-        diff_hamt_nodes(&before, &after, &mut resolver).expect("collision isolate");
-    isolated_added.sort_unstable();
-    isolated_removed.sort_unstable();
-    assert_eq!(isolated_added, added);
-    assert_eq!(isolated_removed, removed);
 }
 
 #[test]
@@ -1380,6 +1421,23 @@ fn test_reachability_rechecks_a_seen_hash_at_a_new_depth() {
     assert!(matches!(
         crate::hamt::walk_reachable_node_hashes(&root, &mut resolver, &mut |hash| marked
             .insert(hash)),
+        Err(HamtTraversalError::CorruptNode(
+            "misplaced collision bucket"
+        ))
+    ));
+}
+
+#[test]
+fn test_reachability_audit_rechecks_a_shared_subtree_at_a_new_root_depth() {
+    let key = b"dummy_server_key";
+    // Valid at depth 1 under `outer`, but using the same subtree as a root
+    // pulls its collision bucket up one level to the misplaced depth 51.
+    let shared = collision_chain(key, HAMT_MAX_DEPTH - 1, &[(1_u64, 10_u64), (2_u64, 20_u64)]);
+    let outer = internal_root(key, 0, NodeRef::Resolved(shared.clone()));
+    let mut resolver = unreachable_resolver();
+
+    assert!(matches!(
+        crate::hamt::node_reachability_audit([outer, shared], [], &mut resolver),
         Err(HamtTraversalError::CorruptNode(
             "misplaced collision bucket"
         ))

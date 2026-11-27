@@ -423,8 +423,11 @@ impl<K, V> HamtNode<K, V> {
         C: FnMut(&[(K, V)], &StructuralHash) -> Result<(), &'static str>,
     {
         // Iterative descent with a single owned cursor for resolved children.
+        // `check_node_depth` makes depth `HAMT_MAX_DEPTH` terminal, so every
+        // loop iteration either returns or advances one level deeper.
         let mut cursor: Option<NodePtr<K, V>> = None;
-        for depth in 0..=HAMT_MAX_DEPTH {
+        let mut depth = 0_usize;
+        loop {
             let node: &HamtNode<K, V> = cursor.as_deref().unwrap_or(self);
             delta::check_node_depth(node, depth)?;
             if node.is_collision() {
@@ -436,9 +439,6 @@ impl<K, V> HamtNode<K, V> {
                     .find(|(stored_key, _)| stored_key.borrow() == key)
                     .map(|(_, value)| value.clone()));
             }
-            if depth >= HAMT_MAX_DEPTH {
-                return Ok(None);
-            }
             match node.slot_at(path_hash, depth) {
                 Slot::Leaf((stored_key, value)) => {
                     return Ok((stored_key.borrow() == key).then(|| value.clone()));
@@ -446,8 +446,8 @@ impl<K, V> HamtNode<K, V> {
                 Slot::Child(child) => cursor = Some(delta::resolve_node_checked(child, resolver)?),
                 Slot::Empty => return Ok(None),
             }
+            depth = depth.saturating_add(1);
         }
-        Ok(None)
     }
 
     /// Visits every key/value pair in the HAMT, resolving lazy children as
@@ -945,22 +945,6 @@ where
     }
 }
 
-fn check_mutation_depth<K, V, E>(
-    node: &HamtNode<K, V>,
-    depth: usize,
-) -> Result<(), HamtMutateError<E>> {
-    if let Some(reason) = node.shape_error() {
-        return Err(HamtMutateError::CorruptNode(reason));
-    }
-    if depth > HAMT_MAX_DEPTH {
-        return Err(HamtMutateError::MaxDepthExceeded { depth });
-    }
-    if node.is_collision() && depth != HAMT_MAX_DEPTH {
-        return Err(HamtMutateError::CorruptNode("misplaced collision bucket"));
-    }
-    Ok(())
-}
-
 fn rebuild_with_child<K, V>(
     node: &NodePtr<K, V>,
     structural_key: &[u8],
@@ -1074,7 +1058,7 @@ where
     where
         F: NodeResolver<K, V, E>,
     {
-        check_mutation_depth(node, depth)?;
+        delta::check_node_depth(node, depth)?;
         if node.is_collision() {
             let old_value = node
                 .leaves
@@ -1455,7 +1439,7 @@ where
     Q: Eq + ?Sized,
     F: NodeResolver<K, V, E>,
 {
-    check_mutation_depth(node, depth)?;
+    delta::check_node_depth(node, depth)?;
     if node.is_collision() {
         let Some(index) = node
             .leaves

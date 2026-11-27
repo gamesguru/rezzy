@@ -186,6 +186,16 @@ where
         // of long collision lists would otherwise cause.
         let encoded_a = encoded_keys(leaves_a);
         let encoded_b = encoded_keys(leaves_b);
+        // `shape_error` checks the collision shape but not public-field key
+        // order, so an unverified in-memory bucket could otherwise produce a
+        // bogus merge result.
+        if !encoded_a.windows(2).all(|window| window[0] < window[1])
+            || !encoded_b.windows(2).all(|window| window[0] < window[1])
+        {
+            return Err(HamtTraversalError::CorruptNode(
+                "MTHC keys are not in canonical order",
+            ));
+        }
         let (mut i, mut j) = (0_usize, 0_usize);
         while i < leaves_a.len() && j < leaves_b.len() {
             let (key_a, value_a) = &leaves_a[i];
@@ -660,9 +670,15 @@ where
 }
 
 /// Walks `root`'s internal-node graph, calling `mark` for every hash.
-/// Reuse one caller-owned mark set across roots: `false` skips content already
-/// visited at a checked placement. If a hash appears at a new depth, its node
-/// is resolved to validate that placement before its descendants are skipped.
+/// Reuse one caller-owned mark set across roots: a child counted by an earlier
+/// call is never resolved, at any depth, so it may already have been reclaimed.
+/// Placement is re-checked only within one call: a hash that this call has
+/// resolved is resolved and checked again if it appears at a new depth. The
+/// root's placement is checked on every call. Multi-root placement
+/// revalidation is provided by
+/// [`node_reachability_audit`](crate::hamt::node_reachability_audit) and
+/// [`bitmap_node_reachability_audit`](crate::hamt::bitmap_node_reachability_audit),
+/// which track depths across every root.
 /// Use [`reachable_node_hashes`] for a single root.
 ///
 /// # Errors
@@ -684,9 +700,8 @@ where
     // Validate the root even when its content was already seen by an earlier
     // call; otherwise a shared hash could mask a misplaced bucket at depth 0.
     check_node_depth(root, 0)?;
-    let mut local: crate::HashMap<StructuralHash, crate::HashSet<usize>> =
-        crate::HashMap::default();
-    local.entry(root.structural_hash).or_default().insert(0);
+    let mut local = crate::HashMap::default();
+    local.insert(root.structural_hash, 1_u64);
     if !mark(root.structural_hash) {
         return Ok(());
     }
@@ -699,7 +714,7 @@ pub(super) fn walk_reachable_node_hashes_with_placements<K, V, F, E, M>(
     root: &NodePtr<K, V>,
     resolver: &mut F,
     mark: &mut M,
-    checked_placements: &mut crate::HashMap<StructuralHash, crate::HashSet<usize>>,
+    checked_placements: &mut crate::HashMap<StructuralHash, u64>,
 ) -> Result<(), HamtTraversalError<E>>
 where
     F: NodeResolver<K, V, E>,
@@ -708,13 +723,15 @@ where
     // Validate the root even when its content was already seen by an earlier
     // call; otherwise a shared hash could mask a misplaced bucket at depth 0.
     check_node_depth(root, 0)?;
-    checked_placements
-        .entry(root.structural_hash)
-        .or_default()
-        .insert(0);
-    if !mark(root.structural_hash) {
+    let _ = mark(root.structural_hash);
+    let seen = checked_placements
+        .get(&root.structural_hash)
+        .copied()
+        .unwrap_or(0);
+    if seen & 1 != 0 {
         return Ok(());
     }
+    *checked_placements.entry(root.structural_hash).or_insert(0) |= 1;
     walk_reachable_children(root, resolver, mark, 0, checked_placements, true)
 }
 
@@ -741,7 +758,7 @@ fn walk_reachable_children<K, V, F, E, M>(
     resolver: &mut F,
     mark: &mut M,
     depth: usize,
-    local: &mut crate::HashMap<StructuralHash, crate::HashSet<usize>>,
+    local: &mut crate::HashMap<StructuralHash, u64>,
     validate_mark_miss: bool,
 ) -> Result<(), HamtTraversalError<E>>
 where
@@ -750,29 +767,28 @@ where
 {
     check_node_depth(node, depth)?;
     let next_depth = depth.saturating_add(1);
+    let next_bit = 1_u64 << next_depth;
     for child in &node.children {
         let hash = child.structural_hash();
         let newly_marked = mark(hash);
-        let depths_seen = local.get(&hash);
-        if depths_seen.is_some_and(|depths| depths.contains(&next_depth)) {
+        let depths_seen = local.get(&hash).copied().unwrap_or(0);
+        if depths_seen & next_bit != 0 {
             continue;
         }
-        let repeated_hash = depths_seen.is_some();
+        let repeated_hash = depths_seen != 0;
         if !newly_marked && !repeated_hash && !validate_mark_miss {
             continue;
         }
         let child_node = resolve_child_at_depth(child, resolver, next_depth)?;
-        local.entry(hash).or_default().insert(next_depth);
-        if newly_marked || repeated_hash {
-            walk_reachable_children(
-                &child_node,
-                resolver,
-                mark,
-                next_depth,
-                local,
-                validate_mark_miss,
-            )?;
-        }
+        *local.entry(hash).or_insert(0) |= next_bit;
+        walk_reachable_children(
+            &child_node,
+            resolver,
+            mark,
+            next_depth,
+            local,
+            validate_mark_miss,
+        )?;
     }
     Ok(())
 }
