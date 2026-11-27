@@ -35,7 +35,7 @@ format: ##H Format codebase (Rust + Lean + scripts)
 
 .PHONY: check
 check:	##H Cargo check and code dupe
-	$(CARGO) check --all-targets --all-features
+	$(CARGO) check --all-targets --all-features --workspace
 	cd benches/ && direnv exec . sh -c '$$CARGO check --all-targets --all-features'
 	-jscpd $$(git ls-files '*.rs')
 	# $(CARGO) fix --all-targets --allow-dirty
@@ -49,7 +49,7 @@ macro: ##H See macro expansion costs
 .PHONY: lint
 lint: ##H Run all linters
 	-shellcheck $(LINT_LOCS_SH)
-	$(CARGO) clippy --all-targets --all-features $(filter --locked,$(CARGO_FEATURE_ARGS))
+	$(CARGO) clippy --all-targets --all-features --workspace $(filter --locked,$(CARGO_FEATURE_ARGS))
 	-cppcheck $$(git ls-files '*.h')
 
 .PHONY: fix

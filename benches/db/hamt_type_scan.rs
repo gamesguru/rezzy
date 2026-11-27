@@ -394,8 +394,7 @@ fn bench(shape: &Shape, n: usize) {
     );
 
     // Flat tree.
-    let flat = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned())
-        .expect("build should not collide");
+    let flat = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned());
     let flat_store = persist(&flat);
 
     // Lanes: members keyed by state_key, other keyed by (type, key), plus an
@@ -423,13 +422,10 @@ fn bench(shape: &Shape, n: usize) {
     singles_record.sort();
 
     let members_root =
-        hamt::build_hamt::<String, Value, _>(STRUCTURAL_KEY, member_lane.iter().cloned())
-            .expect("build should not collide");
-    let other_root = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, other_lane.iter().cloned())
-        .expect("build should not collide");
+        hamt::build_hamt::<String, Value, _>(STRUCTURAL_KEY, member_lane.iter().cloned());
+    let other_root = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, other_lane.iter().cloned());
     let space_root =
-        hamt::build_hamt::<String, Value, _>(STRUCTURAL_KEY, space_lane.iter().cloned())
-            .expect("build should not collide");
+        hamt::build_hamt::<String, Value, _>(STRUCTURAL_KEY, space_lane.iter().cloned());
     let members_store = persist(&members_root);
     let other_store = persist(&other_root);
     let space_store = persist(&space_root);

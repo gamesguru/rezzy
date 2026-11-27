@@ -1233,6 +1233,7 @@ fn test_v2_2_derives_auth_from_single_state_parent_citation() {
 /// rejected. Both are well-formed; the only difference is which extremities were cited. This
 /// documents why "which 20" is a security-relevant choice, not an implementation detail.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn test_omitted_demotion_head_lets_demoted_sender_authorise_against_stale_state() {
     let empty_key = String::new();
     let alice = "@alice:example.com";
@@ -1440,6 +1441,7 @@ fn authorise_against_dag(
 /// Each event is valid against its own cut, so none is rejected at the PDU level; whatever
 /// happens to Y is a state-resolution outcome, not a rejection cascade.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn test_merge_shape_does_not_change_resolved_state() {
     let empty_key = String::new();
     let alice = "@alice:example.com";
@@ -1647,6 +1649,7 @@ fn test_merge_shape_does_not_change_resolved_state() {
 
 /// Checks the proposed five-event merge-shape counterexample against the DAG API.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn test_v2_2_proposed_unconflicted_shadowing_counterexample() {
     let empty = String::new();
     let alice = "@alice:example.com";
@@ -1774,7 +1777,7 @@ fn test_v2_2_proposed_unconflicted_shadowing_counterexample() {
     }
 
     let before = |id: &str| {
-        let event = events.get(id).unwrap();
+        let event = &events[id];
         compute_state_before_from_dag(&DagInputs::new(
             event,
             &events,

@@ -1136,18 +1136,14 @@ fn parse_hamt_entries(value: &JsonValue) -> Result<Vec<(StateHamtKey, String)>, 
 
 type BuiltStateHamt = (RootHandle, Arc<HamtNode<StateHamtKey, String>>, LtHash);
 
-fn build_state_hamt(
-    room_id: &str,
-    entries: &[(StateHamtKey, String)],
-) -> Result<BuiltStateHamt, String> {
+fn build_state_hamt(room_id: &str, entries: &[(StateHamtKey, String)]) -> BuiltStateHamt {
     let mut lattice = LtHash::ZERO;
     for ((event_type, state_key), event_id) in entries {
         lattice.add_seed(&LtHash::seed(event_type.as_str(), state_key, event_id));
     }
     let (handle, root) =
-        build_hamt_root_handle(room_id.as_bytes(), &lattice, entries.iter().cloned())
-            .map_err(|error| std::format!("{error:?}"))?;
-    Ok((handle, root, lattice))
+        build_hamt_root_handle(room_id.as_bytes(), &lattice, entries.iter().cloned());
+    (handle, root, lattice)
 }
 
 fn entry_json((key, value): &(StateHamtKey, String)) -> JsonValue {
@@ -1350,7 +1346,6 @@ fn apply_mutations(room_id: &str, request: &JsonValue) -> Result<JsonValue, Stri
                 &LtHash::ZERO,
                 Vec::<(StateHamtKey, String)>::new(),
             )
-            .map_err(|error| std::format!("{error:?}"))?
             .1
         }
     };
@@ -1434,7 +1429,7 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     .get("entries")
                     .ok_or_else(|| String::from("missing `entries`"))?,
             )?;
-            let (handle, root, lattice) = build_state_hamt(room_id, &entries)?;
+            let (handle, root, lattice) = build_state_hamt(room_id, &entries);
             let persist = request
                 .get("persist")
                 .and_then(JsonValue::as_bool)
@@ -1603,7 +1598,7 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     .get("entries")
                     .ok_or_else(|| String::from("missing `entries`"))?,
             )?;
-            let (_, root, _) = build_state_hamt(room_id, &entries)?;
+            let (_, root, _) = build_state_hamt(room_id, &entries);
             let event_type = require_str(request, "event_type")?;
             let state_key = require_str(request, "state_key")?;
             let key = (rezzy::EventType::from(event_type), state_key.to_owned());
@@ -1626,8 +1621,8 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     .get("b")
                     .ok_or_else(|| String::from("missing `b`"))?,
             )?;
-            let (_, root_a, _) = build_state_hamt(room_id, &a)?;
-            let (_, root_b, _) = build_state_hamt(room_id, &b)?;
+            let (_, root_a, _) = build_state_hamt(room_id, &a);
+            let (_, root_b, _) = build_state_hamt(room_id, &b);
             let mut resolver =
                 |_hash: &StructuralHash| -> Result<Arc<HamtNode<StateHamtKey, String>>, String> {
                     Err(String::from("unexpected lazy HAMT node"))

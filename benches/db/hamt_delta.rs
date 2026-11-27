@@ -245,8 +245,7 @@ fn run_isolate_delta(a: &Node, b: &Node, reference: &Delta, reps: u32, n: usize,
 /// Panics if HAMT construction, mutation, or differencing fails.
 fn bench(n: usize, delta: usize) {
     let entries = make_string_entries(n, 0x5EED_0000 + n as u64);
-    let base = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned())
-        .expect("build should not collide");
+    let base = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned());
     let next = mutate(&base, &entries, delta, 0);
     let depth = tree_depth(&base).max(tree_depth(&next));
     let reference = reference_delta(&base, &next);
@@ -533,8 +532,7 @@ mod disk {
     /// or a diff fails, including node read, decode, or verification failures.
     pub fn bench(n: usize, delta: usize) {
         let entries = make_string_entries(n, 0x5EED_0000 + n as u64);
-        let base = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned())
-            .expect("build");
+        let base = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned());
         let nexts: Vec<Node> = (0..SAMPLES)
             .map(|v| mutate(&base, &entries, delta, v))
             .collect();

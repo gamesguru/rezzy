@@ -370,8 +370,7 @@ mod tests {
             b"!room:example.org",
             &LtHash::ZERO,
             vec![(key.clone(), value.clone())],
-        )
-        .expect("build");
+        );
 
         assert_eq!(root.get(b"!room:example.org", &key), Some(&value));
     }
@@ -470,8 +469,7 @@ mod golden_vectors {
         let entries = golden_entries();
         let lattice = golden_lattice(&entries);
         let (handle, root) =
-            crate::hamt::build_hamt_root_handle(GOLDEN_ROOM_ID.as_bytes(), &lattice, entries)
-                .expect("golden state set must build");
+            crate::hamt::build_hamt_root_handle(GOLDEN_ROOM_ID.as_bytes(), &lattice, entries);
         (handle, root, lattice)
     }
 

@@ -172,8 +172,7 @@ pub fn run_hamt_live_walk(ctx: &FormattingContext<'_>) -> HamtLiveWalkOutput {
         })
         .unwrap_or(b"");
 
-    let empty_root = build_hamt::<(EventType, String), String, _>(structural_key, [])
-        .expect("empty HAMT build must succeed");
+    let empty_root = build_hamt::<(EventType, String), String, _>(structural_key, []);
 
     let mut child_citations: HashMap<&str, usize> = HashMap::new();
     for &i in &order {
@@ -2255,8 +2254,7 @@ mod tests {
                     String::from("$topic_c"),
                 ),
             ],
-        )
-        .expect("expected HAMT build");
+        );
         let expected_hash = format_structural_hash(&expected_hamt.structural_hash);
 
         assert_eq!(

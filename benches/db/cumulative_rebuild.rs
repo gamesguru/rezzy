@@ -141,8 +141,7 @@ pub fn run() {
             None => hamt::build_hamt::<Key, Value, _>(
                 STRUCTURAL_KEY,
                 std::iter::once((k.clone(), v.clone())),
-            )
-            .expect("build should not collide"),
+            ),
             Some(root) => {
                 let mut resolver = unreachable_resolver();
                 hamt::insert(root, STRUCTURAL_KEY, k.clone(), v.clone(), &mut resolver)

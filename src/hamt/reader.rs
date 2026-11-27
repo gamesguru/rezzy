@@ -19,16 +19,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::borrow::Borrow;
 use core::fmt;
-use core::hash::Hash;
 
 use super::codec::PersistedInternalNode;
-use super::{HamtCodec, HamtNode, NodeRef, StructuralHash, HAMT_MAX_DEPTH};
-
-/// Index into a compressed bitmap array for `slot`.
-fn slot_index(bitmap: u32, slot: usize) -> usize {
-    let lower_mask = (1_u32 << slot).wrapping_sub(1);
-    (bitmap & lower_mask).count_ones() as usize
-}
+use super::{map_index, HamtCodec, HamtNode, NodeRef, StructuralHash, HAMT_MAX_DEPTH};
 
 /// Why a persisted HAMT could not be read.
 #[derive(Debug)]
@@ -84,8 +77,8 @@ impl<E: core::error::Error + 'static> core::error::Error for HamtReadError<E> {
 /// decode per node. The cache lives as long as the reader.
 pub struct PersistedHamtReader<'k, K, V, E, L>
 where
-    K: HamtCodec + Hash,
-    V: HamtCodec + Hash,
+    K: HamtCodec,
+    V: HamtCodec,
     L: FnMut(&StructuralHash) -> Result<Option<Vec<u8>>, E>,
 {
     structural_key: &'k [u8],
@@ -95,8 +88,8 @@ where
 
 impl<'k, K, V, E, L> PersistedHamtReader<'k, K, V, E, L>
 where
-    K: HamtCodec + Hash,
-    V: HamtCodec + Hash,
+    K: HamtCodec,
+    V: HamtCodec,
     L: FnMut(&StructuralHash) -> Result<Option<Vec<u8>>, E>,
 {
     /// Open a reader over a tree root baked with `structural_key`.
@@ -126,9 +119,6 @@ where
 
     /// Look up one key under `root`, routing with the default key hash.
     ///
-    /// For trees built with a custom routing hash use
-    /// [`Self::get_with_key_hash`].
-    ///
     /// `root` is the structural hash of the root node, not the state-group id
     /// from the root record. Callers that hold a root record should pass its
     /// [`StateHamtRoot::root_hash`](crate::state::hamt_root::StateHamtRoot::root_hash).
@@ -142,36 +132,71 @@ where
         V: Clone,
         Q: super::HamtRoutingKey + Eq + ?Sized,
     {
-        let root_node = self.node(&root)?;
-        // Copy the reference before the resolver closure borrows `self`.
-        let structural_key = self.structural_key;
-        let mut resolver = |hash: &StructuralHash| self.node(hash);
-        root_node.search(structural_key, key, &mut resolver)
+        let path_hash = super::key_path_hash(self.structural_key, key);
+        self.get_by_path_hash(root, key, &path_hash)
     }
 
-    /// Look up one key under `root` in a tree built with a custom routing hash
-    /// (see [`build_hamt_with_key_hash`](super::build_hamt_with_key_hash)).
+    /// Look up one key using a previously computed routing hash.
     ///
-    /// `key_hash` must be the exact function the tree was built with, e.g.
-    /// [`canonical_key_path_hash`](super::canonical_key_path_hash).
+    /// This is useful when the caller already has the same path hash used to
+    /// build the tree. `get` is simpler for ordinary reads.
     ///
     /// # Errors
+    /// Returns [`HamtReadError`] when a touched node is missing, unreadable,
     /// or fails structural-hash verification.
-    pub fn get_with_key_hash<Q, H>(
+    pub fn get_by_path_hash<Q>(
         &mut self,
         root: StructuralHash,
         key: &Q,
-        key_hash: H,
+        path_hash: &StructuralHash,
     ) -> Result<Option<V>, HamtReadError<E>>
     where
         K: Eq + Borrow<Q>,
         V: Clone,
         Q: Eq + ?Sized,
-        H: FnMut(&Q) -> StructuralHash,
     {
-        let root_node = self.node(&root)?;
-        let mut resolver = |hash: &StructuralHash| self.node(hash);
-        root_node.search_with_key_hash(key, key_hash, &mut resolver)
+        let mut cursor = self.node(&root)?;
+        let mut depth = 0;
+        loop {
+            if depth > super::HAMT_MAX_DEPTH {
+                return Err(HamtReadError::Decode("HAMT exceeds maximum depth"));
+            }
+            if cursor.is_collision() {
+                if depth != super::HAMT_MAX_DEPTH {
+                    return Err(HamtReadError::Decode("misplaced collision bucket"));
+                }
+                return Ok(cursor
+                    .leaves
+                    .iter()
+                    .find(|(stored_key, _)| stored_key.borrow() == key)
+                    .map(|(_, value)| value.clone()));
+            }
+            if depth == super::HAMT_MAX_DEPTH {
+                return Err(HamtReadError::Decode(
+                    "terminal node is not a collision bucket",
+                ));
+            }
+            let slot = super::bucket_index(path_hash, depth);
+            let bit = 1_u32 << slot;
+            if cursor.datamap & bit != 0 {
+                let Some((stored_key, value)) = cursor.leaves.get(map_index(cursor.datamap, slot))
+                else {
+                    return Err(HamtReadError::Decode("leaf index out of bounds"));
+                };
+                return Ok((stored_key.borrow() == key).then(|| value.clone()));
+            }
+            if cursor.nodemap & bit == 0 {
+                return Ok(None);
+            }
+            let Some(child_ref) = cursor.children.get(map_index(cursor.nodemap, slot)) else {
+                return Err(HamtReadError::Decode("child index out of bounds"));
+            };
+            cursor = match child_ref {
+                NodeRef::Resolved(child) => Arc::clone(child),
+                NodeRef::Lazy(hash) => self.node(hash)?,
+            };
+            depth = depth.saturating_add(1);
+        }
     }
 
     /// Look up each key under `root`, in order.
@@ -219,6 +244,15 @@ where
         while let Some(pending) = stack.pop() {
             match pending {
                 Pending::Node(node, depth) => {
+                    if node.is_collision() {
+                        if depth != super::HAMT_MAX_DEPTH {
+                            return Err(HamtReadError::Decode("misplaced collision bucket"));
+                        }
+                        for (key, value) in &node.leaves {
+                            visit(key, value);
+                        }
+                        continue;
+                    }
                     if depth >= HAMT_MAX_DEPTH {
                         return Err(HamtReadError::Decode("HAMT exceeds maximum depth"));
                     }
@@ -232,11 +266,11 @@ where
                 Pending::Entry(node, depth, slot) => {
                     let bit = 1_u32 << slot;
                     if node.datamap & bit != 0 {
-                        let index = slot_index(node.datamap, slot);
+                        let index = map_index(node.datamap, slot);
                         let (key, value) = &node.leaves[index];
                         visit(key, value);
                     } else {
-                        let index = slot_index(node.nodemap, slot);
+                        let index = map_index(node.nodemap, slot);
                         let child = match &node.children[index] {
                             NodeRef::Resolved(child) => Arc::clone(child),
                             NodeRef::Lazy(hash) => self.node(hash)?,
@@ -285,8 +319,7 @@ mod tests {
             ("beta".to_string(), "2".to_string()),
             ("gamma".to_string(), "3".to_string()),
         ];
-        let (handle, root) =
-            build_hamt_root_handle(KEY, &LtHash::default(), entries).expect("build fixture");
+        let (handle, root) = build_hamt_root_handle(KEY, &LtHash::default(), entries);
         let mut records = BTreeMap::new();
         collect(&root, &mut records);
         (records, handle.structural_hash)
@@ -308,8 +341,8 @@ mod tests {
         PersistedHamtReader::new(structural_key, move |hash| Ok(records.get(hash).cloned()))
     }
 
-    fn collect(
-        node: &Arc<HamtNode<String, String>>,
+    fn collect<K: HamtCodec + Clone, V: HamtCodec + Clone>(
+        node: &Arc<HamtNode<K, V>>,
         records: &mut BTreeMap<StructuralHash, Vec<u8>>,
     ) {
         if records.contains_key(&node.structural_hash) {
@@ -320,7 +353,7 @@ mod tests {
                 collect(child, records);
             }
         }
-        let persisted: PersistedInternalNode<String, String> = node.as_ref().into();
+        let persisted: PersistedInternalNode<K, V> = node.as_ref().into();
         records.insert(node.structural_hash, persisted.encode_v1());
     }
 
@@ -339,7 +372,7 @@ mod tests {
         );
 
         let mut entries = reader.collect_entries(root).unwrap();
-        entries.sort();
+        entries.sort_unstable();
         assert_eq!(
             entries,
             vec![
@@ -348,6 +381,42 @@ mod tests {
                 ("gamma".to_string(), "3".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn reads_terminal_collision_buckets() {
+        let root = crate::hamt::build_hamt_with_routing(
+            KEY,
+            vec![(1_u64, 10_u64), (2_u64, 20_u64), (3_u64, 30_u64)],
+            |_| [0_u8; 32],
+        );
+        let mut records = BTreeMap::new();
+        collect(&root, &mut records);
+
+        let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
+            PersistedHamtReader::new(KEY, |hash| Ok(records.get(hash).cloned()));
+        assert_eq!(
+            reader
+                .get_by_path_hash(root.structural_hash, &2, &[0_u8; 32])
+                .unwrap(),
+            Some(20)
+        );
+        assert_eq!(
+            reader
+                .get_by_path_hash(root.structural_hash, &3, &[0_u8; 32])
+                .unwrap(),
+            Some(30)
+        );
+        assert_eq!(
+            reader
+                .get_by_path_hash(root.structural_hash, &9, &[0_u8; 32])
+                .unwrap(),
+            None
+        );
+
+        let mut entries = reader.collect_entries(root.structural_hash).unwrap();
+        entries.sort_unstable();
+        assert_eq!(entries, vec![(1, 10), (2, 20), (3, 30)]);
     }
 
     #[test]
