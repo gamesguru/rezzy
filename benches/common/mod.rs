@@ -542,12 +542,18 @@ pub mod alloc_probe {
 
     struct CountingAllocator;
 
-    unsafe impl GlobalAlloc for CountingAllocator {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+    impl CountingAllocator {
+        fn count(layout: Layout) {
             if ENABLED.load(Ordering::Relaxed) {
                 ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
                 BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
             }
+        }
+    }
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            Self::count(layout);
             unsafe { System.alloc(layout) }
         }
 
@@ -556,10 +562,7 @@ pub mod alloc_probe {
         }
 
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            if ENABLED.load(Ordering::Relaxed) {
-                ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-                BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-            }
+            Self::count(layout);
             unsafe { System.alloc_zeroed(layout) }
         }
     }
