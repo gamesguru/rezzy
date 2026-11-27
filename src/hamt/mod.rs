@@ -1077,10 +1077,6 @@ where
             emit_node_to_sink(&new_node, self.sink);
             return Ok((new_node, old_value));
         }
-        if depth >= HAMT_MAX_DEPTH {
-            return Err(HamtMutateError::MaxDepthExceeded { depth });
-        }
-
         let structural_key = self.structural_key;
         let slot = bucket_index(&path_hash, depth);
         let bit = 1_u32 << slot;
@@ -1465,10 +1461,6 @@ where
         };
         return Ok((outcome, Some(old_value)));
     }
-    if depth >= HAMT_MAX_DEPTH {
-        return Err(HamtMutateError::MaxDepthExceeded { depth });
-    }
-
     let slot = bucket_index(path_hash, depth);
     let bit = 1_u32 << slot;
     let structural_key = ctx.structural_key;

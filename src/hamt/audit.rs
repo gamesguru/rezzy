@@ -293,11 +293,11 @@ pub struct NodeReachabilityAudit {
 /// Partitions `universe` into hashes reachable from `roots` and hashes that
 /// are not.
 ///
-/// Walks each root with [`walk_reachable_node_hashes`](crate::hamt::walk_reachable_node_hashes) against one shared
-/// `HashSet`, so subtrees shared between roots are walked once when they
-/// occupy the same depth. A repeated hash at a different depth is resolved
-/// again so its placement can be validated. `resolver` is therefore called
-/// at most once per distinct `(node hash, depth)` placement across the audit.
+/// Walks every root through the placement-aware audit walker against one
+/// shared mark set and depth map, so subtrees shared between roots are walked
+/// once per distinct `(node hash, depth)` placement. A repeated hash at a
+/// different depth is resolved again so its placement can be validated.
+/// `resolver` is therefore called at most once per placement across the audit.
 ///
 /// `reachable` is the full mark set intersected with `universe`; nodes the
 /// walk reaches that are outside `universe` (e.g. a caller's scan missed
