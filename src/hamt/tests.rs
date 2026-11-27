@@ -1099,6 +1099,51 @@ fn test_descend_level_returns_every_key_in_a_collision_bucket() {
 }
 
 #[test]
+fn test_descend_level_rejects_collision_bucket_on_wrong_ancestor_path() {
+    let key = b"dummy_server_key";
+    let root = collision_root(key, vec![(1_u64, 10_u64), (2_u64, 20_u64)]);
+    let node = collision_node(&root);
+    let bytes = PersistedInternalNode::from(node).encode_v1();
+    let mut wrong_ancestor_hash = [0_u8; 32];
+    wrong_ancestor_hash[0] = 1;
+
+    let result: Result<DescendResult<u64, u64>, DescendError> = descend_level_impl(
+        key,
+        &[(
+            node.structural_hash,
+            &bytes,
+            HAMT_MAX_DEPTH,
+            &[wrong_ancestor_hash],
+        )],
+        constant_routing,
+    );
+    assert_eq!(
+        result,
+        Err(DescendError::CorruptNode(
+            "collision bucket is on the wrong ancestor path"
+        ))
+    );
+
+    // A mismatch only in the final routing slot is a proven absence at this
+    // bucket; all ancestor slots still lead to it.
+    let mut terminal_mismatch = [0_u8; 32];
+    terminal_mismatch[31] = 0x80;
+    let result: DescendResult<u64, u64> = descend_level_impl(
+        key,
+        &[(
+            node.structural_hash,
+            &bytes,
+            HAMT_MAX_DEPTH,
+            &[terminal_mismatch],
+        )],
+        constant_routing,
+    )
+    .expect("terminal route mismatch is absence");
+    assert!(result.found.is_empty());
+    assert_eq!(result.absent, [terminal_mismatch]);
+}
+
+#[test]
 fn test_descend_level_rejects_a_collision_bucket_with_mixed_routing() {
     let key = b"dummy_server_key";
     let node = rebuild_node(key, 0, 0, vec![(1_u64, 10_u64), (2_u64, 20_u64)], vec![]);
@@ -1344,6 +1389,38 @@ fn test_diff_rejects_unsorted_in_memory_collision_bucket() {
 }
 
 #[test]
+fn test_diff_rejects_unsorted_collision_bucket_in_one_sided_subtree() {
+    let key = b"dummy_server_key";
+    let unsorted = unverified_collision(0xA1, vec![(2_u64, 20_u64), (1_u64, 10_u64)]);
+    let before = chain_over(key, HAMT_MAX_DEPTH, unsorted);
+    let after = crate::hamt::build_hamt::<u64, u64, _>(key, []);
+    let mut resolver = unreachable_resolver();
+
+    assert!(matches!(
+        diff_hamt_nodes(&before, &after, &mut resolver),
+        Err(HamtTraversalError::CorruptNode(
+            "MTHC keys are not in canonical order"
+        ))
+    ));
+}
+
+#[test]
+fn test_diff_rejects_unsorted_collision_bucket_in_leaf_subtree_walk() {
+    let key = b"dummy_server_key";
+    let unsorted = unverified_collision(0xA1, vec![(2_u64, 20_u64), (1_u64, 10_u64)]);
+    let before = rebuild_node(key, 1, 0, vec![(99_u64, 0_u64)], vec![]);
+    let after = chain_over(key, HAMT_MAX_DEPTH, unsorted);
+    let mut resolver = unreachable_resolver();
+
+    assert!(matches!(
+        diff_hamt_nodes(&before, &after, &mut resolver),
+        Err(HamtTraversalError::CorruptNode(
+            "MTHC keys are not in canonical order"
+        ))
+    ));
+}
+
+#[test]
 fn test_remove_rejects_unsorted_in_memory_collision_bucket() {
     let key = b"dummy_server_key";
     let bucket = unverified_collision(0xA1, vec![(2_u64, 20_u64), (1_u64, 10_u64)]);
@@ -1386,8 +1463,13 @@ fn test_malformed_node_shape_is_absent_for_reads_and_rejected_for_mutation() {
     });
     let mut resolver = unreachable_resolver();
 
-    assert_eq!(corrupt.get(key, &1_u64), None);
-    assert_eq!(corrupt.search(key, &1_u64, &mut resolver), Ok(None));
+    // Route slot 0, which the malformed datamap claims is occupied. Both
+    // reads must reject the shape instead of indexing the empty leaf array.
+    assert_eq!(corrupt.get_by_path_hash(&1_u64, &[0_u8; 32]), None);
+    assert_eq!(
+        corrupt.search_by_path_hash(&1_u64, &[0_u8; 32], &mut resolver),
+        Ok(None)
+    );
     assert!(matches!(
         crate::hamt::insert(&corrupt, key, 1_u64, 10_u64, &mut resolver),
         Err(HamtMutateError::CorruptNode(

@@ -237,12 +237,9 @@ where
     let universe = IndexedUniverse::try_build(universe)?;
 
     let mut reachable = Bitmap::new();
-    // Hashes outside `universe` still need dedup so a subtree shared across
-    // roots (or reachable from inside and outside `universe`) is walked
-    // once, same as `node_reachability_audit`. `reachable`'s own membership
-    // check covers dedup for anything actually in `universe`, so this set
-    // only ever grows for hashes the caller's `universe` scan missed.
-    let mut visited_outside_universe: HashSet<StructuralHash> = HashSet::default();
+    // The placement-aware walker dedups with `checked_placements`, so hashes
+    // outside `universe` need no bookkeeping here: return false to leave them
+    // out of the bitmap and ignore the (already unused) mark result.
     let mut checked_placements: HashMap<StructuralHash, u64> = HashMap::default();
     for root in roots {
         walk_reachable_node_hashes_with_placements(
@@ -250,9 +247,10 @@ where
             resolver,
             &mut |hash| {
                 if let Some(idx) = universe.index_of(&hash) {
-                    reachable.insert(idx)
+                    reachable.insert(idx);
+                    true
                 } else {
-                    visited_outside_universe.insert(hash)
+                    false
                 }
             },
             &mut checked_placements,

@@ -289,7 +289,9 @@ where
         if in_a {
             let res_a = resolve_only_child(node_a, n_a, slot, resolver)?;
             walk_subtree(&res_a, resolver, next_depth, &mut |n| {
+                check_collision_order(n)?;
                 removed.extend(n.leaves.iter().cloned());
+                Ok(())
             })?;
             continue;
         }
@@ -298,7 +300,9 @@ where
         // guaranteed true -- no need to re-test it.
         let res_b = resolve_only_child(node_b, n_b, slot, resolver)?;
         walk_subtree(&res_b, resolver, next_depth, &mut |n| {
+            check_collision_order(n)?;
             added.extend(n.leaves.iter().cloned());
+            Ok(())
         })?;
     }
 
@@ -360,7 +364,7 @@ struct CrossKindSlot<'a, K, V> {
 /// Returns [`HamtTraversalError::Resolve`] on a resolver failure or
 /// [`HamtTraversalError::MaxDepthExceeded`] at the routing limit. Output
 /// buffers may contain partial changes on error.
-fn diff_leaf_subtree<K: Clone + Eq, V: Clone + Eq, E>(
+fn diff_leaf_subtree<K: Clone + Eq + HamtCodec, V: Clone + Eq, E>(
     cross: &CrossKindSlot<'_, K, V>,
     added: &mut Vec<(K, V)>,
     removed: &mut Vec<(K, V)>,
@@ -384,6 +388,7 @@ fn diff_leaf_subtree<K: Clone + Eq, V: Clone + Eq, E>(
     };
     let mut unchanged = false;
     walk_subtree(&child, resolver, depth, &mut |node| {
+        check_collision_order(node)?;
         for (other_key, other_value) in &node.leaves {
             if other_key == key && other_value == value {
                 unchanged = true;
@@ -391,6 +396,7 @@ fn diff_leaf_subtree<K: Clone + Eq, V: Clone + Eq, E>(
                 subtree_delta.push((other_key.clone(), other_value.clone()));
             }
         }
+        Ok(())
     })?;
     if !unchanged {
         let leaf_delta = if *leaf_is_a {
@@ -809,7 +815,22 @@ where
 {
     walk_subtree(node, resolver, depth, &mut |node| {
         collection.push(node.structural_hash);
+        Ok(())
     })
+}
+
+/// Rejects a collision bucket whose public-field leaves are not in canonical
+/// wire order. Diff walks that emit leaves need this before extending their
+/// output; hash-only walks have no key codec and do not call it.
+fn check_collision_order<K, V, E>(node: &HamtNode<K, V>) -> Result<(), HamtTraversalError<E>>
+where
+    K: HamtCodec,
+{
+    if node.is_collision() {
+        super::codec::check_collision_key_order(&node.leaves)
+            .map_err(HamtTraversalError::CorruptNode)?;
+    }
+    Ok(())
 }
 
 /// Traverses a subtree in pre-order, resolving every child through the shared
@@ -819,13 +840,13 @@ fn walk_subtree<K, V, F, E>(
     node: &NodePtr<K, V>,
     resolver: &mut F,
     depth: usize,
-    visit: &mut impl FnMut(&NodePtr<K, V>),
+    visit: &mut impl FnMut(&NodePtr<K, V>) -> Result<(), HamtTraversalError<E>>,
 ) -> Result<(), HamtTraversalError<E>>
 where
     F: NodeResolver<K, V, E>,
 {
     check_node_depth(node, depth)?;
-    visit(node);
+    visit(node)?;
     let next_depth = depth.saturating_add(1);
     for child in &node.children {
         let child_node = resolve_node_checked(child, resolver)?;

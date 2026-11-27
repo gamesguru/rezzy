@@ -1866,7 +1866,23 @@ where
 
         for &req_hash in target_keys {
             if node.is_collision() {
-                if collision_path_hash == Some(req_hash) {
+                let collision_path_hash = collision_path_hash.ok_or(DescendError::CorruptNode(
+                    "collision bucket has no route hash",
+                ))?;
+                // The collision bucket is reached through every routing slot
+                // before the final slot. A request that disagrees earlier
+                // was sent down the wrong ancestor path; only a difference in
+                // the terminal slot proves absence at this bucket.
+                let terminal_depth = HAMT_MAX_DEPTH.saturating_sub(1);
+                if (0..terminal_depth).any(|ancestor_depth| {
+                    bucket_index(&req_hash, ancestor_depth)
+                        != bucket_index(&collision_path_hash, ancestor_depth)
+                }) {
+                    return Err(DescendError::CorruptNode(
+                        "collision bucket is on the wrong ancestor path",
+                    ));
+                }
+                if collision_path_hash == req_hash {
                     found.extend(
                         node.leaves
                             .iter()
