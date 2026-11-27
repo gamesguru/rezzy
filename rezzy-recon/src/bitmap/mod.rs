@@ -306,13 +306,7 @@ impl Bitmap {
         let mut chunks = Vec::with_capacity(count.min(input.len() / 7));
         let mut previous = None;
         for _ in 0..count {
-            let key = read_u16(&mut input)?;
-            if previous.is_some_and(|previous| key <= previous) {
-                return Err(BitmapDecodeError::NonCanonical);
-            }
-            previous = Some(key);
-            let kind = read_byte(&mut input)?;
-            let len = read_u32(&mut input)?;
+            let (key, kind, len) = read_chunk_header(&mut input, &mut previous)?;
             let chunk = decode_chunk(key, kind, len, &mut input)?;
             chunks.push(Arc::new(chunk));
         }
@@ -355,13 +349,7 @@ impl Bitmap {
         let mut previous = None;
         let mut found = false;
         for _ in 0..count {
-            let key = read_u16(&mut input)?;
-            if previous.is_some_and(|previous| key <= previous) {
-                return Err(BitmapDecodeError::NonCanonical);
-            }
-            previous = Some(key);
-            let kind = read_byte(&mut input)?;
-            let len = read_u32(&mut input)?;
+            let (key, kind, len) = read_chunk_header(&mut input, &mut previous)?;
             match kind {
                 0 => {
                     let len = usize::try_from(len).map_err(|_| BitmapDecodeError::NonCanonical)?;
@@ -543,6 +531,22 @@ fn read_u16(input: &mut &[u8]) -> Result<u16, BitmapDecodeError> {
 
 fn read_u32(input: &mut &[u8]) -> Result<u32, BitmapDecodeError> {
     Ok(u32::from_le_bytes(read_array(input)?))
+}
+
+/// Reads the key/kind/length header shared by [`Bitmap::decode`] and
+/// [`Bitmap::contains_encoded_validated`], enforcing strictly increasing keys.
+fn read_chunk_header(
+    input: &mut &[u8],
+    previous: &mut Option<u16>,
+) -> Result<(u16, u8, u32), BitmapDecodeError> {
+    let key = read_u16(input)?;
+    if previous.is_some_and(|previous| key <= previous) {
+        return Err(BitmapDecodeError::NonCanonical);
+    }
+    *previous = Some(key);
+    let kind = read_byte(input)?;
+    let len = read_u32(input)?;
+    Ok((key, kind, len))
 }
 
 fn decode_chunk(

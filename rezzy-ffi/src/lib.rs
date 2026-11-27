@@ -563,45 +563,44 @@ unsafe fn kernel_update(
     })
 }
 
-/// Adds an event ID to the kernel.
-///
-/// The kernel is an XOR accumulator: inserting the same ID twice cancels it
-/// out. Insert each event once. Returns 0, 1 with a message in `*out` for an
-/// invalid ID or a limit error, or 2 for null arguments.
-///
-/// # Safety
-/// `kernel` must be a live handle used by one thread at a time. `event_id`
-/// must reference `event_id_len` readable bytes. Non-null `out` and `out_len`
-/// must point to writable storage.
-#[no_mangle]
-pub unsafe extern "C" fn rezzy_kernel_insert(
-    kernel: *mut RezzyKernel,
-    event_id: *const u8,
-    event_id_len: usize,
-    out: *mut *mut u8,
-    out_len: *mut usize,
-) -> i32 {
-    // SAFETY: forwarded from this function's contract.
-    unsafe { kernel_update(kernel, event_id, event_id_len, out, out_len, true) }
+macro_rules! kernel_entry_point {
+    ($(#[$meta:meta])* $name:ident, $insert:expr) => {
+        $(#[$meta])*
+        ///
+        /// # Safety
+        /// `kernel` must be a live handle used by one thread at a time. `event_id`
+        /// must reference `event_id_len` readable bytes. Non-null `out` and `out_len`
+        /// must point to writable storage.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(
+            kernel: *mut RezzyKernel,
+            event_id: *const u8,
+            event_id_len: usize,
+            out: *mut *mut u8,
+            out_len: *mut usize,
+        ) -> i32 {
+            // SAFETY: forwarded from this function's contract.
+            unsafe { kernel_update(kernel, event_id, event_id_len, out, out_len, $insert) }
+        }
+    };
 }
 
-/// Removes an event ID from the kernel. Removing from an empty kernel is an
-/// error; removing an ID that was never inserted corrupts the digest, so only
-/// remove IDs that were inserted.
-///
-/// # Safety
-/// Same contract as [`rezzy_kernel_insert`].
-#[no_mangle]
-pub unsafe extern "C" fn rezzy_kernel_remove(
-    kernel: *mut RezzyKernel,
-    event_id: *const u8,
-    event_id_len: usize,
-    out: *mut *mut u8,
-    out_len: *mut usize,
-) -> i32 {
-    // SAFETY: forwarded from this function's contract.
-    unsafe { kernel_update(kernel, event_id, event_id_len, out, out_len, false) }
-}
+kernel_entry_point!(
+    /// Adds an event ID to the kernel.
+    ///
+    /// The kernel is an XOR accumulator: inserting the same ID twice cancels it
+    /// out. Insert each event once. Returns 0, 1 with a message in `*out` for an
+    /// invalid ID or a limit error, or 2 for null arguments.
+    rezzy_kernel_insert,
+    true
+);
+kernel_entry_point!(
+    /// Removes an event ID from the kernel. Removing from an empty kernel is an
+    /// error; removing an ID that was never inserted corrupts the digest, so only
+    /// remove IDs that were inserted.
+    rezzy_kernel_remove,
+    false
+);
 
 /// Writes the kernel's fixed-size persisted record to `*out`.
 ///
@@ -1250,6 +1249,13 @@ fn missing_json(hash: &StructuralHash) -> JsonValue {
     rezzy::json!({ "missing": [hex_encode(hash)] })
 }
 
+fn hamt_error(error: HamtReadError<()>) -> Result<JsonValue, String> {
+    match error {
+        HamtReadError::Missing(hash) => Ok(missing_json(&hash)),
+        error => Err(std::format!("{error:?}")),
+    }
+}
+
 /// Applies `mutations` to the persisted HAMT described by `parent_root_record`
 /// in O(|mutations| * log n), carrying the lattice forward with
 /// `sub_seed`/`add_seed` instead of rehashing every entry.
@@ -1407,18 +1413,48 @@ fn apply_mutations(room_id: &str, request: &JsonValue) -> Result<JsonValue, Stri
     )
     .map_err(|error| std::format!("{error}"))?;
     let node_bytes: usize = created.iter().map(|(_, bytes)| bytes.len()).sum();
-    Ok(rezzy::json!({
+    Ok(state_hamt_persisted_json(
+        &handle,
+        &record,
+        JsonValue::Array(
+            created
+                .iter()
+                .map(|(hash, bytes)| node_json((hash, bytes)))
+                .collect(),
+        ),
+        entry_count,
+        created.len() as u64,
+        node_bytes as u64,
+    ))
+}
+
+fn state_hamt_persisted_json(
+    handle: &RootHandle,
+    record: &[u8],
+    nodes: JsonValue,
+    entry_count: u64,
+    node_count: u64,
+    node_bytes: u64,
+) -> JsonValue {
+    rezzy::json!({
         "root_hash": hex_encode(&handle.structural_hash),
         "state_group_id": hex_encode(&handle.state_group_id),
-        "root_record": hex_encode(&record),
-        "nodes": JsonValue::Array(created.iter().map(|(hash, bytes)| node_json((hash, bytes))).collect()),
+        "root_record": hex_encode(record),
+        "nodes": nodes,
         "entry_count": entry_count,
-        "node_count": created.len() as u64,
-        "node_bytes": node_bytes as u64,
-    }))
+        "node_count": node_count,
+        "node_bytes": node_bytes,
+    })
 }
 
 type StateHamtReader<'a, L> = PersistedHamtReader<'a, StateHamtKey, String, (), L>;
+
+fn state_hamt_reader(
+    room_id: &str,
+    mut nodes: std::collections::BTreeMap<StructuralHash, Vec<u8>>,
+) -> StateHamtReader<'_, impl FnMut(&StructuralHash) -> Result<Option<Vec<u8>>, ()>> {
+    PersistedHamtReader::new(room_id.as_bytes(), move |hash| Ok(nodes.remove(hash)))
+}
 
 #[allow(clippy::too_many_lines)]
 fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String> {
@@ -1450,15 +1486,14 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
             let mut nodes = std::collections::BTreeMap::new();
             collect_persisted_nodes(&root, &mut nodes);
             let node_bytes: usize = nodes.values().map(Vec::len).sum();
-            Ok(rezzy::json!({
-                "root_hash": hex_encode(&handle.structural_hash),
-                "state_group_id": hex_encode(&handle.state_group_id),
-                "root_record": hex_encode(&record),
-                "nodes": JsonValue::Array(nodes.iter().map(node_json).collect()),
-                "entry_count": entries.len() as u64,
-                "node_count": nodes.len() as u64,
-                "node_bytes": node_bytes as u64,
-            }))
+            Ok(state_hamt_persisted_json(
+                &handle,
+                &record,
+                JsonValue::Array(nodes.iter().map(node_json).collect()),
+                entries.len() as u64,
+                nodes.len() as u64,
+                node_bytes as u64,
+            ))
         }
         "apply" => apply_mutations(room_id, request),
         "needed" => {
@@ -1502,11 +1537,7 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     .ok_or_else(|| std::format!("key {index} state_key must be a string"))?;
                 keys.push((rezzy::EventType::from(event_type), state_key.to_owned()));
             }
-            let mut nodes_for_reader = nodes;
-            let mut reader: StateHamtReader<'_, _> =
-                PersistedHamtReader::new(room_id.as_bytes(), move |hash| {
-                    Ok::<_, ()>(nodes_for_reader.remove(hash))
-                });
+            let mut reader = state_hamt_reader(room_id, nodes);
             match reader.get_many(root, &keys) {
                 Ok(values) => Ok(rezzy::json!({
                     "values": JsonValue::Array(
@@ -1516,8 +1547,7 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                             .collect()
                     ),
                 })),
-                Err(HamtReadError::Missing(hash)) => Ok(missing_json(&hash)),
-                Err(error) => Err(std::format!("{error:?}")),
+                Err(error) => hamt_error(error),
             }
         }
         "entries_root" => {
@@ -1527,17 +1557,12 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     .get("nodes")
                     .ok_or_else(|| String::from("missing `nodes`"))?,
             )?;
-            let mut nodes_for_reader = nodes;
-            let mut reader: StateHamtReader<'_, _> =
-                PersistedHamtReader::new(room_id.as_bytes(), move |hash| {
-                    Ok::<_, ()>(nodes_for_reader.remove(hash))
-                });
+            let mut reader = state_hamt_reader(room_id, nodes);
             match reader.collect_entries(root) {
                 Ok(entries) => Ok(rezzy::json!({
                     "entries": JsonValue::Array(entries.iter().map(entry_json).collect()),
                 })),
-                Err(HamtReadError::Missing(hash)) => Ok(missing_json(&hash)),
-                Err(error) => Err(std::format!("{error:?}")),
+                Err(error) => hamt_error(error),
             }
         }
         "verify" => {
@@ -1561,11 +1586,7 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                     .get("nodes")
                     .ok_or_else(|| String::from("missing `nodes`"))?,
             )?;
-            let mut nodes_for_reader = nodes;
-            let mut reader: StateHamtReader<'_, _> =
-                PersistedHamtReader::new(room_id.as_bytes(), move |hash| {
-                    Ok::<_, ()>(nodes_for_reader.remove(hash))
-                });
+            let mut reader = state_hamt_reader(room_id, nodes);
             match reader.collect_entries(decoded.root_hash) {
                 Ok(entries) => {
                     // The lattice in the root record must be the one the
@@ -1588,8 +1609,7 @@ fn hamt_response(room_id: &str, request: &JsonValue) -> Result<JsonValue, String
                         "entry_count": entries.len() as u64,
                     }))
                 }
-                Err(HamtReadError::Missing(hash)) => Ok(missing_json(&hash)),
-                Err(error) => Err(std::format!("{error:?}")),
+                Err(error) => hamt_error(error),
             }
         }
         "lookup" => {
@@ -2253,11 +2273,7 @@ mod tests {
         (status, take_text(out, len))
     }
 
-    #[allow(clippy::too_many_lines)]
-    #[test]
-    fn client_handle_drives_a_reconciliation_round() {
-        let local_ids = [ID_V3, ID_V12];
-        let remote_ids = [ID_V12, ID_V3_OTHER];
+    fn kernel_and_client(local_ids: &[&str]) -> (*mut RezzyKernel, *mut RezzyClient) {
         let kernel = rezzy_kernel_new();
         for id in local_ids {
             assert_eq!(kernel_op(rezzy_kernel_insert, kernel, id).0, OK);
@@ -2265,28 +2281,51 @@ mod tests {
         // SAFETY: `kernel` is a live handle; the client copies it.
         let client = unsafe { rezzy_client_new(kernel) };
         assert!(!client.is_null());
+        (kernel, client)
+    }
+
+    fn start_client(
+        client: *mut RezzyClient,
+        digest: impl Into<JsonValue>,
+        known_event_count: impl Into<JsonValue>,
+        strata: impl Into<JsonValue>,
+    ) -> JsonValue {
+        let start = rezzy::json!({
+            "op": "start",
+            "digest": digest.into(),
+            "known_event_count": known_event_count.into(),
+            "strata": strata.into(),
+            "frame_matches": true,
+            "has_unknown_extremity": false,
+        });
+        let (status, text) = call_client_step(client, &start);
+        assert_eq!(status, OK, "{text}");
+        JsonValue::parse(&text).unwrap()
+    }
+
+    #[allow(clippy::too_many_lines)]
+    #[test]
+    fn client_handle_drives_a_reconciliation_round() {
+        let local_ids = [ID_V3, ID_V12];
+        let remote_ids = [ID_V12, ID_V3_OTHER];
+        let (kernel, client) = kernel_and_client(&local_ids);
 
         let mut remote_state = ResidentKernel::new();
         for id in remote_ids {
             let element = ElementHash::from_matrix_event_id_any(id).unwrap();
             remote_state.insert(element).unwrap();
         }
-        let start = rezzy::json!({
-            "op": "start",
-            "digest": remote_state.accumulator().encode_digest(),
-            "known_event_count": remote_state.accumulator().known_event_count(),
-            "strata": JsonValue::Array(
+        let action = start_client(
+            client,
+            remote_state.accumulator().encode_digest(),
+            remote_state.accumulator().known_event_count(),
+            JsonValue::Array(
                 rezzy_recon::encode_strata(remote_state.strata())
                     .into_iter()
                     .map(JsonValue::String)
-                    .collect()
+                    .collect(),
             ),
-            "frame_matches": true,
-            "has_unknown_extremity": false,
-        });
-        let (status, text) = call_client_step(client, &start);
-        assert_eq!(status, OK, "{text}");
-        let action = JsonValue::parse(&text).unwrap();
+        );
         assert_eq!(
             action.get("action").and_then(JsonValue::as_str),
             Some("bucket_sketches")
@@ -2381,13 +2420,7 @@ mod tests {
     fn exchange(local_ids: &[&str], remote_ids: &[&str]) -> (Option<JsonValue>, JsonValue) {
         let ids =
             |ids: &[&str]| JsonValue::Array(ids.iter().map(|id| JsonValue::from(*id)).collect());
-        let kernel = rezzy_kernel_new();
-        for id in local_ids {
-            assert_eq!(kernel_op(rezzy_kernel_insert, kernel, id).0, OK);
-        }
-        // SAFETY: `kernel` is a live handle; the client copies it.
-        let client = unsafe { rezzy_client_new(kernel) };
-        assert!(!client.is_null());
+        let (kernel, client) = kernel_and_client(local_ids);
         let (status, digest) = kernel_text(rezzy_kernel_digest, kernel);
         assert_eq!(status, OK);
         let local_digest = JsonValue::parse(std::str::from_utf8(&digest).unwrap()).unwrap();
@@ -2397,17 +2430,12 @@ mod tests {
             "op": "snapshot",
             "event_ids": ids(remote_ids),
         }));
-        let start = rezzy::json!({
-            "op": "start",
-            "digest": snapshot.get("digest").unwrap().clone(),
-            "known_event_count": snapshot.get("count").unwrap().clone(),
-            "strata": snapshot.get("strata").unwrap().clone(),
-            "frame_matches": true,
-            "has_unknown_extremity": false,
-        });
-        let (status, text) = call_client_step(client, &start);
-        assert_eq!(status, OK, "{text}");
-        let action = JsonValue::parse(&text).unwrap();
+        let action = start_client(
+            client,
+            snapshot.get("digest").unwrap().clone(),
+            snapshot.get("count").unwrap().clone(),
+            snapshot.get("strata").unwrap().clone(),
+        );
         if action.get("action").and_then(JsonValue::as_str) != Some("bucket_sketches") {
             // SAFETY: each handle is freed once.
             unsafe {
@@ -2887,30 +2915,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn state_hamt_persist_and_read_from_nodes() {
-        let room = "!room:example.org";
+    fn persist_hamt_root(room: &str) -> JsonValue {
         let (status, text) = call_hamt(
             room,
             &format!(r#"{{"op":"root","persist":true,"entries":{HAMT_ENTRIES}}}"#),
         );
         assert_eq!(status, OK, "{text}");
-        let persisted = JsonValue::parse(&text).unwrap();
-        let root_hash = persisted
-            .get("root_hash")
-            .and_then(JsonValue::as_str)
-            .unwrap()
-            .to_owned();
-        let state_group_id = persisted
-            .get("state_group_id")
-            .and_then(JsonValue::as_str)
-            .unwrap()
-            .to_owned();
-        let root_record = persisted
-            .get("root_record")
-            .and_then(JsonValue::as_str)
-            .unwrap()
-            .to_owned();
+        JsonValue::parse(&text).unwrap()
+    }
+
+    #[test]
+    fn state_hamt_persist_and_read_from_nodes() {
+        let room = "!room:example.org";
+        let persisted = persist_hamt_root(room);
+        let root_hash = field(&persisted, "root_hash");
+        let state_group_id = field(&persisted, "state_group_id");
+        let root_record = field(&persisted, "root_record");
         assert_eq!(&root_record[..10], "4d54485201", "MTHR\x01 prefix");
         let nodes = persisted
             .get("nodes")
@@ -2996,17 +3016,8 @@ mod tests {
     #[test]
     fn state_hamt_rejects_a_tampered_node() {
         let room = "!room:example.org";
-        let (status, text) = call_hamt(
-            room,
-            &format!(r#"{{"op":"root","persist":true,"entries":{HAMT_ENTRIES}}}"#),
-        );
-        assert_eq!(status, OK, "{text}");
-        let persisted = JsonValue::parse(&text).unwrap();
-        let root_hash = persisted
-            .get("root_hash")
-            .and_then(JsonValue::as_str)
-            .unwrap()
-            .to_owned();
+        let persisted = persist_hamt_root(room);
+        let root_hash = field(&persisted, "root_hash");
         let mut nodes = persisted
             .get("nodes")
             .and_then(JsonValue::as_array)
@@ -3033,17 +3044,8 @@ mod tests {
     #[test]
     fn state_hamt_verify_rejects_root_record_mismatches() {
         let room = "!room:example.org";
-        let (status, text) = call_hamt(
-            room,
-            &format!(r#"{{"op":"root","persist":true,"entries":{HAMT_ENTRIES}}}"#),
-        );
-        assert_eq!(status, OK, "{text}");
-        let persisted = JsonValue::parse(&text).unwrap();
-        let record = persisted
-            .get("root_record")
-            .and_then(JsonValue::as_str)
-            .unwrap()
-            .to_owned();
+        let persisted = persist_hamt_root(room);
+        let record = field(&persisted, "root_record");
         let nodes = persisted
             .get("nodes")
             .and_then(JsonValue::as_array)

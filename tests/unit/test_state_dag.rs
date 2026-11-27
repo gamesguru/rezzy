@@ -1317,31 +1317,6 @@ fn test_omitted_demotion_head_lets_demoted_sender_authorise_against_stale_state(
         "the demotion must sort after every selected head"
     );
 
-    // Authorises `event` the way a V2.2 receiver does: state-before from the DAG, derive auth
-    // events from it, then run the auth rules.
-    let authorise = |event: &LeanEvent, events: &HashMap<String, LeanEvent>| {
-        let state_before = compute_state_before_from_dag(&DagInputs::new(
-            event,
-            events,
-            StateResVersion::V2_2,
-            &empty_key,
-        ))
-        .expect("state before");
-        let derived = derive_auth_events_from_state_dag(event, &state_before, events, "12.1")
-            .expect("derived auth events");
-        let mut authorised = event.clone();
-        authorised.auth_events = derived;
-        let room_state = room_state_from_shared(&state_before, events);
-        let verdict = check_auth_with_context(
-            &authorised,
-            &room_state,
-            StateResVersion::V2_2,
-            None,
-            Some(events),
-        );
-        (state_before, verdict)
-    };
-
     // (a) Mallory cites exactly the 20 selected heads: the demotion is not in his ancestry.
     let selected_refs: Vec<&str> = selected.iter().map(String::as_str).collect();
     let stale = make_state_event(
@@ -1353,7 +1328,7 @@ fn test_omitted_demotion_head_lets_demoted_sender_authorise_against_stale_state(
         json!({ "topic": "set while demoted" }),
         None,
     );
-    let (stale_state, stale_verdict) = authorise(&stale, &events);
+    let (stale_state, stale_verdict) = authorise_against_dag(&stale, &events);
     assert_eq!(
         stale_state.get(&(EventType::from(M_ROOM_POWER_LEVELS), empty_key.clone())),
         Some(&"$pl".to_string()),
@@ -1386,7 +1361,7 @@ fn test_omitted_demotion_head_lets_demoted_sender_authorise_against_stale_state(
         json!({ "topic": "set while demoted" }),
         None,
     );
-    let (fresh_state, fresh_verdict) = authorise(&fresh, &events);
+    let (fresh_state, fresh_verdict) = authorise_against_dag(&fresh, &events);
     assert_eq!(
         fresh_state.get(&(EventType::from(M_ROOM_POWER_LEVELS), empty_key.clone())),
         Some(&"$zz_demote".to_string()),
@@ -1430,6 +1405,19 @@ fn authorise_against_dag(
     (state_before, verdict)
 }
 
+/// A join by `user`, citing `parent` as its only state DAG parent.
+fn join_event(id: &str, user: &str, parent: &str) -> LeanEvent {
+    make_state_event(
+        id,
+        M_ROOM_MEMBER,
+        user,
+        user,
+        vec![parent],
+        json!({ "membership": "join" }),
+        None,
+    )
+}
+
 /// Merge-shape dependence: does resolving three concurrent heads at once give the same state as
 /// merging two of them first (as a 20-parent cap forces) and the third later?
 ///
@@ -1449,17 +1437,6 @@ fn test_merge_shape_does_not_change_resolved_state() {
     let carol = "@carol:example.com";
     let dave = "@dave:example.com";
 
-    let join = |id: &str, user: &str, parent: &str| {
-        make_state_event(
-            id,
-            M_ROOM_MEMBER,
-            user,
-            user,
-            vec![parent],
-            json!({ "membership": "join" }),
-            None,
-        )
-    };
     // alice is the V12 creator, so she is absent from every `users` map.
     let pl0 = make_state_event(
         "$pl0",
@@ -1546,12 +1523,12 @@ fn test_merge_shape_does_not_change_resolved_state() {
     let mut events = HashMap::new();
     for e in [
         root_create(alice),
-        join("$alice_join", alice, "$create"),
+        join_event("$alice_join", alice, "$create"),
         pl0,
         jr,
-        join("$bob_join", bob, "$jr"),
-        join("$carol_join", carol, "$bob_join"),
-        join("$dave_join", dave, "$carol_join"),
+        join_event("$bob_join", bob, "$jr"),
+        join_event("$carol_join", carol, "$bob_join"),
+        join_event("$dave_join", dave, "$carol_join"),
         t0,
         e1,
         pl_b,
@@ -1656,17 +1633,6 @@ fn test_v2_2_proposed_unconflicted_shadowing_counterexample() {
     let bob = "@bob:example.com";
     let dave = "@dave:example.com";
 
-    let join = |id: &str, user: &str, parent: &str| {
-        make_state_event(
-            id,
-            M_ROOM_MEMBER,
-            user,
-            user,
-            vec![parent],
-            json!({"membership": "join"}),
-            None,
-        )
-    };
     let mut pl0 = make_state_event(
         "$pl0",
         M_ROOM_POWER_LEVELS,
@@ -1734,9 +1700,9 @@ fn test_v2_2_proposed_unconflicted_shadowing_counterexample() {
     let mut events = HashMap::new();
     for ev in [
         root_create(alice),
-        join("$alice_join", alice, "$create"),
-        join("$bob_join", bob, "$alice_join"),
-        join("$dave_join", dave, "$bob_join"),
+        join_event("$alice_join", alice, "$create"),
+        join_event("$bob_join", bob, "$alice_join"),
+        join_event("$dave_join", dave, "$bob_join"),
         pl0,
         t0,
         x,
