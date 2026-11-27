@@ -83,7 +83,34 @@ where
 {
     structural_key: &'k [u8],
     load: L,
+    route: fn(&K, &[u8]) -> StructuralHash,
     cache: BTreeMap<StructuralHash, Arc<HamtNode<K, V>>>,
+}
+
+/// Production routing: the keyed structural hash used by every public tree
+/// builder.
+fn default_route<K: HamtCodec>(key: &K, structural_key: &[u8]) -> StructuralHash {
+    super::key_path_hash(structural_key, key)
+}
+
+/// Validates that every leaf in a terminal collision bucket routes to the same
+/// path hash, returning that hash.
+fn collision_bucket_route<K: HamtCodec, V, E>(
+    node: &HamtNode<K, V>,
+    structural_key: &[u8],
+    route: fn(&K, &[u8]) -> StructuralHash,
+) -> Result<StructuralHash, HamtReadError<E>> {
+    let mut bucket_hash = None;
+    for (key, _) in &node.leaves {
+        let leaf_hash = route(key, structural_key);
+        if bucket_hash.is_some_and(|existing| existing != leaf_hash) {
+            return Err(HamtReadError::Decode(
+                "collision bucket leaves route to different path hashes",
+            ));
+        }
+        bucket_hash = Some(leaf_hash);
+    }
+    bucket_hash.ok_or(HamtReadError::Decode("collision bucket is empty"))
 }
 
 impl<'k, K, V, E, L> PersistedHamtReader<'k, K, V, E, L>
@@ -98,6 +125,23 @@ where
         Self {
             structural_key,
             load,
+            route: default_route::<K>,
+            cache: BTreeMap::new(),
+        }
+    }
+
+    /// Test-only constructor with an injectable routing hash, matching the
+    /// `build_hamt_with_routing` fixture hook.
+    #[cfg(test)]
+    pub(crate) fn new_with_route(
+        structural_key: &'k [u8],
+        load: L,
+        route: fn(&K, &[u8]) -> StructuralHash,
+    ) -> Self {
+        Self {
+            structural_key,
+            load,
+            route,
             cache: BTreeMap::new(),
         }
     }
@@ -155,6 +199,8 @@ where
         V: Clone,
         Q: Eq + ?Sized,
     {
+        let route = self.route;
+        let structural_key = self.structural_key;
         let mut cursor = self.node(&root)?;
         let mut depth = 0;
         loop {
@@ -164,6 +210,10 @@ where
             if cursor.is_collision() {
                 if depth != super::HAMT_MAX_DEPTH {
                     return Err(HamtReadError::Decode("misplaced collision bucket"));
+                }
+                let bucket_hash = collision_bucket_route(&cursor, structural_key, route)?;
+                if bucket_hash != *path_hash {
+                    return Ok(None);
                 }
                 return Ok(cursor
                     .leaves
@@ -240,6 +290,8 @@ where
         // persisted nodes errors instead of overflowing the stack. Pending
         // entries are pushed in descending slot order, so popping interleaves
         // leaves and child subtrees in the node's actual trie-slot order.
+        let route = self.route;
+        let structural_key = self.structural_key;
         let mut stack = vec![Pending::Node(self.node(&root)?, 0_usize)];
         while let Some(pending) = stack.pop() {
             match pending {
@@ -248,6 +300,7 @@ where
                         if depth != super::HAMT_MAX_DEPTH {
                             return Err(HamtReadError::Decode("misplaced collision bucket"));
                         }
+                        collision_bucket_route(&node, structural_key, route)?;
                         for (key, value) in &node.leaves {
                             visit(key, value);
                         }
@@ -394,7 +447,11 @@ mod tests {
         collect(&root, &mut records);
 
         let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
-            PersistedHamtReader::new(KEY, |hash| Ok(records.get(hash).cloned()));
+            PersistedHamtReader::new_with_route(
+                KEY,
+                |hash| Ok(records.get(hash).cloned()),
+                |_, _| [0_u8; 32],
+            );
         assert_eq!(
             reader
                 .get_by_path_hash(root.structural_hash, &2, &[0_u8; 32])
@@ -417,6 +474,29 @@ mod tests {
         let mut entries = reader.collect_entries(root.structural_hash).unwrap();
         entries.sort_unstable();
         assert_eq!(entries, vec![(1, 10), (2, 20), (3, 30)]);
+    }
+
+    #[test]
+    fn rejects_collision_bucket_with_inconsistent_routing() {
+        let root = crate::hamt::build_hamt_with_routing(
+            KEY,
+            vec![(1_u64, 10_u64), (2_u64, 20_u64)],
+            |_| [0_u8; 32],
+        );
+        let mut records = BTreeMap::new();
+        collect(&root, &mut records);
+
+        // Production routing is the default keyed hash, not the synthetic
+        // constant route the fixture was built with. The bucket's leaves
+        // therefore disagree about their route and must be rejected.
+        let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
+            PersistedHamtReader::new(KEY, |hash| Ok(records.get(hash).cloned()));
+        assert!(matches!(
+            reader.get_by_path_hash(root.structural_hash, &1, &[0_u8; 32]),
+            Err(HamtReadError::Decode(
+                "collision bucket leaves route to different path hashes"
+            ))
+        ));
     }
 
     #[test]

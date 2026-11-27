@@ -22,8 +22,9 @@
 ///   key's prefix of k levels costs about `2^(5k)` hash evaluations; finding
 ///   any colliding pair costs about `2^(5k/2)`. Even k = 10 (2^50 for a fixed
 ///   target) only causes O(depth) slowdown — the tree still terminates.
-/// - Full-depth collisions are stored in a small terminal collision bucket,
-///   so routing remains bounded even for adversarial or synthetic collisions.
+/// - Full-depth collisions are stored in a terminal collision bucket: routing
+///   remains bounded by `HAMT_MAX_DEPTH`, though the bucket's leaf count is not
+///   capped and is bounded only by the number of colliding entries.
 ///
 /// The threat model assumes the structural key is per-room (`room_id`), so
 /// precomputed collisions for one room cannot be transferred to another.

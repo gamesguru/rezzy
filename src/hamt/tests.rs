@@ -1315,7 +1315,11 @@ fn test_collision_persisted_reader_resolves_lazy_spine_and_visits_bucket() {
     store(&root, &mut storage);
 
     let mut reader: crate::hamt::PersistedHamtReader<'_, u64, u64, (), _> =
-        crate::hamt::PersistedHamtReader::new(key, |hash| Ok::<_, ()>(storage.get(hash).cloned()));
+        crate::hamt::PersistedHamtReader::new_with_route(
+            key,
+            |hash| Ok::<_, ()>(storage.get(hash).cloned()),
+            |_, _| [0_u8; 32],
+        );
     assert_eq!(
         reader
             .get_by_path_hash(root.structural_hash, &2_u64, &[0_u8; 32])
@@ -1371,6 +1375,50 @@ fn test_collision_nodes_diff_and_isolate_like_an_ordered_map() {
     isolated_removed.sort_unstable();
     assert_eq!(isolated_added, added);
     assert_eq!(isolated_removed, removed);
+}
+
+#[test]
+fn test_malformed_node_shape_is_absent_for_reads_and_rejected_for_mutation() {
+    let key = b"dummy_server_key";
+    let corrupt = Arc::new(HamtNode::<u64, u64> {
+        datamap: 1,
+        nodemap: 0,
+        leaves: vec![],
+        children: vec![],
+        structural_hash: [0_u8; 32],
+    });
+    let mut resolver = unreachable_resolver();
+
+    assert_eq!(corrupt.get(key, &1_u64), None);
+    assert_eq!(corrupt.search(key, &1_u64, &mut resolver), Ok(None));
+    assert!(matches!(
+        crate::hamt::insert(&corrupt, key, 1_u64, 10_u64, &mut resolver),
+        Err(HamtMutateError::CorruptNode(
+            "leaf count does not match datamap"
+        ))
+    ));
+}
+
+#[test]
+fn test_misplaced_collision_root_is_rejected_even_when_hashes_match() {
+    let key = b"dummy_server_key";
+    let corrupt = rebuild_node(key, 0, 0, vec![(1_u64, 10_u64), (2_u64, 20_u64)], vec![]);
+    let mut resolver = unreachable_resolver();
+
+    assert!(matches!(
+        diff_hamt_nodes(&corrupt, &corrupt, &mut resolver),
+        Err(HamtTraversalError::CorruptNode(
+            "misplaced collision bucket"
+        ))
+    ));
+
+    let mut mark = |_hash: StructuralHash| false;
+    assert!(matches!(
+        walk_reachable_node_hashes(&corrupt, &mut resolver, &mut mark),
+        Err(HamtTraversalError::CorruptNode(
+            "misplaced collision bucket"
+        ))
+    ));
 }
 
 #[test]
@@ -1692,7 +1740,11 @@ fn test_insert_node_errors_at_max_depth_boundary() {
     let new_key = find_different_key_with_slot_at_depth(key, depth, slot, existing);
 
     let node = rebuild_node(key, 1_u32 << slot, 0, vec![(existing, 1_u64)], vec![]);
-    let new_path_hash = leaf_hash_for_key(key, new_key);
+    // Inject the same full routing hash for both keys: a terminal split must
+    // create a bucket whose leaves all share that route, not merely agree on
+    // the final routing bit.
+    let shared_path_hash = leaf_hash_for_key(key, existing);
+    let new_path_hash = shared_path_hash;
     let mut resolver = unreachable_resolver();
 
     let result = insert_node(
@@ -1714,6 +1766,14 @@ fn test_insert_node_errors_at_max_depth_boundary() {
     };
     assert!(child.is_collision());
     assert_eq!(child.leaves.len(), 2);
+    assert_eq!(
+        child.get_by_path_hash_inner(&existing, &shared_path_hash, HAMT_MAX_DEPTH),
+        Some(&1)
+    );
+    assert_eq!(
+        child.get_by_path_hash_inner(&new_key, &shared_path_hash, HAMT_MAX_DEPTH),
+        Some(&2)
+    );
 }
 
 /// A leaf legitimately placed at `HAMT_MAX_DEPTH - 1` (a singleton bucket,

@@ -401,7 +401,7 @@ where
         );
         assert_eq!(datamap & nodemap, 0, "datamap and nodemap must not overlap");
         if collision_bucket {
-            debug_assert!(
+            assert!(
                 leaves.windows(2).all(|pair| {
                     let mut left = Vec::new();
                     let mut right = Vec::new();

@@ -1,11 +1,14 @@
 //! Subtree differencing and mutation delta tracking for HAMT tries.
 
 use alloc::{sync::Arc, vec::Vec};
+use core::cmp::Ordering;
 use core::fmt;
 
 use crate::incremental::LtHash;
 
-use super::{map_index, HamtNode, NodePtr, NodeRef, NodeResolver, StructuralHash, HAMT_MAX_DEPTH};
+use super::{
+    map_index, HamtCodec, HamtNode, NodePtr, NodeRef, NodeResolver, StructuralHash, HAMT_MAX_DEPTH,
+};
 
 pub type Delta<K, V> = Vec<(K, V)>;
 pub type DeltaResult<K, V, E> = Result<(Delta<K, V>, Delta<K, V>), E>;
@@ -17,7 +20,7 @@ fn collect_delta<K, V, E>(
     resolver: &mut impl FnMut(&StructuralHash) -> Result<NodePtr<K, V>, E>,
 ) -> DeltaResult<K, V, HamtTraversalError<E>>
 where
-    K: Clone + Eq,
+    K: Clone + Eq + HamtCodec,
     V: Clone + Eq,
 {
     let mut added = Vec::new();
@@ -42,10 +45,14 @@ pub fn isolate_delta<K, V, F, E>(
     resolver: &mut F,
 ) -> DeltaResult<K, V, HamtTraversalError<E>>
 where
-    K: Clone + Eq,
+    K: Clone + Eq + HamtCodec,
     V: Clone + Eq,
     F: NodeResolver<K, V, E>,
 {
+    // Validate both roots before the shortcut: two structurally identical
+    // misplaced collision buckets must still be rejected.
+    check_node_depth(root_a, 0)?;
+    check_node_depth(root_b, 0)?;
     // Short-circuit only when both the lattice and the root structural hashes
     // match. A lattice collision alone must not suppress a real structural
     // diff.
@@ -69,10 +76,14 @@ pub fn diff_hamt_nodes<K, V, F, E>(
     resolver: &mut F,
 ) -> DeltaResult<K, V, HamtTraversalError<E>>
 where
-    K: Clone + Eq,
+    K: Clone + Eq + HamtCodec,
     V: Clone + Eq,
     F: NodeResolver<K, V, E>,
 {
+    // Validate both roots before the shortcut: two structurally identical
+    // misplaced collision buckets must still be rejected.
+    check_node_depth(root_a, 0)?;
+    check_node_depth(root_b, 0)?;
     if root_a.structural_hash == root_b.structural_hash {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -90,6 +101,9 @@ pub(super) fn check_node_depth<K, V, E>(
     node: &HamtNode<K, V>,
     depth: usize,
 ) -> Result<(), HamtTraversalError<E>> {
+    if let Some(reason) = node.shape_error() {
+        return Err(HamtTraversalError::CorruptNode(reason));
+    }
     if depth > HAMT_MAX_DEPTH {
         return Err(HamtTraversalError::MaxDepthExceeded { depth });
     }
@@ -105,6 +119,16 @@ pub(super) fn check_node_depth<K, V, E>(
         ));
     }
     Ok(())
+}
+
+/// Compares two keys by their canonical persisted bytes, matching the order
+/// used to store terminal collision buckets.
+fn compare_encoded_keys<K: HamtCodec>(left: &K, right: &K) -> Ordering {
+    let mut left_bytes = Vec::new();
+    let mut right_bytes = Vec::new();
+    left.encode_hamt(&mut left_bytes);
+    right.encode_hamt(&mut right_bytes);
+    left_bytes.cmp(&right_bytes)
 }
 
 /// Helper to iterate over the indices of set bits in a 32-bit integer.
@@ -166,7 +190,7 @@ fn diff_nodes<K, V, F, E>(
     depth: usize,
 ) -> Result<(), HamtTraversalError<E>>
 where
-    K: Clone + Eq,
+    K: Clone + Eq + HamtCodec,
     V: Clone + Eq,
     F: NodeResolver<K, V, E>,
 {
@@ -180,21 +204,34 @@ where
     if node_a.is_collision() || node_b.is_collision() {
         let leaves_a = &node_a.leaves;
         let leaves_b = &node_b.leaves;
-        for (key_a, value_a) in leaves_a {
-            match leaves_b.iter().find(|(key_b, _)| key_a == key_b) {
-                Some((_, value_b)) if value_a == value_b => {}
-                Some((key_b, value_b)) => {
+        // Collision leaves are canonically sorted by encoded key bytes, so a
+        // linear merge avoids the quadratic nested scans a bucket-sized pair
+        // of long collision lists would otherwise cause.
+        let (mut i, mut j) = (0_usize, 0_usize);
+        while i < leaves_a.len() && j < leaves_b.len() {
+            let (key_a, value_a) = &leaves_a[i];
+            let (key_b, value_b) = &leaves_b[j];
+            match compare_encoded_keys(key_a, key_b) {
+                Ordering::Less => {
                     removed.push((key_a.clone(), value_a.clone()));
-                    added.push((key_b.clone(), value_b.clone()));
+                    i += 1;
                 }
-                None => removed.push((key_a.clone(), value_a.clone())),
+                Ordering::Greater => {
+                    added.push((key_b.clone(), value_b.clone()));
+                    j += 1;
+                }
+                Ordering::Equal => {
+                    if key_a != key_b || value_a != value_b {
+                        removed.push((key_a.clone(), value_a.clone()));
+                        added.push((key_b.clone(), value_b.clone()));
+                    }
+                    i += 1;
+                    j += 1;
+                }
             }
         }
-        for (key_b, value_b) in leaves_b {
-            if !leaves_a.iter().any(|(key_a, _)| key_a == key_b) {
-                added.push((key_b.clone(), value_b.clone()));
-            }
-        }
+        removed.extend(leaves_a[i..].iter().cloned());
+        added.extend(leaves_b[j..].iter().cloned());
         return Ok(());
     }
     let next_depth = depth.saturating_add(1);
@@ -664,6 +701,9 @@ where
     F: NodeResolver<K, V, E>,
     M: FnMut(StructuralHash) -> bool,
 {
+    // Validate the root even when its content was already seen by an earlier
+    // call; otherwise a shared hash could mask a misplaced bucket at depth 0.
+    check_node_depth(root, 0)?;
     if !mark(root.structural_hash) {
         return Ok(());
     }

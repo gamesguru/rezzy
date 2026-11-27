@@ -263,6 +263,27 @@ impl<K, V> HamtNode<K, V> {
         self.datamap == 0 && self.nodemap == 0 && self.leaves.len() > 1 && self.children.is_empty()
     }
 
+    /// Returns why this node's in-memory shape is internally inconsistent.
+    ///
+    /// A collision bucket is a valid shape on its own; whether it is legal at
+    /// a particular depth is a separate check. This validates the bitmap/array
+    /// correspondence every traversal relies on before it indexes anything.
+    pub(crate) fn shape_error(&self) -> Option<&'static str> {
+        if self.datamap & self.nodemap != 0 {
+            return Some("datamap and nodemap overlap");
+        }
+        if self.is_collision() {
+            return None;
+        }
+        if self.leaves.len() != self.datamap.count_ones() as usize {
+            return Some("leaf count does not match datamap");
+        }
+        if self.children.len() != self.nodemap.count_ones() as usize {
+            return Some("child count does not match nodemap");
+        }
+        None
+    }
+
     /// Computes the structural hash of this node from its contents.
     ///
     pub fn compute_structural_hash(
@@ -311,6 +332,9 @@ impl<K, V> HamtNode<K, V> {
     /// This is the most general lookup entry point. Use it when the caller
     /// already knows the exact path hash that was used to build or mutate the
     /// tree.
+    ///
+    /// A malformed node shape is treated as a missing key; persisted reads
+    /// should use [`PersistedHamtReader`], which reports corruption.
     #[must_use]
     pub fn get_by_path_hash<Q>(&self, key: &Q, path_hash: &StructuralHash) -> Option<&V>
     where
@@ -374,6 +398,9 @@ impl<K, V> HamtNode<K, V> {
         let mut cursor: Option<NodePtr<K, V>> = None;
         for depth in 0..=HAMT_MAX_DEPTH {
             let node: &HamtNode<K, V> = cursor.as_deref().unwrap_or(self);
+            if node.shape_error().is_some() {
+                return Ok(None);
+            }
             if node.is_collision() {
                 // Collision buckets are only valid at the routing limit; a
                 // bucket higher up is corrupt, so treat the key as absent
@@ -496,6 +523,9 @@ impl<K, V> HamtNode<K, V> {
         K: Eq + Borrow<Q>,
         Q: Eq + ?Sized,
     {
+        if self.shape_error().is_some() {
+            return None;
+        }
         if self.is_collision() {
             if depth != HAMT_MAX_DEPTH {
                 return None;
@@ -879,6 +909,9 @@ fn check_mutation_depth<K, V, E>(
     node: &HamtNode<K, V>,
     depth: usize,
 ) -> Result<(), HamtMutateError<E>> {
+    if let Some(reason) = node.shape_error() {
+        return Err(HamtMutateError::CorruptNode(reason));
+    }
     if depth > HAMT_MAX_DEPTH {
         return Err(HamtMutateError::MaxDepthExceeded { depth });
     }

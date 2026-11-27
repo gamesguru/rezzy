@@ -127,11 +127,6 @@ fn hamt_to_state_map(root: &StateHamt) -> SharedStateMap {
 }
 
 /// Run an incremental HAMT-backed live walk over DAG events.
-///
-/// # Panics
-///
-/// Panics only if constructing the empty HAMT fails, which indicates an
-/// internal violation of the HAMT builder's invariants.
 #[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn run_hamt_live_walk(ctx: &FormattingContext<'_>) -> HamtLiveWalkOutput {
