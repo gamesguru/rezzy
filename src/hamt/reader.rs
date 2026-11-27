@@ -165,9 +165,15 @@ where
     /// This is useful when the caller already has the same path hash used to
     /// build the tree. `get` is simpler for ordinary reads.
     ///
+    /// The descent also verifies that any ordinary leaf it lands on routes
+    /// through every ancestor slot and through the terminal slot selected by
+    /// `path_hash`. An internal node with no leaves cannot expose ancestor
+    /// misplacement from its own bytes alone, so the check applies whenever a
+    /// leaf or collision bucket is reached.
+    ///
     /// # Errors
     /// Returns [`HamtReadError`] when a touched node is missing, unreadable,
-    /// or fails structural-hash verification.
+    /// or fails structural-hash or trie-path verification.
     pub fn get_by_path_hash<Q>(
         &mut self,
         root: StructuralHash,
@@ -183,6 +189,10 @@ where
         let structural_key = self.structural_key;
         let root_node = self.node(&root)?;
         let mut resolver = |hash: &StructuralHash| self.node(hash);
+        let mut validate_leaf = |stored_key: &K, expected: &StructuralHash, depth: usize| {
+            let actual = route(stored_key, structural_key);
+            super::validate_leaf_route_prefix(&actual, expected, depth)
+        };
         let mut validate_collision = |leaves: &[(K, V)], expected: &StructuralHash| {
             let actual = super::collision_route_hash(leaves, |key| route(key, structural_key))?;
             if actual == *expected {
@@ -192,7 +202,13 @@ where
             }
         };
         root_node
-            .search_by_path_hash_checked(key, path_hash, &mut resolver, &mut validate_collision)
+            .search_by_path_hash_checked(
+                key,
+                path_hash,
+                &mut resolver,
+                &mut validate_leaf,
+                &mut validate_collision,
+            )
             .map_err(|error| match error {
                 super::HamtTraversalError::Resolve(error) => error,
                 super::HamtTraversalError::CorruptNode(reason) => HamtReadError::Decode(reason),
@@ -228,6 +244,11 @@ where
     }
 
     /// Visit every key/value pair under `root` in trie order.
+    ///
+    /// Every ordinary leaf is checked against the slots that led to it, so a
+    /// record stored below a subtree its key never selects is reported as
+    /// corruption instead of being visited. An internal node with no leaves
+    /// cannot reveal ancestor misplacement from its own bytes alone.
     ///
     /// # Errors
     /// Returns [`HamtReadError`] when a touched node is missing or invalid.
@@ -303,6 +324,9 @@ where
                     if node.datamap & bit != 0 {
                         let index = map_index(node.datamap, slot);
                         let (key, value) = &node.leaves[index];
+                        let hash = route(key, structural_key);
+                        super::validate_leaf_slot_path(&hash, &path[..depth], slot)
+                            .map_err(HamtReadError::Decode)?;
                         visit(key, value);
                     } else {
                         let index = map_index(node.nodemap, slot);
@@ -479,6 +503,66 @@ mod tests {
     }
 
     #[test]
+    fn full_walk_rejects_an_ordinary_leaf_in_the_wrong_slot() {
+        let leaf = (1_u64, 10_u64);
+        let node = Arc::new(HamtNode {
+            datamap: 1,
+            nodemap: 0,
+            leaves: vec![leaf],
+            children: vec![],
+            structural_hash: HamtNode::compute_structural_hash(KEY, 1, 0, &[leaf], &[]),
+        });
+        let mut records = BTreeMap::new();
+        collect(&node, &mut records);
+        let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
+            PersistedHamtReader::new_with_route(
+                KEY,
+                |hash| Ok(records.get(hash).cloned()),
+                |_, _| [0x08_u8; 32],
+            );
+        assert!(matches!(
+            reader.for_each_entry(node.structural_hash, |_, _| {}),
+            Err(HamtReadError::Decode("leaf routed to wrong slot"))
+        ));
+        assert!(matches!(
+            reader.get_by_path_hash(node.structural_hash, &2, &[0_u8; 32]),
+            Err(HamtReadError::Decode("leaf routed to wrong slot"))
+        ));
+    }
+
+    #[test]
+    fn rejects_ordinary_leaf_under_wrong_ancestor_slot() {
+        // Leaf routes to root slot 5, child slot 3, but `child` is attached under root slot 0.
+        let child_leaves = vec![(1_u64, 10_u64)];
+        let child = crate::hamt::rebuild_node(KEY, 1 << 3, 0, child_leaves, vec![]);
+        let root_node =
+            crate::hamt::rebuild_node(KEY, 0, 1 << 0, vec![], vec![NodeRef::Resolved(child)]);
+        let mut records = BTreeMap::new();
+        collect(&root_node, &mut records);
+
+        let leaf_route = |_: &u64, _: &[u8]| {
+            let mut h = [0_u8; 32];
+            h[0] = (3 << 5) | 5; // depth-0 slot 5, depth-1 slot 3
+            h
+        };
+        let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
+            PersistedHamtReader::new_with_route(KEY, |h| Ok(records.get(h).cloned()), leaf_route);
+        assert!(matches!(
+            reader.for_each_entry(root_node.structural_hash, |_, _| {}),
+            Err(HamtReadError::Decode("leaf does not match its trie path"))
+        ));
+
+        let mut query = [0_u8; 32];
+        query[0] = 3 << 5; // depth-0 slot 0, depth-1 slot 3 (reaches the misplaced leaf)
+        let mut reader: PersistedHamtReader<'_, u64, u64, (), _> =
+            PersistedHamtReader::new_with_route(KEY, |h| Ok(records.get(h).cloned()), leaf_route);
+        assert!(matches!(
+            reader.get_by_path_hash(root_node.structural_hash, &1, &query),
+            Err(HamtReadError::Decode("leaf does not match its trie path"))
+        ));
+    }
+
+    #[test]
     fn rejects_collision_bucket_with_inconsistent_routing() {
         let (records, root) = zero_routed_fixture(vec![(1, 10), (2, 20)]);
 
@@ -615,7 +699,26 @@ mod tests {
 
         let mut records = BTreeMap::new();
         collect(&root_node, &mut records);
-        let mut reader = reader_for(&records, KEY);
+        let mut reader: PersistedHamtReader<'_, String, String, (), _> =
+            PersistedHamtReader::new_with_route(
+                KEY,
+                |hash| Ok(records.get(hash).cloned()),
+                |key, _| match key.as_str() {
+                    "first" => [0_u8; 32],
+                    "child" => {
+                        let mut h = [0_u8; 32];
+                        h[0] = 2; // depth-0 slot 2, depth-1 slot 0
+                        h
+                    }
+                    "last" => {
+                        let mut h = [0_u8; 32];
+                        h[0] = 4; // depth-0 slot 4
+                        h
+                    }
+                    _ => unreachable!("unexpected fixture key"),
+                },
+            );
+
         let mut order = Vec::new();
         reader
             .for_each_entry(root_node.structural_hash, |key, _| {

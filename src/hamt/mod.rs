@@ -160,11 +160,14 @@ impl<V: Clone + HamtCodec> HamtValue for V {}
 /// The outcome of descending one level of a HAMT with a batch of requested keys.
 #[derive(Debug, PartialEq, Eq)]
 pub struct DescendResult<K, V> {
-    /// Keys found at this level with their decoded key and value.
+    /// Entries whose full 256-bit `KeyPathHash` matched a requested hash, with
+    /// their decoded key and value.
     ///
-    /// The key is carried alongside the path hash because a terminal
-    /// collision bucket can hold several distinct keys that share one
-    /// `KeyPathHash`; a `(hash, value)` pair alone cannot distinguish them.
+    /// Because `descend_level` routes by `KeyPathHash` alone, `found` proves
+    /// hash equality rather than key equality: at a terminal collision bucket
+    /// every leaf in the bucket shares `req_hash` and is emitted here, even if
+    /// the caller's target key is an absent colliding key. Callers must compare
+    /// the decoded `K` against their requested key.
     pub found: Vec<(KeyPathHash, K, V)>,
     /// Keys proven to be absent at this level (the corresponding slot bit was clear).
     pub absent: Vec<KeyPathHash>,
@@ -392,7 +395,13 @@ impl<K, V> HamtNode<K, V> {
         Q: Eq + ?Sized,
         F: NodeResolver<K, V, E>,
     {
-        match self.search_by_path_hash_checked(key, path_hash, resolver, &mut |_, _| Ok(())) {
+        match self.search_by_path_hash_checked(
+            key,
+            path_hash,
+            resolver,
+            &mut |_, _, _| Ok(()),
+            &mut |_, _| Ok(()),
+        ) {
             Ok(found) => Ok(found),
             Err(HamtTraversalError::Resolve(error)) => Err(error),
             Err(
@@ -406,13 +415,14 @@ impl<K, V> HamtNode<K, V> {
     }
 
     /// Shared checked descent used by in-memory search and persisted reads.
-    /// The collision validator lets persisted callers enforce routing without
-    /// duplicating slot traversal or its shape checks.
-    pub(crate) fn search_by_path_hash_checked<Q, F, E, C>(
+    /// Validators let persisted callers enforce routing without duplicating
+    /// slot traversal or its shape checks.
+    pub(crate) fn search_by_path_hash_checked<Q, F, E, L, C>(
         &self,
         key: &Q,
         path_hash: &StructuralHash,
         resolver: &mut F,
+        validate_leaf: &mut L,
         validate_collision: &mut C,
     ) -> Result<Option<V>, HamtTraversalError<E>>
     where
@@ -420,6 +430,7 @@ impl<K, V> HamtNode<K, V> {
         V: Clone,
         Q: Eq + ?Sized,
         F: NodeResolver<K, V, E>,
+        L: FnMut(&K, &StructuralHash, usize) -> Result<(), &'static str>,
         C: FnMut(&[(K, V)], &StructuralHash) -> Result<(), &'static str>,
     {
         // Iterative descent with a single owned cursor for resolved children.
@@ -441,6 +452,8 @@ impl<K, V> HamtNode<K, V> {
             }
             match node.slot_at(path_hash, depth) {
                 Slot::Leaf((stored_key, value)) => {
+                    validate_leaf(stored_key, path_hash, depth)
+                        .map_err(HamtTraversalError::CorruptNode)?;
                     return Ok((stored_key.borrow() == key).then(|| value.clone()));
                 }
                 Slot::Child(child) => cursor = Some(delta::resolve_node_checked(child, resolver)?),
@@ -596,6 +609,43 @@ where
         return Err("leaf routed to wrong slot");
     }
     Ok(hash)
+}
+
+/// Validates that `leaf_hash` agrees with `expected_route` at `depth` (its own
+/// node's slot) and across `0..depth` (the ancestor slots that led to this node).
+pub(crate) fn validate_leaf_route_prefix(
+    leaf_hash: &StructuralHash,
+    expected_route: &StructuralHash,
+    depth: usize,
+) -> Result<(), &'static str> {
+    if bucket_index(leaf_hash, depth) != bucket_index(expected_route, depth) {
+        return Err("leaf routed to wrong slot");
+    }
+    if (0..depth).any(|level| bucket_index(leaf_hash, level) != bucket_index(expected_route, level))
+    {
+        return Err("leaf does not match its trie path");
+    }
+    Ok(())
+}
+
+/// Validates that `leaf_hash` selects `slot` at `ancestor_slots.len()` and
+/// matches every ancestor slot along `0..depth`.
+pub(crate) fn validate_leaf_slot_path(
+    leaf_hash: &StructuralHash,
+    ancestor_slots: &[usize],
+    slot: usize,
+) -> Result<(), &'static str> {
+    if bucket_index(leaf_hash, ancestor_slots.len()) != slot {
+        return Err("leaf routed to wrong slot");
+    }
+    if ancestor_slots
+        .iter()
+        .enumerate()
+        .any(|(level, &expected)| bucket_index(leaf_hash, level) != expected)
+    {
+        return Err("leaf does not match its trie path");
+    }
+    Ok(())
 }
 
 /// The routing hash of `key`: a keyed hash of its [`HamtRoutingKey`] bytes.
@@ -1799,10 +1849,17 @@ where
 /// routing slot is consumed, so every request must carry the bucket's complete 256-bit route.
 /// A mismatch is reported as corruption, never as `absent`.
 ///
+/// An ordinary leaf is likewise validated against the route that reached it: its key must
+/// select every ancestor slot and its own slot under `depth`. A leaf stored below a subtree
+/// its key never selects is corruption, not a reason to report the request as `absent`. (An
+/// internal node with no leaves cannot reveal ancestor misplacement from its own bytes alone,
+/// so this check applies whenever a leaf or collision bucket is reached.)
+///
 /// # Errors
 /// Returns [`DescendError::Decode`] if any node byte slice fails v1 parsing, or
-/// [`DescendError::CorruptNode`] if internal bitmap invariants are violated or a request does
-/// not match its terminal collision bucket's full route.
+/// [`DescendError::CorruptNode`] if internal bitmap invariants are violated, an ordinary leaf
+/// or collision bucket does not match its trie path, or a request does not match its terminal
+/// collision bucket's full route.
 pub fn descend_level<K, V>(
     structural_key: &[u8],
     nodes_and_keys: &[(StructuralHash, &[u8], usize, &[KeyPathHash])],
@@ -1869,10 +1926,7 @@ where
         };
 
         for &req_hash in target_keys {
-            if node.is_collision() {
-                let collision_path_hash = collision_path_hash.ok_or(DescendError::CorruptNode(
-                    "collision bucket has no route hash",
-                ))?;
+            if let Some(collision_path_hash) = collision_path_hash {
                 // A bucket only sits at `HAMT_MAX_DEPTH`, after every routing
                 // slot has been consumed. Any request reaching it must carry
                 // the bucket's complete 256-bit route; a difference anywhere
@@ -1899,14 +1953,10 @@ where
                     .leaves
                     .get(leaf_idx)
                     .ok_or(DescendError::CorruptNode("leaf index out of bounds"))?;
-                // Lazy slot validation: only check the leaf being read, not
-                // the entire datamap. In a correct CHAMP HAMT, a leaf at
-                // slot `s` must satisfy bucket_index(key_hash(leaf_key), depth) == s.
-                let expected_slot = bucket_index(&key_hash(leaf_key), depth);
-                if expected_slot != slot {
-                    return Err(DescendError::CorruptNode("leaf routed to wrong slot"));
-                }
-                if key_hash(leaf_key) == req_hash {
+                let leaf_hash = key_hash(leaf_key);
+                validate_leaf_route_prefix(&leaf_hash, &req_hash, depth)
+                    .map_err(DescendError::CorruptNode)?;
+                if leaf_hash == req_hash {
                     found.push((req_hash, leaf_key.clone(), val.clone()));
                 } else {
                     // Different leaf occupies this exact slot: key is proven absent

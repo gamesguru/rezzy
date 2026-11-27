@@ -1142,6 +1142,34 @@ fn test_descend_level_rejects_a_collision_bucket_with_mixed_routing() {
 }
 
 #[test]
+fn test_descend_level_rejects_ordinary_leaf_under_wrong_ancestor_path() {
+    let key = b"wrong_ancestor_leaf_key";
+    // Leaf routes to depth-0 slot 5, depth-1 slot 3 (`(3 << 5) | 5`), so it is
+    // valid at slot 3 of its depth-1 node, but the request reached depth 1 via
+    // depth-0 slot 0 (`3 << 5`).
+    let child = rebuild_node(key, 1_u32 << 3, 0, vec![(1_u64, 10_u64)], vec![]);
+    let bytes = PersistedInternalNode::from(child.as_ref()).encode_v1();
+    let mut req_hash = [0_u8; 32];
+    req_hash[0] = 3 << 5;
+
+    let res: Result<DescendResult<u64, u64>, DescendError> = descend_level_impl(
+        key,
+        &[(child.structural_hash, &bytes, 1, &[req_hash])],
+        |_| {
+            let mut h = [0_u8; 32];
+            h[0] = (3 << 5) | 5;
+            h
+        },
+    );
+    assert_eq!(
+        res,
+        Err(DescendError::CorruptNode(
+            "leaf does not match its trie path"
+        ))
+    );
+}
+
+#[test]
 fn test_hamt_insert_builds_collision_node() {
     let key = b"dummy_server_key";
     let root = collision_root(key, vec![(1_u64, 10_u64)]);
