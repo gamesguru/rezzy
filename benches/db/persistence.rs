@@ -68,8 +68,7 @@ fn legacy_snapshot_bytes(flat_state: &HashMap<Key, Value>) -> u64 {
 /// variants.
 fn build_persist_fixture(n: usize, steps: usize) -> PersistFixture {
     let base_entries = make_string_entries(n, 0x5EED_0000 + n as u64);
-    let root = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, base_entries.iter().cloned())
-        .expect("build should not collide");
+    let root = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, base_entries.iter().cloned());
     let flat_state: HashMap<Key, Value> = base_entries.into_iter().collect();
     let existing_keys: Vec<Key> = flat_state.keys().cloned().collect();
     let mut rng = Xorshift128::new(0xBEEF);

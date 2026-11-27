@@ -43,7 +43,6 @@ exclude = [
     ".gitmodules",
     ".typos.toml",
     ".cargo/",
-    "rustfmt.toml",
     "tests/",
     "support/",
     "Makefile",

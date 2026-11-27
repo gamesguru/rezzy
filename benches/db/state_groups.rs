@@ -103,8 +103,7 @@ fn bench_state_groups(n: usize, steps: usize) {
     let base_entries = make_string_entries(n, 0x5EED_0000 + n as u64);
     let mut flat_state: HashMap<Key, Value> = base_entries.iter().cloned().collect();
     let mut hamt_root =
-        hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, base_entries.iter().cloned())
-            .expect("build should not collide");
+        hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, base_entries.iter().cloned());
 
     // A key set at genesis and never mutated again — the worst case for a
     // delta chain (must walk every hop back to the snapshot) and a

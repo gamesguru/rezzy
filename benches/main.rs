@@ -59,7 +59,8 @@ const BENCHMARKS: &[BenchmarkEntry] = &[
     BenchmarkEntry {
         domain: "state",
         name: "auth_sharing",
-        description: "AuthGraph build with repeated auth tuples; shared vs independent bitmap difference",
+        description:
+            "AuthGraph build with repeated auth tuples; shared vs independent bitmap difference",
         run_fn: state::auth_sharing::run,
     },
     BenchmarkEntry {

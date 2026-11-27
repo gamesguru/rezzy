@@ -1,7 +1,5 @@
 //! Structural hashing and state-group identity for HAMT nodes.
 
-use core::hash::Hasher;
-
 /// A 256-bit structural hash for HAMT nodes.
 ///
 /// This is a local storage/cache key used to skip identical subtrees within a
@@ -24,18 +22,12 @@ use core::hash::Hasher;
 ///   key's prefix of k levels costs about `2^(5k)` hash evaluations; finding
 ///   any colliding pair costs about `2^(5k/2)`. Even k = 10 (2^50 for a fixed
 ///   target) only causes O(depth) slowdown — the tree still terminates.
-/// - **Full-depth exhaustion** (52 levels = 2^260 hashes) is
-///   computationally infeasible.
-/// - `HamtBuildError::HashCollision` at max depth is a safe error return,
-///   not a panic or data corruption.
+/// - Full-depth collisions are stored in a terminal collision bucket: routing
+///   remains bounded by `HAMT_MAX_DEPTH`, though the bucket's leaf count is not
+///   capped and is bounded only by the number of colliding entries.
 ///
-/// The threat model assumes:
-/// 1. The structural key is per-room (`room_id`), so precomputed collisions
-///    for one room cannot be transferred to another.
-/// 2. Callers of `build_hamt_with_key_hash` do **not** feed wire-derived
-///    path hashes through the custom `key_hash` closure without local
-///    re-keying via `key_path_hash(structural_key, key)`.
-///
+/// The threat model assumes the structural key is per-room (`room_id`), so
+/// precomputed collisions for one room cannot be transferred to another.
 /// Because the key is public and fixed to `room_id`, an attacker can precompute
 /// shallow collisions against a known room. That residual cost (seconds of
 /// compute for a handful of extra tree levels) is bounded and accepted;
@@ -215,19 +207,14 @@ impl StructuralHashBuilder {
         Self(hasher)
     }
 
+    /// Absorbs `bytes` into the hash.
+    pub(crate) fn update(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+
     /// Finishes the hash and returns the 32-byte structural hash.
     pub(crate) fn finalize(self) -> StructuralHash {
         *self.0.finalize().as_bytes()
-    }
-}
-
-impl Hasher for StructuralHashBuilder {
-    fn finish(&self) -> u64 {
-        0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        self.0.update(bytes);
     }
 }
 

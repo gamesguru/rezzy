@@ -90,8 +90,7 @@ fn build_maps(
 ) {
     let ordmap: imbl::OrdMap<Key, Value> = entries.iter().cloned().collect();
     let persistent: PersistentMap = entries.iter().cloned().collect();
-    let hamt_root = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned())
-        .expect("build should not collide");
+    let hamt_root = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned());
     (ordmap, persistent, hamt_root)
 }
 
@@ -137,8 +136,7 @@ fn bench_bulk_build(n: usize, entries: &[(Key, Value)]) {
     });
 
     let hamt_elapsed = time_repeated(&format!("hamt::build_hamt (n={n})"), reps, || {
-        let root = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned())
-            .expect("build should not collide");
+        let root = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned());
         black_box(root);
     });
 

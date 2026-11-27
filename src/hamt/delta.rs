@@ -1,20 +1,15 @@
 //! Subtree differencing and mutation delta tracking for HAMT tries.
 
 use alloc::{sync::Arc, vec::Vec};
-use core::{fmt, hash::Hash};
+use core::cmp::Ordering;
+use core::fmt;
 
-use crate::incremental::LtHash;
-
-use super::{map_index, NodePtr, NodeRef, NodeResolver, StructuralHash, HAMT_MAX_DEPTH};
+use super::{
+    map_index, HamtCodec, HamtNode, NodePtr, NodeRef, NodeResolver, StructuralHash, HAMT_MAX_DEPTH,
+};
 
 pub type Delta<K, V> = Vec<(K, V)>;
 pub type DeltaResult<K, V, E> = Result<(Delta<K, V>, Delta<K, V>), E>;
-
-/// `Hash + Eq + Clone` bounds shared by the HAMT diff key and value types.
-///
-/// Blanket-implemented, so callers never implement it directly.
-pub trait DeltaElem: Hash + Clone + Eq {}
-impl<T: Hash + Clone + Eq> DeltaElem for T {}
 
 /// Walks both roots and returns the accumulated added/removed leaves.
 fn collect_delta<K, V, E>(
@@ -23,8 +18,8 @@ fn collect_delta<K, V, E>(
     resolver: &mut impl FnMut(&StructuralHash) -> Result<NodePtr<K, V>, E>,
 ) -> DeltaResult<K, V, HamtTraversalError<E>>
 where
-    K: DeltaElem,
-    V: DeltaElem,
+    K: Clone + Eq + HamtCodec,
+    V: Clone + Eq,
 {
     let mut added = Vec::new();
     let mut removed = Vec::new();
@@ -32,53 +27,51 @@ where
     Ok((added, removed))
 }
 
-/// Isolates the delta (added/removed items) between two HAMT tries in O(|Delta|
-/// * log32 N) time. Uses the `LtHash` lattice to quickly short-circuit if the
-///   tries are convergently identical.
-///
-/// # Errors
-/// Returns [`HamtTraversalError::Resolve`] if the `resolver` fails to resolve a lazy node, or
-/// [`HamtTraversalError::MaxDepthExceeded`] if the diff recurses past the deepest depth a
-/// legitimately-built HAMT can have.
-pub fn isolate_delta<K, V, F, E>(
+/// Validates both diff roots before an identity shortcut can hide a misplaced
+/// node.
+fn validate_roots_at_depth_zero<K, V, E>(
     root_a: &NodePtr<K, V>,
-    lattice_a: &LtHash,
     root_b: &NodePtr<K, V>,
-    lattice_b: &LtHash,
-    resolver: &mut F,
-) -> DeltaResult<K, V, HamtTraversalError<E>>
-where
-    K: DeltaElem,
-    V: DeltaElem,
-    F: NodeResolver<K, V, E>,
-{
-    // Short-circuit only when both the lattice and the root structural hashes
-    // match. A lattice collision alone must not suppress a real structural
-    // diff.
-    if lattice_a == lattice_b && root_a.structural_hash == root_b.structural_hash {
-        return Ok((Vec::new(), Vec::new()));
-    }
-
-    collect_delta(root_a, root_b, resolver)
+) -> Result<(), HamtTraversalError<E>> {
+    check_node_depth(root_a, 0)?;
+    check_node_depth(root_b, 0)?;
+    Ok(())
 }
 
-/// Isolates the delta (added/removed items) between two HAMT root nodes directly,
-/// short-circuiting on identical structural hashes without requiring `LtHash` references.
+/// Encodes every leaf key so a collision-bucket merge can compare canonical
+/// wire order without re-encoding inside the loop.
+fn encoded_keys<K: HamtCodec, V>(leaves: &[(K, V)]) -> Vec<Vec<u8>> {
+    leaves
+        .iter()
+        .map(|(key, _)| {
+            let mut bytes = Vec::new();
+            key.encode_hamt(&mut bytes);
+            bytes
+        })
+        .collect()
+}
+
+/// Computes the delta (added/removed items) between two HAMT root nodes,
+/// short-circuiting on identical structural hashes.
 ///
 /// # Errors
-/// Returns [`HamtTraversalError::Resolve`] if the `resolver` fails to resolve a lazy node, or
-/// [`HamtTraversalError::MaxDepthExceeded`] if the diff recurses past the deepest depth a
-/// legitimately-built HAMT can have.
+/// Returns [`HamtTraversalError::Resolve`] if the `resolver` fails to resolve a lazy node,
+/// [`HamtTraversalError::CorruptNode`] if either root has a malformed shape or a misplaced
+/// collision bucket, or [`HamtTraversalError::MaxDepthExceeded`] if the diff recurses past the
+/// deepest depth a legitimately-built HAMT can have.
 pub fn diff_hamt_nodes<K, V, F, E>(
     root_a: &NodePtr<K, V>,
     root_b: &NodePtr<K, V>,
     resolver: &mut F,
 ) -> DeltaResult<K, V, HamtTraversalError<E>>
 where
-    K: DeltaElem,
-    V: DeltaElem,
+    K: Clone + Eq + HamtCodec,
+    V: Clone + Eq,
     F: NodeResolver<K, V, E>,
 {
+    // Validate both roots before the shortcut: two structurally identical
+    // misplaced collision buckets must still be rejected.
+    validate_roots_at_depth_zero(root_a, root_b)?;
     if root_a.structural_hash == root_b.structural_hash {
         return Ok((Vec::new(), Vec::new()));
     }
@@ -86,10 +79,32 @@ where
     collect_delta(root_a, root_b, resolver)
 }
 
-/// Rejects a traversal that reached the HAMT maximum depth.
-pub(super) fn check_depth<E>(depth: usize) -> Result<(), HamtTraversalError<E>> {
-    if depth >= HAMT_MAX_DEPTH {
+/// Rejects a node shape that cannot legally appear at `depth`.
+///
+/// Collision buckets are terminal: they may only occur exactly at
+/// [`HAMT_MAX_DEPTH`]. Everything below that depth must be an ordinary node,
+/// and anything beyond it is corruption. Enforcing both directions stops a
+/// malformed graph from recursing forever on the collision-bucket shortcut.
+pub(super) fn check_node_depth<K, V, E>(
+    node: &HamtNode<K, V>,
+    depth: usize,
+) -> Result<(), HamtTraversalError<E>> {
+    if let Some(reason) = node.shape_error() {
+        return Err(HamtTraversalError::CorruptNode(reason));
+    }
+    if depth > HAMT_MAX_DEPTH {
         return Err(HamtTraversalError::MaxDepthExceeded { depth });
+    }
+    if depth == HAMT_MAX_DEPTH {
+        // A legitimately built trie terminates in a collision bucket here; a
+        // non-terminal node has run past the usable routing depth.
+        if !node.is_collision() {
+            return Err(HamtTraversalError::MaxDepthExceeded { depth });
+        }
+    } else if node.is_collision() {
+        return Err(HamtTraversalError::CorruptNode(
+            "misplaced collision bucket",
+        ));
     }
     Ok(())
 }
@@ -124,14 +139,13 @@ fn diff_short_circuit<K, V, E>(
     node_b: &NodePtr<K, V>,
     depth: usize,
 ) -> Result<bool, HamtTraversalError<E>> {
+    check_node_depth(node_a, depth)?;
+    check_node_depth(node_b, depth)?;
     if Arc::ptr_eq(node_a, node_b) {
         return Ok(true);
     }
     if node_a.structural_hash == node_b.structural_hash {
         return Ok(true);
-    }
-    if depth >= HAMT_MAX_DEPTH {
-        return Err(HamtTraversalError::MaxDepthExceeded { depth });
     }
     Ok(false)
 }
@@ -144,6 +158,7 @@ fn diff_short_circuit<K, V, E>(
 /// Propagates resolver failures as [`HamtTraversalError::Resolve`] and reports
 /// [`HamtTraversalError::MaxDepthExceeded`] at the routing limit. Output
 /// buffers may contain partial changes on error.
+#[allow(clippy::too_many_lines)]
 fn diff_nodes<K, V, F, E>(
     node_a: &NodePtr<K, V>,
     node_b: &NodePtr<K, V>,
@@ -153,11 +168,60 @@ fn diff_nodes<K, V, F, E>(
     depth: usize,
 ) -> Result<(), HamtTraversalError<E>>
 where
-    K: DeltaElem,
-    V: DeltaElem,
+    K: Clone + Eq + HamtCodec,
+    V: Clone + Eq,
     F: NodeResolver<K, V, E>,
 {
     if diff_short_circuit(node_a, node_b, depth)? {
+        return Ok(());
+    }
+    // Both sides are terminal collision buckets with no slot maps, so the
+    // bitmap walk below would see them as empty. `diff_short_circuit` has
+    // already proven both are collisions exactly at the routing limit, and
+    // their leaves are canonically sorted; compare them directly.
+    if node_a.is_collision() || node_b.is_collision() {
+        let leaves_a = &node_a.leaves;
+        let leaves_b = &node_b.leaves;
+        // Collision leaves are canonically sorted by encoded key bytes, so a
+        // linear merge avoids the quadratic nested scans a bucket-sized pair
+        // of long collision lists would otherwise cause.
+        let encoded_a = encoded_keys(leaves_a);
+        let encoded_b = encoded_keys(leaves_b);
+        // `shape_error` checks the collision shape but not public-field key
+        // order, so an unverified in-memory bucket could otherwise produce a
+        // bogus merge result.
+        if !encoded_a.windows(2).all(|window| window[0] < window[1])
+            || !encoded_b.windows(2).all(|window| window[0] < window[1])
+        {
+            return Err(HamtTraversalError::CorruptNode(
+                "MTHC keys are not in canonical order",
+            ));
+        }
+        let (mut i, mut j) = (0_usize, 0_usize);
+        while i < leaves_a.len() && j < leaves_b.len() {
+            let (key_a, value_a) = &leaves_a[i];
+            let (key_b, value_b) = &leaves_b[j];
+            match encoded_a[i].cmp(&encoded_b[j]) {
+                Ordering::Less => {
+                    removed.push((key_a.clone(), value_a.clone()));
+                    i = i.saturating_add(1);
+                }
+                Ordering::Greater => {
+                    added.push((key_b.clone(), value_b.clone()));
+                    j = j.saturating_add(1);
+                }
+                Ordering::Equal => {
+                    if key_a != key_b || value_a != value_b {
+                        removed.push((key_a.clone(), value_a.clone()));
+                        added.push((key_b.clone(), value_b.clone()));
+                    }
+                    i = i.saturating_add(1);
+                    j = j.saturating_add(1);
+                }
+            }
+        }
+        removed.extend(leaves_a[i..].iter().cloned());
+        added.extend(leaves_b[j..].iter().cloned());
         return Ok(());
     }
     let next_depth = depth.saturating_add(1);
@@ -296,7 +360,7 @@ struct CrossKindSlot<'a, K, V> {
 /// Returns [`HamtTraversalError::Resolve`] on a resolver failure or
 /// [`HamtTraversalError::MaxDepthExceeded`] at the routing limit. Output
 /// buffers may contain partial changes on error.
-fn diff_leaf_subtree<K: DeltaElem, V: DeltaElem, E>(
+fn diff_leaf_subtree<K: Clone + Eq, V: Clone + Eq, E>(
     cross: &CrossKindSlot<'_, K, V>,
     added: &mut Vec<(K, V)>,
     removed: &mut Vec<(K, V)>,
@@ -428,6 +492,10 @@ pub enum HamtTraversalError<E> {
     /// The resolver failed to load a lazy child the walk needed to descend
     /// into.
     Resolve(E),
+    /// A node's shape is illegal for the depth it occupies. This can come
+    /// from malformed persisted data, so it is reported rather than treated
+    /// as an exhausted depth.
+    CorruptNode(&'static str),
     /// The walk recursed past the deepest depth a legitimately-built HAMT
     /// can have, which only happens against corrupted or adversarial node
     /// data.
@@ -441,6 +509,7 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Resolve(err) => write!(f, "hamt traversal resolver failed: {err}"),
+            Self::CorruptNode(reason) => write!(f, "hamt traversal corrupt node: {reason}"),
             Self::MaxDepthExceeded { depth } => {
                 write!(f, "hamt traversal exceeded max depth at {depth}")
             }
@@ -455,7 +524,7 @@ where
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
             Self::Resolve(err) => Some(err),
-            Self::MaxDepthExceeded { .. } => None,
+            Self::CorruptNode(_) | Self::MaxDepthExceeded { .. } => None,
         }
     }
 }
@@ -602,9 +671,16 @@ where
 }
 
 /// Walks `root`'s internal-node graph, calling `mark` for every hash.
-/// Reuse one caller-owned mark set across roots: `false` skips an already
-/// visited subtree, so shared structure is walked once. Use
-/// [`reachable_node_hashes`] for a single root.
+/// Reuse one caller-owned mark set across roots: a child counted by an earlier
+/// call is never resolved, at any depth, so it may already have been reclaimed.
+/// Placement is re-checked only within one call: a hash that this call has
+/// resolved is resolved and checked again if it appears at a new depth. The
+/// root's placement is checked on every call. Multi-root placement
+/// revalidation is provided by
+/// [`node_reachability_audit`](crate::hamt::node_reachability_audit) and
+/// [`bitmap_node_reachability_audit`](crate::hamt::bitmap_node_reachability_audit),
+/// which track depths across every root.
+/// Use [`reachable_node_hashes`] for a single root.
 ///
 /// # Errors
 /// Returns [`HamtTraversalError::Resolve`] if `resolver` fails, or
@@ -622,38 +698,98 @@ where
     F: NodeResolver<K, V, E>,
     M: FnMut(StructuralHash) -> bool,
 {
+    // Validate the root even when its content was already seen by an earlier
+    // call; otherwise a shared hash could mask a misplaced bucket at depth 0.
+    check_node_depth(root, 0)?;
+    let mut local = crate::HashMap::default();
+    local.insert(root.structural_hash, 1_u64);
     if !mark(root.structural_hash) {
         return Ok(());
     }
-    walk_reachable_children(root, resolver, mark, 0)
+    walk_reachable_children(root, resolver, mark, 0, &mut local, false)
 }
 
-/// Walks `node`'s children, checking each child's hash against `mark`
-/// *before* resolving it — a shared subtree already marked by an earlier
-/// call in the same sweep is skipped without ever calling `resolver` for
-/// it. This matters beyond avoiding wasted resolves: if the caller is
-/// mid-GC-sweep and an already-accounted-for node has since been reaped by
-/// a concurrent pass, resolving it again to reach a `mark` check we didn't
-/// need would fail the whole walk for no reason — checking first makes
-/// that impossible.
-fn walk_reachable_children<K, V, F, E, M>(
-    node: &NodePtr<K, V>,
+/// Reachability walk shared by audits so content marking and placement
+/// validation remain distinct across all roots in the audit.
+pub(super) fn walk_reachable_node_hashes_with_placements<K, V, F, E, M>(
+    root: &NodePtr<K, V>,
     resolver: &mut F,
     mark: &mut M,
-    depth: usize,
+    checked_placements: &mut crate::HashMap<StructuralHash, u64>,
 ) -> Result<(), HamtTraversalError<E>>
 where
     F: NodeResolver<K, V, E>,
     M: FnMut(StructuralHash) -> bool,
 {
-    check_depth(depth)?;
+    // Validate the root even when its content was already seen by an earlier
+    // call; otherwise a shared hash could mask a misplaced bucket at depth 0.
+    check_node_depth(root, 0)?;
+    let _ = mark(root.structural_hash);
+    let seen = checked_placements
+        .get(&root.structural_hash)
+        .copied()
+        .unwrap_or(0);
+    if seen & 1 != 0 {
+        return Ok(());
+    }
+    *checked_placements.entry(root.structural_hash).or_insert(0) |= 1;
+    walk_reachable_children(root, resolver, mark, 0, checked_placements, true)
+}
+
+/// Resolves a child and validates that its shape is legal at `depth`.
+fn resolve_child_at_depth<K, V, F, E>(
+    child: &NodeRef<K, V>,
+    resolver: &mut F,
+    depth: usize,
+) -> Result<NodePtr<K, V>, HamtTraversalError<E>>
+where
+    F: NodeResolver<K, V, E>,
+{
+    let node = resolve_node_checked(child, resolver)?;
+    check_node_depth(&node, depth)?;
+    Ok(node)
+}
+
+/// Shared reachability walk. `validate_mark_miss` is enabled for multi-root
+/// audits, where a marked hash at an unseen depth still has to be resolved to
+/// validate that placement. The public single-walk path preserves the GC-safe
+/// mark-miss shortcut unless the current walk has already seen that hash.
+fn walk_reachable_children<K, V, F, E, M>(
+    node: &NodePtr<K, V>,
+    resolver: &mut F,
+    mark: &mut M,
+    depth: usize,
+    local: &mut crate::HashMap<StructuralHash, u64>,
+    validate_mark_miss: bool,
+) -> Result<(), HamtTraversalError<E>>
+where
+    F: NodeResolver<K, V, E>,
+    M: FnMut(StructuralHash) -> bool,
+{
+    check_node_depth(node, depth)?;
     let next_depth = depth.saturating_add(1);
+    let next_bit = 1_u64 << next_depth;
     for child in &node.children {
-        if !mark(child.structural_hash()) {
+        let hash = child.structural_hash();
+        let newly_marked = mark(hash);
+        let depths_seen = local.get(&hash).copied().unwrap_or(0);
+        if depths_seen & next_bit != 0 {
             continue;
         }
-        let child_node = resolve_node_checked(child, resolver)?;
-        walk_reachable_children(&child_node, resolver, mark, next_depth)?;
+        let repeated_hash = depths_seen != 0;
+        if !newly_marked && !repeated_hash && !validate_mark_miss {
+            continue;
+        }
+        let child_node = resolve_child_at_depth(child, resolver, next_depth)?;
+        *local.entry(hash).or_insert(0) |= next_bit;
+        walk_reachable_children(
+            &child_node,
+            resolver,
+            mark,
+            next_depth,
+            local,
+            validate_mark_miss,
+        )?;
     }
     Ok(())
 }
@@ -688,7 +824,7 @@ fn walk_subtree<K, V, F, E>(
 where
     F: NodeResolver<K, V, E>,
 {
-    check_depth(depth)?;
+    check_node_depth(node, depth)?;
     visit(node);
     let next_depth = depth.saturating_add(1);
     for child in &node.children {

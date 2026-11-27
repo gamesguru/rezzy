@@ -18,10 +18,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use rezzy::hamt::delta::{diff_hamt_nodes, isolate_delta};
+use rezzy::hamt::delta::diff_hamt_nodes;
 use rezzy::hamt::hash::StructuralHash;
 use rezzy::hamt::{self, HamtNode, NodeRef};
-use rezzy::incremental::LtHash;
 
 use crate::common::prelude::*;
 use crate::common::{make_string_entries, unreachable_resolver};
@@ -160,11 +159,10 @@ fn count_cross_kind(a: &Node, b: &Node) -> usize {
 }
 
 /// Fully-resident delta from `diff_hamt_nodes` itself, used only to check that
-/// every resolver-backed variant and `isolate_delta` return the identical
-/// ordered pair. This is a consistency check, NOT an independent oracle: a bug
-/// in `diff_hamt_nodes` would be reproduced here. Independent correctness
-/// (including the leaf<->subtree case) is covered by the oracle tests in
-/// `src/hamt/tests.rs`.
+/// every resolver-backed variant returns the identical ordered pair. This is a
+/// consistency check, NOT an independent oracle: a bug in `diff_hamt_nodes`
+/// would be reproduced here. Independent correctness (including the
+/// leaf<->subtree case) is covered by the oracle tests in `src/hamt/tests.rs`.
 fn reference_delta(a: &Node, b: &Node) -> Delta {
     let mut none = |_: &StructuralHash| -> Result<Node, ()> { Err(()) };
     diff_hamt_nodes(a, b, &mut none).expect("reference diff")
@@ -210,34 +208,6 @@ fn run_one(label: &str, a: &Node, b: &Node, store: &Store, reference: &Delta, re
     );
 }
 
-/// Times fully resident [`isolate_delta`] (the public entry point that wraps
-/// `diff_hamt_nodes` with the lattice/root short-circuit) from `a` to `b`.
-/// Both lattices are `ZERO`; the roots differ, so the short-circuit never
-/// fires and the full diff runs. The result is checked against `reference`
-/// before timing.
-///
-/// # Panics
-/// Panics if `reps` is zero, the diff fails, or the delta differs from `reference`.
-fn run_isolate_delta(a: &Node, b: &Node, reference: &Delta, reps: u32, n: usize, delta: usize) {
-    let leaves = reference.0.len() + reference.1.len();
-    let lattice = LtHash::ZERO;
-    let mut none = |_: &StructuralHash| -> Result<Node, ()> { Err(()) };
-    let got = isolate_delta(a, &lattice, b, &lattice, &mut none).expect("isolate_delta");
-    assert_eq!(&got, reference, "isolate_delta mismatch (n={n}, d={delta})");
-
-    let start = Instant::now();
-    for _ in 0..reps {
-        let mut none = |_: &StructuralHash| -> Result<Node, ()> { Err(()) };
-        black_box(isolate_delta(a, &lattice, b, &lattice, &mut none).expect("isolate_delta"));
-    }
-    let per = start.elapsed() / reps;
-    let ns = per.as_nanos() as f64;
-    println!(
-        "  isolate_delta in-memory (n={n}, d={delta}): {ns:.1} ns/op ({leaves} delta leaves, {:.1} ns/leaf)",
-        ns / leaves.max(1) as f64
-    );
-}
-
 /// Reports fully resident and RAM-resolved diff timings for an `n`-entry base
 /// with `delta` mutations, varying the number of cached child layers.
 ///
@@ -245,8 +215,7 @@ fn run_isolate_delta(a: &Node, b: &Node, reference: &Delta, reps: u32, n: usize,
 /// Panics if HAMT construction, mutation, or differencing fails.
 fn bench(n: usize, delta: usize) {
     let entries = make_string_entries(n, 0x5EED_0000 + n as u64);
-    let base = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned())
-        .expect("build should not collide");
+    let base = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned());
     let next = mutate(&base, &entries, delta, 0);
     let depth = tree_depth(&base).max(tree_depth(&next));
     let reference = reference_delta(&base, &next);
@@ -264,8 +233,6 @@ fn bench(n: usize, delta: usize) {
         &reference,
         reps,
     );
-
-    run_isolate_delta(&base, &next, &reference, reps, n, delta);
 
     let mut store = Store::new();
     store_all(&base, &mut store);
@@ -533,8 +500,7 @@ mod disk {
     /// or a diff fails, including node read, decode, or verification failures.
     pub fn bench(n: usize, delta: usize) {
         let entries = make_string_entries(n, 0x5EED_0000 + n as u64);
-        let base = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned())
-            .expect("build");
+        let base = hamt::build_hamt::<Key, Value, _>(STRUCTURAL_KEY, entries.iter().cloned());
         let nexts: Vec<Node> = (0..SAMPLES)
             .map(|v| mutate(&base, &entries, delta, v))
             .collect();

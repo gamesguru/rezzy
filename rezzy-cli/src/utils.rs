@@ -1329,7 +1329,6 @@ mod tests {
             structural_key,
             state.iter().map(|(k, v)| (k.clone(), v.clone())),
         )
-        .expect("HAMT build")
         .structural_hash
     }
     /// Deterministic DAG fixture for the partition tests: event `i` has one to
