@@ -293,7 +293,7 @@ pub struct NodeReachabilityAudit {
 /// Partitions `universe` into hashes reachable from `roots` and hashes that
 /// are not.
 ///
-/// Walks each root with [`walk_reachable_node_hashes`] against one shared
+/// Walks each root with [`walk_reachable_node_hashes`](crate::hamt::walk_reachable_node_hashes) against one shared
 /// `HashSet`, so subtrees shared between roots are walked once when they
 /// occupy the same depth. A repeated hash at a different depth is resolved
 /// again so its placement can be validated. `resolver` is therefore called
@@ -309,7 +309,7 @@ pub struct NodeReachabilityAudit {
 /// deepest depth a legitimately-built HAMT can have.
 ///
 /// On error, the in-progress mark set may be partially populated (see
-/// [`walk_reachable_node_hashes`]'s error-recovery note); this function
+/// [`walk_reachable_node_hashes`](crate::hamt::walk_reachable_node_hashes)'s error-recovery note); this function
 /// discards it and returns the error rather than a partial answer, so a
 /// caller never mistakes a partial reachable set for a complete one.
 pub fn node_reachability_audit<K, V, F, E>(

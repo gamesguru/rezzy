@@ -256,7 +256,7 @@ impl<K, V> HamtNode<K, V> {
     /// sentinel shape: no slot maps, no children, and at least two inline
     /// entries).
     ///
-    /// A valid bucket only ever appears at [`HAMT_MAX_DEPTH`]; callers that
+    /// A valid bucket only ever appears at `HAMT_MAX_DEPTH`; callers that
     /// care about structural correctness must still check the depth.
     #[must_use]
     pub fn is_collision(&self) -> bool {
