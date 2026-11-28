@@ -103,6 +103,42 @@ jobs:
       - name: Test
         run: CARGO_FEATURE_ARGS="--locked --all-features" make rust/test
 
+  i686:
+    name: Rust 1.89.0 i686 (32-bit)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.89.0"
+          targets: i686-unknown-linux-gnu
+          components: clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-1.89.0-i686
+
+      # Needed to link 32-bit test binaries on the 64-bit runner.
+      - name: Install 32-bit linker support
+        run: sudo apt-get update && sudo apt-get install -y gcc-multilib
+
+      - name: Lint (i686)
+        run:
+          cargo clippy --locked --workspace --target i686-unknown-linux-gnu
+          --all-targets --all-features -- -D warnings
+
+      - name: Test (i686)
+        run:
+          cargo test --locked --workspace --lib --tests --target
+          i686-unknown-linux-gnu --all-features
+
   checks:
     name: Format, Coverage, and Summary
     runs-on: ubuntu-latest

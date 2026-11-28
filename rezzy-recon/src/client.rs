@@ -1055,6 +1055,9 @@ fn provision_bucket_capacity(target: u64, floor: usize) -> Option<usize> {
         .checked_add(target / 2)
         .and_then(|value| value.checked_add(target % 2))
         .and_then(|value| value.checked_add(4))
+        // Cap while still `u64`: on 32-bit targets a large estimate does not
+        // fit `usize`, though the capacity it maps to always does.
+        .map(|value| value.min(MAX_BUCKET_SKETCH_CAPACITY as u64))
         .and_then(|value| usize::try_from(value).ok())
         .map(|value| value.clamp(floor, MAX_BUCKET_SKETCH_CAPACITY))
 }
