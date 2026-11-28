@@ -276,6 +276,9 @@ fn warn_if_scalar(backend: EvaluatorBackend) {
 #[cfg(any(not(feature = "std"), not(target_arch = "x86_64")))]
 #[must_use]
 /// Returns the evaluator backend selected for this build/target.
+// Not `const`: the x86_64 `std` version detects CPU features at runtime, and
+// the public signature should not differ between targets.
+#[allow(clippy::missing_const_for_fn)]
 pub fn get_evaluator() -> EvaluatorBackend {
     EvaluatorBackend::Scalar
 }
@@ -303,7 +306,7 @@ fn get_dispatch_evaluator() -> EvaluatorBackend {
 }
 
 #[cfg(any(not(feature = "std"), not(target_arch = "x86_64")))]
-fn get_dispatch_evaluator() -> EvaluatorBackend {
+const fn get_dispatch_evaluator() -> EvaluatorBackend {
     EvaluatorBackend::Scalar
 }
 
@@ -351,7 +354,9 @@ const fn select_evaluator_backend(has_avx512: bool, has_pclmul: bool) -> Evaluat
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use alloc::{string::String, vec::Vec};
+    #[cfg(all(feature = "std", target_arch = "x86_64"))]
+    use alloc::string::String;
+    use alloc::vec::Vec;
 
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
     #[test]
@@ -369,11 +374,10 @@ mod tests {
 
     #[test]
     fn test_evaluators_match_scalar() {
-        let backend = get_evaluator();
         #[cfg(all(feature = "std", target_arch = "x86_64"))]
         if std::is_x86_feature_detected!("pclmulqdq") {
             assert_ne!(
-                backend,
+                get_evaluator(),
                 EvaluatorBackend::Scalar,
                 "PCLMULQDQ-capable CPUs must select an accelerated backend"
             );

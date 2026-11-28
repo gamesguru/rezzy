@@ -109,7 +109,9 @@ unsafe fn clmul_pclmul_words(left: u64, right: u64) -> [u64; 2] {
     #[cfg(target_arch = "x86")]
     {
         let mut words = [0_u64; 2];
-        _mm_storeu_si128(words.as_mut_ptr().cast(), product);
+        // SAFETY: `words` is 16 writable bytes, and the store has no
+        // alignment requirement. SSE2 is implied by `pclmulqdq`.
+        unsafe { _mm_storeu_si128(words.as_mut_ptr().cast(), product) };
         words
     }
 }
